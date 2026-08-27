@@ -16,3 +16,7 @@ repository.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+jiff = "0.2.35"
+uuid = "1.26.0"

@@ -73,6 +73,15 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   either, since both imply a durable intent that separate attempts belong to,
   and no such thing exists here. A job records which agent ran it, because once
   more than one can, "why did this go badly?" has no answer without it.
+- **workspace** — the isolated place a job's agent works: the filesystem the
+  repository is checked out into, together with whatever boundary surrounds it.
+  What that boundary *is* — a container, a worktree — is still undecided, and
+  the word is deliberately indifferent to the answer. One job, one workspace:
+  no two ever share one, which is an invariant rather than an aspiration
+  (`docs/architecture.md` §2). Not a *sandbox*, which claims a security
+  property one of the two candidate mechanisms would not actually provide, and
+  not a *checkout*, which names the files and misses the boundary that makes
+  them isolated.
 - **reason** — the free text the orchestrator writes when it creates a job,
   saying why it decided to. Prose meant for a human reading the dashboard, not
   a key pointing at a signal. It is the whole of a job's provenance, which is
@@ -86,7 +95,10 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   agent decided to…" is ambiguous in exactly the place where being wrong is
   expensive, and the sentence still reads fine either way. Note that an agent
   is not only something inside a job — the orchestrator runs one too, to think
-  with.
+  with. In the code the word is a type rather than a label: an agent is always
+  referred to by `AgentId`, so two agents an operator happens to name the same
+  thing stay distinct, and a job records which one ran it without depending on
+  a name that can be edited later.
 
 ## 3. House rules
 

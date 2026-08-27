@@ -72,6 +72,17 @@ written to expect a query, a partial load or a transaction. Adopting a database
 later is not swapping a backend, it is revisiting every read. That is the bet
 being taken, and it is being taken deliberately at a scale where it is cheap.
 
+Nothing here versions the snapshot, and that gap is taken knowingly rather than
+overlooked. Being rid of migrations was part of the point, but a serialised
+structure evolves too: an added field is free with a default, while a rename or
+a removal makes an existing file fail to load — and failing to load means losing
+all of it, since there is only the one file. For now the answer is to delete it
+and start again, which is honest while the only thing it holds is a proof of
+concept and indefensible the moment it holds something an operator would miss. A
+version field is the intended fix; recognising when that moment has arrived is
+the hard part, and the trigger is the first time somebody would rather migrate
+than start over.
+
 Revisit when any of three things becomes true: job history stops fitting
 comfortably in memory, rewriting the whole file per change stops being cheap, or
 a second writer appears — the last of which would most likely arrive as somebody
