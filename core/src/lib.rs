@@ -32,9 +32,13 @@ use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Key as CipherKey, Nonce as CipherNonce};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
+
+// Re-exported because both appear in this crate's public signatures: a caller
+// building a job needs a timestamp and an identifier, and making it depend on
+// these crates separately would make matching their versions its problem.
+pub use jiff::Timestamp;
+pub use uuid::Uuid;
 
 /// Bytes of the nonce a single sealing operation consumes.
 pub const NONCE_LEN: usize = 12;
@@ -369,6 +373,22 @@ impl Key {
         Self(material)
     }
 
+    /// Parses key material supplied as base64.
+    ///
+    /// Parsing is pure, so it lives with the type rather than with whatever
+    /// reads the environment — which keeps the one place that knows what a key
+    /// looks like from being the same place that knows where it comes from.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the text is not base64, or does not decode to exactly the
+    /// right number of bytes. Neither message repeats the input.
+    pub fn from_base64(text: &str) -> Result<Self, KeyError> {
+        let decoded = BASE64.decode(text).map_err(|_| KeyError::Encoding)?;
+        let material: [u8; 32] = decoded.try_into().map_err(|_| KeyError::Length)?;
+        Ok(Self(material))
+    }
+
     fn cipher(&self) -> Aes256Gcm {
         Aes256Gcm::new(&CipherKey::<Aes256Gcm>::from(self.0))
     }
@@ -378,6 +398,20 @@ impl fmt::Debug for Key {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("Key(<redacted>)")
     }
+}
+
+/// Key material could not be read.
+///
+/// Deliberately says nothing about the input, since a malformed key is often a
+/// nearly-correct one and an error message is a place secrets escape.
+#[derive(Debug, thiserror::Error)]
+pub enum KeyError {
+    /// The text is not valid base64.
+    #[error("the key is not valid base64")]
+    Encoding,
+    /// The text decoded to the wrong number of bytes.
+    #[error("the key must decode to exactly 32 bytes")]
+    Length,
 }
 
 /// Sealing a credential failed.

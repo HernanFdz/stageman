@@ -59,6 +59,18 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   Settled by reading the terms that actually apply to each configured agent,
   and re-reading them whenever a vendor moves them.
 
+- **Which logging does this use, and where does its output go?** The store has
+  the first thing that needs one: a snapshot write that fails inside a `Drop`
+  can only be reported, never returned, and it currently goes to standard error
+  as a placeholder rather than a choice. `tracing` with `tracing-subscriber` is
+  the leading candidate — structured, and its span model suits a system whose
+  work is naturally nested inside a job. The harder half is where output goes:
+  `docs/decisions/0005-conversation-happens-on-channels.md` has the dashboard
+  showing logs, so writing to a terminal nobody is attached to is not enough,
+  and a failure an operator never sees is close to a failure that was
+  swallowed. Settled by the first thing that needs to *read* a log rather than
+  write one, which is the dashboard.
+
 - **What should happen when an agent credential expires while nobody is
   watching?** It will, and it lands on every job at once. The options run from
   failing each job loudly and showing it on the dashboard, to pausing the
