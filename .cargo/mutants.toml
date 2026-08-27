@@ -1,0 +1,17 @@
+# Scaffolded by quality 0.1.0-dev.
+#
+# `xtask/src/main.rs` is the I/O shell of the gate's own checks: it reads files,
+# shells out to git, and hands the results to `xtask/src/scan.rs`, where every
+# decision actually lives. `scan.rs` is deliberately NOT excluded — it is pure,
+# unit tested, and held to the same bar as your code.
+#
+# This exclusion is a known gap, not a judgement that the code deserves less.
+# Testing the I/O layer needs temp-directory fixtures; until those exist, its
+# behaviour is covered only indirectly, by the gate's own clean/broken fixtures.
+# Delete this line and write those tests if you want the guarantee closed — the
+# survivors are all "replace <fn> -> T with Default::default()" on thin wrappers.
+#
+# Your own code is not excluded, and should not be. If `just verify` reports a
+# survivor in your source, that is the check working: the tests would not notice
+# that code being wrong.
+exclude_globs = ["xtask/src/main.rs"]

@@ -1,0 +1,11 @@
+# Backticked names in the docs that `just drift-doc-symbols` should not expect
+# to find in the Rust source, because they are not Rust symbols.
+#
+# Keep this list SHORT. Every entry is a claim that a name in your design docs
+# refers to something outside this codebase; if the list grows, the docs are
+# probably citing another project, which is its own rule violation.
+#
+# Format: one identifier per line, with a comment saying what it actually is.
+#
+# Example:
+#   jsQR          # JavaScript QR-decoding library, called from the browser

@@ -1,0 +1,24 @@
+# Scaffolded by quality 0.1.0-dev.
+#
+# Pinned to an exact version, not "stable". Two reasons:
+#   1. `nursery = "deny"` is only safe against a pinned compiler — nursery
+#      lints change between releases, so a floating channel means a routine
+#      toolchain update can break CI on code nobody touched.
+#   2. "clippy passes" is only a reproducible claim if the clippy is fixed.
+#
+# Bumping is a deliberate, reviewable commit: change the version, run
+# `just check`, and deal with whatever new lints arrived — on your schedule.
+[toolchain]
+channel = "1.95.0"
+components = ["clippy", "rustfmt"]
+# Every triple named in the justfile's `check_matrix` must ALSO be listed here.
+# Targets install per toolchain, and this file pins one — so a target you
+# installed with `rustup target add` belongs to whatever toolchain was default at
+# the time, not to this one. The failure does not mention targets at all:
+#
+#     error[E0463]: can't find crate for `std`
+#
+# Listing it here makes rustup install it on demand, for the pinned toolchain,
+# on every machine that clones this repository.
+#
+# targets = ["wasm32-unknown-unknown"]

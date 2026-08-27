@@ -1,0 +1,56 @@
+# Scaffolded by quality 0.1.0-dev.
+#
+# Deliberately narrow. cargo-deny out of the box fails on your own path
+# dependencies and your own unlicensed internal crates, which trains you to
+# ignore its output — and a check you ignore is worse than no check, because
+# it still reads as coverage.
+
+[advisories]
+# A yanked dependency is a decision someone else made about your code.
+yanked = "deny"
+# Add advisory IDs here ONLY with a dated comment saying why it does not
+# apply and when it will be revisited. An unexplained entry is a silent hole.
+ignore = []
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.9
+# An allow-list entry no dependency happens to use is not a finding. Left at
+# the default, a project with few dependencies gets one warning per unused
+# entry on every single run — noise from the first commit, which is how a
+# check becomes something you skim past instead of read.
+unused-allowed-license = "allow"
+# Workspace-internal crates are not published and need no license header.
+# Without this, every path dependency is a finding.
+private = { ignore = true }
+
+[bans]
+# Duplicate versions are usually upstream's fault and not actionable; a
+# warning keeps them visible without making the gate lie.
+multiple-versions = "warn"
+# A wildcard version is not reproducible and not auditable.
+wildcards = "deny"
+# Exempts intra-workspace path dependencies, which carry no version and would
+# otherwise be reported as wildcards in every workspace.
+#
+# IMPORTANT: this does NOT apply to publishable crates — crates.io forbids bare
+# path dependencies, so a publishable crate depending on a sibling by path with
+# no `version` cannot be published at all. If cargo-deny still reports a
+# wildcard after enabling this, it has found a real publishability defect, not
+# noise. The usual cause is a member declared `{ workspace = true }` where the
+# workspace entry gives a path but no `version`; `cargo publish --dry-run`
+# confirms it.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

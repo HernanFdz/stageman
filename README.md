@@ -1,0 +1,3 @@
+# stageman
+
+A Rust project.

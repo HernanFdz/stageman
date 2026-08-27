@@ -1,0 +1,7 @@
+
+/target
+
+# Working notes: session state, open questions, upstream observations.
+# Carries state, never authority — anything explaining why tracked code is
+# the way it is belongs in docs/ instead.
+.local/

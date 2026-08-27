@@ -1,0 +1,48 @@
+# Scaffolded by quality 0.1.0-dev.
+#
+# Test code is exempted from the panic lints. Without these four keys the
+# panic lints fire inside #[cfg(test)] under `cargo clippy --all-targets`
+# (verified), which makes `assert_eq!(v.unwrap(), 3)` a build error.
+#
+# Note this is only reachable because the gate uses --all-targets. Plain
+# `cargo clippy` never compiles test code, so it never lints it either —
+# which reads as "unwraps are allowed in tests" but actually means "test
+# code is unchecked for everything".
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true
+# `useless_vec` is warn-by-default rather than part of any group, so nothing in
+# the manifest mentions it and `-D warnings` promotes it to an error anyway.
+# `vec![…]` in a test is ordinary, and the allocation it objects to costs
+# nothing there. Verified: a three-element `vec!` in a `#[cfg(test)]` module
+# fails the gate without this line and passes with it.
+allow-useless-vec-in-tests = true
+
+# Two frictions in test code have NO knob, so they are handled at the source
+# instead — do not go looking for a key that does not exist. Confirmed against
+# clippy's own list of valid fields, which it prints when it rejects one.
+#
+#   arithmetic_side_effects  Its only config is type-based
+#                            (`arithmetic-side-effects-allowed*`). A property
+#                            test whose oracle must write `x + y` needs
+#                            `#[expect(…, reason = "…")]`; see
+#                            `.quality/gate-reference.md`, which gives the
+#                            scoping rule that keeps it from covering
+#                            production code.
+#   large_stack_arrays       Only the global `array-size-threshold`. A big
+#                            fixture array in a test trips it; raising the
+#                            threshold weakens it everywhere, so prefer an
+#                            `#[expect]` at the test.
+
+# Library crates must not leak an opaque error type into their public API.
+# Binaries may use anyhow/color-eyre freely; scaffold this only for libs.
+# disallowed-types = [
+#     { path = "anyhow::Error", reason = "libraries expose typed errors; use thiserror" },
+# ]
+
+# The arithmetic escape hatches (saturating_*, wrapping_*, checked_*().unwrap_or)
+# are caught by `just drift-escape-hatches` rather than here, because
+# disallowed-methods needs one entry per concrete primitive type — roughly 70
+# entries to cover the integer types — while one grep covers all of them and
+# carries the same explanation when it fires.

@@ -1,0 +1,20 @@
+# Repo automation, run as `cargo xtask <check>` via the alias in
+# `.cargo/config.toml`.
+#
+# Zero dependencies, deliberately. It keeps the lockfile clean, adds no supply
+# chain surface for `cargo deny` to weigh, and compiles fast enough that the
+# drift checks stay in the tight loop. Everything here is std.
+#
+# It IS a workspace member, so the gate lints the gate's own code under the same
+# rules it enforces on yours.
+
+[package]
+name = "xtask"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Repo-hygiene checks for the quality gate."
+license = "MIT"
+
+[lints]
+workspace = true

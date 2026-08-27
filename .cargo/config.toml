@@ -1,0 +1,5 @@
+
+[alias]
+# `cargo xtask <check>` — the gate's repo automation. Zero dependencies,
+# unit-tested, and a workspace member so the gate lints its own code.
+xtask = "run --quiet --package xtask --"

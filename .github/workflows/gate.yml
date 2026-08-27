@@ -1,0 +1,59 @@
+# Scaffolded by quality 0.1.0-dev.
+#
+# Deliberately contains no logic. Every rule lives in the justfile, so CI and
+# your machine run the identical thing and cannot drift apart — which is also
+# what keeps the project forge-neutral: porting this to another CI system means
+# rewriting the setup steps, never the checks.
+#
+# The toolchain is not selected here on purpose: rust-toolchain.toml pins the
+# exact compiler and rustup honours it automatically.
+#
+# Hardening note: for a repo that accepts outside contributions, pin each action
+# to a full commit SHA rather than a tag (`uses: actions/checkout@<sha>`), since
+# a tag can be moved. Left as tags here because the correct SHAs have to be
+# looked up when you decide to pin them, not guessed by a scaffolder.
+
+name: gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-nextest,cargo-deny
+      - run: just check
+
+  mutants:
+    # `just verify` is check + mutants; `check` has already run as its own job,
+    # so this runs only the part that job did not.
+    name: mutants (changed code only)
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # `just mutants` diffs against a base commit, so it needs history.
+          fetch-depth: 0
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-nextest,cargo-mutants
+      # On a pull request, mutate what the PR changes. On a push, the recipe
+      # falls back to HEAD~1 by itself.
+      - run: just mutants "${{ github.event.pull_request.base.sha }}"
