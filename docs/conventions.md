@@ -123,6 +123,16 @@ justify is usually obsolete.
   crate's problem. If a change to that agent's interface would touch **core**,
   the abstraction is in the wrong place — the whole reason the crate boundary is
   there is that the agent is on somebody else's release cadence.
+- **Packages carry a prefix; directories do not.** The directories are named
+  for the concepts in `docs/architecture.md` §1, and the packages inside them
+  are `stageman-core`, `stageman-orchestrator` and `stageman-job`, with the app
+  published as `stageman` itself. Exactly one of those prefixes is
+  load-bearing: a package whose library target is named `core` **shadows the
+  sysroot crate of the same name** in every crate that depends on it, and the
+  failure is not an ambiguity error but a silent one — `use core::fmt` reports
+  that `fmt` cannot be found in `core`, as though the standard library had
+  developed a hole. The other two are prefixed for symmetry, because a naming
+  rule with one unexplained exception is a rule nobody remembers.
 - **Dependency versions live in `Cargo.toml` and are not restated here.** They
   are derivable, they go stale, and `just drift` cannot catch a version number
   in prose. Gotchas belong here; numbers do not.

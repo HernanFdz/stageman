@@ -5,6 +5,29 @@ version = 4
 [[package]]
 name = "stageman"
 version = "0.1.0"
+dependencies = [
+ "stageman-core",
+ "stageman-job",
+ "stageman-orchestrator",
+]
+
+[[package]]
+name = "stageman-core"
+version = "0.1.0"
+
+[[package]]
+name = "stageman-job"
+version = "0.1.0"
+dependencies = [
+ "stageman-core",
+]
+
+[[package]]
+name = "stageman-orchestrator"
+version = "0.1.0"
+dependencies = [
+ "stageman-core",
+]
 
 [[package]]
 name = "xtask"

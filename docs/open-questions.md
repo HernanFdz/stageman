@@ -50,10 +50,12 @@ Intended next steps, in order, each with its reason. Written as intentions, not
 progress: "next X, because Y" — never "X is 60% done", which is both derivable
 and wrong within a day.
 
-- Next the four crates as an empty skeleton, because the dependency rule in
-  `docs/architecture.md` §1 is worth nothing until the compiler is the one
-  holding it, and retrofitting a boundary is far more expensive than starting
-  with one.
+- Next, settle how the orchestrator talks to the agent inside a job: a
+  throwaway spike against both candidates, testing only the two things
+  `docs/architecture.md` §2 makes non-negotiable. It gates everything below it,
+  which is why it comes first — the schema cannot settle what a job stores
+  until a job's conversation has a shape, and Slack end to end *is* that
+  conversation.
 - Then the SQLite schema and the encrypted credential handling, because every
   other piece needs somewhere to put a project, and because the redaction bar in
   `docs/conventions.md` §4 is cheap to build in and awkward to add afterwards.

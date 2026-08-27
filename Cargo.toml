@@ -1,21 +1,29 @@
-[package]
-name = "stageman"
+# A virtual manifest: every crate is a member and none is the root package.
+# `docs/architecture.md` §1 names the four and says which way the dependencies
+# point; this file is where that rule is actually enforced, because a member
+# cannot name a crate it does not depend on.
+
+[workspace]
+members = ["core", "orchestrator", "job", "app", "xtask"]
+# Must be explicit in a virtual manifest — there is no root package whose
+# edition could imply it, and the default without this line is resolver 1.
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.95.0"
-description = "An orchestration platform for sleepless coding agents."
 license = "MIT"
-readme = "README.md"
 repository = "https://github.com/HernanFdz/stageman"
-keywords = ["agentic", "coding"]
-categories = ["AI"]
 
-[lints]
-workspace = true
-
-[workspace]
-# xtask is a member so the gate lints its own implementation.
-members = ["xtask"]
+# The whole internal dependency graph in one place, so the shape is readable
+# without opening five manifests. What is absent matters as much as what is
+# here: neither `orchestrator` nor `job` may name the other, and the only
+# thing stopping them is that no such dependency is ever declared.
+[workspace.dependencies]
+stageman-core = { path = "core", version = "0.1.0" }
+stageman-orchestrator = { path = "orchestrator", version = "0.1.0" }
+stageman-job = { path = "job", version = "0.1.0" }
 
 [profile.release]
 # Debug builds already panic on integer overflow; release wraps silently.

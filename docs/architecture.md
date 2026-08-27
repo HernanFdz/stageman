@@ -55,6 +55,11 @@ other — everything they share is a type in **core**, which is what keeps the
 deciding and the doing from growing into one another. **app** may name all
 three; nothing may name **app**.
 
+The directories are named for the concepts above and the packages are not —
+they carry a prefix, and the app is published as the project's own name. That
+mismatch is deliberate and one half of it is load-bearing; the reason is in
+`docs/conventions.md` §3.
+
 The asymmetry worth noticing: instructions only ever flow one way. The
 orchestrator composes the prompt a job starts from, and a job never writes its
 own. Every place in the system where an instruction is *authored* is therefore

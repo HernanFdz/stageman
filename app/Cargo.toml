@@ -1,0 +1,29 @@
+# The published package, and the one you run. It may name all three internal
+# crates; nothing may name it.
+#
+# `README.md` and `LICENSE` here are symlinks to the files at the repository
+# root. A published package cannot reach outside its own directory, so
+# packaging follows the link and ships the content — and there is still only
+# one copy under version control.
+
+[package]
+name = "stageman"
+description = "An orchestration platform for sleepless coding agents."
+readme = "README.md"
+keywords = ["agentic", "coding"]
+# Must be a slug crates.io actually recognises, or `cargo publish` rejects the
+# package. Nothing in the gate checks this; the scaffold's placeholder did not.
+categories = ["development-tools"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+stageman-core.workspace = true
+stageman-job.workspace = true
+stageman-orchestrator.workspace = true
+
+[lints]
+workspace = true

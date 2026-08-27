@@ -1,0 +1,18 @@
+# The domain. Depends on nothing, by design — see `docs/architecture.md` §1.
+#
+# `publish = false` on this and its two siblings is deliberate: they are
+# internal to the workspace, and a crate nobody can depend on cannot be
+# depended on by mistake.
+
+[package]
+name = "stageman-core"
+description = "Domain types for stageman. Internal to the workspace."
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
