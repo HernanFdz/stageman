@@ -12,7 +12,15 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+agent-client-protocol = "2.0.0"
+futures = "0.3.34"
 stageman-core.workspace = true
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["process", "io-util"] }
+tokio-util = { version = "0.7.19", features = ["compat"] }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["macros", "rt"] }

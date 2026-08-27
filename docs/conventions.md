@@ -104,6 +104,13 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   value, so removing that configuration later cannot rewrite the record of work
   already done.
 
+  One near-miss is imported rather than invented: the protocol library uses the
+  same word for the *role* at the far end of a connection. Both types are in
+  scope in an adapter, and `ConnectionTo<Agent>` compiles and reads correctly
+  against either one, so the protocol's is aliased at the import rather than
+  used bare. This is the one place in the codebase where the wrong meaning of
+  this word type-checks.
+
 ## 3. House rules
 
 Anything someone would otherwise get wrong: framework versions and their
@@ -166,11 +173,11 @@ justify is usually obsolete.
   happen on the request path: watching a channel, judging a signal and
   supervising a job all belong on their own tasks. A dashboard that stops
   painting because a job is thinking is the failure this rule exists to prevent.
-- **Typed errors per crate, and no `anyhow` in core, orchestrator or job.**
-  That is the gate's bar restated only where it bites: **app** is a binary and
-  may do as it likes internally, but the other three are libraries whose errors
-  cross a boundary, and a boxed error at that boundary makes the caller's
-  handling untestable.
+- **Typed errors per crate, and no `anyhow` in core, agent, orchestrator or
+  job.** That is the gate's bar restated only where it bites: **app** is a
+  binary and may do as it likes internally, but the other four are libraries
+  whose errors cross a boundary, and a boxed error at that boundary makes the
+  caller's handling untestable.
 - **The agent is third-party, and its quirks stop at the job boundary.** How the
   agent process is launched, spoken to and cleaned up is entirely the **job**
   crate's problem. If a change to that agent's interface would touch **core**,

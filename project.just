@@ -17,7 +17,11 @@
 #       cargo run -- --fixtures tests/data
 
 # The image tag is a fact two places need to agree on — this recipe and
-# whatever spawns containers — so it lives here rather than in either.
+# whatever spawns containers. The second place now exists and is a Rust
+# constant, which `just` cannot read and which cannot be generated without
+# putting a build step in front of every check. So the two literals stay, and a
+# test in the agent crate asserts they are the same string; it parses the line
+# below, so keep the `name := "value"` shape.
 image_tag := "stageman/claude:dev"
 
 [doc("Build the agent image that jobs and triage run inside")]
@@ -31,3 +35,18 @@ image-check:
     # image, the adapter and the stdio channel are all intact. Worth reaching
     # for before anything that needs a token.
     docker run -i --rm --network none {{ image_tag }} < images/claude/handshake.json
+
+# Both of these greet the image, and the difference is what is on trial. The
+# recipe above tests the image with a redirect and a file, so it holds when this
+# repository does not compile. This one tests *this repository's* code, and is
+# the ignored test from the agent crate — ignored so that `just check` needs
+# neither a runtime nor a built image, and named here so that skipping it stays
+# a choice rather than an accident.
+[doc("Drive a container from this repository's own code — needs a built image")]
+image-handshake:
+    # Every ignored test in the workspace, because every one of them is ignored
+    # for this single reason: it needs a container runtime. Naming them
+    # individually would mean this recipe silently stops covering the next one
+    # somebody writes, and `just check` already reports how many it skipped.
+    cargo nextest run --workspace --locked --run-ignored ignored-only
+

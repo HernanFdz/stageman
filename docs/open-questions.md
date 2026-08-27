@@ -58,6 +58,21 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   swallowed. Settled by the first thing that needs to *read* a log rather than
   write one, which is the dashboard.
 
+- **Does a container die with the process that started it, on every runtime
+  this has to work on?** `docs/conventions.md` §4 makes "killing stageman
+  leaves nothing behind" a bar with a test rather than an aspiration, and a
+  container is now the thing that would be left. Measured on Docker Desktop on
+  macOS, with a container's standard input held cleanly open: hard-killing the
+  attached client ends the container either way, and `--rm` decides what
+  remains of it. With that flag, nothing — not even a stopped container.
+  Without it, the container is left exited, with its filesystem intact. The
+  handshake passes it because a throwaway probe has no state worth keeping;
+  anything that does will want the other behaviour. That is one runtime on one
+  platform and the mechanism was not identified, so it is evidence and not a
+  guarantee; the same probe on a Linux engine and on a rootless runtime is what
+  would settle it. Settled by running it where CI runs, since that is the
+  second platform this has to hold on anyway.
+
 - **What should happen when an agent credential expires while nobody is
   watching?** It will, and it lands on every job at once. The options run from
   failing each job loudly and showing it on the dashboard, to pausing the
@@ -73,16 +88,12 @@ Intended next steps, in order, each with its reason. Written as intentions, not
 progress: "next X, because Y" — never "X is 60% done", which is both derivable
 and wrong within a day.
 
-- Next, drive a container from Rust: the agent crate speaking the protocol over
-  a container's standard input and output. The image exists and answers, but it
-  has only ever been driven from a throwaway script — nothing in this
-  repository speaks the protocol yet, so this is where the contract in
-  `docs/decisions/0006-agents-are-pluggable.md` stops being a description and
-  becomes code.
-- Then a workspace and a platform credential arriving at container start, which
-  is the first time
+- Next, a workspace and a platform credential arriving at container start,
+  which is the first time
   `docs/decisions/0009-jobs-hold-their-own-platform-credentials.md` is
-  exercised rather than described.
+  exercised rather than described. The handshake reaches a container with
+  neither, so this is the step that makes the arguments vary rather than being
+  one fixed list.
 - Then the app grows a binary, so that the first-run prompt in
   `docs/decisions/0013-an-instance-is-configured-before-it-exists.md`, and the
   key read from the environment, have somewhere to live.
