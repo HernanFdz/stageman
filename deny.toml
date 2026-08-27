@@ -34,9 +34,34 @@ unused-allowed-license = "allow"
 private = { ignore = true }
 
 [bans]
-# Duplicate versions are usually upstream's fault and not actionable; a
-# warning keeps them visible without making the gate lie.
-multiple-versions = "warn"
+# Denied, with the exemptions written down. This was a warning on the argument
+# that duplicates are upstream's fault and not actionable — true, and beside
+# the point: a warning nobody acts on is how a duplicate gets *added* without
+# anyone noticing, which is precisely how the entry below arrived. Denying
+# makes a new duplicate fail the gate while the known ones carry a reason and a
+# revisit trigger, which is the trade `#[expect(lint, reason = "…")]` already
+# makes in the source.
+#
+# The self-deletion is not free: an exemption that stops matching reports as
+# `unmatched-skip`, which is a warning here and is promoted to an error by the
+# `deps` recipe. Without that flag a stale entry rots silently, which is the
+# failure this whole section is trying to avoid.
+multiple-versions = "deny"
+skip = [
+    # Half the proc-macro ecosystem is still on syn 2 while the other half has
+    # moved to syn 3: `serde_derive`, `thiserror-impl`, `tokio-macros` and the
+    # protocol SDK's own derive are on 3; `darling`, `derive_more-impl`,
+    # `pin-project-internal`, `serde_with_macros`, `strum_macros` and
+    # `tracing-attributes` are on 2. Every one of those is already at its
+    # latest published version, so there is no lockfile edit that resolves
+    # this — only dropping the SDK would, and
+    # `docs/decisions/0014-the-protocols-own-sdk-and-our-own-spawning.md` took
+    # that deliberately.
+    #
+    # Revisit: nothing to do. When those six publish against syn 3 this entry
+    # stops matching and the gate fails until it is deleted.
+    { crate = "syn:2", reason = "transitive: six upstream proc-macro crates have not yet migrated to syn 3" },
+]
 # A wildcard version is not reproducible and not auditable.
 wildcards = "deny"
 # Exempts intra-workspace path dependencies, which carry no version and would

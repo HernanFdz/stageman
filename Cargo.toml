@@ -54,11 +54,11 @@ pedantic = { level = "deny", priority = -1 }
 # routine `rustup update` would break CI on code nobody touched.
 nursery = { level = "deny", priority = -1 }
 cargo = { level = "deny", priority = -1 }
-# Fires once per duplicated version anywhere in the tree — almost always someone
-# else's transitive choice, and nothing you can act on. deny.toml covers the same
-# ground properly with `multiple-versions = "warn"`, which keeps it visible
-# without making the gate lie. Left denied, this is the largest non-actionable
-# noise source in the whole set.
+# Fires once per duplicated version anywhere in the tree, with no way to exempt
+# one case without exempting them all. deny.toml covers the same ground properly
+# with `multiple-versions = "deny"` plus a skip list, so each exemption carries
+# its reason and fails the gate once it stops being needed. Left denied here,
+# this is the largest non-actionable noise source in the whole set.
 multiple_crate_versions = "allow"
 
 # DENY PANICS — each one verified firing on clippy 0.1.95.

@@ -206,7 +206,11 @@ drift-escape-hatches:
 # the moment you add it, not at push time once you have built on top of it.
 [doc("Supply chain: advisories, licenses, bans, sources")]
 deps:
-    cargo deny check
+    # `--deny unmatched-skip` has no deny.toml equivalent — cargo-deny rejects
+    # the key — so it has to be here. Without it a `[bans] skip` entry that has
+    # outlived its reason reports as a warning and stays forever, which turns
+    # the exemption list into the thing it exists to prevent.
+    cargo deny check --deny unmatched-skip
 
 # -------------------------------------------------------------------- verify
 
