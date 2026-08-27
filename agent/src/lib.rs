@@ -13,3 +13,7 @@
 //! crate exists to catch — see `docs/decisions/0006-agents-are-pluggable.md`,
 //! and note that the same record explains why this abstraction was refused
 //! until now.
+//!
+//! The shape that contract takes was settled by a spike rather than by
+//! argument; `docs/decisions/0010-acp-is-the-agent-contract.md` records the
+//! choice, and rather more usefully, the evidence that outlives it.

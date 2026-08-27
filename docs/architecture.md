@@ -176,6 +176,11 @@ running an agent at all, rather than by calling a vendor's service, is
 `docs/decisions/0007-model-work-goes-through-an-agent-cli.md`, and it is a
 billing decision at least as much as a technical one.
 
+What shape that contract takes was settled by a spike rather than by argument.
+`docs/decisions/0010-acp-is-the-agent-contract.md` records the choice and, more
+usefully, the evidence — most of which stays true whichever way the choice had
+gone.
+
 The reason the **job** crate hosts nothing, despite an earlier design in which
 the orchestrator hosted the tools an agent used to reach the world, is
 `docs/decisions/0009-jobs-hold-their-own-platform-credentials.md` — the most

@@ -36,51 +36,16 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   favours either side — see
   `docs/decisions/0008-one-credential-per-agent.md`. Decide it on isolation
   alone.
-
-- **How is an agent driven — one shared protocol, or an adapter per tool?** The
-  Agent Client Protocol is an open standard for precisely this relationship:
-  JSON-RPC over a subprocess's standard input and output, with sessions,
-  streamed turns, and the agent raising permission requests back to whoever
-  launched it. The alternative is an adapter per tool over each agent's own
-  headless interface. While only one agent mattered the adapters looked
-  cheaper, since a single tool's own interface already offers duplex streaming
-  and schema-constrained output.
-  `docs/decisions/0006-agents-are-pluggable.md` changes that arithmetic:
-  bespoke work per agent, against one protocol. Note what that protocol
-  actually costs, because it is easy to overstate — agents do not all speak it
-  natively, and at least one is reached through a separate adapter binary
-  maintained by a third party and distributed through a package manager this
-  project otherwise has no use for. Depending on such an adapter has been
-  accepted, which makes the question less about reach and more about shape:
-  whether the protocol is the right form for the contract, with each agent
-  reaching it natively, through somebody else's adapter, or through one of
-  ours. What still has to be checked — and is the narrow thing the spike
-  exists for — is whether a permission request surfaces as an event the parent
-  can *answer*. Routing it to a human on a channel is the entire requirement,
-  and a mode that simply stops asking is not a substitute for one that asks
-  somewhere else.
-
-- **Is a third-party orchestrator permitted to run an agent on a personal
-  subscription?** Vendors bill agent tools two ways — a subscription meant for
-  a person working interactively, and per-token keys meant for automation — and
-  the boundary between those is being actively rewritten. At least one vendor
-  announced a change to how non-interactive usage is metered and then paused
-  it, and secondary sources disagree with that vendor's own documentation about
-  what third-party tools may do. None of this can be settled by reasoning about
-  it. What makes it survivable rather than fatal is that
-  `docs/decisions/0008-one-credential-per-agent.md` treats the credential as
-  configuration, so an answer either way is a setting rather than a redesign.
-  Settled by reading the terms that actually apply to each configured agent,
-  and re-reading them whenever a vendor moves them.
-
-- **What should happen when an agent credential expires while nobody is
-  watching?** It will, and it lands on every job at once. The options run from
-  failing each job loudly and showing it on the dashboard, to pausing the
-  instance and saying so on the channel a human is actually reading. The second
-  is more work and is probably right, because a dashboard nobody is looking at
-  is exactly where this failure would otherwise sit until morning. Settled by
-  deciding what a job that cannot start should look like in general — the same
-  question wearing a different hat, and worth answering once.
+  Since then a spike has put more weight on the container side. The transport
+  works: a containerised process answered interleaved requests over standard
+  input and output with networking disabled entirely, driven from an
+  uncontainerised parent. An image can carry a build of the agent for the
+  platform the container runs on, which pins the agent's version — worth more
+  than it sounds, since both agents examined update themselves, so a job run on
+  the host can have its agent change underneath it between runs. And the two
+  mitigations deferred below are both far easier inside a container than
+  outside one. Against all that: a container took roughly two seconds to start,
+  which a worktree does not, and per-job containers pay that every time.
 
 - **Should a job's environment have an egress allowlist?** Since
   `docs/decisions/0009-jobs-hold-their-own-platform-credentials.md`, a job holds
@@ -104,26 +69,47 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   that permits opening a pull request but not merging one is the same question
   wearing a different hat, and answering it once answers both.
 
+- **Is a third-party orchestrator permitted to run an agent on a personal
+  subscription?** Vendors bill agent tools two ways — a subscription meant for
+  a person working interactively, and per-token keys meant for automation — and
+  the boundary between those is being actively rewritten. At least one vendor
+  announced a change to how non-interactive usage is metered and then paused
+  it, and secondary sources disagree with that vendor's own documentation about
+  what third-party tools may do. None of this can be settled by reasoning about
+  it. What makes it survivable rather than fatal is that
+  `docs/decisions/0008-one-credential-per-agent.md` treats the credential as
+  configuration, so an answer either way is a setting rather than a redesign.
+  Settled by reading the terms that actually apply to each configured agent,
+  and re-reading them whenever a vendor moves them.
+
+- **What should happen when an agent credential expires while nobody is
+  watching?** It will, and it lands on every job at once. The options run from
+  failing each job loudly and showing it on the dashboard, to pausing the
+  instance and saying so on the channel a human is actually reading. The second
+  is more work and is probably right, because a dashboard nobody is looking at
+  is exactly where this failure would otherwise sit until morning. Settled by
+  deciding what a job that cannot start should look like in general — the same
+  question wearing a different hat, and worth answering once.
+
 ## Next
 
 Intended next steps, in order, each with its reason. Written as intentions, not
 progress: "next X, because Y" — never "X is 60% done", which is both derivable
 and wrong within a day.
 
-- Next, settle how an agent is driven: a throwaway spike against both
-  candidates, testing only the two things `docs/architecture.md` §2 makes
-  non-negotiable — and testing them against more than one agent, because a
-  contract validated against a single tool is precisely the costume
-  `docs/decisions/0006-agents-are-pluggable.md` warns about. It gates
-  everything below it, which is why it comes first: the schema cannot settle
-  what a job stores until a job's conversation has a shape, and Slack end to
-  end *is* that conversation.
-- Then the SQLite schema and the encrypted credential handling, because every
-  other piece needs somewhere to put a project, and because the redaction bar in
-  `docs/conventions.md` §4 is cheap to build in and awkward to add afterwards.
+- Next the SQLite schema and the encrypted credential handling, because every
+  other piece needs somewhere to put a project and the credentials that project
+  uses, and because the redaction bar in `docs/conventions.md` §4 is cheap to
+  build in and awkward to add afterwards.
+- Then one job end to end, as the proof of concept: a project configured, an
+  agent spawned through the protocol into an isolated workspace, and a change
+  proposed. Deliberately before the two mitigations above rather than after —
+  they are far easier to design against something that runs than against
+  something imagined, and the isolation question is more likely to be answered
+  by building this than by arguing about it.
 - Then Slack end to end — a signal read, judged and turned into a job whose
-  prompt is snapshot-tested, and a blocking question asked and answered without
-  anyone touching a terminal. Slack first because it is the escalation path
+  prompt is snapshot-tested, and a question asked and answered without anyone
+  touching a terminal. Slack because it is the escalation path
   rather than the richest source of work: until a job can ask something,
   nothing can safely run unattended, so every other channel is blocked behind
   this one. See `docs/decisions/0005-conversation-happens-on-channels.md`.
