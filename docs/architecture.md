@@ -57,8 +57,15 @@ first.
   composed.
 - **job** — the doing. Provisions one isolated workspace, runs one agent inside
   it, supervises it to completion, and gives it the credentials its project
-  needs. The agent reaches platforms through those platforms' own tools rather
-  than through anything hosted here — see
+  needs. Supervision spans more than one lifetime of this process: a job
+  interrupted by the daemon being killed is resumed at startup rather than
+  abandoned, per
+  `docs/decisions/0015-a-job-survives-the-daemon-dying.md`. It provisions the
+  workspace and not its contents — nothing here delivers a repository, and an
+  agent that needs one clones it, per
+  `docs/decisions/0016-the-agent-clones-the-repository.md`. The agent reaches
+  platforms through those platforms' own tools rather than through anything
+  hosted here — see
   `docs/decisions/0009-jobs-hold-their-own-platform-credentials.md`. Which agent
   ran it is recorded on the job.
 - **app** — the Dioxus fullstack binary. Serves the dashboard and runs the
@@ -114,8 +121,8 @@ nobody is a wish.
   deliberately, and records what it bought and what it now costs. Read it before
   treating this invariant as the defence, because it is not one: it bounds the
   blast radius of a leak and does nothing to prevent one.
-- **One job, one workspace, one project.** No two jobs ever share a working
-  tree, and a job provisioned for one project cannot reach another project's
+- **One job, one workspace, one project.** No two jobs ever share a container,
+  and a job provisioned for one project cannot reach another project's
   repository, credentials or channels. *Defended by* construction, since a
   workspace is minted per job and scoped to a project, and by the escape test in
   `docs/conventions.md` §4. That mechanism is a container — see
@@ -123,6 +130,14 @@ nobody is a wish.
   boundary rather than relying on the agent to respect it. The escape test
   still earns its place: construction is an argument about what the code does,
   and the test is evidence about what the mechanism actually permits.
+
+  This once said *no two jobs share a working tree*, which named the files
+  instead of the boundary. Since
+  `docs/decisions/0016-the-agent-clones-the-repository.md` a job may have no
+  working tree at all and the invariant is untouched — which is the sense in
+  which naming the container was always the more accurate claim, and the
+  clearest sign that the older wording described an implementation rather than a
+  property.
 - **No job blocks on a terminal.** A job that needs a human emits the question
   on a channel and stays alive. It never writes to standard output expecting an
   answer on standard input, because nobody is watching that terminal — that is
@@ -164,8 +179,8 @@ constraint in `docs/vision.md` §3 is that one operator runs this on their own
 machine: a second daemon is a second thing to install, supervise and restart,
 and buys nothing while both halves live and die together anyway. The cost is
 that the dashboard and the deciding share a process and a fate, which is why
-"killing stageman leaves nothing behind" is a quality bar in
-`docs/conventions.md` §4 rather than an aspiration.
+"killing stageman leaves nothing running and nothing untracked" is a quality bar
+in `docs/conventions.md` §4 rather than an aspiration.
 
 State is one file for the same reason — see
 `docs/decisions/0011-state-is-a-snapshot-not-a-database.md`, which supersedes an

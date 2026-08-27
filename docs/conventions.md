@@ -66,23 +66,35 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   message posted. Signals are read and judged, not stored or addressed. They
   are deliberately not entities; see **reason** below.
 - **job** — one agent, in one isolated workspace, on one project, from kickoff
-  to completion. A job happens once. There is no retry and no resume: a second
-  attempt is a new job with its own workspace. Not a *worker*, which implies a
+  to completion. A job happens once, and there is no retry: a second attempt is
+  a new job with its own workspace. It may, however, outlive the process
+  supervising it — the daemon being killed stops a job's container rather than
+  ending the job, and startup puts it back to work. **Resuming is not
+  retrying**, and the distinction is the whole of it: a resumed job is the same
+  job continuing, which is why nothing records an attempt count and why the
+  outward-facing things it already did are not done twice. See
+  `docs/decisions/0015-a-job-survives-the-daemon-dying.md`, which reverses an
+  earlier "no resume" and says what changed. Not a *worker*, which implies a
   long-lived process pulling from a pool and gets the relationship backwards —
   the job is the work, not the thing that fetches it. Not a *task* or a *run*
   either, since both imply a durable intent that separate attempts belong to,
   and no such thing exists here. A job records which agent ran it, because once
   more than one can, "why did this go badly?" has no answer without it.
-- **workspace** — the isolated place a job's agent works: the filesystem the
-  repository is checked out into, together with the container around it — see
+- **workspace** — the isolated place a job's agent works: the container it runs
+  in, for as long as that job lasts — see
   `docs/decisions/0012-agents-run-in-containers.md`. One job, one workspace: no
   two ever share one, which is an invariant rather than an aspiration
   (`docs/architecture.md` §2). Not a *checkout*, which names the files and
-  misses the boundary that makes them isolated. The word stayed deliberately
-  indifferent to that boundary while it was undecided, and the boundary is now
-  decided, but the word is still the right one — the orchestrator's own agent
-  runs in a container and has no workspace at all, because it has no repository
-  to work on.
+  misses the boundary that makes them isolated — and the files are no longer
+  even part of the definition. This once read "the filesystem the repository is
+  checked out into", from a design in which something delivered that
+  repository. Nothing does:
+  `docs/decisions/0016-the-agent-clones-the-repository.md` has the agent clone
+  it if the work needs one, so what is inside a workspace is the job's business
+  and a job with no repository at all is an ordinary case rather than an empty
+  mount. The orchestrator's agent still has no workspace, and now for a plainer
+  reason than having no repository — a workspace belongs to a job, and triage
+  is not one.
 - **reason** — the free text the orchestrator writes when it creates a job,
   saying why it decided to. Prose meant for a human reading the dashboard, not
   a key pointing at a signal. It is the whole of a job's provenance, which is
@@ -218,13 +230,25 @@ it lands.
   invariant needs a test that genuinely tries to break out — reads another
   project's state, writes outside its own workspace — and fails to. An invariant
   defended only by construction quietly stops holding when the construction
-  changes, and the isolation mechanism is an open question, so it will change.
-- **Killing stageman leaves nothing behind.** Hard-killing the process is a
-  supported operation with a test, not an accident recovered from by hand: no
-  stranded workspace, no orphaned agent process, nothing left running. This is a
-  long-lived daemon on somebody's own machine, so it *will* be killed
-  mid-job — and the failure mode is a silent leak rather than a crash, which is
-  exactly the kind nobody notices until there are forty of them.
+  changes. The mechanism is no longer an open question — it is a container, per
+  `docs/decisions/0012-agents-run-in-containers.md` — which raises the bar
+  rather than retiring it: the test is now evidence about what that container
+  actually permits, and construction is only an argument about what the code
+  asks for.
+- **Killing stageman leaves nothing running and nothing untracked.** Hard-killing
+  the process is a supported operation with a test, not an accident recovered
+  from by hand. This is a long-lived daemon on somebody's own machine, so it
+  *will* be killed mid-job — and the failure mode is a silent leak rather than a
+  crash, which is exactly the kind nobody notices until there are forty of them.
+
+  This used to read "leaves nothing behind", and
+  `docs/decisions/0015-a-job-survives-the-daemon-dying.md` narrowed it: a
+  stopped container the instance can still name is retained deliberately, so
+  that a job which has already opened a pull request or asked a question on a
+  channel is resumed rather than duplicated. Only a container nothing can name
+  is a leak. That makes the test *harder* rather than laxer, because it now has
+  to tell the two apart — a suite that merely counts what is left behind would
+  pass on the leak and fail on the feature.
 - **Kickoff prompts are snapshot-tested.** The prompt text the orchestrator
   composes is asserted as literal text, so a change to what a job is told to do
   shows up as a reviewable diff. Prompt text is the highest-leverage code here

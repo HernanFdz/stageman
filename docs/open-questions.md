@@ -58,20 +58,33 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   swallowed. Settled by the first thing that needs to *read* a log rather than
   write one, which is the dashboard.
 
-- **Does a container die with the process that started it, on every runtime
-  this has to work on?** `docs/conventions.md` §4 makes "killing stageman
-  leaves nothing behind" a bar with a test rather than an aspiration, and a
-  container is now the thing that would be left. Measured on Docker Desktop on
-  macOS, with a container's standard input held cleanly open: hard-killing the
-  attached client ends the container either way, and `--rm` decides what
-  remains of it. With that flag, nothing — not even a stopped container.
-  Without it, the container is left exited, with its filesystem intact. The
-  handshake passes it because a throwaway probe has no state worth keeping;
-  anything that does will want the other behaviour. That is one runtime on one
-  platform and the mechanism was not identified, so it is evidence and not a
-  guarantee; the same probe on a Linux engine and on a rootless runtime is what
-  would settle it. Settled by running it where CI runs, since that is the
-  second platform this has to hold on anyway.
+- **Does a stopped container behave the same way on every runtime this has to
+  run on?** `docs/decisions/0015-a-job-survives-the-daemon-dying.md` rests on
+  one measurement taken on Docker Desktop on macOS: hard-killing the attached
+  client leaves the container exited with its filesystem intact, and starting it
+  again resumes the session. The mechanism was not identified, so it is evidence
+  rather than a guarantee — and the whole resume design now depends on it, which
+  makes this the most load-bearing unverified claim in the repository. Settled
+  by running the same probe on a Linux engine, which is where CI runs, and on a
+  rootless runtime. If it does not generalise, the fallback is not obvious and
+  is worth thinking about before the probe rather than after: most likely
+  recording enough to recreate the container rather than restart it, which is a
+  different design and not a patch to this one.
+
+- **When is a finished job's container removed?** Nothing does it today, so
+  `docs/decisions/0015-a-job-survives-the-daemon-dying.md` accumulates one
+  writable layer per job — the leak that record's own narrowed bar permits by
+  name. Deliberately unanswered until a job exists to retire, because the shape
+  of the rule depends on what finishing looks like. The leading candidate is
+  that an operator retires a job from the dashboard and that removes its
+  container, with automatic retirement later: an agent that judges itself
+  finished asks for confirmation on a channel and retires on the answer. Note
+  what that second half already is — a job asking a question and waiting for a
+  human, which is
+  `docs/decisions/0005-conversation-happens-on-channels.md` and the last item
+  under Next. So this is not a separate feature to design; it falls out of the
+  channel work, and the cheap thing to record now is that the two are the same
+  problem.
 
 - **What should happen when an agent credential expires while nobody is
   watching?** It will, and it lands on every job at once. The options run from
@@ -88,15 +101,24 @@ Intended next steps, in order, each with its reason. Written as intentions, not
 progress: "next X, because Y" — never "X is 60% done", which is both derivable
 and wrong within a day.
 
-- Next, a workspace and a platform credential arriving at container start,
-  which is the first time
-  `docs/decisions/0009-jobs-hold-their-own-platform-credentials.md` is
-  exercised rather than described. The handshake reaches a container with
-  neither, so this is the step that makes the arguments vary rather than being
-  one fixed list.
+- Next, a session that can be prompted, with the credentials it needs arriving
+  at container start. This is the first time
+  `docs/decisions/0009-jobs-hold-their-own-platform-credentials.md` is exercised
+  rather than described, and the first time the pure function
+  `docs/architecture.md` §1 promises in **core** — deciding what a child agent
+  process is handed — has to exist. It was going to be "a workspace and a
+  credential"; `docs/decisions/0016-the-agent-clones-the-repository.md` removed
+  the workspace half, since nothing delivers a repository any more.
 - Then the app grows a binary, so that the first-run prompt in
   `docs/decisions/0013-an-instance-is-configured-before-it-exists.md`, and the
-  key read from the environment, have somewhere to live.
+  key read from the environment, have somewhere to live. It moved up the queue:
+  resuming needs a startup to hook into, so this is now the thing standing
+  between `docs/decisions/0015-a-job-survives-the-daemon-dying.md` and being
+  real.
+- Then jobs survive a restart for real — containers named from their job,
+  labelled for sweeping, and startup restarting and resuming what it finds.
+  Deliberately after a job can run at all, because a resume test needs
+  something worth resuming.
 - Then one job end to end, as the proof of concept: a project configured, an
   agent started in its own container, and a change proposed. Deliberately
   before the two mitigations above rather than after — they are far easier to
