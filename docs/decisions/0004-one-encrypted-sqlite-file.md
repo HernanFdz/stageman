@@ -1,7 +1,9 @@
 # 0004 — One encrypted SQLite file
 
 ## Status
-Accepted
+Superseded by `docs/decisions/0011-state-is-a-snapshot-not-a-database.md`. The
+credential reasoning below is carried forward by that record unchanged — what it
+supersedes is the choice of an embedded database as the store.
 
 ## Context
 

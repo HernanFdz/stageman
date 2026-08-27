@@ -52,10 +52,10 @@ watch jobs and read their logs, and pause or kill one that has gone wrong. A
 single instance manages several projects, and a job belongs to exactly one of
 them: it cannot see another project's repository, credentials or channels.
 
-All state lives in one `SQLite` file, with credentials encrypted at rest under a
-key supplied by the environment at startup. Back up the file and you have backed
-up the instance; take it to another machine without the key and it tells you
-nothing.
+All state lives in one human-readable file, rewritten whenever anything changes,
+with credentials encrypted under a key supplied by the environment at startup.
+Back up that file and you have backed up the instance; take it to another
+machine without the key and it tells you nothing.
 
 ## Documentation
 

@@ -165,7 +165,9 @@ that the dashboard and the deciding share a process and a fate, which is why
 `docs/conventions.md` §4 rather than an aspiration.
 
 State is one file for the same reason — see
-`docs/decisions/0004-one-encrypted-sqlite-file.md`.
+`docs/decisions/0011-state-is-a-snapshot-not-a-database.md`, which supersedes an
+earlier choice of an embedded database and is explicit about the one thing that
+swap makes expensive to undo.
 
 The fifth crate is the newest part of this shape and the least self-evident. It
 exists because being agent-agnostic is a commitment rather than a possibility,

@@ -99,14 +99,14 @@ State the rule and the reason. A rule without its reason gets discarded the
 first time it is inconvenient — usually correctly, because a rule nobody can
 justify is usually obsolete.
 
-- **All state is one SQLite file, and credentials in it are encrypted at rest**
-  with a key supplied by the environment at startup. Projects, jobs, reasons,
-  prompts and credentials all live there; the file is portable and useless
-  without the key. The reason is `docs/vision.md` §3 — this runs headless on a
-  machine the operator owns, where an OS keychain is awkward and reading
-  credentials from the environment alone would contradict editing them from the
-  dashboard. What that costs is in
-  `docs/decisions/0004-one-encrypted-sqlite-file.md`.
+- **State lives in memory and is snapshotted to one file on every change.**
+  Projects, jobs, reasons, prompts and credentials are one structure, serialised
+  with serde and written atomically — temporary file, flush, rename — whenever
+  it changes. Not at shutdown: `docs/vision.md` §3 commits to surviving the
+  process being killed, and a shutdown-only snapshot survives only a clean exit.
+  Credentials inside it stay encrypted under a key from the environment, so the
+  file is portable and useless without it. Reasoning and reversal cost are in
+  `docs/decisions/0011-state-is-a-snapshot-not-a-database.md`.
 - **No secret is ever written to a log line.** Encryption protects the file, not
   the terminal, and a token escapes through a formatted struct long before it
   escapes through the database. The mechanical half of this rule is §4 below.
@@ -180,7 +180,11 @@ it lands.
   the formatted output. A derived `Debug` on a secret-bearing type is a bug, not
   a style preference. No lint in the gate catches this, and the usual way a
   token reaches a log is a struct printed whole while somebody debugs something
-  unrelated.
+  unrelated. The same applies to serialisation, and for a sharper reason: state
+  is persisted by serialising the very structure those credentials live in, so a
+  type that formats safely and serialises in the clear writes the secret to disk
+  on the next change. One wrapper type should carry both behaviours, and one
+  test should cover both, so neither can be added without the other.
 - **Isolation is tested, not assumed.** The one-job-one-workspace-one-project
   invariant needs a test that genuinely tries to break out — reads another
   project's state, writes outside its own workspace — and fails to. An invariant

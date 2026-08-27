@@ -97,10 +97,10 @@ Intended next steps, in order, each with its reason. Written as intentions, not
 progress: "next X, because Y" — never "X is 60% done", which is both derivable
 and wrong within a day.
 
-- Next the SQLite schema and the encrypted credential handling, because every
-  other piece needs somewhere to put a project and the credentials that project
-  uses, and because the redaction bar in `docs/conventions.md` §4 is cheap to
-  build in and awkward to add afterwards.
+- Next the state structure, its snapshot, and the encrypted credential handling,
+  because every other piece needs somewhere to put a project and the credentials
+  that project uses, and because the redaction bar in `docs/conventions.md` §4
+  is cheap to build in and awkward to add afterwards.
 - Then one job end to end, as the proof of concept: a project configured, an
   agent spawned through the protocol into an isolated workspace, and a change
   proposed. Deliberately before the two mitigations above rather than after —
