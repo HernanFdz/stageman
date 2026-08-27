@@ -73,12 +73,19 @@ Intended next steps, in order, each with its reason. Written as intentions, not
 progress: "next X, because Y" — never "X is 60% done", which is both derivable
 and wrong within a day.
 
-- Next the snapshot: sealing credentials on the way out, and validating a loaded
-  file before it becomes state. The structure exists; what is missing is the
-  half that cannot be added safely except in the same change as encryption.
-- Then the image and the container: an agent installed at build time, spoken to
-  through the protocol over standard input and output, with a credential and a
-  workspace arriving at start. Nothing else runs until this does.
+- Next, drive a container from Rust: the agent crate speaking the protocol over
+  a container's standard input and output. The image exists and answers, but it
+  has only ever been driven from a throwaway script — nothing in this
+  repository speaks the protocol yet, so this is where the contract in
+  `docs/decisions/0006-agents-are-pluggable.md` stops being a description and
+  becomes code.
+- Then a workspace and a platform credential arriving at container start, which
+  is the first time
+  `docs/decisions/0009-jobs-hold-their-own-platform-credentials.md` is
+  exercised rather than described.
+- Then the app grows a binary, so that the first-run prompt in
+  `docs/decisions/0013-an-instance-is-configured-before-it-exists.md`, and the
+  key read from the environment, have somewhere to live.
 - Then one job end to end, as the proof of concept: a project configured, an
   agent started in its own container, and a change proposed. Deliberately
   before the two mitigations above rather than after — they are far easier to
