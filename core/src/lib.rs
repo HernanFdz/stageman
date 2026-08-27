@@ -597,11 +597,159 @@ impl Snapshot {
     }
 }
 
+/// Exactly what one agent process is allowed to see, and nothing more.
+///
+/// The piece of logic `docs/architecture.md` §1 says looks like plumbing and
+/// is not. It lives in a crate with no I/O because it is a pure function from
+/// configuration to a description: *deciding* is here, *delivering* belongs to
+/// an adapter and differs per agent — a variable for one, a file at an
+/// expected path for another.
+///
+/// Being able to test it without spawning a process is the whole point rather
+/// than a convenience. At least one agent resolves credentials by precedence
+/// and prefers a per-token key when it finds one, so a variable inherited from
+/// whatever shell started the daemon silently changes who pays: no error, no
+/// log line, and no way to notice before the invoice arrives. See
+/// `docs/decisions/0008-one-credential-per-agent.md`, and
+/// `docs/conventions.md` §3 for the rule this exists to keep.
+///
+/// **Nothing here is inherited.** A handout is built by selecting from one
+/// project, which is how the invariant in `docs/architecture.md` §2 — a job
+/// holds credentials for its own project and no other — holds by construction
+/// rather than by review.
+///
+/// It carries credentials, so like [`Secret`] it redacts when formatted and
+/// deliberately implements no serialisation: a handout is what a process is
+/// about to be handed, never state, and nothing should be able to write one to
+/// disk.
+#[derive(Clone)]
+pub struct Handout {
+    agent: Agent,
+    agent_credential: Secret,
+    platforms: BTreeMap<Platform, Secret>,
+}
+
+impl Handout {
+    /// What the agent the orchestrator thinks with is handed.
+    ///
+    /// Its own credential, and no platform credential at all: triage has no
+    /// project, no repository and no workspace, so there is nothing it could
+    /// legitimately reach a platform for — see
+    /// `docs/decisions/0012-agents-run-in-containers.md`.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the orchestrator's agent has no configuration — which the
+    /// invariant on [`State`] says cannot happen, since it holds at
+    /// construction and is checked again when a snapshot is loaded.
+    ///
+    /// The signature admits it anyway, and deliberately. The alternative is a
+    /// total function that substitutes an empty credential for a missing one,
+    /// which converts a state that cannot occur into an authentication failure
+    /// somewhere else entirely — the exact trade `.quality/gate-reference.md`
+    /// forbids, where a loud failure is replaced by a silent wrong value. An
+    /// unreachable error variant costs one `?`; a fabricated credential costs
+    /// an afternoon.
+    pub fn for_triage(state: &State) -> Result<Self, HandoutError> {
+        let agent = state.orchestrator_agent;
+        let config = state
+            .agents
+            .get(&agent)
+            .ok_or(HandoutError::UnconfiguredAgent(agent))?;
+        Ok(Self {
+            agent,
+            agent_credential: config.auth_token.clone(),
+            platforms: BTreeMap::new(),
+        })
+    }
+
+    /// What a job's agent is handed: its own credential, plus the platform
+    /// credentials of the one project the job belongs to.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the project is not one this instance watches, or if the agent
+    /// has no configuration. Both are refusals rather than empty handouts: a
+    /// process started with nothing to authenticate with fails later, further
+    /// from the cause, and `docs/conventions.md` §3 would rather that be a
+    /// visible job failure than a mystery.
+    pub fn for_job(state: &State, agent: Agent, project: ProjectId) -> Result<Self, HandoutError> {
+        let config = state
+            .agents
+            .get(&agent)
+            .ok_or(HandoutError::UnconfiguredAgent(agent))?;
+        let project = state
+            .projects
+            .get(&project)
+            .ok_or(HandoutError::UnknownProject(project))?;
+        Ok(Self {
+            agent,
+            agent_credential: config.auth_token.clone(),
+            platforms: project.credentials.clone(),
+        })
+    }
+
+    /// Which agent this was built for.
+    ///
+    /// Carried so that an adapter can refuse a handout meant for another
+    /// agent. The invariant says nothing belonging to any other agent, and a
+    /// value that cannot be checked defends nothing.
+    #[must_use]
+    pub const fn agent(&self) -> Agent {
+        self.agent
+    }
+
+    /// What the agent authenticates with.
+    #[must_use]
+    pub const fn agent_credential(&self) -> &Secret {
+        &self.agent_credential
+    }
+
+    /// What this job reaches one platform with, if it has anything for it.
+    #[must_use]
+    pub fn platform(&self, platform: Platform) -> Option<&Secret> {
+        self.platforms.get(&platform)
+    }
+
+    /// Every platform credential in this handout.
+    pub fn platforms(&self) -> impl Iterator<Item = (Platform, &Secret)> {
+        self.platforms.iter().map(|(p, s)| (*p, s))
+    }
+}
+
+impl fmt::Debug for Handout {
+    /// Names what is present and never its contents.
+    ///
+    /// Written out rather than derived, per `docs/conventions.md` §4. The
+    /// fields redact themselves, so deriving would in fact be safe here — and
+    /// that is exactly the reasoning which stops being true the first time
+    /// somebody adds a `String` field, which is why the rule has no exception
+    /// worth taking.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Handout")
+            .field("agent", &self.agent)
+            .field("agent_credential", &"<redacted>")
+            .field("platforms", &self.platforms.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+/// A handout could not be decided.
+#[derive(Debug, thiserror::Error)]
+pub enum HandoutError {
+    /// The agent has no configuration in this instance.
+    #[error("the agent {0:?} has no configuration in this instance")]
+    UnconfiguredAgent(Agent),
+    /// The project is not one this instance watches.
+    #[error("no project {0} in this instance")]
+    UnknownProject(ProjectId),
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        Agent, AgentConfig, BASE64, Job, JobId, Key, NONCE_LEN, Nonce, OpenError, Platform,
-        Project, ProjectId, Secret, Snapshot, State,
+        Agent, AgentConfig, BASE64, Handout, HandoutError, Job, JobId, Key, NONCE_LEN, Nonce,
+        OpenError, Platform, Project, ProjectId, Secret, Snapshot, State,
     };
     use base64::Engine as _;
     use jiff::Timestamp;
@@ -828,5 +976,107 @@ mod tests {
         // The orchestrator picks an agent by reading this, so an empty one is
         // a silent failure rather than a cosmetic one.
         assert!(!Agent::Claude.description().is_empty());
+    }
+
+    /// Two projects whose credentials differ, so that "the wrong one" is
+    /// detectable rather than merely absent.
+    fn two_projects() -> (State, ProjectId, ProjectId) {
+        let mut state = configured();
+        let mine = ProjectId::from_uuid(Uuid::from_u128(3));
+        let theirs = ProjectId::from_uuid(Uuid::from_u128(4));
+
+        state.projects.insert(mine, a_project_with_a_job());
+
+        let mut other = a_project_with_a_job();
+        other.name = "somebody else".to_owned();
+        other.credentials.insert(
+            Platform::GitHub,
+            Secret::new("not-yours-and-never-was".to_owned()),
+        );
+        state.projects.insert(theirs, other);
+
+        (state, mine, theirs)
+    }
+
+    #[test]
+    fn triage_is_handed_its_credential_and_no_platform_at_all() {
+        let state = configured();
+        let handout = Handout::for_triage(&state).expect("a configured instance");
+
+        assert_eq!(handout.agent(), Agent::Claude);
+        assert_eq!(handout.agent_credential().expose(), "agent-token");
+        assert_eq!(handout.platforms().count(), 0);
+        assert!(handout.platform(Platform::GitHub).is_none());
+    }
+
+    #[test]
+    fn a_job_is_handed_its_own_projects_credentials() {
+        let (state, mine, _) = two_projects();
+        let handout = Handout::for_job(&state, Agent::Claude, mine).expect("a watched project");
+
+        assert_eq!(handout.agent_credential().expose(), "agent-token");
+        assert_eq!(
+            handout.platform(Platform::GitHub).map(Secret::expose),
+            Some(TOKEN)
+        );
+    }
+
+    /// The escape test `docs/conventions.md` §4 asks for, at the level where
+    /// the selection actually happens: a handout built for one project must
+    /// carry nothing belonging to another, and the two are distinguishable
+    /// because their credentials differ rather than because one is empty.
+    #[test]
+    fn a_jobs_handout_carries_nothing_belonging_to_another_project() {
+        let (state, mine, theirs) = two_projects();
+
+        let ours = Handout::for_job(&state, Agent::Claude, mine).expect("a watched project");
+        let alien = Handout::for_job(&state, Agent::Claude, theirs).expect("a watched project");
+
+        let leaked = alien.platform(Platform::GitHub).map(Secret::expose);
+        assert_eq!(leaked, Some("not-yours-and-never-was"));
+        assert_ne!(ours.platform(Platform::GitHub).map(Secret::expose), leaked);
+
+        for (_, secret) in ours.platforms() {
+            assert_ne!(secret.expose(), "not-yours-and-never-was");
+        }
+    }
+
+    #[test]
+    fn a_handout_for_a_project_this_instance_does_not_watch_is_refused() {
+        let (state, _, _) = two_projects();
+        let stranger = ProjectId::from_uuid(Uuid::from_u128(99));
+
+        let refused = Handout::for_job(&state, Agent::Claude, stranger);
+
+        assert!(matches!(refused, Err(HandoutError::UnknownProject(id)) if id == stranger));
+    }
+
+    #[test]
+    fn a_handout_for_an_agent_with_no_configuration_is_refused() {
+        let (mut state, mine, _) = two_projects();
+        state.agents.clear();
+
+        let refused = Handout::for_job(&state, Agent::Claude, mine);
+
+        assert!(matches!(
+            refused,
+            Err(HandoutError::UnconfiguredAgent(Agent::Claude))
+        ));
+        assert!(Handout::for_triage(&state).is_err());
+    }
+
+    #[test]
+    fn a_handout_does_not_leak_a_credential_when_formatted() {
+        let (state, mine, _) = two_projects();
+        let handout = Handout::for_job(&state, Agent::Claude, mine).expect("a watched project");
+
+        let shown = format!("{handout:?}");
+
+        assert!(!shown.contains("agent-token"), "{shown}");
+        assert!(!shown.contains(TOKEN), "{shown}");
+        assert!(
+            shown.contains("GitHub"),
+            "it should still say what it holds"
+        );
     }
 }

@@ -123,6 +123,19 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   used bare. This is the one place in the codebase where the wrong meaning of
   this word type-checks.
 
+- **handout** — exactly what one agent process is allowed to see: its agent's
+  own credential, and the platform credentials of the one project it works for.
+  Nothing else, and nothing inherited. It is *decided* in the domain crate as a
+  pure function and *delivered* by an adapter, because which secrets a process
+  may see is a question about configuration while what they are called is
+  knowledge about one agent. Not *environment*, and that near-miss is the whole
+  reason this word exists: an environment names a delivery mechanism, and
+  delivery is precisely the half that differs — a variable for one agent, a file
+  at an expected path for another — so a word presuming variables would make the
+  wrong half sound settled. Not *credentials* either, which is a bag of secrets
+  rather than a decision about one process, and loses the part that matters:
+  a handout is scoped to somebody, and the scoping is the point.
+
 ## 3. House rules
 
 Anything someone would otherwise get wrong: framework versions and their

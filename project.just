@@ -44,9 +44,21 @@ image-check:
 # a choice rather than an accident.
 [doc("Drive a container from this repository's own code — needs a built image")]
 image-handshake:
-    # Every ignored test in the workspace, because every one of them is ignored
-    # for this single reason: it needs a container runtime. Naming them
-    # individually would mean this recipe silently stops covering the next one
-    # somebody writes, and `just check` already reports how many it skipped.
-    cargo nextest run --workspace --locked --run-ignored ignored-only
+    # Every ignored test that costs nothing to run. They are ignored for one
+    # reason — they need a container runtime — so this selects by exclusion
+    # rather than by naming them, and keeps covering the next one somebody
+    # writes. `just check` already reports how many it skipped.
+    cargo nextest run --workspace --locked --run-ignored ignored-only \
+        -E 'not test(/costs_a_credential/)'
+
+# Split from the recipe above because these spend real money and reach the
+# network, which makes them a different thing to reach for. They are grouped by
+# module rather than by name so the filter keeps working as more are added, and
+# they fail loudly rather than skipping when no credential is present: a test
+# that passes because it could not run is worse than one that is honestly
+# absent.
+[doc("Drive an agent that actually answers — needs a built image and a credential")]
+image-session:
+    cargo nextest run --workspace --locked --run-ignored ignored-only \
+        -E 'test(/costs_a_credential/)'
 

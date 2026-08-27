@@ -86,6 +86,18 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   channel work, and the cheap thing to record now is that the two are the same
   problem.
 
+- **How is the orchestrator's long-lived container held open?**
+  `docs/decisions/0012-agents-run-in-containers.md` puts the agent the
+  orchestrator thinks with in one long-lived container, on the reasoning that
+  per-signal containers buy nothing and cost a start every time. What is built
+  starts one per question, which is a gap rather than a violation only because
+  nothing calls it yet — it becomes a violation the moment the orchestrator
+  does. The obstacle is shape, not effort: the protocol library scopes a
+  connection to a closure, so a connection outliving one call means a task that
+  owns it and a channel to speak through, and that task's failure and shutdown
+  become things somebody has to handle. Settled by building it, and worth
+  building before the orchestrator has a second caller rather than after.
+
 - **What should happen when an agent credential expires while nobody is
   watching?** It will, and it lands on every job at once. The options run from
   failing each job loudly and showing it on the dashboard, to pausing the

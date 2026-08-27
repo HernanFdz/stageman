@@ -31,11 +31,16 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 
-use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::schema::v1::{InitializeRequest, InitializeResponse};
+use agent_client_protocol::schema::v1::{
+    ContentBlock, InitializeRequest, InitializeResponse, NewSessionRequest, PromptRequest,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    SelectedPermissionOutcome, SessionNotification, SessionUpdate, TextContent,
+};
 use agent_client_protocol::{ByteStreams, Client, ConnectionTo};
-use stageman_core::Agent;
+use parking_lot::Mutex;
+use stageman_core::{Agent, Handout, Platform, Secret};
 use tokio::io::AsyncReadExt as _;
 use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
 
@@ -45,6 +50,16 @@ use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt 
 // read correctly whichever one it resolved to, which is precisely the kind of
 // ambiguity `docs/conventions.md` §2 says to spend a word avoiding.
 use agent_client_protocol::Agent as AgentRole;
+
+/// Re-exported because they appear in this crate's own signatures.
+///
+/// `docs/decisions/0014-the-protocols-own-sdk-and-our-own-spawning.md` accepted
+/// that protocol types would surface here rather than being wrapped. Accepting
+/// that and then not re-exporting them would leave [`Greeting`] and [`Answer`]
+/// unreadable to anyone who has not also taken the protocol library as a direct
+/// dependency, which is the cost without the benefit.
+pub use agent_client_protocol::schema::ProtocolVersion;
+pub use agent_client_protocol::schema::v1::StopReason;
 
 /// How much of a failed container's standard error is kept.
 ///
@@ -151,9 +166,9 @@ impl From<InitializeResponse> for Greeting {
     }
 }
 
-/// An agent's container could not be reached.
+/// An agent in a container could not be reached, or would not answer.
 #[derive(Debug, thiserror::Error)]
-pub enum HandshakeError {
+pub enum AgentError {
     /// The container runtime itself could not be started.
     ///
     /// The one failure that makes an instance unusable rather than one job:
@@ -208,10 +223,7 @@ pub enum HandshakeError {
 /// speaking — a missing image, most often — or if the exchange itself does not
 /// complete. The three are separate variants because an operator acts on them
 /// differently.
-pub async fn handshake(
-    runtime: &ContainerRuntime,
-    agent: Agent,
-) -> Result<Greeting, HandshakeError> {
+pub async fn handshake(runtime: &ContainerRuntime, agent: Agent) -> Result<Greeting, AgentError> {
     greet(runtime, &handshake_arguments(agent)).await
 }
 
@@ -222,7 +234,7 @@ pub async fn handshake(
 /// greets and one that never starts, and taking the arguments here is what
 /// lets a test ask for the second without the agent set having to contain a
 /// deliberately broken member.
-async fn greet(runtime: &ContainerRuntime, arguments: &[&str]) -> Result<Greeting, HandshakeError> {
+async fn greet(runtime: &ContainerRuntime, arguments: &[&str]) -> Result<Greeting, AgentError> {
     let mut container = tokio::process::Command::new(runtime.path())
         .args(arguments)
         .stdin(Stdio::piped())
@@ -232,7 +244,7 @@ async fn greet(runtime: &ContainerRuntime, arguments: &[&str]) -> Result<Greetin
         // parent that has stopped reading it.
         .kill_on_drop(true)
         .spawn()
-        .map_err(|source| HandshakeError::Runtime {
+        .map_err(|source| AgentError::Runtime {
             path: runtime.path().to_owned(),
             source,
         })?;
@@ -242,7 +254,7 @@ async fn greet(runtime: &ContainerRuntime, arguments: &[&str]) -> Result<Greetin
         container.stdout.take(),
         container.stderr.take(),
     ) else {
-        return Err(HandshakeError::NoChannel);
+        return Err(AgentError::NoChannel);
     };
 
     // Jointly, and that is load-bearing rather than tidy. Standard error is a
@@ -269,17 +281,17 @@ async fn greet(runtime: &ContainerRuntime, arguments: &[&str]) -> Result<Greetin
 
     // Reached in both outcomes: the reaping that makes "nothing survives the
     // call" true rather than merely intended.
-    let status = container.wait().await.map_err(HandshakeError::Exit)?;
+    let status = container.wait().await.map_err(AgentError::Exit)?;
 
     match spoken {
         Ok(greeting) => Ok(greeting),
         // A container that failed on its own terms explains itself better than
         // the protocol error its silence produced, so it wins when both exist.
-        Err(_) if !status.success() => Err(HandshakeError::Container {
+        Err(_) if !status.success() => Err(AgentError::Container {
             status: status.to_string(),
             message: printed,
         }),
-        Err(protocol) => Err(HandshakeError::Protocol(protocol)),
+        Err(protocol) => Err(AgentError::Protocol(protocol)),
     }
 }
 
@@ -319,6 +331,257 @@ async fn printed(mut stderr: tokio::process::ChildStderr) -> String {
         String::new()
     } else {
         format!(" — {trimmed}")
+    }
+}
+
+/// Where a job's agent works inside its container.
+///
+/// A directory rather than a mount: nothing delivers a repository, and an
+/// agent that needs one clones it here — see
+/// `docs/decisions/0016-the-agent-clones-the-repository.md`. The image already
+/// makes this its working directory.
+const WORKSPACE: &str = "/workspace";
+
+/// The variables one agent's container is started with, and their values.
+///
+/// This is *delivery*, and the counterpart to the deciding that
+/// [`stageman_core::Handout`] does. Which credentials a process may see is a
+/// pure question about configuration and lives in the domain crate; what they
+/// are called here is knowledge about one agent and lives in its adapter. See
+/// `docs/conventions.md` §3.
+fn variables(handout: &Handout) -> Vec<(&'static str, Secret)> {
+    let mut set = vec![match handout.agent() {
+        Agent::Claude => (
+            claude_credential_variable(handout.agent_credential()),
+            handout.agent_credential().clone(),
+        ),
+    }];
+
+    for (platform, credential) in handout.platforms() {
+        set.push((
+            match platform {
+                // What the platform's own command-line tool reads, which is how
+                // a job reaches it at all — see
+                // `docs/decisions/0009-jobs-hold-their-own-platform-credentials.md`.
+                Platform::GitHub => "GH_TOKEN",
+            },
+            credential.clone(),
+        ));
+    }
+    set
+}
+
+/// Which variable this agent's credential belongs in.
+///
+/// Two exist and they are not interchangeable, which was measured rather than
+/// assumed: an OAuth token placed in the API-key variable does not fail, it
+/// *hangs* — no error, no refusal, just a turn that never ends. A wrong answer
+/// that announces itself is cheap; this one costs however long you wait before
+/// suspecting the variable name.
+///
+/// Sniffing the prefix rather than asking an operator which kind they have:
+/// the prefix is unambiguous, and
+/// `docs/decisions/0013-an-instance-is-configured-before-it-exists.md` already
+/// asks them for a credential on first run, where a second question about its
+/// species is friction with no better answer behind it.
+fn claude_credential_variable(credential: &Secret) -> &'static str {
+    if credential.expose().starts_with("sk-ant-oat") {
+        "CLAUDE_CODE_OAUTH_TOKEN"
+    } else {
+        "ANTHROPIC_API_KEY"
+    }
+}
+
+/// The arguments that start a container able to reach a model.
+///
+/// Pure, so what a container is started with can be asserted without starting
+/// one — and this is the argument list that carries credentials, so being able
+/// to assert it cheaply is the point rather than a convenience.
+///
+/// Each variable is named but not valued here. `--env NAME` tells the runtime
+/// to forward that variable from this process, so the secret travels through an
+/// environment rather than through a command line, and never appears in the
+/// process table where any user on the machine can read it.
+///
+/// It takes the list rather than deciding it, so the names forwarded and the
+/// values set are the same list by construction. Deciding it twice would let
+/// the two drift apart, and a runtime told to forward a variable that is not
+/// set says nothing at all — leaving a job that cannot authenticate and no line
+/// anywhere explaining why.
+fn session_arguments(agent: Agent, delivering: &[(&'static str, Secret)]) -> Vec<String> {
+    let mut arguments = vec![
+        "run".to_owned(),
+        "--rm".to_owned(),
+        "--interactive".to_owned(),
+    ];
+    for (name, _) in delivering {
+        arguments.push("--env".to_owned());
+        arguments.push((*name).to_owned());
+    }
+    // Deliberately no `--network none` here, unlike the handshake: reaching a
+    // model needs the network, and so does cloning. Which hosts it *ought* to
+    // reach is the egress allowlist still open in `docs/open-questions.md`.
+    arguments.push(image(agent).to_owned());
+    arguments
+}
+
+/// What an agent said in reply to one question.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Answer {
+    /// Everything the agent said, in order.
+    ///
+    /// Its message text only. Its private reasoning and its tool calls arrive
+    /// on the same stream and are deliberately dropped: this is the answer, not
+    /// a transcript, and a caller that wants the working needs a different
+    /// shape rather than a fuller string.
+    pub text: String,
+    /// Why the turn ended.
+    ///
+    /// Carried rather than collapsed into success, because an answer truncated
+    /// by a token limit and one the agent finished are both text and only this
+    /// tells them apart.
+    pub stop_reason: StopReason,
+}
+
+/// Puts one question to an agent and returns what it says.
+///
+/// The one-shot shape of the contract in `docs/architecture.md` §1 — how the
+/// orchestrator thinks, rather than how a job works. The container is started,
+/// asked and destroyed.
+///
+/// **It starts a container per question, and
+/// `docs/decisions/0012-agents-run-in-containers.md` says the orchestrator's
+/// agent should run in one long-lived one.** That is not an oversight and not
+/// yet a violation, since nothing calls this yet; reusing a container means a
+/// connection outliving a single call, which is machinery this does not build.
+/// Tracked in `docs/open-questions.md`.
+///
+/// # Errors
+///
+/// Fails if the runtime cannot be started, if the container exits without
+/// speaking — a missing image, most often — or if the exchange does not
+/// complete. An agent that authenticates badly fails here as a protocol error
+/// or as a turn that never ends, which is why choosing the right variable to
+/// deliver its credential in is this adapter's problem and not an operator's.
+pub async fn ask(
+    runtime: &ContainerRuntime,
+    handout: &Handout,
+    question: &str,
+) -> Result<Answer, AgentError> {
+    let delivering = variables(handout);
+    let mut container = tokio::process::Command::new(runtime.path())
+        .args(session_arguments(handout.agent(), &delivering))
+        // Set here rather than inherited. Nothing else is forwarded, because
+        // the runtime forwards only what `--env` names — which is what makes
+        // `docs/conventions.md` §3's "constructed, never inherited" true by
+        // mechanism instead of by care.
+        .envs(
+            delivering
+                .iter()
+                .map(|(name, secret)| (*name, secret.expose())),
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|source| AgentError::Runtime {
+            path: runtime.path().to_owned(),
+            source,
+        })?;
+
+    let (Some(to_agent), Some(from_agent), Some(complaints)) = (
+        container.stdin.take(),
+        container.stdout.take(),
+        container.stderr.take(),
+    ) else {
+        return Err(AgentError::NoChannel);
+    };
+
+    let heard = Arc::new(Mutex::new(String::new()));
+    let collecting = Arc::clone(&heard);
+
+    let (spoken, printed_out) = futures::future::join(
+        Client
+            .builder()
+            .on_receive_notification(
+                async move |notification: SessionNotification, _cx| {
+                    if let SessionUpdate::AgentMessageChunk(chunk) = notification.update
+                        && let ContentBlock::Text(said) = chunk.content
+                    {
+                        collecting.lock().push_str(&said.text);
+                    }
+                    Ok(())
+                },
+                agent_client_protocol::on_receive_notification!(),
+            )
+            .on_receive_request(
+                async move |request: RequestPermissionRequest, responder, _cx| {
+                    // Approved, and not because permission is meaningless. The
+                    // boundary this system relies on is the container, chosen
+                    // in `docs/decisions/0012-agents-run-in-containers.md`
+                    // precisely so that it enforces isolation rather than the
+                    // agent respecting it — and
+                    // `docs/decisions/0010-acp-is-the-agent-contract.md`
+                    // measured that agents decide and report rather than
+                    // genuinely asking. Refusing here would forbid an agent
+                    // from doing what it was started to do, inside a boundary
+                    // built to make that safe.
+                    let allow = request
+                        .options
+                        .iter()
+                        .find(|option| {
+                            format!("{:?}", option.kind)
+                                .to_lowercase()
+                                .contains("allow")
+                        })
+                        .or_else(|| request.options.first())
+                        .map(|option| option.option_id.clone());
+                    responder.respond(RequestPermissionResponse::new(
+                        allow.map_or(RequestPermissionOutcome::Cancelled, |id| {
+                            RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(id))
+                        }),
+                    ))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_with(
+                ByteStreams::new(to_agent.compat_write(), from_agent.compat()),
+                async |connection: ConnectionTo<AgentRole>| {
+                    connection
+                        .send_request(InitializeRequest::new(ProtocolVersion::V1))
+                        .block_task()
+                        .await?;
+                    let session = connection
+                        .send_request(NewSessionRequest::new(PathBuf::from(WORKSPACE)))
+                        .block_task()
+                        .await?;
+                    let reply = connection
+                        .send_request(PromptRequest::new(
+                            session.session_id,
+                            vec![ContentBlock::Text(TextContent::new(question.to_owned()))],
+                        ))
+                        .block_task()
+                        .await?;
+                    Ok(reply.stop_reason)
+                },
+            ),
+        printed(complaints),
+    )
+    .await;
+
+    let status = container.wait().await.map_err(AgentError::Exit)?;
+
+    match spoken {
+        Ok(stop_reason) => Ok(Answer {
+            text: heard.lock().clone(),
+            stop_reason,
+        }),
+        Err(_) if !status.success() => Err(AgentError::Container {
+            status: status.to_string(),
+            message: printed_out,
+        }),
+        Err(protocol) => Err(AgentError::Protocol(protocol)),
     }
 }
 
@@ -374,7 +637,7 @@ mod tests {
     async fn a_runtime_that_is_not_there_fails_as_a_runtime_rather_than_a_protocol() {
         let runtime = ContainerRuntime::new(PathBuf::from("/nonexistent/container/runtime"));
         let failure = handshake(&runtime, Agent::Claude).await;
-        assert!(matches!(failure, Err(HandshakeError::Runtime { .. })));
+        assert!(matches!(failure, Err(AgentError::Runtime { .. })));
     }
 
     /// The container runtime, found rather than configured.
@@ -443,7 +706,7 @@ mod tests {
         )
         .await;
 
-        let Err(HandshakeError::Container { status, message }) = failure else {
+        let Err(AgentError::Container { status, message }) = failure else {
             panic!("expected a container failure, got {failure:?}");
         };
         assert!(status.contains('3'), "exit status was {status}");
@@ -479,8 +742,158 @@ mod tests {
         .await;
 
         assert!(
-            matches!(failure, Err(HandshakeError::Container { .. })),
+            matches!(failure, Err(AgentError::Container { .. })),
             "expected a container failure, got {failure:?}"
         );
+    }
+
+    use stageman_core::{AgentConfig, Handout, Job, Project, ProjectId, State, Uuid};
+    use std::collections::BTreeMap;
+
+    /// An instance configured with one agent and nothing else.
+    fn instance(credential: &str) -> State {
+        State::new(
+            Agent::Claude,
+            AgentConfig {
+                auth_token: Secret::new(credential.to_owned()),
+            },
+        )
+    }
+
+    /// An instance with one project, so a handout can carry a platform
+    /// credential as well as an agent's own.
+    fn instance_with_a_project(credential: &str) -> (State, ProjectId) {
+        let mut state = instance(credential);
+        let id = ProjectId::from_uuid(Uuid::from_u128(7));
+        let mut credentials = BTreeMap::new();
+        credentials.insert(
+            Platform::GitHub,
+            Secret::new("gh-not-a-real-token".to_owned()),
+        );
+        state.projects.insert(
+            id,
+            Project {
+                name: "example".to_owned(),
+                repository: "https://example.invalid/repo".to_owned(),
+                credentials,
+                jobs: BTreeMap::<_, Job>::new(),
+            },
+        );
+        (state, id)
+    }
+
+    #[test]
+    fn an_oauth_token_and_an_api_key_go_to_different_variables() {
+        assert_eq!(
+            claude_credential_variable(&Secret::new("sk-ant-oat01-xyz".to_owned())),
+            "CLAUDE_CODE_OAUTH_TOKEN"
+        );
+        assert_eq!(
+            claude_credential_variable(&Secret::new("sk-ant-api03-xyz".to_owned())),
+            "ANTHROPIC_API_KEY"
+        );
+    }
+
+    #[test]
+    fn triage_is_delivered_its_credential_and_nothing_else() {
+        let state = instance("sk-ant-oat01-xyz");
+        let handout = Handout::for_triage(&state).expect("a configured instance");
+
+        let delivered = variables(&handout);
+
+        assert_eq!(delivered.len(), 1, "{delivered:?}");
+        assert_eq!(delivered[0].0, "CLAUDE_CODE_OAUTH_TOKEN");
+        assert_eq!(delivered[0].1.expose(), "sk-ant-oat01-xyz");
+    }
+
+    #[test]
+    fn a_job_is_delivered_the_variable_its_platform_tool_reads() {
+        let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
+        let handout = Handout::for_job(&state, Agent::Claude, project).expect("a watched project");
+
+        let delivered = variables(&handout);
+        let named: Vec<&str> = delivered.iter().map(|(name, _)| *name).collect();
+
+        assert!(named.contains(&"CLAUDE_CODE_OAUTH_TOKEN"), "{named:?}");
+        assert!(named.contains(&"GH_TOKEN"), "{named:?}");
+    }
+
+    /// The one that matters most in this module. A secret on a command line is
+    /// readable by every user on the machine through the process table, so the
+    /// arguments must *name* each variable and never carry its value.
+    #[test]
+    fn no_credential_ever_appears_in_a_containers_arguments() {
+        let (state, project) = instance_with_a_project("sk-ant-oat01-secret-value");
+        let handout = Handout::for_job(&state, Agent::Claude, project).expect("a watched project");
+
+        let arguments = session_arguments(handout.agent(), &variables(&handout));
+        let line = arguments.join(" ");
+
+        assert!(!line.contains("sk-ant-oat01-secret-value"), "{line}");
+        assert!(!line.contains("gh-not-a-real-token"), "{line}");
+        assert!(line.contains("--env CLAUDE_CODE_OAUTH_TOKEN"), "{line}");
+        assert!(line.contains("--env GH_TOKEN"), "{line}");
+    }
+
+    #[test]
+    fn a_session_container_is_not_cut_off_from_the_network() {
+        let state = instance("sk-ant-oat01-xyz");
+        let handout = Handout::for_triage(&state).expect("a configured instance");
+
+        let arguments = session_arguments(handout.agent(), &variables(&handout));
+
+        assert!(!arguments.iter().any(|a| a == "none"), "{arguments:?}");
+        assert_eq!(
+            arguments.last().map(String::as_str),
+            Some(image(Agent::Claude))
+        );
+    }
+
+    /// Tests that spend real money, kept in their own module so a filter can
+    /// name them as a group rather than one at a time. Run with
+    /// `just image-session`; `just image-handshake` deliberately excludes them,
+    /// because everything it runs needs only a runtime and an image.
+    mod costs_a_credential {
+        use super::*;
+
+        /// The credential, from the gitignored file this project keeps it in.
+        ///
+        /// Panics rather than skipping when it is absent. A test that quietly
+        /// passes because it could not run is the failure mode the ignored
+        /// tests above are arranged to avoid, and it would be perverse to
+        /// reintroduce it here.
+        fn credential() -> Secret {
+            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../.local/anthropic-token");
+            let raw = std::fs::read_to_string(path)
+                .expect("write an agent credential to .local/anthropic-token (it is gitignored)");
+            Secret::new(raw.trim().to_owned())
+        }
+
+        #[tokio::test]
+        #[ignore = "needs a container runtime, a built image and a credential; run `just image-session`"]
+        async fn an_agent_answers_a_question() {
+            let state = State::new(
+                Agent::Claude,
+                AgentConfig {
+                    auth_token: credential(),
+                },
+            );
+            let handout = Handout::for_triage(&state).expect("a configured instance");
+
+            let answer = ask(
+                &located_runtime(),
+                &handout,
+                "Reply with exactly one word, lowercase, no punctuation: pong",
+            )
+            .await
+            .expect("the agent answers");
+
+            assert_eq!(answer.stop_reason, StopReason::EndTurn);
+            assert!(
+                answer.text.to_lowercase().contains("pong"),
+                "said {:?}",
+                answer.text
+            );
+        }
     }
 }
