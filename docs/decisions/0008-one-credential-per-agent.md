@@ -89,6 +89,31 @@ somebody else's work on the operator's account. It buys no access to the
 repositories or channels, because those credentials are held elsewhere and by
 different rules.
 
+**Proven, and one thing accepted rather than settled.** A real subscription
+token authenticates a containerised agent end to end: handed in as an
+environment variable at container start, through the protocol adapter and the
+vendor's own agent library, on a host with no agent installed and nobody logged
+in. Worth recording that the adapter advertises *no* authentication methods at
+all — which is the under-declaration
+`docs/decisions/0010-acp-is-the-agent-contract.md` warned about rather than a
+statement that none exist. A deliberately wrong token fails in seconds with a
+precise authentication error, so the variable is plainly read.
+
+What was **not** settled is whether a vendor's terms permit a third party to
+drive an agent on a personal subscription. That question was retired
+deliberately rather than answered: the boundary is being actively rewritten, no
+amount of testing decides it, and this record already absorbs either answer,
+because the credential is configuration. If the subscription path stops being
+available the fallback is a different value in the same field. Recorded as
+accepted rather than resolved, so that whoever meets it next finds the
+reasoning instead of a gap.
+
+That fallback is currently an inference rather than a measurement. The
+subscription variable was tested; the per-token key variable was not, on the
+grounds that the vendor's own library honours it and the other agent's adapter
+advertises it explicitly. Converting the inference into a measurement costs one
+run with a key.
+
 Revisit if an agent worth supporting offers no headless credential at all. That
 would force a choice between excluding it and reintroducing ambient auth for
 that one adapter, and the second option should not be taken quietly.

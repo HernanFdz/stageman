@@ -46,19 +46,6 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   that permits opening a pull request but not merging one is the same question
   wearing a different hat, and answering it once answers both.
 
-- **Is a third-party orchestrator permitted to run an agent on a personal
-  subscription?** Vendors bill agent tools two ways — a subscription meant for
-  a person working interactively, and per-token keys meant for automation — and
-  the boundary between those is being actively rewritten. At least one vendor
-  announced a change to how non-interactive usage is metered and then paused
-  it, and secondary sources disagree with that vendor's own documentation about
-  what third-party tools may do. None of this can be settled by reasoning about
-  it. What makes it survivable rather than fatal is that
-  `docs/decisions/0008-one-credential-per-agent.md` treats the credential as
-  configuration, so an answer either way is a setting rather than a redesign.
-  Settled by reading the terms that actually apply to each configured agent,
-  and re-reading them whenever a vendor moves them.
-
 - **Which logging does this use, and where does its output go?** The store has
   the first thing that needs one: a snapshot write that fails inside a `Drop`
   can only be reported, never returned, and it currently goes to standard error

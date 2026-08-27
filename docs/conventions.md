@@ -148,16 +148,18 @@ justify is usually obsolete.
   test it by hand and fails when a service manager starts it, which is the
   worst of the available outcomes. Record the path, and verify it with the
   startup check above.
-- **A missing agent, or a credential that does not work, fails at startup,
-  loudly.** Nothing works without one — not even watching a channel — so the
-  worst possible moment to find out is three in the morning, on the first
-  signal that mattered. Note precisely what is being checked: not whether the
-  agent is installed or logged in on this machine, since it is neither and
-  never needs to be, but whether the runtime and image are there and the
-  credential this project holds actually works. Agent tools
-  generally ship a health check of their own; call theirs, with the environment
-  this project would construct, rather than inferring health from the first
-  failure of real work.
+- **Fail at startup for whatever makes the instance unusable; surface the rest
+  in the dashboard.** A missing container runtime and a snapshot that cannot be
+  written are the first kind — nothing works without them, and the worst moment
+  to discover it is three in the morning on the first signal that mattered.
+  Writing the snapshot once at startup is exactly this rule, already built.
+
+  A credential that has stopped working is the *second* kind, and refusing to
+  start over one would be a trap: the dashboard is where credentials get fixed,
+  so an instance that will not start puts the repair behind the door it just
+  locked. Those fail the job that needs them, visibly, and leave the instance
+  running so an operator can do something about it. The distinction is whether
+  the operator could act on it — not how serious it looks.
 - **The app crate is an Axum server, and the orchestrator shares its runtime.**
   Dioxus fullstack server functions are Axum handlers, and the orchestrator runs
   in that same process rather than beside it. So orchestrator work must never
