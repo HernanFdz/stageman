@@ -46,8 +46,15 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   cheaper, since a single tool's own interface already offers duplex streaming
   and schema-constrained output.
   `docs/decisions/0006-agents-are-pluggable.md` changes that arithmetic:
-  bespoke work per agent, against one protocol that several of them already
-  speak. What still has to be checked — and is the narrow thing the spike
+  bespoke work per agent, against one protocol. Note what that protocol
+  actually costs, because it is easy to overstate — agents do not all speak it
+  natively, and at least one is reached through a separate adapter binary
+  maintained by a third party and distributed through a package manager this
+  project otherwise has no use for. Depending on such an adapter has been
+  accepted, which makes the question less about reach and more about shape:
+  whether the protocol is the right form for the contract, with each agent
+  reaching it natively, through somebody else's adapter, or through one of
+  ours. What still has to be checked — and is the narrow thing the spike
   exists for — is whether a permission request surfaces as an event the parent
   can *answer*. Routing it to a human on a channel is the entire requirement,
   and a mode that simply stops asking is not a substitute for one that asks

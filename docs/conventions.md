@@ -110,15 +110,25 @@ justify is usually obsolete.
 - **No secret is ever written to a log line.** Encryption protects the file, not
   the terminal, and a token escapes through a formatted struct long before it
   escapes through the database. The mechanical half of this rule is §4 below.
-- **A child process's environment is constructed, never inherited.** An agent
-  process gets exactly the variables it ought to have: its own agent's
-  credential, and nothing belonging to any other. This is not tidiness. At
-  least one agent resolves credentials by precedence and prefers a per-token
-  key when it finds one, so a variable inherited from whatever shell started
-  stageman silently changes who pays — no error, no log line, and no way to
-  notice before the invoice. The construction is a pure function in the core
-  crate precisely so it can be tested without spawning anything; the reasoning
-  is in `docs/decisions/0008-one-credential-per-agent.md`.
+- **What a child process is handed is constructed, never inherited.** An agent
+  process receives exactly the credential material it ought to have — its own
+  agent's, and nothing belonging to any other. Delivery differs per agent: a
+  variable for one, a file at an expected path for another. What never differs
+  is that this project decides, and that nothing arrives by accident. This is
+  not tidiness. At least one agent resolves credentials by precedence and
+  prefers a per-token key when it finds one, so a variable inherited from
+  whatever shell started the daemon silently changes who pays — no error, no
+  log line, and no way to notice before the invoice arrives. Deciding what goes
+  where is a pure function in the core crate so it can be tested without
+  spawning anything; delivering it belongs to the adapter. Reasoning in
+  `docs/decisions/0008-one-credential-per-agent.md`.
+- **An agent's location is configuration, never a PATH lookup.** Agents install
+  to places a login shell knows about and a service manager does not — of the
+  two installed while this was being designed, one sits in a directory absent
+  from a non-interactive shell's PATH. A daemon that finds its agents by
+  searching PATH therefore works perfectly when you test it by hand and fails
+  when anything else starts it, which is the worst of the available outcomes.
+  Record the path, and verify it with the startup check above.
 - **A missing agent, or a credential that does not work, fails at startup,
   loudly.** Nothing works without one — not even watching a channel — so the
   worst possible moment to find out is three in the morning, on the first

@@ -28,9 +28,17 @@ with each other.
 ## Decision
 
 Each configured agent carries exactly one credential, and every process that
-runs that agent is given an environment **constructed** for it: exactly the
-credential variables of its own agent, and none belonging to any other. Nothing
-is inherited from the environment stageman itself was started in.
+runs that agent is handed **constructed** credential material: exactly what
+that agent needs in order to authenticate as itself, and nothing belonging to
+any other. Nothing is inherited from the environment stageman itself was
+started in.
+
+"Material" rather than "variables" is deliberate, and was learned rather than
+foreseen. One agent takes a token from an environment variable; another keeps
+its subscription credential in a file and expects to find it at a path. How it
+is delivered differs per agent and is an adapter's business. What does not
+differ is that this project decides what a process gets, and that nothing
+arrives by accident.
 
 Because exactly one credential is ever present, precedence between credential
 kinds is never consulted and cannot silently change underneath us.

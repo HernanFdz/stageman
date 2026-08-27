@@ -36,11 +36,14 @@ first.
 - **core** — the domain. What a project is, what a job is, the states a job
   moves through, and the vocabulary in `docs/conventions.md` §2 expressed as
   types. No I/O, no async runtime, no platform, no framework. It also owns one
-  piece of logic that looks like plumbing and is not: building the environment
-  a child agent process is handed. That is a pure function from configuration
-  to a set of variables, it is the only thing standing between an operator and
-  silently paying the wrong way, and being pure is exactly what lets it be
-  tested without spawning anything.
+  piece of logic that looks like plumbing and is not: deciding what a child
+  agent process is handed. That is a pure function from configuration to a
+  description of exactly what that process should see and nothing more.
+  *Delivering* it is an adapter's job and differs per agent — a variable for
+  one, a file at an expected path for another — but the deciding stays here and
+  stays pure, because it is the only thing standing between an operator and
+  silently paying the wrong way, and that is worth being able to test without
+  spawning anything.
 - **agent** — the contract every coding agent is driven through, and the
   adapters that implement it. Two shapes and one contract: a one-shot
   structured query, and a session bound to a workspace. Nothing outside an
