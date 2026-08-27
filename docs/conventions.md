@@ -71,7 +71,8 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   long-lived process pulling from a pool and gets the relationship backwards —
   the job is the work, not the thing that fetches it. Not a *task* or a *run*
   either, since both imply a durable intent that separate attempts belong to,
-  and no such thing exists here.
+  and no such thing exists here. A job records which agent ran it, because once
+  more than one can, "why did this go badly?" has no answer without it.
 - **reason** — the free text the orchestrator writes when it creates a job,
   saying why it decided to. Prose meant for a human reading the dashboard, not
   a key pointing at a signal. It is the whole of a job's provenance, which is
@@ -79,11 +80,13 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   absent.
 - **kickoff prompt** — the instruction text the orchestrator composes and the
   job's agent begins from. A job never writes its own.
-- **agent** — reserved, always, for the third-party coding agent running inside
-  a job. Never for stageman, never for the orchestrator, never for a job. This
-  one matters more than it looks: "the agent decided to…" is ambiguous in
-  exactly the place where being wrong is expensive, and the sentence still
-  reads fine.
+- **agent** — reserved, always, for a third-party coding agent: the tool that
+  gets configured, chosen and run. Never for stageman, never for the
+  orchestrator, never for a job. This one matters more than it looks: "the
+  agent decided to…" is ambiguous in exactly the place where being wrong is
+  expensive, and the sentence still reads fine either way. Note that an agent
+  is not only something inside a job — the orchestrator runs one too, to think
+  with.
 
 ## 3. House rules
 
@@ -107,6 +110,24 @@ justify is usually obsolete.
 - **No secret is ever written to a log line.** Encryption protects the file, not
   the terminal, and a token escapes through a formatted struct long before it
   escapes through the database. The mechanical half of this rule is §4 below.
+- **A child process's environment is constructed, never inherited.** An agent
+  process gets exactly the variables it ought to have: its own agent's
+  credential, and nothing belonging to any other. This is not tidiness. At
+  least one agent resolves credentials by precedence and prefers a per-token
+  key when it finds one, so a variable inherited from whatever shell started
+  stageman silently changes who pays — no error, no log line, and no way to
+  notice before the invoice. The construction is a pure function in the core
+  crate precisely so it can be tested without spawning anything; the reasoning
+  is in `docs/decisions/0008-one-credential-per-agent.md`.
+- **A missing agent, or a credential that does not work, fails at startup,
+  loudly.** Nothing works without one — not even watching a channel — so the
+  worst possible moment to find out is three in the morning, on the first
+  signal that mattered. Note precisely what is being checked: not whether the
+  agent is logged in on this machine, which it never needs to be, but whether
+  the credential this project holds for it actually works. Agent tools
+  generally ship a health check of their own; call theirs, with the environment
+  this project would construct, rather than inferring health from the first
+  failure of real work.
 - **The app crate is an Axum server, and the orchestrator shares its runtime.**
   Dioxus fullstack server functions are Axum handlers, and the orchestrator runs
   in that same process rather than beside it. So orchestrator work must never

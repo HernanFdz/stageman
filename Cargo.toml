@@ -4,7 +4,7 @@
 # cannot name a crate it does not depend on.
 
 [workspace]
-members = ["core", "orchestrator", "job", "app", "xtask"]
+members = ["core", "agent", "orchestrator", "job", "app", "xtask"]
 # Must be explicit in a virtual manifest — there is no root package whose
 # edition could imply it, and the default without this line is resolver 1.
 resolver = "3"
@@ -22,6 +22,7 @@ repository = "https://github.com/HernanFdz/stageman"
 # thing stopping them is that no such dependency is ever declared.
 [workspace.dependencies]
 stageman-core = { path = "core", version = "0.1.0" }
+stageman-agent = { path = "agent", version = "0.1.0" }
 stageman-orchestrator = { path = "orchestrator", version = "0.1.0" }
 stageman-job = { path = "job", version = "0.1.0" }
 

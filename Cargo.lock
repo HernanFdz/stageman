@@ -6,9 +6,17 @@ version = 4
 name = "stageman"
 version = "0.1.0"
 dependencies = [
+ "stageman-agent",
  "stageman-core",
  "stageman-job",
  "stageman-orchestrator",
+]
+
+[[package]]
+name = "stageman-agent"
+version = "0.1.0"
+dependencies = [
+ "stageman-core",
 ]
 
 [[package]]
@@ -19,6 +27,7 @@ version = "0.1.0"
 name = "stageman-job"
 version = "0.1.0"
 dependencies = [
+ "stageman-agent",
  "stageman-core",
 ]
 
@@ -26,6 +35,7 @@ dependencies = [
 name = "stageman-orchestrator"
 version = "0.1.0"
 dependencies = [
+ "stageman-agent",
  "stageman-core",
 ]
 

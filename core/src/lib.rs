@@ -9,3 +9,10 @@
 //!
 //! The vocabulary this crate exists to express is fixed in
 //! `docs/conventions.md` §2, including the words it deliberately avoids.
+//!
+//! One thing here looks like plumbing and is not: building the environment an
+//! agent process is handed. It lives in a crate with no I/O because it is a
+//! pure function from configuration to a set of variables, and because it is
+//! the only thing standing between an operator and silently paying the wrong
+//! way — which makes being able to test it without spawning a process the
+//! whole point rather than a convenience.

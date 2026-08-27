@@ -27,8 +27,25 @@ proposal you decline.
 ## Running it
 
 Running stageman means running one server executable on a machine you control.
-It serves a dashboard and does the watching in the same process — there is no
-second daemon to supervise and nothing to install alongside it.
+It serves a dashboard and does the watching in the same process, so there is no
+second daemon to supervise.
+
+What it does need is at least one coding agent installed on the machine.
+stageman runs agents rather than replacing them, and it will not start without
+one.
+
+It does not need that agent to be logged in. Credentials are entered once in
+the dashboard, held encrypted, and handed to each agent process as it is
+spawned — nothing has to be exported into the machine's environment, and the
+host never needs an interactive login of its own. Obtaining a credential is a
+one-time step you do wherever you happen to be, and only its result goes into
+stageman. That is what makes running this on a headless server no different
+from running it on your laptop.
+
+Which agents are available is yours to configure, the orchestrator picks one
+per job from what you have set up, and the dashboard shows which agent ran each
+job. Where an agent can be paid for by a subscription rather than by the token,
+that is the path stageman prefers.
 
 The dashboard is where you add projects and set the credentials each one needs,
 watch jobs and read their logs, and pause or kill one that has gone wrong. A

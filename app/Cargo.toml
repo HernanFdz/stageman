@@ -21,6 +21,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+stageman-agent.workspace = true
 stageman-core.workspace = true
 stageman-job.workspace = true
 stageman-orchestrator.workspace = true

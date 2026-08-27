@@ -35,13 +35,25 @@ first.
 
 - **core** — the domain. What a project is, what a job is, the states a job
   moves through, and the vocabulary in `docs/conventions.md` §2 expressed as
-  types. No I/O, no async runtime, no platform, no framework.
-- **orchestrator** — the deciding. Watches the channels, judges what is worth
-  acting on, and creates jobs. It holds every credential, and it is the only
-  place a kickoff prompt is composed.
-- **job** — the doing. Provisions one isolated workspace, runs one agent process
-  inside it, supervises that process to completion, and hosts the tools through
-  which that agent reaches the outside world.
+  types. No I/O, no async runtime, no platform, no framework. It also owns one
+  piece of logic that looks like plumbing and is not: building the environment
+  a child agent process is handed. That is a pure function from configuration
+  to a set of variables, it is the only thing standing between an operator and
+  silently paying the wrong way, and being pure is exactly what lets it be
+  tested without spawning anything.
+- **agent** — the contract every coding agent is driven through, and the
+  adapters that implement it. Two shapes and one contract: a one-shot
+  structured query, and a session bound to a workspace. Nothing outside an
+  adapter may be specific to one agent.
+- **orchestrator** — the deciding. Watches the channels and judges what each
+  signal deserves. A job is one possible reaction and not the only one — doing
+  nothing, and answering on the channel, are reactions too. That is worth
+  stating because "creates jobs" is the shape this crate drifts into the moment
+  nobody writes down that its remit is wider. It holds every platform
+  credential, and it is the only place a kickoff prompt is composed.
+- **job** — the doing. Provisions one isolated workspace, runs one agent inside
+  it, supervises it to completion, and hosts the tools through which that agent
+  reaches the outside world. Which agent ran it is recorded on the job.
 - **app** — the Dioxus fullstack binary. Serves the dashboard and runs the
   orchestrator in the same process; running this is what running stageman means.
   It operates the instance — projects, credentials, logs, stopping a job — and
@@ -49,11 +61,18 @@ first.
   no conversational state lives here; see
   `docs/decisions/0005-conversation-happens-on-channels.md`.
 
-Dependencies point inward. **orchestrator** and **job** may both name **core**,
-and **core** may name neither. **orchestrator** and **job** may never name each
-other — everything they share is a type in **core**, which is what keeps the
-deciding and the doing from growing into one another. **app** may name all
-three; nothing may name **app**.
+Dependencies point inward. **core** names nothing. **agent** may name **core**.
+**orchestrator** and **job** may name **core** and **agent** — both run agents,
+for different shapes of work — and may never name each other; everything they
+share is a type in **core**, which is what keeps the deciding and the doing from
+growing into one another. **app** may name all four; nothing may name **app**.
+
+So the orchestrator does not start a job, despite being the thing that decides
+one should exist. It emits a request as a **core** type, and **app** — the only
+crate allowed to name both sides — hands that request to **job**. This is worth
+a sentence of its own because "the orchestrator creates jobs" is the natural
+reading of the bullet above, and acting on that reading is the first thing that
+breaks the rule.
 
 The directories are named for the concepts above and the packages are not —
 they carry a prefix, and the app is published as the project's own name. That
@@ -73,12 +92,24 @@ change breaks one. These are the properties the type system, the tests, or a
 reviewer are defending — write down which, because "invariant" enforced by
 nobody is a wish.
 
-- **A job never holds a platform credential.** Credentials live in the
-  orchestrator. A job reaches GitHub, Slack or anything else only by calling a
-  tool the orchestrator hosts, so text that arrives in a repository cannot carry
-  a token back out. *Defended by* the crate boundary — **job** has no path to
-  the credential store — and by a reviewer, who has to reject any change that
-  hands one across.
+- **A job never holds a *platform* credential.** Platform means the outside
+  world a job could act on: the repository host, the chat workspace, the error
+  reporter. Those live in the orchestrator, and a job reaches them only by
+  calling a tool the orchestrator hosts, so text arriving in a repository
+  cannot carry a token back out. *Defended by* the crate boundary — **job** has
+  no path to that credential store — and by a reviewer, who has to reject any
+  change that hands one across.
+
+  The **agent** credential is deliberately outside this invariant. A job's
+  environment contains one by construction, because an agent that cannot
+  authenticate cannot think, and no arrangement exists in which it does not. It
+  is a different kind of secret: it buys work on the operator's account, and
+  buys nothing at all in their repositories or channels. Its rule is separate
+  and narrower — an agent process receives exactly its own agent's credential
+  variables and none belonging to any other — and lives in
+  `docs/decisions/0008-one-credential-per-agent.md`. Writing the carve-out down
+  is the point: an invariant with a silent exception is worse than one with a
+  stated boundary, because only the second can be checked.
 - **One job, one workspace, one project.** No two jobs ever share a working
   tree, and a job provisioned for one project cannot reach another project's
   repository, credentials or channels. *Defended by* construction, since a
@@ -131,3 +162,12 @@ that the dashboard and the deciding share a process and a fate, which is why
 
 State is one file for the same reason — see
 `docs/decisions/0004-one-encrypted-sqlite-file.md`.
+
+The fifth crate is the newest part of this shape and the least self-evident. It
+exists because being agent-agnostic is a commitment rather than a possibility,
+and because both halves genuinely run agents — see
+`docs/decisions/0006-agents-are-pluggable.md`, which also records why the same
+abstraction was refused earlier and what changed. That a model is reached by
+running an agent at all, rather than by calling a vendor's service, is
+`docs/decisions/0007-model-work-goes-through-an-agent-cli.md`, and it is a
+billing decision at least as much as a technical one.

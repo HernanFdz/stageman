@@ -1,7 +1,9 @@
 # 0001 — Drive an existing coding agent, and host its tools
 
 ## Status
-Accepted
+Accepted. The rejection of a pluggable worker contract below is superseded by
+`docs/decisions/0006-agents-are-pluggable.md` — that record fires the revisit
+condition this one names, rather than contradicting it.
 
 ## Context
 

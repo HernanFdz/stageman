@@ -7,6 +7,8 @@
 //! blocks on a terminal — when it needs a human it asks on a channel and stays
 //! alive, because nobody is watching that terminal.
 //!
-//! The agent is somebody else's product on somebody else's release cadence, so
-//! its quirks stop at this boundary: if a change to it would reach
-//! `stageman-core`, the abstraction is in the wrong place.
+//! How an agent is driven is not this crate's business — that contract lives
+//! in `stageman-agent`, and which agent ran a given job is recorded on the job
+//! itself. What belongs here is everything around the agent: the workspace it
+//! runs in, the supervision that ends it, and the tools it reaches the world
+//! through.

@@ -50,10 +50,14 @@ deliberate absence that is not written down is indistinguishable from a gap.
   boundary is absolute rather than conditional, no credential that can land code
   or reach production has to exist anywhere in the system, so the worst outcome
   of a bad autonomous decision is a bad proposal nobody accepts.
-- **Not a coding agent.** The agent that does the work is somebody else's
-  product, on somebody else's release cadence. Building one would mean owning
-  the largest and fastest-moving part of the problem in order to reach the part
-  that is actually missing, which is the deciding rather than the doing.
+- **Not a coding agent, and not tied to one.** The agent that does the work is
+  somebody else's product, on somebody else's release cadence. Building one
+  would mean owning the largest and fastest-moving part of the problem in order
+  to reach the part that is actually missing, which is the deciding rather than
+  the doing. Nor is this a front end for one particular agent: which agent runs
+  a given piece of work is chosen from whatever the operator has configured,
+  and an agent that cannot be swapped out is a defect rather than a
+  simplification. See `docs/decisions/0006-agents-are-pluggable.md`.
 - **Not multi-tenant, and not a hosted service.** One operator, one instance,
   their own machine and their own credentials. Several *projects* per instance
   is a requirement; several *customers* per instance is not, because isolating
@@ -68,6 +72,15 @@ deliberate absence that is not written down is indistinguishable from a gap.
   during the hours somebody is at the desk anyway — and the entire point is the
   hours when nobody is. See
   `docs/decisions/0005-conversation-happens-on-channels.md`.
+- **Not a filter.** Every signal gets a real judgement from a model, and that
+  judgement will often be to do nothing — noticing is not the same as acting.
+  What is deliberately absent is a cheap deterministic pre-pass deciding which
+  signals are worth thinking about, because that pass would quietly become the
+  product. Something attentive looking at everything is the entire value on
+  offer; a rule deciding what deserves attention replaces it with a rule, which
+  is what everyone already has. Written down as refused rather than overlooked,
+  because it is an obvious optimisation and will be proposed again — most
+  persuasively by whoever is looking at the bill.
 
 ## 3. The constraint that shapes everything
 

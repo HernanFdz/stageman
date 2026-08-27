@@ -1,5 +1,6 @@
-# The doing. May name the domain and nothing else in this workspace —
-# `stageman-orchestrator` is absent from the list below on purpose.
+# The doing. May name the domain and the agent contract — an agent is what a
+# job supervises. `stageman-orchestrator` is absent from the list below on
+# purpose.
 
 [package]
 name = "stageman-job"
@@ -12,6 +13,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+stageman-agent.workspace = true
 stageman-core.workspace = true
 
 [lints]

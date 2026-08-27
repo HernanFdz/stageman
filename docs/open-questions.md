@@ -30,19 +30,50 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   daemon and a slower start. Settled by writing the escape test from
   `docs/conventions.md` §4 first and seeing which mechanism passes it — the test
   is required either way, so it costs nothing to write it before choosing.
+  One argument that used to sit on this scale has been removed: a container
+  could not reach an ambient desktop login, but a headless agent credential
+  reaches a container as easily as anything else, so authentication no longer
+  favours either side — see
+  `docs/decisions/0008-one-credential-per-agent.md`. Decide it on isolation
+  alone.
 
-- **How does the orchestrator talk to the agent inside a job?** Two candidates.
-  The Agent Client Protocol is an open, editor-oriented standard: JSON-RPC over
-  a subprocess's standard input and output, with sessions, streamed turns, and —
-  the part that matters here — the agent raising permission requests back to
-  whoever launched it. It is a wire protocol rather than a library, so a Rust
-  process can speak it directly, and the agents worth driving already implement
-  it. The alternative is the chosen agent's own headless interface, which is
-  narrower but has no second specification between us and it. Settled by
-  checking one thing against both: whether a message can be pushed into a
-  *running* agent, and whether a blocking question can be answered from
-  somewhere other than a terminal. `docs/architecture.md` §2 makes that
-  non-negotiable, and an interface that cannot do it disqualifies itself.
+- **How is an agent driven — one shared protocol, or an adapter per tool?** The
+  Agent Client Protocol is an open standard for precisely this relationship:
+  JSON-RPC over a subprocess's standard input and output, with sessions,
+  streamed turns, and the agent raising permission requests back to whoever
+  launched it. The alternative is an adapter per tool over each agent's own
+  headless interface. While only one agent mattered the adapters looked
+  cheaper, since a single tool's own interface already offers duplex streaming
+  and schema-constrained output.
+  `docs/decisions/0006-agents-are-pluggable.md` changes that arithmetic:
+  bespoke work per agent, against one protocol that several of them already
+  speak. What still has to be checked — and is the narrow thing the spike
+  exists for — is whether a permission request surfaces as an event the parent
+  can *answer*. Routing it to a human on a channel is the entire requirement,
+  and a mode that simply stops asking is not a substitute for one that asks
+  somewhere else.
+
+- **Is a third-party orchestrator permitted to run an agent on a personal
+  subscription?** Vendors bill agent tools two ways — a subscription meant for
+  a person working interactively, and per-token keys meant for automation — and
+  the boundary between those is being actively rewritten. At least one vendor
+  announced a change to how non-interactive usage is metered and then paused
+  it, and secondary sources disagree with that vendor's own documentation about
+  what third-party tools may do. None of this can be settled by reasoning about
+  it. What makes it survivable rather than fatal is that
+  `docs/decisions/0008-one-credential-per-agent.md` treats the credential as
+  configuration, so an answer either way is a setting rather than a redesign.
+  Settled by reading the terms that actually apply to each configured agent,
+  and re-reading them whenever a vendor moves them.
+
+- **What should happen when an agent credential expires while nobody is
+  watching?** It will, and it lands on every job at once. The options run from
+  failing each job loudly and showing it on the dashboard, to pausing the
+  instance and saying so on the channel a human is actually reading. The second
+  is more work and is probably right, because a dashboard nobody is looking at
+  is exactly where this failure would otherwise sit until morning. Settled by
+  deciding what a job that cannot start should look like in general — the same
+  question wearing a different hat, and worth answering once.
 
 ## Next
 
@@ -50,12 +81,14 @@ Intended next steps, in order, each with its reason. Written as intentions, not
 progress: "next X, because Y" — never "X is 60% done", which is both derivable
 and wrong within a day.
 
-- Next, settle how the orchestrator talks to the agent inside a job: a
-  throwaway spike against both candidates, testing only the two things
-  `docs/architecture.md` §2 makes non-negotiable. It gates everything below it,
-  which is why it comes first — the schema cannot settle what a job stores
-  until a job's conversation has a shape, and Slack end to end *is* that
-  conversation.
+- Next, settle how an agent is driven: a throwaway spike against both
+  candidates, testing only the two things `docs/architecture.md` §2 makes
+  non-negotiable — and testing them against more than one agent, because a
+  contract validated against a single tool is precisely the costume
+  `docs/decisions/0006-agents-are-pluggable.md` warns about. It gates
+  everything below it, which is why it comes first: the schema cannot settle
+  what a job stores until a job's conversation has a shape, and Slack end to
+  end *is* that conversation.
 - Then the SQLite schema and the encrypted credential handling, because every
   other piece needs somewhere to put a project, and because the redaction bar in
   `docs/conventions.md` §4 is cheap to build in and awkward to add afterwards.

@@ -1,7 +1,9 @@
 # 0003 — Four crates around a core
 
 ## Status
-Accepted
+Accepted. The crate count is superseded by
+`docs/decisions/0006-agents-are-pluggable.md`; the dependency rule and the
+rejected alternatives below still stand.
 
 ## Context
 

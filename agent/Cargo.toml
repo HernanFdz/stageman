@@ -1,0 +1,18 @@
+# The contract every coding agent is driven through, and the adapters that
+# implement it. Depends on the domain and nothing else in this workspace.
+
+[package]
+name = "stageman-agent"
+description = "The coding-agent contract and its adapters for stageman. Internal to the workspace."
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+stageman-core.workspace = true
+
+[lints]
+workspace = true
