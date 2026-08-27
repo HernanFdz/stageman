@@ -21,7 +21,28 @@ Questions blocking or shaping work, each with enough context to answer without
 re-deriving it. If you cannot state what would settle it, it is not a question
 yet — it is unease, and belongs in your own notes until it sharpens.
 
-- _(none yet)_
+- **What is a workspace, mechanically — a container or a git worktree?**
+  `docs/architecture.md` §2 requires that a job cannot reach outside its own
+  workspace or into another project. A worktree is nearly free and starts
+  instantly, but it shares a kernel, a filesystem and a network with everything
+  else on the machine, so the invariant holds only as far as the agent process
+  chooses to respect it. A container actually enforces it and costs an image, a
+  daemon and a slower start. Settled by writing the escape test from
+  `docs/conventions.md` §4 first and seeing which mechanism passes it — the test
+  is required either way, so it costs nothing to write it before choosing.
+
+- **How does the orchestrator talk to the agent inside a job?** Two candidates.
+  The Agent Client Protocol is an open, editor-oriented standard: JSON-RPC over
+  a subprocess's standard input and output, with sessions, streamed turns, and —
+  the part that matters here — the agent raising permission requests back to
+  whoever launched it. It is a wire protocol rather than a library, so a Rust
+  process can speak it directly, and the agents worth driving already implement
+  it. The alternative is the chosen agent's own headless interface, which is
+  narrower but has no second specification between us and it. Settled by
+  checking one thing against both: whether a message can be pushed into a
+  *running* agent, and whether a blocking question can be answered from
+  somewhere other than a terminal. `docs/architecture.md` §2 makes that
+  non-negotiable, and an interface that cannot do it disqualifies itself.
 
 ## Next
 
@@ -29,4 +50,16 @@ Intended next steps, in order, each with its reason. Written as intentions, not
 progress: "next X, because Y" — never "X is 60% done", which is both derivable
 and wrong within a day.
 
-- _(none yet)_
+- Next the four crates as an empty skeleton, because the dependency rule in
+  `docs/architecture.md` §1 is worth nothing until the compiler is the one
+  holding it, and retrofitting a boundary is far more expensive than starting
+  with one.
+- Then the SQLite schema and the encrypted credential handling, because every
+  other piece needs somewhere to put a project, and because the redaction bar in
+  `docs/conventions.md` §4 is cheap to build in and awkward to add afterwards.
+- Then Slack end to end — a signal read, judged and turned into a job whose
+  prompt is snapshot-tested, and a blocking question asked and answered without
+  anyone touching a terminal. Slack first because it is the escalation path
+  rather than the richest source of work: until a job can ask something,
+  nothing can safely run unattended, so every other channel is blocked behind
+  this one. See `docs/decisions/0005-conversation-happens-on-channels.md`.

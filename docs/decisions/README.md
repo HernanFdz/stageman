@@ -5,7 +5,9 @@ in the order taken. They are append-only — a superseded record stays and says
 what replaced it, because the reasoning that was wrong is often more useful than
 the reasoning that was right.
 
-_(none yet — the first record is `0001-<slug>.md`, alongside this file)_
+Records sit alongside this file, numbered from `0001`. The directory listing is
+the index; there is deliberately no second copy of it here, because a list the
+filesystem already maintains is exactly the kind that stops being true quietly.
 
 A record without these three is an assertion, not a decision:
 
