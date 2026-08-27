@@ -28,8 +28,19 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::{Aes256Gcm, Key as CipherKey, Nonce as CipherNonce};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use jiff::Timestamp;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+/// Bytes of the nonce a single sealing operation consumes.
+pub const NONCE_LEN: usize = 12;
+
+/// A nonce: unique per sealing operation, never reused under one key.
+pub type Nonce = [u8; NONCE_LEN];
 
 /// A credential, in memory.
 ///
@@ -75,11 +86,11 @@ impl fmt::Display for Secret {
 }
 
 /// Identifies a project.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ProjectId(Uuid);
 
 /// Identifies a job.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct JobId(Uuid);
 
 macro_rules! identifier {
@@ -128,7 +139,7 @@ identifier!(JobId);
 /// A job stores this **by value**, never as a reference into configuration, so
 /// that removing an agent's configuration cannot rewrite the history of jobs
 /// that used it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Agent {
     /// Anthropic's coding agent.
     Claude,
@@ -175,7 +186,7 @@ pub struct AgentConfig {
 /// credential. See
 /// `docs/decisions/0009-jobs-hold-their-own-platform-credentials.md` for why a
 /// job holds these at all.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Platform {
     /// The repository host.
     GitHub,
@@ -186,7 +197,10 @@ pub enum Platform {
 /// A job happens once. There is no retry and no resume: a second attempt is a
 /// new job with its own workspace, which is why nothing here records an
 /// attempt count.
-#[derive(Debug, Clone)]
+///
+/// It holds no credential, which is why it crosses the snapshot boundary
+/// unchanged while the types around it need a sealed counterpart.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Job {
     /// Which agent ran it.
     ///
@@ -274,11 +288,288 @@ impl State {
             orchestrator_agent,
         }
     }
+
+    /// Converts to the form that goes on disk, sealing every credential.
+    ///
+    /// Takes a source of nonces rather than generating them, because
+    /// randomness is an effect and this crate takes none. A **fresh** nonce is
+    /// consumed per credential per write, always: with this cipher, reusing one
+    /// under the same key leaks the authentication key rather than merely one
+    /// plaintext, so there is no such thing as a cheap reuse.
+    ///
+    /// A consequence worth knowing: because sealing happens on the way out,
+    /// every write produces different ciphertext even when no credential
+    /// changed. The values are opaque anyway, so what
+    /// `docs/decisions/0011-state-is-a-snapshot-not-a-database.md` wanted from
+    /// a readable file survives — but two snapshots are never byte-identical.
+    ///
+    /// # Errors
+    ///
+    /// Fails only if the cipher rejects an input, which for a well-formed key
+    /// and nonce does not happen in practice.
+    pub fn seal(
+        &self,
+        key: &Key,
+        nonces: &mut impl FnMut() -> Nonce,
+    ) -> Result<Snapshot, SealError> {
+        let agents = self
+            .agents
+            .iter()
+            .map(|(agent, config)| {
+                Ok((
+                    *agent,
+                    SealedAgentConfig {
+                        auth_token: config.auth_token.seal(key, nonces())?,
+                    },
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, SealError>>()?;
+
+        let projects = self
+            .projects
+            .iter()
+            .map(|(id, project)| {
+                let credentials = project
+                    .credentials
+                    .iter()
+                    .map(|(platform, secret)| Ok((*platform, secret.seal(key, nonces())?)))
+                    .collect::<Result<BTreeMap<_, _>, SealError>>()?;
+                Ok((
+                    *id,
+                    SealedProject {
+                        name: project.name.clone(),
+                        repository: project.repository.clone(),
+                        credentials,
+                        jobs: project.jobs.clone(),
+                    },
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, SealError>>()?;
+
+        Ok(Snapshot {
+            agents,
+            projects,
+            orchestrator_agent: self.orchestrator_agent,
+        })
+    }
+}
+
+/// The key a snapshot's credentials are sealed under.
+///
+/// Supplied by the environment at startup, and never stored beside the file it
+/// protects — that is what makes the file portable and useless on its own.
+/// Redacts when formatted, for exactly the reason a credential does.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Key([u8; 32]);
+
+impl Key {
+    /// Wraps key material.
+    #[must_use]
+    pub const fn new(material: [u8; 32]) -> Self {
+        Self(material)
+    }
+
+    fn cipher(&self) -> Aes256Gcm {
+        Aes256Gcm::new(&CipherKey::<Aes256Gcm>::from(self.0))
+    }
+}
+
+impl fmt::Debug for Key {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Key(<redacted>)")
+    }
+}
+
+/// Sealing a credential failed.
+#[derive(Debug, thiserror::Error)]
+pub enum SealError {
+    /// The cipher rejected the input.
+    #[error("a credential could not be sealed")]
+    Cipher,
+}
+
+/// A snapshot could not be turned back into state.
+///
+/// Every variant is deliberately vague about *which* credential, and says
+/// nothing about its contents: an error message is a place secrets escape.
+#[derive(Debug, thiserror::Error)]
+pub enum OpenError {
+    /// A stored credential is not valid base64.
+    #[error("a stored credential is not valid base64")]
+    Encoding,
+    /// A stored nonce is the wrong length.
+    #[error("a stored nonce is the wrong length")]
+    NonceLength,
+    /// Decryption failed.
+    #[error("a credential could not be decrypted: wrong key, or the file was altered")]
+    Cipher,
+    /// A credential decrypted to something that is not text.
+    #[error("a credential decrypted to bytes that are not text")]
+    NotText,
+    /// The orchestrator's agent has no configuration.
+    #[error("the orchestrator's agent {0:?} has no configuration in this snapshot")]
+    UnconfiguredOrchestratorAgent(Agent),
+}
+
+/// A credential as it appears on disk.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SealedSecret {
+    /// The nonce this was sealed with, base64.
+    pub nonce: String,
+    /// The ciphertext and its authentication tag, base64.
+    pub ciphertext: String,
+}
+
+impl Secret {
+    /// Seals this credential for storage.
+    ///
+    /// # Errors
+    ///
+    /// Fails only if the cipher rejects the input.
+    pub fn seal(&self, key: &Key, nonce: Nonce) -> Result<SealedSecret, SealError> {
+        let ciphertext = key
+            .cipher()
+            .encrypt(&CipherNonce::from(nonce), self.0.as_bytes())
+            .map_err(|_| SealError::Cipher)?;
+        Ok(SealedSecret {
+            nonce: BASE64.encode(nonce),
+            ciphertext: BASE64.encode(ciphertext),
+        })
+    }
+}
+
+impl SealedSecret {
+    /// Recovers the credential.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the stored encoding is malformed, or if decryption fails —
+    /// which means the key is wrong or the file was altered. The cipher
+    /// authenticates, so a tampered snapshot is a failure rather than a
+    /// plausible-looking wrong answer.
+    pub fn open(&self, key: &Key) -> Result<Secret, OpenError> {
+        let nonce = BASE64
+            .decode(&self.nonce)
+            .map_err(|_| OpenError::Encoding)?;
+        let nonce: Nonce = nonce.try_into().map_err(|_| OpenError::NonceLength)?;
+        let ciphertext = BASE64
+            .decode(&self.ciphertext)
+            .map_err(|_| OpenError::Encoding)?;
+        let plaintext = key
+            .cipher()
+            .decrypt(&CipherNonce::from(nonce), ciphertext.as_slice())
+            .map_err(|_| OpenError::Cipher)?;
+        String::from_utf8(plaintext)
+            .map(Secret::new)
+            .map_err(|_| OpenError::NotText)
+    }
+}
+
+/// An agent's configuration as it appears on disk.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SealedAgentConfig {
+    /// The sealed credential.
+    pub auth_token: SealedSecret,
+}
+
+/// A project as it appears on disk.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SealedProject {
+    /// What to call it.
+    pub name: String,
+    /// Where the repository lives.
+    pub repository: String,
+    /// Its sealed credentials.
+    pub credentials: BTreeMap<Platform, SealedSecret>,
+    /// Its jobs, which hold nothing needing sealing.
+    pub jobs: BTreeMap<JobId, Job>,
+}
+
+/// Everything one instance knows, as it appears on disk.
+///
+/// A separate type from [`State`] rather than the same one behind a flag,
+/// because the boundary between them does real work: a file is untrusted input
+/// — hand-edited, half-written, or written by an older version — and turning
+/// one into state is the moment to find out whether it can be believed. What
+/// comes out the far side has already been checked, so nothing downstream
+/// handles a reference that does not resolve.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Snapshot {
+    /// The configured agents, sealed.
+    pub agents: BTreeMap<Agent, SealedAgentConfig>,
+    /// The projects, sealed.
+    pub projects: BTreeMap<ProjectId, SealedProject>,
+    /// Which agent the orchestrator thinks with.
+    pub orchestrator_agent: Agent,
+}
+
+impl Snapshot {
+    /// Decrypts and validates, yielding state that can be relied on.
+    ///
+    /// # Errors
+    ///
+    /// Fails if any credential cannot be recovered, or if the snapshot is
+    /// internally inconsistent — currently, if the agent it names as the
+    /// orchestrator's has no configuration. That check is what lets every
+    /// later caller look that agent up without handling an absence.
+    pub fn open(self, key: &Key) -> Result<State, OpenError> {
+        let Self {
+            agents,
+            projects,
+            orchestrator_agent,
+        } = self;
+
+        let agents = agents
+            .into_iter()
+            .map(|(agent, config)| {
+                Ok((
+                    agent,
+                    AgentConfig {
+                        auth_token: config.auth_token.open(key)?,
+                    },
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, OpenError>>()?;
+
+        let projects = projects
+            .into_iter()
+            .map(|(id, project)| {
+                let credentials = project
+                    .credentials
+                    .into_iter()
+                    .map(|(platform, sealed)| Ok((platform, sealed.open(key)?)))
+                    .collect::<Result<BTreeMap<_, _>, OpenError>>()?;
+                Ok((
+                    id,
+                    Project {
+                        name: project.name,
+                        repository: project.repository,
+                        credentials,
+                        jobs: project.jobs,
+                    },
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, OpenError>>()?;
+
+        if !agents.contains_key(&orchestrator_agent) {
+            return Err(OpenError::UnconfiguredOrchestratorAgent(orchestrator_agent));
+        }
+
+        Ok(State {
+            agents,
+            projects,
+            orchestrator_agent,
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Agent, AgentConfig, Job, JobId, Platform, Project, ProjectId, Secret, State};
+    use super::{
+        Agent, AgentConfig, BASE64, Job, JobId, Key, NONCE_LEN, Nonce, OpenError, Platform,
+        Project, ProjectId, Secret, Snapshot, State,
+    };
+    use base64::Engine as _;
     use jiff::Timestamp;
     use std::collections::BTreeMap;
     use uuid::Uuid;
@@ -364,6 +655,138 @@ mod tests {
             .flat_map(|project| project.jobs.values())
             .all(|job| job.agent == Agent::Claude);
         assert!(still_recorded);
+    }
+
+    fn key() -> Key {
+        Key::new([7; 32])
+    }
+
+    /// Deterministic stand-in for the randomness a caller normally supplies.
+    ///
+    /// A range rather than a counter, so the arithmetic happens inside the
+    /// iterator instead of in code that would then need a suppression. Real
+    /// nonces come from the operating system; all a test needs is that
+    /// successive ones differ.
+    fn counting_nonces() -> impl FnMut() -> Nonce {
+        let mut supply = (0_u8..u8::MAX).map(|byte| [byte; NONCE_LEN]);
+        move || supply.next().unwrap_or([u8::MAX; NONCE_LEN])
+    }
+
+    fn populated() -> State {
+        let mut state = configured();
+        state.projects.insert(
+            ProjectId::from_uuid(Uuid::from_u128(3)),
+            a_project_with_a_job(),
+        );
+        state
+    }
+
+    fn sealed() -> Snapshot {
+        populated()
+            .seal(&key(), &mut counting_nonces())
+            .expect("sealing cannot fail for a well-formed key and nonce")
+    }
+
+    #[test]
+    fn a_sealed_snapshot_carries_no_plaintext_credential() {
+        // The whole point of the exercise. If this ever fails, every token this
+        // instance holds is sitting in a file in the clear.
+        let json = serde_json::to_string(&sealed()).expect("a snapshot serialises");
+        assert!(!json.contains(TOKEN));
+        assert!(!json.contains("agent-token"));
+    }
+
+    #[test]
+    fn a_snapshot_round_trips_through_json_and_back_into_state() {
+        // Also proves the map keys survive: JSON object keys must be strings,
+        // so an enum or an identifier used as one has to serialise as text.
+        let json = serde_json::to_string(&sealed()).expect("a snapshot serialises");
+        let parsed: Snapshot = serde_json::from_str(&json).expect("and parses back");
+        let state = parsed.open(&key()).expect("and opens with the right key");
+        let project = state
+            .projects
+            .values()
+            .next()
+            .expect("the project survived");
+        assert_eq!(
+            project
+                .credentials
+                .get(&Platform::GitHub)
+                .map(Secret::expose),
+            Some(TOKEN)
+        );
+    }
+
+    #[test]
+    fn each_credential_is_sealed_with_its_own_nonce() {
+        // Guards the failure that would be catastrophic rather than merely
+        // wrong: with this cipher, reusing a nonce under one key leaks the
+        // authentication key. Hoisting one nonce out of the loop would look
+        // like a tidy-up.
+        let snapshot = sealed();
+        let agent_nonce = &snapshot
+            .agents
+            .get(&Agent::Claude)
+            .expect("the agent is configured")
+            .auth_token
+            .nonce;
+        let project = snapshot
+            .projects
+            .values()
+            .next()
+            .expect("the project is there");
+        let project_nonce = &project
+            .credentials
+            .get(&Platform::GitHub)
+            .expect("the credential is there")
+            .nonce;
+        assert_ne!(agent_nonce, project_nonce);
+    }
+
+    #[test]
+    fn the_wrong_key_does_not_open_a_snapshot() {
+        assert!(matches!(
+            sealed().open(&Key::new([8; 32])),
+            Err(OpenError::Cipher)
+        ));
+    }
+
+    #[test]
+    fn an_altered_snapshot_is_refused_rather_than_misread() {
+        // The cipher authenticates, so tampering is a failure rather than a
+        // plausible-looking wrong answer. That is why it is an AEAD and not
+        // just encryption.
+        let mut snapshot = sealed();
+        let sealed_token = &mut snapshot
+            .agents
+            .get_mut(&Agent::Claude)
+            .expect("the agent is configured")
+            .auth_token;
+        let mut raw = BASE64
+            .decode(&sealed_token.ciphertext)
+            .expect("we wrote valid base64");
+        raw[0] ^= 0xFF;
+        sealed_token.ciphertext = BASE64.encode(raw);
+
+        assert!(matches!(snapshot.open(&key()), Err(OpenError::Cipher)));
+    }
+
+    #[test]
+    fn a_snapshot_naming_an_unconfigured_orchestrator_agent_is_refused() {
+        // The check that lets every later caller look that agent up without
+        // handling an absence. A file is untrusted input; this is where that
+        // stops being true.
+        let mut snapshot = sealed();
+        snapshot.agents.clear();
+        assert!(matches!(
+            snapshot.open(&key()),
+            Err(OpenError::UnconfiguredOrchestratorAgent(Agent::Claude))
+        ));
+    }
+
+    #[test]
+    fn a_key_does_not_leak_when_formatted() {
+        assert!(!format!("{:?}", key()).contains('7'));
     }
 
     #[test]
