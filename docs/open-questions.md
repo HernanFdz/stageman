@@ -82,6 +82,28 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   deciding what a job that cannot start should look like in general — the same
   question wearing a different hat, and worth answering once.
 
+- **Should a job's environment have an egress allowlist?** Since
+  `docs/decisions/0009-jobs-hold-their-own-platform-credentials.md`, a job holds
+  credentials an agent could be talked into sending somewhere. Restricting
+  outbound traffic to the platforms the project actually uses means a persuaded
+  agent has nowhere to send them, which is the strongest available mitigation
+  and costs nothing at runtime. Deliberately deferred until something works end
+  to end, because the shape of the rule is easier to get right against a system
+  that runs than one imagined. Settled by choosing the isolation mechanism
+  above — the answer is close to free in one of the two options and close to
+  impossible in the other.
+
+- **Should a job's platform credentials be scoped and short-lived?** The other
+  mitigation from 0009, and independent of the first. A credential limited to
+  the one repository a job is working on, minted per job and expiring, turns a
+  leak from an estate-wide problem into a bounded one. Deferred for the same
+  reason. Settled by finding out what the platforms actually support: a token
+  narrow enough to be worth minting per job, and an issuing path that does not
+  need a human. Note the interaction with
+  `docs/decisions/0002-never-merge-never-deploy.md` — whether a scope exists
+  that permits opening a pull request but not merging one is the same question
+  wearing a different hat, and answering it once answers both.
+
 ## Next
 
 Intended next steps, in order, each with its reason. Written as intentions, not

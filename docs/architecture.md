@@ -52,11 +52,15 @@ first.
   signal deserves. A job is one possible reaction and not the only one — doing
   nothing, and answering on the channel, are reactions too. That is worth
   stating because "creates jobs" is the shape this crate drifts into the moment
-  nobody writes down that its remit is wider. It holds every platform
-  credential, and it is the only place a kickoff prompt is composed.
+  nobody writes down that its remit is wider. It holds what it needs in order to
+  *watch* a project's channels, and it is the only place a kickoff prompt is
+  composed.
 - **job** — the doing. Provisions one isolated workspace, runs one agent inside
-  it, supervises it to completion, and hosts the tools through which that agent
-  reaches the outside world. Which agent ran it is recorded on the job.
+  it, supervises it to completion, and gives it the credentials its project
+  needs. The agent reaches platforms through those platforms' own tools rather
+  than through anything hosted here — see
+  `docs/decisions/0009-jobs-hold-their-own-platform-credentials.md`. Which agent
+  ran it is recorded on the job.
 - **app** — the Dioxus fullstack binary. Serves the dashboard and runs the
   orchestrator in the same process; running this is what running stageman means.
   It operates the instance — projects, credentials, logs, stopping a job — and
@@ -95,24 +99,21 @@ change breaks one. These are the properties the type system, the tests, or a
 reviewer are defending — write down which, because "invariant" enforced by
 nobody is a wish.
 
-- **A job never holds a *platform* credential.** Platform means the outside
-  world a job could act on: the repository host, the chat workspace, the error
-  reporter. Those live in the orchestrator, and a job reaches them only by
-  calling a tool the orchestrator hosts, so text arriving in a repository
-  cannot carry a token back out. *Defended by* the crate boundary — **job** has
-  no path to that credential store — and by a reviewer, who has to reject any
-  change that hands one across.
+- **A job holds credentials for its own project, and for no other.** It gets
+  what its project needs to reach the platforms that project uses, plus the
+  credential material of the one agent running it — and nothing belonging to
+  any other project, and nothing belonging to any other agent. *Defended by*
+  construction, since everything a job is handed is selected from the project
+  it belongs to and built by the pure function in **core**, and by the escape
+  test in `docs/conventions.md` §4.
 
-  The **agent** credential is deliberately outside this invariant. A job's
-  environment contains one by construction, because an agent that cannot
-  authenticate cannot think, and no arrangement exists in which it does not. It
-  is a different kind of secret: it buys work on the operator's account, and
-  buys nothing at all in their repositories or channels. Its rule is separate
-  and narrower — an agent process receives exactly its own agent's credential
-  variables and none belonging to any other — and lives in
-  `docs/decisions/0008-one-credential-per-agent.md`. Writing the carve-out down
-  is the point: an invariant with a silent exception is worse than one with a
-  stated boundary, because only the second can be checked.
+  This is the narrowed survivor of a stronger claim. The original invariant was
+  that a job held no platform credential at all, which made exfiltration
+  structurally impossible rather than merely bounded.
+  `docs/decisions/0009-jobs-hold-their-own-platform-credentials.md` gave that up
+  deliberately, and records what it bought and what it now costs. Read it before
+  treating this invariant as the defence, because it is not one: it bounds the
+  blast radius of a leak and does nothing to prevent one.
 - **One job, one workspace, one project.** No two jobs ever share a working
   tree, and a job provisioned for one project cannot reach another project's
   repository, credentials or channels. *Defended by* construction, since a
@@ -174,3 +175,9 @@ abstraction was refused earlier and what changed. That a model is reached by
 running an agent at all, rather than by calling a vendor's service, is
 `docs/decisions/0007-model-work-goes-through-an-agent-cli.md`, and it is a
 billing decision at least as much as a technical one.
+
+The reason the **job** crate hosts nothing, despite an earlier design in which
+the orchestrator hosted the tools an agent used to reach the world, is
+`docs/decisions/0009-jobs-hold-their-own-platform-credentials.md` — the most
+consequential reversal taken so far, and the one most worth reading before
+changing anything here.

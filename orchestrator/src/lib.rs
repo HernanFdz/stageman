@@ -5,10 +5,15 @@
 //! answering on the channel, are reactions too. Judging is the work here;
 //! spawning is a consequence of one particular judgement.
 //!
-//! Two things live here and nowhere else. Every platform credential, because a
-//! job that cannot hold one cannot leak one. And every kickoff prompt, because
-//! a job executes instructions it did not write — which is what makes prompt
-//! text reviewable in one place rather than scattered across the system.
+//! One thing lives here and nowhere else: every kickoff prompt, because a job
+//! executes instructions it did not write, which is what keeps prompt text
+//! reviewable in one place rather than scattered across the system.
+//!
+//! Credentials are no longer in that set. This crate holds what it needs in
+//! order to *watch* a project's channels; a job is handed what it needs in
+//! order to *act* on them. Both come from the same project configuration. See
+//! `docs/decisions/0009-jobs-hold-their-own-platform-credentials.md` for what
+//! that gave up, and what it bought.
 //!
 //! To judge at all, this crate runs an agent itself, the same way a job does
 //! and through the same contract — one-shot and structured rather than a

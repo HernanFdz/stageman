@@ -3,7 +3,11 @@
 ## Status
 Accepted. The rejection of a pluggable worker contract below is superseded by
 `docs/decisions/0006-agents-are-pluggable.md` — that record fires the revisit
-condition this one names, rather than contradicting it.
+condition this one names, rather than contradicting it. The decision to host the
+agent's tools is superseded by
+`docs/decisions/0009-jobs-hold-their-own-platform-credentials.md`. What remains
+accepted is the part the title names: drive an existing coding agent rather than
+write one.
 
 ## Context
 

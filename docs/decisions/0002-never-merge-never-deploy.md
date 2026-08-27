@@ -49,6 +49,15 @@ in the sense that reversing it means introducing credentials that do not
 currently exist, which changes the threat model of every other component. The
 absence is the feature.
 
+**Amended by `docs/decisions/0009-jobs-hold-their-own-platform-credentials.md`.**
+The paragraph above is no longer true as written. A job now holds a repository
+credential, so this record's guarantee rests on that credential's scope — and
+possibly on branch protection applied by the platform itself, if scope turns out
+not to separate opening a pull request from merging one. The decision stands
+unchanged; what defends it does not, and 0009 says how. The original wording is
+left intact because "the absence is the feature" was the reasoning, and knowing
+we gave it up deliberately is worth more than a tidy record.
+
 Revisit if the reviewing itself becomes the thing worth automating. That is a
 different product with a different trust story, and it should be argued from
 scratch rather than as an amendment to this.
