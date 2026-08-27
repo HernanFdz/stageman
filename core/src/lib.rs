@@ -18,15 +18,15 @@
 //! spawning a process the whole point rather than a convenience. Delivering
 //! that description is an adapter's job, and differs per agent.
 //!
-//! **Nothing here reads a clock or mints an identifier.** Both are effects, and
-//! both would make every value non-deterministic to construct, so both are
-//! supplied by the caller — which is why creating a job takes a timestamp
-//! rather than asking the operating system for one. The crates that are allowed
-//! effects do that; this one stays a set of values a test can build exactly.
+//! **Nothing here reads a clock, mints an identifier, or generates a nonce.**
+//! All three are effects, and all three would make values non-deterministic to
+//! construct, so all three are supplied by the caller — which is why creating a
+//! job takes a timestamp rather than asking the operating system for one. The
+//! crates that are allowed effects do that; this one stays a set of values a
+//! test can build exactly.
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::PathBuf;
 
 use jiff::Timestamp;
 use uuid::Uuid;
@@ -37,12 +37,10 @@ use uuid::Uuid;
 /// a token reaches a log is a structure printed whole while somebody is
 /// debugging something else entirely.
 ///
-/// **It deliberately does not implement serialisation yet.** State is persisted
-/// by serialising the very structure credentials live in, so a `Serialize` that
-/// wrote the value in the clear would put every token on disk on the next
-/// change — the same bug as a derived `Debug`, wearing a different hat. Adding
-/// it is the same commit as adding encryption, never an earlier one. The bar is
-/// in `docs/conventions.md` §4.
+/// **It deliberately does not implement serialisation.** State is persisted by
+/// converting it to a separate sealed form, and a `Serialize` here would let
+/// this type reach a file in the clear by accident. The bar is in
+/// `docs/conventions.md` §4.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Secret(String);
 
@@ -75,10 +73,6 @@ impl fmt::Display for Secret {
         f.write_str("<redacted>")
     }
 }
-
-/// Identifies a configured agent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct AgentId(Uuid);
 
 /// Identifies a project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -116,9 +110,63 @@ macro_rules! identifier {
     };
 }
 
-identifier!(AgentId);
 identifier!(ProjectId);
 identifier!(JobId);
+
+/// A coding agent this project knows how to run.
+///
+/// A closed set rather than a list an operator can extend, because every agent
+/// needs an adapter and an image, both of which are code — so the set of
+/// supportable agents was always bounded by what is compiled in, and a value
+/// an operator could invent only postponed the failure to runtime. Adding one
+/// is a compile error everywhere it is not yet handled, which is the point.
+///
+/// Naming the set here is not the same as being specific to one, which
+/// `docs/decisions/0006-agents-are-pluggable.md` forbids outside an adapter:
+/// this crate knows *which* agents exist, and adapters know how each behaves.
+///
+/// A job stores this **by value**, never as a reference into configuration, so
+/// that removing an agent's configuration cannot rewrite the history of jobs
+/// that used it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Agent {
+    /// Anthropic's coding agent.
+    Claude,
+}
+
+impl Agent {
+    /// What this agent is good for, in prose.
+    ///
+    /// Not decoration and not operator-editable: the orchestrator chooses which
+    /// agent runs a job, and this is what it reasons over — see
+    /// `docs/decisions/0006-agents-are-pluggable.md`. It lives in code because
+    /// it describes the agent rather than the installation.
+    #[must_use]
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Claude => {
+                "General-purpose coding agent. Reads a repository, makes changes \
+                 across files, runs commands, and explains what it did."
+            }
+        }
+    }
+}
+
+/// What an operator supplies in order to run an agent.
+///
+/// A credential and nothing else. There is deliberately no path here: agents
+/// run in containers built with them already installed, so where the program
+/// lives is decided by an image rather than by the machine this happens to run
+/// on — see `docs/decisions/0012-agents-run-in-containers.md`.
+#[derive(Debug, Clone)]
+pub struct AgentConfig {
+    /// What the agent authenticates with.
+    ///
+    /// One credential per agent, never one per role — the orchestrator and a
+    /// job running the same agent use the same one. See
+    /// `docs/decisions/0008-one-credential-per-agent.md`.
+    pub auth_token: Secret,
+}
 
 /// A platform a project's jobs act on.
 ///
@@ -133,45 +181,6 @@ pub enum Platform {
     GitHub,
 }
 
-/// How to start an agent.
-///
-/// The program is a path rather than a name on purpose. Agents install where a
-/// login shell can find them and a service manager cannot, so resolving one by
-/// searching the environment works when you test it by hand and fails when
-/// anything else starts it — see `docs/conventions.md` §3.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Launch {
-    /// Absolute path to the program to run.
-    pub program: PathBuf,
-    /// Arguments passed before anything this project adds.
-    pub args: Vec<String>,
-}
-
-/// A coding agent this instance can run.
-///
-/// Always a third-party tool, never this project and never a job — the word is
-/// reserved in `docs/conventions.md` §2 precisely because "the agent decided
-/// to…" reads fine while meaning two different things.
-#[derive(Debug, Clone)]
-pub struct Agent {
-    /// What to call it in the dashboard.
-    pub name: String,
-    /// What it is good for, in prose.
-    ///
-    /// Not decoration: the orchestrator chooses which agent runs a job, and
-    /// this is what it reasons over. See
-    /// `docs/decisions/0006-agents-are-pluggable.md`.
-    pub description: String,
-    /// How to start it.
-    pub launch: Launch,
-    /// What it authenticates with.
-    ///
-    /// One credential per agent, never one per role — the orchestrator and a
-    /// job running the same agent use the same one. See
-    /// `docs/decisions/0008-one-credential-per-agent.md`.
-    pub credential: Secret,
-}
-
 /// One agent, in one workspace, working on one project.
 ///
 /// A job happens once. There is no retry and no resume: a second attempt is a
@@ -181,9 +190,10 @@ pub struct Agent {
 pub struct Job {
     /// Which agent ran it.
     ///
-    /// Recorded because once more than one agent can, "why did this go badly?"
-    /// has no answer without it.
-    pub agent: AgentId,
+    /// Stored by value, so this stays true after an operator removes that
+    /// agent's configuration. Recorded at all because once more than one agent
+    /// can run a job, "why did this go badly?" has no answer without it.
+    pub agent: Agent,
     /// Why the orchestrator started it, in prose.
     ///
     /// The whole of a job's provenance, deliberately — see
@@ -224,78 +234,86 @@ pub struct Project {
     pub jobs: BTreeMap<JobId, Job>,
 }
 
-/// The agent a fresh instance is seeded with.
-///
-/// A fixed value rather than a minted one, so that the entry a first run
-/// creates is the same entry on every machine and can be referred to before
-/// anything has been configured.
-pub const SEEDED_AGENT: AgentId = AgentId::from_uuid(Uuid::from_u128(1));
-
 /// Everything one instance knows.
 ///
-/// The whole of what gets snapshotted, and the whole of what is loaded back —
-/// see `docs/decisions/0011-state-is-a-snapshot-not-a-database.md`. A default
-/// value is a first run rather than an error.
+/// The whole of what gets snapshotted and the whole of what is loaded back —
+/// see `docs/decisions/0011-state-is-a-snapshot-not-a-database.md`.
+///
+/// There is deliberately no `Default`. An instance with nothing to think with
+/// is not a state worth representing, so one is either loaded from a snapshot
+/// or built by the first-run flow, and never conjured empty — see
+/// `docs/decisions/0013-an-instance-is-configured-before-it-exists.md`.
 #[derive(Debug, Clone)]
 pub struct State {
-    /// The agents this instance can run.
-    pub agents: BTreeMap<AgentId, Agent>,
+    /// The agents this instance can run, and what each authenticates with.
+    pub agents: BTreeMap<Agent, AgentConfig>,
     /// The projects it watches.
     pub projects: BTreeMap<ProjectId, Project>,
     /// Which agent the orchestrator thinks with.
     ///
-    /// Not optional. An instance with nothing to think with is not a state
-    /// worth representing, and making it representable would spread option
-    /// handling across every caller in exchange for catching the weaker half
-    /// of a failure the startup check in `docs/conventions.md` §3 has to catch
-    /// properly anyway — that check can tell an operator the path is wrong or
-    /// the credential is dead, and a missing value cannot.
-    pub orchestrator_agent: AgentId,
+    /// Not optional, and guaranteed to appear in `agents` — by construction
+    /// here, and by the check a snapshot passes on its way back in. That is
+    /// what lets every later caller look it up without handling an absence
+    /// that a working instance never has.
+    pub orchestrator_agent: Agent,
 }
 
-impl Default for State {
-    /// A first run: one agent, unconfigured, and nothing else.
+impl State {
+    /// Builds the state of a freshly configured instance.
     ///
-    /// The seeded entry is a **template**, not a working configuration. It
-    /// cannot know where the program lives on this machine or what credential
-    /// to use, so it carries a legible placeholder for the first and an empty
-    /// value for the second, and the startup check refuses to run until both
-    /// are real. In particular the program is a bare name, which
-    /// `docs/conventions.md` §3 forbids resolving through the environment —
-    /// the rule is kept by rejecting a non-absolute path at startup rather
-    /// than by quietly searching for one.
-    fn default() -> Self {
+    /// Taking the agent and its configuration together is what makes the
+    /// invariant above hold by construction: there is no moment at which an
+    /// instance exists without something to think with.
+    #[must_use]
+    pub fn new(orchestrator_agent: Agent, config: AgentConfig) -> Self {
         let mut agents = BTreeMap::new();
-        agents.insert(
-            SEEDED_AGENT,
-            Agent {
-                name: "Claude Code".to_owned(),
-                description: "General-purpose coding agent. Reads a repository, \
-                              makes changes across files, runs commands, and \
-                              explains what it did."
-                    .to_owned(),
-                launch: Launch {
-                    program: PathBuf::from("claude"),
-                    args: Vec::new(),
-                },
-                credential: Secret::new(String::new()),
-            },
-        );
+        agents.insert(orchestrator_agent, config);
         Self {
             agents,
             projects: BTreeMap::new(),
-            orchestrator_agent: SEEDED_AGENT,
+            orchestrator_agent,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentId, Platform, Project, Secret, State};
+    use super::{Agent, AgentConfig, Job, JobId, Platform, Project, ProjectId, Secret, State};
+    use jiff::Timestamp;
     use std::collections::BTreeMap;
     use uuid::Uuid;
 
     const TOKEN: &str = "ghp-not-a-real-token";
+
+    fn configured() -> State {
+        State::new(
+            Agent::Claude,
+            AgentConfig {
+                auth_token: Secret::new("agent-token".to_owned()),
+            },
+        )
+    }
+
+    fn a_project_with_a_job() -> Project {
+        let mut credentials = BTreeMap::new();
+        credentials.insert(Platform::GitHub, Secret::new(TOKEN.to_owned()));
+        let mut jobs = BTreeMap::new();
+        jobs.insert(
+            JobId::from_uuid(Uuid::from_u128(9)),
+            Job {
+                agent: Agent::Claude,
+                reason: "an issue was opened".to_owned(),
+                kickoff: "work on it".to_owned(),
+                created_at: Timestamp::UNIX_EPOCH,
+            },
+        );
+        Project {
+            name: "example".to_owned(),
+            repository: "https://example.invalid/repo".to_owned(),
+            credentials,
+            jobs,
+        }
+    }
 
     #[test]
     fn debug_does_not_leak_a_secret() {
@@ -313,15 +331,7 @@ mod tests {
     fn a_secret_nested_in_a_structure_does_not_leak() {
         // The failure this guards is not formatting a secret directly — nobody
         // does that. It is printing whatever happens to contain one.
-        let mut credentials = BTreeMap::new();
-        credentials.insert(Platform::GitHub, Secret::new(TOKEN.to_owned()));
-        let project = Project {
-            name: "example".to_owned(),
-            repository: "https://example.invalid/repo".to_owned(),
-            credentials,
-            jobs: BTreeMap::new(),
-        };
-        assert!(!format!("{project:?}").contains(TOKEN));
+        assert!(!format!("{:?}", a_project_with_a_job()).contains(TOKEN));
     }
 
     #[test]
@@ -330,34 +340,36 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_instance_can_name_the_agent_it_thinks_with() {
-        let state = State::default();
-        assert!(state.projects.is_empty());
-        // The point of seeding rather than leaving this absent: the reference
-        // always resolves, so no caller has to handle a state that a working
-        // instance never occupies.
+    fn a_configured_instance_can_look_up_the_agent_it_thinks_with() {
+        let state = configured();
         assert!(state.agents.contains_key(&state.orchestrator_agent));
+        assert!(state.projects.is_empty());
     }
 
     #[test]
-    fn the_seeded_agent_is_a_template_and_not_a_working_configuration() {
-        // Guards the thing most likely to be "tidied up" later: the seed looks
-        // configured, and is not. Startup is what refuses it — see
-        // conventions §3 — so this test pins the shape that check relies on.
-        let state = State::default();
-        let agent = state
-            .agents
-            .get(&state.orchestrator_agent)
-            .expect("the seeded agent is present by construction");
-        assert!(agent.credential.expose().is_empty());
-        assert!(!agent.launch.program.is_absolute());
+    fn a_jobs_agent_survives_that_agent_being_deconfigured() {
+        // The reason a job stores an agent by value rather than by reference:
+        // removing configuration is ordinary housekeeping, and it must not
+        // rewrite the record of work already done.
+        let mut state = configured();
+        let project = a_project_with_a_job();
+        state
+            .projects
+            .insert(ProjectId::from_uuid(Uuid::from_u128(3)), project);
+        state.agents.remove(&Agent::Claude);
+
+        let still_recorded = state
+            .projects
+            .values()
+            .flat_map(|project| project.jobs.values())
+            .all(|job| job.agent == Agent::Claude);
+        assert!(still_recorded);
     }
 
     #[test]
-    fn identifiers_of_different_kinds_wrap_the_same_value_distinctly() {
-        // Distinct types over one representation: the point is that a project
-        // identifier cannot be passed where a job's is expected.
-        let raw = Uuid::from_u128(7);
-        assert_eq!(AgentId::from_uuid(raw).as_uuid(), &raw);
+    fn every_agent_says_what_it_is_good_for() {
+        // The orchestrator picks an agent by reading this, so an empty one is
+        // a silent failure rather than a cosmetic one.
+        assert!(!Agent::Claude.description().is_empty());
     }
 }

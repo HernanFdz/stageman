@@ -58,6 +58,16 @@ Reversing means merging one crate back and inlining the adapter, which is
 mechanical. What is expensive to reverse is the *commitment* — being agnostic
 is a promise to users, and withdrawing it is a product change, not a refactor.
 
+**Two clarifications added once this met code.** *"Nothing outside an adapter is
+specific to one agent"* is about behaviour, not about knowing the roster: the
+domain crate names the closed set of agents that exist, and adapters know how
+each behaves. The set has to be closed because every agent needs an adapter and
+an image, both compiled in — so a value an operator could invent only postponed
+the failure to runtime, while an enumeration makes adding one a compile error
+everywhere it is not yet handled. And the description an agent carries lives in
+code rather than in configuration: it describes the agent, not the
+installation, and nothing an operator could edit would make it more true.
+
 Revisit if, after two adapters exist, the contract has become a union of vendor
 quirks rather than a shape they share. That would mean the seam is in the wrong
 place, and it is better answered by moving the boundary than by widening the

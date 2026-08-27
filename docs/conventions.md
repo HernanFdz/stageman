@@ -74,14 +74,15 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   and no such thing exists here. A job records which agent ran it, because once
   more than one can, "why did this go badly?" has no answer without it.
 - **workspace** — the isolated place a job's agent works: the filesystem the
-  repository is checked out into, together with whatever boundary surrounds it.
-  What that boundary *is* — a container, a worktree — is still undecided, and
-  the word is deliberately indifferent to the answer. One job, one workspace:
-  no two ever share one, which is an invariant rather than an aspiration
-  (`docs/architecture.md` §2). Not a *sandbox*, which claims a security
-  property one of the two candidate mechanisms would not actually provide, and
-  not a *checkout*, which names the files and misses the boundary that makes
-  them isolated.
+  repository is checked out into, together with the container around it — see
+  `docs/decisions/0012-agents-run-in-containers.md`. One job, one workspace: no
+  two ever share one, which is an invariant rather than an aspiration
+  (`docs/architecture.md` §2). Not a *checkout*, which names the files and
+  misses the boundary that makes them isolated. The word stayed deliberately
+  indifferent to that boundary while it was undecided, and the boundary is now
+  decided, but the word is still the right one — the orchestrator's own agent
+  runs in a container and has no workspace at all, because it has no repository
+  to work on.
 - **reason** — the free text the orchestrator writes when it creates a job,
   saying why it decided to. Prose meant for a human reading the dashboard, not
   a key pointing at a signal. It is the whole of a job's provenance, which is
@@ -95,10 +96,13 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   agent decided to…" is ambiguous in exactly the place where being wrong is
   expensive, and the sentence still reads fine either way. Note that an agent
   is not only something inside a job — the orchestrator runs one too, to think
-  with. In the code the word is a type rather than a label: an agent is always
-  referred to by `AgentId`, so two agents an operator happens to name the same
-  thing stay distinct, and a job records which one ran it without depending on
-  a name that can be edited later.
+  with. In the code it is a closed set rather than an open list: the agents that
+  can be run are the ones compiled in, because each needs an adapter and an
+  image and both are code. What an operator supplies per agent is an
+  `AgentConfig` — a credential, and nothing else, since where the program lives
+  is decided by an image rather than by this machine. A job stores its agent by
+  value, so removing that configuration later cannot rewrite the record of work
+  already done.
 
 ## 3. House rules
 
@@ -134,19 +138,23 @@ justify is usually obsolete.
   where is a pure function in the core crate so it can be tested without
   spawning anything; delivering it belongs to the adapter. Reasoning in
   `docs/decisions/0008-one-credential-per-agent.md`.
-- **An agent's location is configuration, never a PATH lookup.** Agents install
-  to places a login shell knows about and a service manager does not — of the
-  two installed while this was being designed, one sits in a directory absent
-  from a non-interactive shell's PATH. A daemon that finds its agents by
-  searching PATH therefore works perfectly when you test it by hand and fails
-  when anything else starts it, which is the worst of the available outcomes.
-  Record the path, and verify it with the startup check above.
+- **The container runtime's location is configuration, never a PATH lookup.**
+  This rule used to be about agents; agents now live in images, so it retargets
+  rather than retires — see
+  `docs/decisions/0012-agents-run-in-containers.md`. The reasoning is
+  unchanged and was measured: of the two agents installed while this was being
+  designed, one sat in a directory absent from a non-interactive shell's PATH.
+  Anything a daemon locates by searching therefore works perfectly when you
+  test it by hand and fails when a service manager starts it, which is the
+  worst of the available outcomes. Record the path, and verify it with the
+  startup check above.
 - **A missing agent, or a credential that does not work, fails at startup,
   loudly.** Nothing works without one — not even watching a channel — so the
   worst possible moment to find out is three in the morning, on the first
   signal that mattered. Note precisely what is being checked: not whether the
-  agent is logged in on this machine, which it never needs to be, but whether
-  the credential this project holds for it actually works. Agent tools
+  agent is installed or logged in on this machine, since it is neither and
+  never needs to be, but whether the runtime and image are there and the
+  credential this project holds actually works. Agent tools
   generally ship a health check of their own; call theirs, with the environment
   this project would construct, rather than inferring health from the first
   failure of real work.

@@ -118,8 +118,11 @@ nobody is a wish.
   tree, and a job provisioned for one project cannot reach another project's
   repository, credentials or channels. *Defended by* construction, since a
   workspace is minted per job and scoped to a project, and by the escape test in
-  `docs/conventions.md` §4 — construction alone stops holding the moment the
-  isolation mechanism changes, and that mechanism is still an open question.
+  `docs/conventions.md` §4. That mechanism is a container — see
+  `docs/decisions/0012-agents-run-in-containers.md` — which enforces the
+  boundary rather than relying on the agent to respect it. The escape test
+  still earns its place: construction is an argument about what the code does,
+  and the test is evidence about what the mechanism actually permits.
 - **No job blocks on a terminal.** A job that needs a human emits the question
   on a channel and stays alive. It never writes to standard output expecting an
   answer on standard input, because nobody is watching that terminal — that is
