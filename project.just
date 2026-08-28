@@ -62,3 +62,10 @@ image-session:
     cargo nextest run --workspace --locked --run-ignored ignored-only \
         -E 'test(/costs_a_credential/)'
 
+# Not a test, and deliberately so: `just image-handshake` runs every ignored
+# test that costs no credential, so an ignored test which opened a pull request
+# would fire on a command run several times a session. An example is compiled
+# and linted by the gate and executed only when somebody types this.
+[doc("Run one real job that proposes a real change — opens a pull request")]
+propose repository:
+    cargo run --package stageman --example propose -- {{ repository }}
