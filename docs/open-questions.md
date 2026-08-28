@@ -114,6 +114,28 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   become things somebody has to handle. Settled by building it, and worth
   building before the orchestrator has a second caller rather than after.
 
+- **Should the runtime be Podman only?** The list compiled in by
+  `docs/decisions/0023-the-container-runtime-is-discovered-once.md` is ordered
+  Docker first, so that is what continuous integration finds and what most
+  machines will. The question is whether it should name Podman and nothing
+  else.
+
+  The argument for is the one measured under the question below: rootless
+  Podman was the only nesting configuration that kept every capability off and
+  seccomp filtering on. Choosing one runtime everywhere also makes what is
+  tested and what is run the same thing, which an ordered list of two does not.
+
+  The argument against is that Docker is what is already installed on most
+  machines, and a list naming only Podman means somebody with a working
+  container runtime is told they have none. That is a poor first impression for
+  a reason they did not choose.
+
+  Two things would settle it and neither is expensive. Whether this project's
+  adapter works against Podman at all — it shells out for a version, a run, a
+  listing and a label, none of which has ever been exercised there, and the
+  answer is one afternoon. And whether anything in the nesting answer below
+  actually requires it, rather than merely preferring it.
+
 - **How does a job run containers of its own?** Answered for provisioning in
   general by
   `docs/decisions/0024-the-agent-provisions-what-a-project-needs.md` — the
