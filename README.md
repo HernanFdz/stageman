@@ -36,25 +36,25 @@ already installed — so the machine itself needs no coding agent, no repository
 tooling, and nothing particular on its path. That holds for the agent the
 orchestrator thinks with just as much as for the ones doing the work.
 
-A running stageman reads no credential from the machine's environment. The
-first one is entered in the terminal the first time you start it, the rest in
-the dashboard; all of them are held encrypted and handed to a container as it
-starts. Obtaining a credential is a one-time step you do wherever you happen to
-be, and only its result goes into stageman. The first run is the only thing
-that asks you anything — and on a machine with no terminal to ask on, it will
-take those answers from the environment instead, once, to bring the instance
-into existence. Those answers are `STAGEMAN_AGENT_TOKEN`, the agent's
-credential, and `STAGEMAN_CONTAINER_RUNTIME`, the runtime's path — set both and
-nothing is asked; set neither and the terminal is.
+A running stageman reads no credential from the machine's environment. Every
+one of them is entered in the dashboard, held encrypted, and handed to a
+container as it starts. Obtaining a credential is a one-time step you do
+wherever you happen to be, and only its result goes into stageman.
+
+**It asks you nothing to start.** A fresh instance has no agents, no projects
+and no container runtime, and that is a perfectly good instance — it simply has
+nothing to do yet. You give it those in the dashboard, in that order, because a
+project needs an agent to think with and at least one its jobs can run on.
 
 Starting it needs two things named in the environment: `STAGEMAN_KEY`, the
 base64 key its file is encrypted under, and `STAGEMAN_STATE`, where that file
-lives. Neither has a default, because a daemon started by a service manager
-inherits a working directory nobody chose.
+lives. Both describe where the instance *is* rather than what it does, which is
+why neither can live in the file itself, and neither has a default because a
+daemon started by a service manager inherits a working directory nobody chose.
 
-What gets reported is `STAGEMAN_LOG`, read on every run rather than only the
-first. It takes the same filter syntax as `RUST_LOG` and defaults to `warn` —
-enough to see what needs attention, not a commentary on things going right.
+What gets reported is `STAGEMAN_LOG`. It takes the same filter syntax as
+`RUST_LOG` and defaults to `warn` — enough to see what needs attention, not a
+commentary on things going right.
 
 Which agents are configured is yours to decide, the orchestrator picks one per
 job from what you have set up, and the dashboard shows which agent ran each

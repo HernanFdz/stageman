@@ -21,7 +21,9 @@ use std::process::ExitCode;
 
 use stageman::Store;
 use stageman_agent::ContainerRuntime;
-use stageman_core::{Agent, AgentConfig, Key, Platform, Project, ProjectId, Secret, State, Uuid};
+use stageman_core::{
+    Agent, AgentConfig, JobAgents, Key, Platform, Project, ProjectId, Secret, State, Uuid,
+};
 
 /// The work this job is asked to do.
 ///
@@ -81,13 +83,14 @@ async fn propose() -> Result<(), String> {
     // An instance that exists only for this run. Nothing configures a project
     // yet — that is the next step in `docs/open-questions.md` — so this builds
     // one directly, which is exactly what a dashboard will do later.
-    let mut state = State::new(
+    let mut state = State::default();
+    state.agents.insert(
         Agent::Claude,
         AgentConfig {
             auth_token: agent_token,
         },
-        runtime.path().to_owned(),
     );
+    state.container_runtime = Some(runtime.path().to_owned());
     let project = ProjectId::from_uuid(Uuid::new_v4());
     let mut credentials = std::collections::BTreeMap::new();
     credentials.insert(Platform::GitHub, platform_token);
@@ -96,6 +99,9 @@ async fn propose() -> Result<(), String> {
         Project {
             name: "stageman".to_owned(),
             repository: repository.clone(),
+            orchestrator_agent: Agent::Claude,
+            job_agents: JobAgents::new(std::collections::BTreeSet::from([Agent::Claude]))
+                .map_err(|error| error.to_string())?,
             credentials,
             jobs: std::collections::BTreeMap::new(),
         },

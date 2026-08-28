@@ -568,10 +568,10 @@ mod tests {
     };
     use stageman_agent::{Answer, ContainerRuntime, StopReason};
     use stageman_core::{
-        Agent, AgentConfig, Job, JobId, Key, Progress, Project, ProjectId, Secret, State,
-        Timestamp, Uuid,
+        Agent, AgentConfig, Job, JobAgents, JobId, Key, Progress, Project, ProjectId, Secret,
+        State, Timestamp, Uuid,
     };
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
 
@@ -579,14 +579,22 @@ mod tests {
         Key::new([3; 32])
     }
 
+    /// An instance with one agent configured and nothing else.
     fn configured() -> State {
-        State::new(
-            Agent::Claude,
-            AgentConfig {
-                auth_token: Secret::new("agent-token".to_owned()),
-            },
-            PathBuf::from("/usr/local/bin/container-runtime"),
-        )
+        State {
+            agents: BTreeMap::from([(
+                Agent::Claude,
+                AgentConfig {
+                    auth_token: Secret::new("agent-token".to_owned()),
+                },
+            )]),
+            container_runtime: Some(PathBuf::from("/usr/local/bin/container-runtime")),
+            ..State::default()
+        }
+    }
+
+    fn only_claude() -> JobAgents {
+        JobAgents::new(BTreeSet::from([Agent::Claude])).expect("one is not none")
     }
 
     fn snapshot_path(directory: &TempDir) -> PathBuf {
@@ -643,6 +651,8 @@ mod tests {
                 Project {
                     name: "example".to_owned(),
                     repository: "https://example.invalid/repo".to_owned(),
+                    orchestrator_agent: Agent::Claude,
+                    job_agents: only_claude(),
                     credentials: BTreeMap::new(),
                     jobs: BTreeMap::new(),
                 },
@@ -723,6 +733,8 @@ mod tests {
             Project {
                 name: "example".to_owned(),
                 repository: "https://example.invalid/repo".to_owned(),
+                orchestrator_agent: Agent::Claude,
+                job_agents: only_claude(),
                 credentials: BTreeMap::new(),
                 jobs,
             },
@@ -866,19 +878,22 @@ mod tests {
             repository: &str,
             runtime: &ContainerRuntime,
         ) -> (State, ProjectId) {
-            let mut state = State::new(
+            let mut state = State::default();
+            state.agents.insert(
                 Agent::Claude,
                 AgentConfig {
                     auth_token: credential(),
                 },
-                runtime.path().to_owned(),
             );
+            state.container_runtime = Some(runtime.path().to_owned());
             let project = ProjectId::from_uuid(Uuid::from_u128(11));
             state.projects.insert(
                 project,
                 Project {
                     name: "hello".to_owned(),
                     repository: repository.to_owned(),
+                    orchestrator_agent: Agent::Claude,
+                    job_agents: only_claude(),
                     // No platform credential: the repository is public, so this
                     // also checks that a job with nothing to authenticate with
                     // is a perfectly ordinary job rather than a broken one.

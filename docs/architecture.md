@@ -48,8 +48,11 @@ first.
   adapters that implement it. Two shapes and one contract: a one-shot
   structured query, and a session bound to a workspace. Nothing outside an
   adapter may be specific to one agent.
-- **orchestrator** — the deciding. Watches the channels and judges what each
-  signal deserves. A job is one possible reaction and not the only one — doing
+- **orchestrator** — the deciding, for one project. Watches that project's
+  channels and judges what each signal deserves. One per project rather than
+  one per instance, because watching needs the project's own credentials and a
+  shared orchestrator would hold every project's at once — see
+  `docs/decisions/0020-the-orchestrator-belongs-to-a-project.md`. A job is one possible reaction and not the only one — doing
   nothing, and answering on the channel, are reactions too. That is worth
   stating because "creates jobs" is the shape this crate drifts into the moment
   nobody writes down that its remit is wider. It holds what it needs in order to
@@ -69,7 +72,8 @@ first.
   `docs/decisions/0009-jobs-hold-their-own-platform-credentials.md`. Which agent
   ran it is recorded on the job.
 - **app** — the Dioxus fullstack binary. Serves the dashboard and runs the
-  orchestrator in the same process; running this is what running stageman means.
+  orchestrators — one per project — in the same process; running this is what
+  running stageman means.
   It operates the instance — projects, credentials, logs, stopping a job — and
   never talks to one. Conversation with a running job belongs to a channel, so
   no conversational state lives here; see
@@ -174,7 +178,7 @@ a proposal is what lets a job run unattended at all, and is the reason no part
 of this system needs a credential that can merge — see
 `docs/decisions/0002-never-merge-never-deploy.md`.
 
-The orchestrator runs inside **app** rather than beside it because the
+A project's orchestrator runs inside **app** rather than beside it because the
 constraint in `docs/vision.md` §3 is that one operator runs this on their own
 machine: a second daemon is a second thing to install, supervise and restart,
 and buys nothing while both halves live and die together anyway. The cost is

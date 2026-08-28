@@ -150,14 +150,6 @@ Intended next steps, in order, each with its reason. Written as intentions, not
 progress: "next X, because Y" — never "X is 60% done", which is both derivable
 and wrong within a day.
 
-- Next, the half of the proof of concept still missing: a change actually
-  proposed. A job now runs end to end — a project watched, a container named
-  for it, a kickoff it did not write, and a repository it cloned itself — and
-  it stops short of opening a pull request. That step is the first in this
-  project that cannot be taken against something invented: it needs a
-  repository somebody owns and a credential that can push to it, and the thing
-  it produces is visible to other people. Deliberately still before the two
-  mitigations above, which are far easier to design against something that runs.
 - Then move the end-to-end tests out of the crates they test. A test that drives
   a whole flow — a job from kickoff to a cloned repository, a session surviving
   its container stopping — belongs in `tests/`, where it is a separate crate
@@ -173,13 +165,28 @@ and wrong within a day.
   and stays where it is. Roughly half of the ignored tests are in each group,
   so this is a move for some and not a reorganisation of all.
 
-- Then a way to configure a project at all. One is currently built in a test,
-  and an operator has no way to add one, because adding projects is the
-  dashboard's job and there is no dashboard. Worth stating as its own step
-  rather than letting it hide inside the dashboard's: the first-run flow shows
-  that asking for configuration in a terminal is cheap, and a project is a
-  repository and a credential rather than anything a dashboard is uniquely good
-  at.
+- Next, the dashboard — and its first piece proves the shape rather than draws
+  a screen. Dioxus is named in `docs/architecture.md` §1 and has never been
+  compiled here. It arrives with a server-function model and a client that
+  compiles to WebAssembly, and both shape everything built against them, so the
+  smallest thing that serves a page and reads real state through a server
+  function is worth having before any screen is designed against a guess.
+
+  It also has to settle a gate question in the same breath. `cargo` builds the
+  host side only, so a client that does not compile for its own target would
+  pass `just check` untouched, and the gate would silently stop covering half
+  the application. Deciding that after two screens exist is deciding it too
+  late.
+
+- Then the agents and projects views, which is where configuring an instance
+  finally becomes possible at all. Agents first, because
+  `docs/decisions/0021-an-instance-starts-empty.md` has a project naming one
+  agent for its orchestrator and a non-empty set for its jobs: creating a
+  project is impossible until at least one exists, and an agent a project names
+  cannot be removed. `State::used_by` is the query that answers both, and it
+  names the projects that would break rather than merely refusing — which is
+  what lets a dashboard say *why*.
+
 - Then Slack end to end — a signal read, judged and turned into a job whose
   prompt is snapshot-tested, and a question asked and answered without anyone
   touching a terminal. Slack because it is the escalation path

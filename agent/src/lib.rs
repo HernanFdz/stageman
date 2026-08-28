@@ -1083,18 +1083,26 @@ mod tests {
         );
     }
 
-    use stageman_core::{AgentConfig, Handout, Job, Project, ProjectId, State, Uuid};
+    use stageman_core::{AgentConfig, Handout, Job, JobAgents, Project, ProjectId, State, Uuid};
     use std::collections::BTreeMap;
 
     /// An instance configured with one agent and nothing else.
+    /// An instance with one agent configured and nothing else.
     fn instance(credential: &str) -> State {
-        State::new(
-            Agent::Claude,
-            AgentConfig {
-                auth_token: Secret::new(credential.to_owned()),
-            },
-            PathBuf::from("/usr/local/bin/container-runtime"),
-        )
+        State {
+            agents: BTreeMap::from([(
+                Agent::Claude,
+                AgentConfig {
+                    auth_token: Secret::new(credential.to_owned()),
+                },
+            )]),
+            container_runtime: Some(PathBuf::from("/usr/local/bin/container-runtime")),
+            ..State::default()
+        }
+    }
+
+    fn only_claude() -> JobAgents {
+        JobAgents::new(std::collections::BTreeSet::from([Agent::Claude])).expect("one is not none")
     }
 
     /// An instance with one project, so a handout can carry a platform
@@ -1112,6 +1120,8 @@ mod tests {
             Project {
                 name: "example".to_owned(),
                 repository: "https://example.invalid/repo".to_owned(),
+                orchestrator_agent: Agent::Claude,
+                job_agents: only_claude(),
                 credentials,
                 jobs: BTreeMap::<_, Job>::new(),
             },
@@ -1133,8 +1143,8 @@ mod tests {
 
     #[test]
     fn triage_is_delivered_its_credential_and_nothing_else() {
-        let state = instance("sk-ant-oat01-xyz");
-        let handout = Handout::for_triage(&state).expect("a configured instance");
+        let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
+        let handout = Handout::for_triage(&state, project).expect("a watched project");
 
         let delivered = variables(&handout);
 
@@ -1174,8 +1184,8 @@ mod tests {
 
     #[test]
     fn a_session_container_is_not_cut_off_from_the_network() {
-        let state = instance("sk-ant-oat01-xyz");
-        let handout = Handout::for_triage(&state).expect("a configured instance");
+        let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
+        let handout = Handout::for_triage(&state, project).expect("a watched project");
 
         let arguments = session_arguments(handout.agent(), &variables(&handout));
 
@@ -1193,8 +1203,8 @@ mod tests {
 
     #[test]
     fn a_retained_container_is_named_labelled_and_survives_its_own_exit() {
-        let state = instance("sk-ant-oat01-xyz");
-        let handout = Handout::for_triage(&state).expect("a configured instance");
+        let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
+        let handout = Handout::for_triage(&state, project).expect("a watched project");
 
         let arguments = retained_arguments("stageman-job-abc", Agent::Claude, &variables(&handout));
         let line = arguments.join(" ");
@@ -1281,14 +1291,27 @@ mod tests {
         }
 
         fn handout_of(runtime: &ContainerRuntime) -> (State, Handout) {
-            let state = State::new(
+            let mut state = State::default();
+            state.agents.insert(
                 Agent::Claude,
                 AgentConfig {
                     auth_token: credential(),
                 },
-                runtime.path().to_owned(),
             );
-            let handout = Handout::for_triage(&state).expect("a configured instance");
+            state.container_runtime = Some(runtime.path().to_owned());
+            let project = ProjectId::from_uuid(Uuid::from_u128(3));
+            state.projects.insert(
+                project,
+                Project {
+                    name: "probe".to_owned(),
+                    repository: "https://example.invalid/repo".to_owned(),
+                    orchestrator_agent: Agent::Claude,
+                    job_agents: only_claude(),
+                    credentials: BTreeMap::new(),
+                    jobs: BTreeMap::new(),
+                },
+            );
+            let handout = Handout::for_triage(&state, project).expect("a watched project");
             (state, handout)
         }
 
