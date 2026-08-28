@@ -59,6 +59,50 @@ pub const fn resumption_notice() -> &'static str {
     RESUMPTION
 }
 
+/// The instruction a job begins from.
+///
+/// Self-contained by necessity: an agent in a fresh container knows nothing
+/// about where it came from, so this carries the repository, the work, and the
+/// constraint — `docs/conventions.md` §2.
+///
+/// Three things it says that are not negotiable, each from a decision rather
+/// than from taste. Nothing has been checked out, because
+/// `docs/decisions/0016-the-agent-clones-the-repository.md` removed every
+/// mechanism that would have. The tools are already authenticated, because
+/// `docs/decisions/0009-jobs-hold-their-own-platform-credentials.md` hands the
+/// job its project's credential rather than proxying its access. And work ends
+/// at a proposal, because
+/// `docs/decisions/0002-never-merge-never-deploy.md` is what lets a job run
+/// with nobody watching at all.
+///
+/// The proposal instruction is deliberately conditional — *when you have a
+/// change to propose*. A job whose work is a question rather than a change has
+/// nothing to open, and an unconditional instruction would have it inventing
+/// one to comply.
+#[must_use]
+pub fn kickoff(repository: &str, work: &str) -> String {
+    format!(
+        "\
+You are working on {repository}.
+
+Nothing has been checked out for you. If the work needs the repository, clone \
+it into the current directory yourself. You have git and gh, and gh is already \
+signed in as the account this work belongs to.
+
+The work:
+
+{work}
+
+When you have a change to propose, open a pull request and stop there. Do not \
+merge it, do not deploy anything, and do not push to the default branch. \
+Somebody reads what you propose before it counts for anything, which is what \
+lets you work unattended.
+
+If you need an answer from a person before you can continue, say so plainly \
+and stop. Do not guess, and do not wait — nobody is watching this terminal."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::resumption_notice;
@@ -79,6 +123,50 @@ outside this workspace, such as a branch pushed or a comment posted. Check how t
 stand before you act. Do not assume your last step completed, and do not assume it did not.
 
 Then carry on with the work you were given."
+        );
+    }
+
+    /// Asserted whole, per `docs/conventions.md` §4. This is the text that
+    /// decides what every job does, and it can be rewritten completely without
+    /// a single other test going red — so the diff is the review.
+    #[test]
+    fn a_kickoff_reads_exactly_as_written() {
+        assert_eq!(
+            super::kickoff(
+                "https://example.invalid/repo",
+                "Fix the flaky test in the parser."
+            ),
+            "You are working on https://example.invalid/repo.
+
+Nothing has been checked out for you. If the work needs the repository, clone it into the \
+current directory yourself. You have git and gh, and gh is already signed in as the account this \
+work belongs to.
+
+The work:
+
+Fix the flaky test in the parser.
+
+When you have a change to propose, open a pull request and stop there. Do not merge it, do not \
+deploy anything, and do not push to the default branch. Somebody reads what you propose before \
+it counts for anything, which is what lets you work unattended.
+
+If you need an answer from a person before you can continue, say so plainly and stop. Do not \
+guess, and do not wait — nobody is watching this terminal."
+        );
+    }
+
+    /// The constraint that lets a job run with nobody watching, and the one
+    /// worth a test of its own because losing it is not visible in behaviour
+    /// until something has already been merged.
+    #[test]
+    fn a_kickoff_always_says_to_propose_and_never_to_merge() {
+        let prompt = super::kickoff("https://example.invalid/repo", "anything at all");
+
+        assert!(prompt.contains("open a pull request"), "{prompt}");
+        assert!(prompt.contains("Do not merge it"), "{prompt}");
+        assert!(
+            prompt.contains("do not push to the default branch"),
+            "{prompt}"
         );
     }
 

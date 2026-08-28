@@ -129,10 +129,21 @@ Intended next steps, in order, each with its reason. Written as intentions, not
 progress: "next X, because Y" — never "X is 60% done", which is both derivable
 and wrong within a day.
 
-- Next, one job end to end, as the proof of concept: a project configured, an
-  agent started in its own container, and a change proposed. Deliberately
-  before the two mitigations above rather than after — they are far easier to
-  design against something that runs than against something imagined.
+- Next, the half of the proof of concept still missing: a change actually
+  proposed. A job now runs end to end — a project watched, a container named
+  for it, a kickoff it did not write, and a repository it cloned itself — and
+  it stops short of opening a pull request. That step is the first in this
+  project that cannot be taken against something invented: it needs a
+  repository somebody owns and a credential that can push to it, and the thing
+  it produces is visible to other people. Deliberately still before the two
+  mitigations above, which are far easier to design against something that runs.
+- Then a way to configure a project at all. One is currently built in a test,
+  and an operator has no way to add one, because adding projects is the
+  dashboard's job and there is no dashboard. Worth stating as its own step
+  rather than letting it hide inside the dashboard's: the first-run flow shows
+  that asking for configuration in a terminal is cheap, and a project is a
+  repository and a credential rather than anything a dashboard is uniquely good
+  at.
 - Then Slack end to end — a signal read, judged and turned into a job whose
   prompt is snapshot-tested, and a question asked and answered without anyone
   touching a terminal. Slack because it is the escalation path

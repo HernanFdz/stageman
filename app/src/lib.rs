@@ -20,7 +20,8 @@ use rand::rngs::{StdRng, SysRng};
 use rand::{Rng as _, SeedableRng as _};
 use stageman_agent::{ContainerRuntime, StopReason};
 use stageman_core::{
-    JobId, Key, NONCE_LEN, Nonce, OpenError, Progress, SealError, Snapshot, State,
+    Agent, Handout, Job, JobId, Key, NONCE_LEN, Nonce, OpenError, Progress, ProjectId, SealError,
+    Snapshot, State, Timestamp,
 };
 
 /// An instance could not be opened.
@@ -236,6 +237,96 @@ impl Drop for StateGuard<'_> {
     }
 }
 
+/// A job could not be created.
+#[derive(Debug, thiserror::Error)]
+pub enum RunError {
+    /// The project is not one this instance watches.
+    #[error("no project {0} in this instance")]
+    UnknownProject(ProjectId),
+    /// What the job's agent may see could not be decided.
+    #[error("what the job's agent may see could not be decided")]
+    Handout(#[source] stageman_core::HandoutError),
+}
+
+/// Creates a job on a project and runs it to completion.
+///
+/// The whole of the doing, in the one crate allowed to name both the store and
+/// the job — `docs/architecture.md` §1. What the orchestrator will eventually
+/// decide (which project, which agent, why, and what work) arrives here as
+/// arguments, because nothing decides it yet.
+///
+/// **The record is written before the container exists, and the order is not
+/// arbitrary.** Killed in between, this leaves a job believed to be running
+/// with nothing to run in — which the sweep recognises and records as failed.
+/// The other order leaves a container naming a job the instance has no record
+/// of, which is the case the sweep can only warn about, because a container it
+/// cannot place is a container it must not remove. One ordering produces a
+/// problem that resolves itself; the other produces one that needs a person.
+///
+/// # Errors
+///
+/// Fails if the project is unknown, or if a handout cannot be decided for it.
+/// A job that *runs* and fails is not an error here: it is a recorded outcome,
+/// returned as [`Progress::Failed`], because the job happened.
+pub async fn run(
+    store: &Store,
+    runtime: &ContainerRuntime,
+    project: ProjectId,
+    agent: Agent,
+    reason: &str,
+    work: &str,
+) -> Result<(JobId, Progress), RunError> {
+    let (repository, handout) = {
+        let state = store.read();
+        let repository = state
+            .projects
+            .get(&project)
+            .ok_or(RunError::UnknownProject(project))?
+            .repository
+            .clone();
+        let handout = Handout::for_job(&state, agent, project).map_err(RunError::Handout)?;
+        // Explicit, because holding a lock on the instance across the work
+        // below would mean a job's whole run blocking every reader of it.
+        drop(state);
+        (repository, handout)
+    };
+
+    let kickoff = stageman_orchestrator::kickoff(&repository, work);
+    let job = JobId::from_uuid(uuid::Uuid::new_v4());
+
+    {
+        let mut state = store.update();
+        if let Some(project) = state.projects.get_mut(&project) {
+            project.jobs.insert(
+                job,
+                Job {
+                    agent,
+                    reason: reason.to_owned(),
+                    kickoff: kickoff.clone(),
+                    created_at: Timestamp::now(),
+                    progress: Progress::Running,
+                },
+            );
+        }
+    }
+
+    let progress = match stageman_job::start(runtime, &handout, job, &kickoff).await {
+        Ok(answer) if answer.stop_reason == StopReason::EndTurn => Progress::Completed,
+        Ok(answer) => {
+            let why = format!("the agent stopped: {:?}", answer.stop_reason);
+            tracing::warn!(%job, stop_reason = ?answer.stop_reason, "did not finish");
+            Progress::Failed(why)
+        }
+        Err(error) => {
+            tracing::warn!(%job, %error, "could not be run");
+            Progress::Failed(error.to_string())
+        }
+    };
+
+    record(store, job, progress.clone());
+    Ok((job, progress))
+}
+
 /// What a sweep found, and what it did about it.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Swept {
@@ -423,7 +514,7 @@ fn record(store: &Store, job: JobId, progress: Progress) {
 
 #[cfg(test)]
 mod tests {
-    use super::{LoadError, Store, Swept, Unplaceable, reconcile, unplaceable};
+    use super::{LoadError, Store, Swept, Unplaceable, reconcile, run, unplaceable};
     use stageman_agent::ContainerRuntime;
     use stageman_core::{
         Agent, AgentConfig, Job, JobId, Key, Progress, Project, ProjectId, Secret, State,
@@ -692,5 +783,135 @@ mod tests {
             matches!(found.first(), Some(Unplaceable::Forgotten(_, job)) if *job == lost),
             "{found:?}"
         );
+    }
+
+    /// Tests that spend real money and reach the network, grouped so a filter
+    /// can name them. Run with `just image-session`.
+    mod costs_a_credential {
+        use super::*;
+
+        /// A repository small enough to clone in a test, public enough to need
+        /// no credential, and owned by the platform itself so it will not
+        /// vanish.
+        const PUBLIC_REPOSITORY: &str = "https://github.com/octocat/Hello-World";
+
+        fn credential() -> Secret {
+            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../.local/anthropic-token");
+            let raw = std::fs::read_to_string(path)
+                .expect("write an agent credential to .local/anthropic-token (it is gitignored)");
+            Secret::new(raw.trim().to_owned())
+        }
+
+        fn located_runtime() -> ContainerRuntime {
+            let located = std::process::Command::new("sh")
+                .args(["-c", "command -v docker"])
+                .output()
+                .expect("looking for a container runtime");
+            let path = String::from_utf8(located.stdout).expect("a runtime path is text");
+            ContainerRuntime::new(PathBuf::from(path.trim()))
+        }
+
+        fn an_instance_watching(
+            repository: &str,
+            runtime: &ContainerRuntime,
+        ) -> (State, ProjectId) {
+            let mut state = State::new(
+                Agent::Claude,
+                AgentConfig {
+                    auth_token: credential(),
+                },
+                runtime.path().to_owned(),
+            );
+            let project = ProjectId::from_uuid(Uuid::from_u128(11));
+            state.projects.insert(
+                project,
+                Project {
+                    name: "hello".to_owned(),
+                    repository: repository.to_owned(),
+                    // No platform credential: the repository is public, so this
+                    // also checks that a job with nothing to authenticate with
+                    // is a perfectly ordinary job rather than a broken one.
+                    credentials: BTreeMap::new(),
+                    jobs: BTreeMap::new(),
+                },
+            );
+            (state, project)
+        }
+
+        /// One job, end to end: a project configured, an agent started in a
+        /// container named for its job, a kickoff it did not write, and a
+        /// repository it fetched itself.
+        ///
+        /// The clone is the part worth proving, because
+        /// `docs/decisions/0016-the-agent-clones-the-repository.md` removed
+        /// every mechanism that would have put a repository there — so the
+        /// files being present is evidence the agent did it, and nothing else
+        /// could have.
+        #[tokio::test]
+        #[ignore = "needs a container runtime, a built image, a credential and the network; run `just image-session`"]
+        async fn a_job_runs_from_kickoff_to_a_cloned_repository() {
+            let runtime = located_runtime();
+            let directory = tempfile::tempdir().expect("a temporary directory");
+            let (state, project) = an_instance_watching(PUBLIC_REPOSITORY, &runtime);
+            let store =
+                Store::create(snapshot_path(&directory), key(), state).expect("it can write");
+
+            let (job, progress) = run(
+                &store,
+                &runtime,
+                project,
+                Agent::Claude,
+                "checking that a job can run at all",
+                "Clone the repository. Then reply with one short line saying how many files are \
+                 in it. Make no changes, commit nothing, and open nothing.",
+            )
+            .await
+            .expect("the job is created");
+
+            assert_eq!(progress, Progress::Completed, "the job did not finish");
+            assert_eq!(
+                store
+                    .read()
+                    .job(job)
+                    .map(|recorded| recorded.progress.clone()),
+                Some(Progress::Completed),
+                "and the instance should have recorded that"
+            );
+
+            // The kickoff it was given is kept on the job, so what a job was
+            // told survives the job — which is most of what makes a bad run
+            // answerable afterwards.
+            let told = store
+                .read()
+                .job(job)
+                .map(|recorded| recorded.kickoff.clone())
+                .expect("the job is recorded");
+            assert!(told.contains(PUBLIC_REPOSITORY), "{told}");
+            assert!(told.contains("open a pull request"), "{told}");
+
+            // The repository really is in the container, and nothing but the
+            // agent could have put it there.
+            let workspace = directory.path().join("workspace");
+            let copied = std::process::Command::new(runtime.path())
+                .arg("cp")
+                .arg(format!("{}:/workspace", stageman_job::container(job)))
+                .arg(&workspace)
+                .output()
+                .expect("the runtime runs");
+            assert!(
+                copied.status.success(),
+                "{}",
+                String::from_utf8_lossy(&copied.stderr)
+            );
+            let cloned = std::fs::read_dir(&workspace)
+                .expect("the workspace was copied out")
+                .filter_map(Result::ok)
+                .any(|entry| entry.path().join(".git").exists());
+            assert!(cloned, "no clone in the workspace: {workspace:?}");
+
+            stageman_job::discard(&runtime, job)
+                .await
+                .expect("it is removable");
+        }
     }
 }
