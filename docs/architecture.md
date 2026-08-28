@@ -79,11 +79,24 @@ first.
   no conversational state lives here; see
   `docs/decisions/0005-conversation-happens-on-channels.md`.
 
+  **This is the one crate compiled for two machines**, and the split runs
+  through it rather than around it: the daemon's half may name everything
+  below, and the browser's half gets plain serialisable types and nothing else
+  — see `docs/decisions/0022-the-browser-never-sees-the-domain.md`. The split
+  is drawn by optional dependencies in the manifest rather than by `cfg` in the
+  source, because a `cfg` hides code from the compiler and not a dependency
+  from cargo.
+
 Dependencies point inward. **core** names nothing. **agent** may name **core**.
 **orchestrator** and **job** may name **core** and **agent** — both run agents,
 for different shapes of work — and may never name each other; everything they
 share is a type in **core**, which is what keeps the deciding and the doing from
 growing into one another. **app** may name all four; nothing may name **app**.
+
+There is one more direction, and it is inside **app** rather than between
+crates: **nothing served to a browser may name any of the four.** The rule
+looks like the same one and is not — the others are about what a crate is
+allowed to know, and this one is about what leaves the machine.
 
 So the orchestrator does not start a job, despite being the thing that decides
 one should exist. It emits a request as a **core** type, and **app** — the only
@@ -142,6 +155,18 @@ nobody is a wish.
   which naming the container was always the more accurate claim, and the
   clearest sign that the older wording described an implementation rather than a
   property.
+- **Nothing served to a browser can carry a credential.** What the dashboard
+  reads is a small set of plain types holding counts, names and paths, built on
+  the server from the domain and never the domain itself. *Defended by* those
+  types having nowhere to put one, by the manifest keeping **core** out of the
+  browser's build entirely, and by a test that configures a credential and
+  reads both the rendered page and the route looking for it. See
+  `docs/decisions/0022-the-browser-never-sees-the-domain.md`.
+
+  The test passes by construction today, which is exactly why it is worth
+  having: construction is what a later field would change, and a redacting
+  `Debug` would not notice — `docs/conventions.md` §4's rule is about
+  formatting, and this is about the wire.
 - **No job blocks on a terminal.** A job that needs a human emits the question
   on a channel and stays alive. It never writes to standard output expecting an
   answer on standard input, because nobody is watching that terminal — that is

@@ -30,31 +30,52 @@ Running stageman means running one server executable on a machine you control.
 It serves a dashboard and does the watching in the same process, so there is no
 second daemon to supervise.
 
-What it does need is a container runtime. stageman runs agents rather than
-replacing them, and it runs each one inside a container built with that agent
-already installed — so the machine itself needs no coding agent, no repository
-tooling, and nothing particular on its path. That holds for the agent the
-orchestrator thinks with just as much as for the ones doing the work.
+What it does need is a container runtime — Docker or Podman, installed the
+ordinary way, and running. stageman runs agents rather than replacing them, and
+it runs each one inside a container built with that agent already installed —
+so the machine itself needs no coding agent, no repository tooling, and nothing
+particular on its path. That holds for the agent the orchestrator thinks with
+just as much as for the ones doing the work.
+
+You do not tell it where that runtime is. It looks in the places each installer
+puts one, checks that what it finds actually answers rather than merely exists,
+and prints the path it settled on. A machine without one is a machine stageman
+cannot work on, so it says which paths it tried and stops rather than starting
+into a state where nothing can run.
 
 A running stageman reads no credential from the machine's environment. Every
 one of them is entered in the dashboard, held encrypted, and handed to a
 container as it starts. Obtaining a credential is a one-time step you do
 wherever you happen to be, and only its result goes into stageman.
 
-**It asks you nothing to start.** A fresh instance has no agents, no projects
-and no container runtime, and that is a perfectly good instance — it simply has
-nothing to do yet. You give it those in the dashboard, in that order, because a
-project needs an agent to think with and at least one its jobs can run on.
+**It asks you nothing to start.** A fresh instance has no agents and no
+projects, and that is a perfectly good instance — it simply has nothing to do
+yet. You give it those in the dashboard, in that order, because a project needs
+an agent to think with and at least one its jobs can run on.
 
-Starting it needs two things named in the environment: `STAGEMAN_KEY`, the
-base64 key its file is encrypted under, and `STAGEMAN_STATE`, where that file
-lives. Both describe where the instance *is* rather than what it does, which is
-why neither can live in the file itself, and neither has a default because a
-daemon started by a service manager inherits a working directory nobody chose.
+Starting it needs one thing named in the environment: `STAGEMAN_KEY`, the
+base64 key its file is encrypted under. That cannot have a default and cannot
+live in the file it protects, which is the whole of why it is asked for at all.
+
+Where that file goes is not your problem. It lands in the ordinary place for
+application data on your platform, the directory is created if it is not there,
+and the path is printed at startup so it is never a guess. Set `STAGEMAN_STATE`
+if you want a different one — a second instance on one machine is the case that
+needs it. What it will never be is relative to wherever the process happened to
+start: a daemon under a service manager has a working directory nobody chose.
 
 What gets reported is `STAGEMAN_LOG`. It takes the same filter syntax as
 `RUST_LOG` and defaults to `warn` — enough to see what needs attention, not a
 commentary on things going right.
+
+Where the dashboard listens is `IP` and `PORT`, defaulting to `127.0.0.1:8080`.
+Those two names are generic, and they are what they are because the Dioxus
+tooling sets them: a binary that read its own pair would need translating every
+time it was run for development. Ask for port zero and the operating system
+picks; either way the address actually taken is printed at startup, along with
+whether a browser bundle was found beside the binary. A build without one still
+serves the dashboard — the page is rendered on the server and arrives
+complete, it just does not update itself afterwards.
 
 Which agents are configured is yours to decide, the orchestrator picks one per
 job from what you have set up, and the dashboard shows which agent ran each

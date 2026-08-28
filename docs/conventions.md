@@ -213,6 +213,28 @@ justify is usually obsolete.
   happen on the request path: watching a channel, judging a signal and
   supervising a job all belong on their own tasks. A dashboard that stops
   painting because a job is thinking is the failure this rule exists to prevent.
+- **The app's `server` feature is a contract with the framework, not a name.**
+  The server-function macro emits `#[cfg(feature = "server")]` literally, so a
+  feature spelled anything else silently moves every server function's body to
+  the client. Everything the daemon needs is an optional dependency behind it —
+  including the four internal crates — because a `cfg` hides code from the
+  compiler and only the manifest hides a dependency from cargo. Reasoning in
+  `docs/decisions/0022-the-browser-never-sees-the-domain.md`.
+
+  Two consequences worth knowing before meeting them. **A server function's
+  dependencies arrive as an axum extension declared in the macro attribute**,
+  not through the framework's serve configuration: that reaches the virtual DOM,
+  so it exists while a page is rendered and is missing when the browser calls
+  the same route afterwards — which passes every server-rendering test and
+  fails the first real click. And **a lint expectation written on a server function does not
+  survive**: the macro re-emits doc comments and drops every other attribute,
+  so anything the generated client code needs goes at module scope.
+- **The gate builds the browser's half too, and it is a line in
+  `check_matrix`.** `cargo` builds the host side only, so without that line a
+  client that does not compile would pass `just check` untouched and the gate
+  would silently stop covering half the application. The line excludes the four
+  internal crates by name; a crate added later fails there until somebody says
+  which side of the split it is on, which is the right default.
 - **Typed errors per crate, and no `anyhow` in core, agent, orchestrator or
   job.** That is the gate's bar restated only where it bites: **app** is a
   binary and may do as it likes internally, but the other four are libraries
@@ -308,10 +330,38 @@ built from this gate, this one needs:
 - **The agent image, built** — `just image`. The container tests skip without
   it rather than failing, so a green `just check` on a machine that has never
   built it is not evidence the containers work; `just image-handshake` is.
+- **`dx`, the Dioxus CLI** — `cargo install dioxus-cli`, needed to build the
+  browser half into a bundle. `just dashboard` serves both halves with
+  reloading; `just check` needs neither it nor a bundle, because the wasm pass
+  is `cargo` against a target and that is a toolchain fact.
 
-Neither is needed for `just check`, which is deliberate: the gate stays
-runnable on a machine with nothing but a toolchain, and the things that need
-more are ignored tests behind their own recipes.
+  **It has to be the same version as the `dioxus` dependency**, which is in
+  `Cargo.toml` and is deliberately not repeated here. `dx` generates the glue
+  the runtime hydrates against, so the two are one thing shipped as two
+  packages. A mismatch is not fatal today — it serves, and says so in red on
+  every start — which is exactly what makes it worth writing down: a warning
+  that does not stop anything is one people learn to scroll past.
+  `cargo install dioxus-cli@<the version in Cargo.toml>` fixes it.
+
+  A binary built by `cargo` alone therefore has a server and no client, and
+  that is a working thing to run rather than a broken one — the page is
+  rendered on the server and arrives complete, it just does not come alive
+  afterwards. Which one you have is printed at startup, so this is never a
+  guess.
+
+**The runtime is needed for `just check`; the image and `dx` are not.** That
+split used to be simpler — nothing beyond a toolchain — and
+`docs/decisions/0023-the-container-runtime-is-discovered-once.md` gave up the
+runtime half deliberately, on the grounds that something required in production
+and optional in the tests is a difference that gets discovered late. Seven
+integration tests run the binary, and the binary refuses to start without a
+runtime, so there is no version of this where the gate passes on a machine that
+could not run the program.
+
+Building the image stays out, because a present runtime is not a built image: it
+is a container build costing minutes and a network, so it belongs to
+`just verify` — the bar for pushing — rather than to the gate you run
+constantly.
 
 **Two credentials, if you want to run the tests that cost money.**
 `just image-session` drives a real agent against a real model, and
@@ -325,8 +375,13 @@ ignores rather than from the environment, so nothing inherits them by accident:
   scoped to this one repository, with contents and pull requests write, and
   nothing else.
 
-Both live in the gitignored `.local` directory, and are named here without it
-on purpose. `just drift` resolves every backticked path in this directory
+A third file, `instance-key`, sits beside them and is not in that list because
+nothing asks you for it: `just dashboard` generates one on first use, to
+encrypt the development instance it serves. Losing it costs a file with nothing
+in it, and an instance that will not open is repaired by deleting both.
+
+All of these live in the gitignored `.local` directory, and the credentials are
+named here without it on purpose. `just drift` resolves every backticked path in this directory
 against the repository, so citing one that exists on the machine writing the
 sentence and in no clone passes locally and fails everywhere else. That is not
 hypothetical: it is what this paragraph did when it was first written, and the

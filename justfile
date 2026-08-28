@@ -56,6 +56,7 @@ default: check
 # completely clean.
 check_matrix := '''
 host
+--target wasm32-unknown-unknown --no-default-features --features web --exclude stageman-core --exclude stageman-agent --exclude stageman-orchestrator --exclude stageman-job
 '''
 
 # --------------------------------------------------------------------- check
@@ -218,8 +219,13 @@ deps:
 # pre-push hook and CI both run this, and CI knows the base of a pull request
 # while a laptop does not. Empty means `mutants` works it out, which is what a
 # hook wants.
-[doc("Everything in `check`, plus mutation testing. The bar for pushing.")]
-verify base="": check (mutants base)
+# `containers` is this project's own and is defined in `project.just`, which is
+# the one place the shared half of this file reaches into the local half. It is
+# here rather than in `check` because it builds a container image: minutes and a
+# network, against a gate whose whole promise is to cost time proportional to
+# the code. A project without that recipe deletes the dependency.
+[doc("Everything in `check`, plus mutation testing and the container tests. The bar for pushing.")]
+verify base="": check (mutants base) containers
 
 # The declared rust-version is decorative unless something builds against it, and
 # clippy::incompatible_msrv catches std-API breaks only, never new syntax.

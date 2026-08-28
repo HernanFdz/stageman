@@ -114,26 +114,120 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   become things somebody has to handle. Settled by building it, and worth
   building before the orchestrator has a second caller rather than after.
 
-- **May a project carry an image of its own?**
-  `docs/decisions/0019-a-projects-tooling-is-the-projects-business.md` settled
-  who *decides* what a job needs — the project, and never stageman — and left
-  who *provides* it open. Declaring a prerequisite does not put a toolchain in
-  a container.
+- **How does a job run containers of its own?** Answered for provisioning in
+  general by
+  `docs/decisions/0024-the-agent-provisions-what-a-project-needs.md` — the
+  agent sets a project up inside its own container — and this is the one
+  prerequisite that answer cannot supply, because it is the container itself.
 
-  Two shapes remain. An image per project, built from an agent's as a base,
-  which is correct and multiplies what somebody has to build and keep current.
-  Or a project naming packages installed when its container starts, which
-  `docs/decisions/0012-agents-run-in-containers.md` rejected for the agent
-  because installing on every start puts minutes in front of every signal — an
-  argument that is genuinely weaker here, since a job is not on a signal's
-  critical path and starts far less often than triage does.
+  It is not hypothetical: it is this project. Since
+  `docs/decisions/0023-the-container-runtime-is-discovered-once.md`,
+  `just check` needs a container runtime, so an agent working on this
+  repository needs one inside its container. Installing a client is not having
+  a runtime — measured: a container with the Docker CLI answers
+  `docker --version` and fails `docker version`, since only the second reaches
+  a daemon.
 
-  What makes this worth answering rather than living with: an agent that cannot
-  run a project's checks still opens a pull request. The proposal is honest
-  about it — the first one this system made said so unprompted — but honesty
-  hands the verification back to a person, which is the work this system exists
-  to remove. Settled by the second project this ever runs against, because one
-  project's answer is indistinguishable from a special case.
+  **Three shapes, and two of them were measured rather than reasoned about.**
+
+  *Mounting the host's container socket* is what most continuous integration
+  does, and it is disqualified here rather than merely risky. It breaks the
+  invariant in `docs/architecture.md` §2 directly: a container holding that
+  socket listed its siblings, read another container's environment — which is
+  where `docs/decisions/0008-one-credential-per-agent.md` puts an agent's
+  credential — and executed inside it as root. That is every other project's
+  credentials, from any one job.
+
+  *A privileged container* running its own daemon works, and costs the whole
+  boundary: every Linux capability, the host's block devices, and the host's
+  root filesystem readable through the raw device. It has no socket to abuse
+  and reaches the same place by a longer road, so it is not the safer of the
+  two despite looking like it.
+
+  *A rootless container running rootless Podman* also works, and is the one
+  worth building on. Measured in that configuration: no capabilities at all,
+  seccomp filtering still active, no host devices, and the innermost root two
+  user namespaces away from any real user. It needs `/dev/fuse`, a non-root
+  user in the container, and — on a distribution that enforces SELinux — its
+  labelling relaxed.
+
+  What that does *not* buy is worth being equally clear about: the kernel is
+  still shared, so an escape is still a kernel bug away. The difference is
+  where an attacker starts, not whether the door exists.
+
+  Settled by trying the third shape on the machine it has to work on. What is
+  measured was measured on one architecture, under a virtual machine, on a
+  distribution that enforces SELinux; continuous integration is none of those,
+  and the SELinux flag in particular may be unnecessary there. Note also that
+  the requirement itself is a consequence of 0023 rather than a fact of nature
+  — a gate that did not need a runtime would not need any of this, and that is
+  the cheapest available answer if the rest turns out to be expensive.
+
+- **Is the environment the right place for the encryption key?** It is where
+  `STAGEMAN_KEY` arrives today, for the reason
+  `docs/decisions/0017-the-runtimes-path-is-recorded-in-the-instance.md` gives
+  in passing: storing it beside the file it encrypts would defeat the
+  encryption. That says where it must *not* be and settles nothing about where
+  it should be.
+
+  Get the threat model right before designing for it, because the obvious
+  statement of it is wrong. A process environment is not world-readable: on
+  Linux `/proc/<pid>/environ` is readable only by the same user and by root,
+  and macOS has no equivalent at all for another user's processes. So the
+  exposure is to **anything already running as the same user** — which on a
+  developer's own machine is a large set, and is exactly the machine
+  `docs/vision.md` §3 has this running on. It is also inherited by children:
+  the container runtime client is spawned with the daemon's environment, so
+  the key is in that process too. Not in the *container* — what crosses that
+  boundary is only what `--env` names, which is the mechanism
+  `docs/conventions.md` §3 relies on — but the client is one more process
+  holding it.
+
+  The candidates are per-platform and none is portable, which is the hard
+  part. A service manager is the leading shape: a systemd unit's
+  `LoadCredential=` passes a secret through a file descriptor rather than the
+  environment, which is strictly better than `EnvironmentFile=` and better
+  than what happens today. The analogues are launchd with the Keychain, and a
+  Windows service with the credential manager. All three arrive with
+  installation rather than with the program.
+
+  Settled by distribution, and deliberately not before: what installs this
+  decides what can hold a secret for it, and building a keychain integration
+  against a guess about packaging is how that gets built twice.
+
+- **Does the dashboard need authentication before it leaves `127.0.0.1`?**
+  Nothing authenticates a request today, and the default address makes that
+  survivable rather than correct: anything that can reach the port can read
+  every project's name and, once the views exist, change what this instance
+  runs. The address is configurable, so the protection is a default and not a
+  boundary.
+
+  Worth stating what it is *not*: no credential is served — see
+  `docs/decisions/0022-the-browser-never-sees-the-domain.md` and the invariant
+  in `docs/architecture.md` §2 — so this is about who may operate the instance
+  rather than about what leaks from reading it.
+
+  Settled by deciding whether this is ever reached from another machine.
+  `docs/vision.md` §3 has a daemon on somebody's own machine, and if that holds
+  the answer is to document the default loudly and stop. The moment somebody
+  wants it from a phone, the answer is a real one and the cheapest real one is
+  probably a reverse proxy that already does this, rather than a login page
+  here.
+
+- **How does a page find out that something changed?** Everything the dashboard
+  shows is read once, while the page is rendered. A job finishing, a signal
+  arriving, an orchestrator deciding — none of it reaches a browser that is
+  already open, and this is the first thing anybody will notice.
+
+  The mechanisms are known and the choice between them is not: polling the
+  route on a timer, which is trivial and wrong at any interval you pick;
+  server-sent events, which fit one-directional updates exactly; or the
+  framework's websocket support, which fits and costs more. What actually
+  decides it is what the *first* changing view needs, and none exists yet.
+
+  Note the interaction with the question above it. Anything long-lived is a
+  connection somebody has to authenticate, so answering that one first is
+  cheaper than answering it twice.
 
 - **What should happen when an agent credential expires while nobody is
   watching?** It will, and it lands on every job at once. The options run from
@@ -150,20 +244,7 @@ Intended next steps, in order, each with its reason. Written as intentions, not
 progress: "next X, because Y" — never "X is 60% done", which is both derivable
 and wrong within a day.
 
-- Next, the dashboard — and its first piece proves the shape rather than draws
-  a screen. Dioxus is named in `docs/architecture.md` §1 and has never been
-  compiled here. It arrives with a server-function model and a client that
-  compiles to WebAssembly, and both shape everything built against them, so the
-  smallest thing that serves a page and reads real state through a server
-  function is worth having before any screen is designed against a guess.
-
-  It also has to settle a gate question in the same breath. `cargo` builds the
-  host side only, so a client that does not compile for its own target would
-  pass `just check` untouched, and the gate would silently stop covering half
-  the application. Deciding that after two screens exist is deciding it too
-  late.
-
-- Then move the end-to-end tests out of the crates they test. A test that drives
+- Next, move the end-to-end tests out of the crates they test. A test that drives
   a whole flow — a job from kickoff to a cloned repository, a session surviving
   its container stopping — belongs in `tests/`, where it is a separate crate
   that may use only the public API. That is what an end-to-end test should

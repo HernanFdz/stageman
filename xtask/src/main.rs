@@ -401,6 +401,22 @@ fn run_msrv(matrix: &str) -> Result<String, String> {
 
 /// Mutation-test what changed, so the backlog does not block but new untested
 /// logic does.
+/// How long one mutant's test run may take before it counts as hung, in seconds.
+///
+/// Set rather than left to cargo-mutants, which derives it from the baseline
+/// run and floors it at twenty seconds. That default is wrong for any suite
+/// containing a test with a deadline of its own, and wrong in a way that
+/// depends on the machine: a mutant which makes N such tests wait costs
+/// `N / parallelism` deadlines, and `cargo test` takes its parallelism from
+/// the core count. The same mutant is therefore caught on a developer's
+/// machine and reported as a timeout on a two-core runner — which is exactly
+/// what happened, and a timeout is counted as a survivor, so the gate failed
+/// on a mutant the tests do kill.
+///
+/// The cost of a generous value is bounded and paid only by mutants that
+/// genuinely hang: one of them, once each.
+const MUTANT_TIMEOUT: &str = "120";
+
 fn run_mutants(base_arg: Option<&str>) -> Result<String, String> {
     let base = base_arg
         .filter(|spec| !spec.is_empty())
@@ -412,7 +428,13 @@ fn run_mutants(base_arg: Option<&str>) -> Result<String, String> {
         println!("mutants: no base commit to diff against — running the full sweep");
         return finish(
             Command::new("cargo")
-                .args(["mutants", "--workspace", "--no-shuffle"])
+                .args([
+                    "mutants",
+                    "--workspace",
+                    "--no-shuffle",
+                    "--timeout",
+                    MUTANT_TIMEOUT,
+                ])
                 .status(),
             "mutants: no surviving mutants",
         );
@@ -426,7 +448,14 @@ fn run_mutants(base_arg: Option<&str>) -> Result<String, String> {
     fs::write(&path, &diff).map_err(|e| format!("writing {}: {e}", path.display()))?;
     println!("mutants: mutating only what changed since {base}");
     let status = Command::new("cargo")
-        .args(["mutants", "--workspace", "--no-shuffle", "--in-diff"])
+        .args([
+            "mutants",
+            "--workspace",
+            "--no-shuffle",
+            "--timeout",
+            MUTANT_TIMEOUT,
+            "--in-diff",
+        ])
         .arg(&path)
         .status();
     let _ = fs::remove_file(&path);

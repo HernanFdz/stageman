@@ -27,7 +27,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::path::PathBuf;
 
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Key as CipherKey, Nonce as CipherNonce};
@@ -354,24 +353,15 @@ pub struct State {
     pub agents: BTreeMap<Agent, AgentConfig>,
     /// The projects it watches.
     pub projects: BTreeMap<ProjectId, Project>,
-    /// Where the container runtime lives on this machine.
-    ///
-    /// A located path and never a name to be searched for, because a daemon
-    /// that searches works when you test it by hand and fails under a service
-    /// manager — `docs/conventions.md` §3 states the rule and
-    /// `docs/decisions/0017-the-runtimes-path-is-recorded-in-the-instance.md`
-    /// says why it is recorded here rather than in an environment with the
-    /// same problem.
-    ///
-    /// Optional because an instance with no projects has nothing to run, so
-    /// there is nothing for a missing runtime to make unusable. What must not
-    /// happen is a project being created against a runtime nothing has
-    /// verified, which is a check at that moment rather than at startup.
-    ///
-    /// The one value in a snapshot describing the machine rather than the
-    /// work, which is worth knowing before moving a snapshot to another one.
-    pub container_runtime: Option<PathBuf>,
 }
+
+// Deliberately absent: where the container runtime lives. It was a field here
+// until `docs/decisions/0023-the-container-runtime-is-discovered-once.md`
+// replaced it with discovery, and the reason it does not come back is that it
+// describes the *machine* rather than the work. A snapshot is meant to be
+// portable — copy the file, carry it to another machine, supply the key — and
+// a recorded absolute path is the one thing in it that a different machine
+// makes wrong.
 
 impl State {
     /// Which projects depend on an agent's configuration.
@@ -540,11 +530,7 @@ impl State {
             })
             .collect::<Result<BTreeMap<_, _>, SealError>>()?;
 
-        Ok(Snapshot {
-            agents,
-            projects,
-            container_runtime: self.container_runtime.clone(),
-        })
+        Ok(Snapshot { agents, projects })
     }
 }
 
@@ -755,16 +741,6 @@ pub struct Snapshot {
     pub agents: BTreeMap<Agent, SealedAgentConfig>,
     /// The projects, sealed.
     pub projects: BTreeMap<ProjectId, SealedProject>,
-    /// Where the container runtime lives on this machine.
-    ///
-    /// Not a credential, so it is stored as it was given. It is also the only
-    /// field here that will be wrong if this file is opened on a different
-    /// machine, which fails at startup rather than quietly — see
-    /// `docs/decisions/0017-the-runtimes-path-is-recorded-in-the-instance.md`.
-    ///
-    /// Absent on an instance that has not been given one yet, which is what an
-    /// instance looks like before anybody has configured anything.
-    pub container_runtime: Option<PathBuf>,
 }
 
 impl Snapshot {
@@ -777,11 +753,7 @@ impl Snapshot {
     /// orchestrator's has no configuration. That check is what lets every
     /// later caller look that agent up without handling an absence.
     pub fn open(self, key: &Key) -> Result<State, OpenError> {
-        let Self {
-            agents,
-            projects,
-            container_runtime,
-        } = self;
+        let Self { agents, projects } = self;
 
         let agents = agents
             .into_iter()
@@ -817,11 +789,7 @@ impl Snapshot {
             })
             .collect::<Result<BTreeMap<_, _>, OpenError>>()?;
 
-        let state = State {
-            agents,
-            projects,
-            container_runtime,
-        };
+        let state = State { agents, projects };
         // A file is untrusted input, so this is where believing it stops.
         state.check().map_err(OpenError::Inconsistent)?;
         Ok(state)
@@ -994,17 +962,9 @@ mod tests {
     use base64::Engine as _;
     use jiff::Timestamp;
     use std::collections::{BTreeMap, BTreeSet};
-    use std::path::PathBuf;
     use uuid::Uuid;
 
     const TOKEN: &str = "ghp-not-a-real-token";
-
-    /// Where a test pretends the container runtime lives.
-    ///
-    /// Never resolved: nothing in this crate runs a program, and a path that
-    /// exists on the machine running the tests would make them pass for a
-    /// reason unrelated to what they check.
-    const RUNTIME: &str = "/usr/local/bin/container-runtime";
 
     /// An instance with an agent configured and nothing else.
     fn configured() -> State {
@@ -1015,7 +975,6 @@ mod tests {
                     auth_token: Secret::new("agent-token".to_owned()),
                 },
             )]),
-            container_runtime: Some(PathBuf::from(RUNTIME)),
             ..State::default()
         }
     }
@@ -1082,7 +1041,6 @@ mod tests {
 
         assert!(empty.agents.is_empty());
         assert!(empty.projects.is_empty());
-        assert!(empty.container_runtime.is_none());
     }
 
     #[test]
@@ -1192,13 +1150,22 @@ mod tests {
         assert!(!json.contains("agent-token"));
     }
 
+    /// A snapshot says nothing about the machine it was written on.
+    ///
+    /// This replaces a test asserting the opposite — that a snapshot remembered
+    /// where the container runtime lived. That field is gone, per
+    /// `docs/decisions/0023-the-container-runtime-is-discovered-once.md`, and
+    /// what it protected is worth keeping as a property: the file is meant to
+    /// be copied to another machine, so anything machine-specific in it is
+    /// wrong there. Asserted against the serialised form rather than the type,
+    /// because a field added back would compile perfectly and only show up
+    /// here.
     #[test]
-    fn a_snapshot_remembers_where_the_container_runtime_lives() {
-        let recovered = sealed()
-            .open(&key())
-            .expect("the snapshot opens with the key it was sealed under");
+    fn a_snapshot_holds_nothing_that_belongs_to_one_machine() {
+        let json = serde_json::to_string(&sealed()).expect("a snapshot serialises");
 
-        assert_eq!(recovered.container_runtime, Some(PathBuf::from(RUNTIME)));
+        assert!(!json.contains("runtime"), "{json}");
+        assert!(!json.contains("/usr/"), "{json}");
     }
 
     #[test]
