@@ -176,14 +176,17 @@ fn started(variables: &[(&str, String)]) -> Serving {
 
 /// How long a start is given to say where it is listening.
 ///
-/// Bounded on both sides, which is why it is a small number rather than a
-/// generous one. Below: a start prints its address in well under a second, so
-/// this is twenty times what it needs even under a loaded parallel run. Above:
-/// `cargo mutants` sets its own timeout from the baseline run — twenty seconds
-/// here — and a wait longer than that turns a mutant this suite *does* catch
-/// into a reported timeout, which the gate treats as a survivor. Both bounds
-/// were measured rather than guessed.
-const PATIENCE: Duration = Duration::from_secs(10);
+/// A backstop against a process that starts and never speaks, not a
+/// measurement of anything: the whole of this suite runs in about a second on
+/// continuous integration, so a single start is a fraction of that and this is
+/// two orders of magnitude more than it needs.
+///
+/// Kept small because it is spent more than once. Eleven tests here wait on a
+/// start, and a change that stops any start printing makes every one of them
+/// wait the full time — serially, on a machine with fewer cores than tests.
+/// That is what `MUTANT_TIMEOUT` in `xtask` is sized against, and keeping this
+/// modest is the other half of the same arrangement.
+const PATIENCE: Duration = Duration::from_secs(5);
 
 /// Reads a starting binary's output until it names the address it took.
 ///
