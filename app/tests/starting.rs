@@ -27,7 +27,7 @@
 )]
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::io::{self, BufRead as _, BufReader, Read as _, Write as _};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Output, Stdio};
@@ -82,10 +82,21 @@ impl Serving {
     /// The whole of the response to one `GET`, headers included.
     ///
     /// Written by hand rather than with an HTTP client, because `Connection:
-    /// close` makes the whole exchange "write a request, read to end of file"
-    /// and a dependency would buy nothing. Headers are kept in the returned
-    /// text on purpose: a test asserting on a status line should not have to
-    /// take this function's word for it.
+    /// close` makes the whole exchange "write a request, read until the peer
+    /// stops talking" and a dependency would buy nothing. Headers are kept in
+    /// the returned text on purpose: a test asserting on a status line should
+    /// not have to take this function's word for it.
+    ///
+    /// **A reset after the payload counts as the end**, which is the one piece
+    /// of this that is not obvious. Under `Connection: close` the response is
+    /// over when the peer closes, and whether that arrives as an orderly
+    /// shutdown or a reset is a detail of the kernel and the timing rather than
+    /// anything about the response — `read_to_end` calls the second one an
+    /// error, and continuous integration duly produced one where this machine
+    /// never has. Tolerating it hides nothing: a reset that arrived *early*
+    /// leaves a truncated response, and the assertions in the tests below then
+    /// fail against the partial text, which says far more than
+    /// `ConnectionReset` did.
     fn get(&self, path: &str) -> String {
         let mut connection = TcpStream::connect(&self.address).expect("the dashboard accepts");
         write!(
@@ -94,10 +105,19 @@ impl Serving {
             self.address
         )
         .expect("the request is sent");
+
         let mut response = Vec::new();
-        connection
-            .read_to_end(&mut response)
-            .expect("the response arrives");
+        let mut chunk = [0_u8; 4096];
+        loop {
+            match connection.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) => response.extend_from_slice(chunk.get(..read).unwrap_or_default()),
+                Err(reset) if reset.kind() == io::ErrorKind::ConnectionReset => break,
+                Err(interrupted) if interrupted.kind() == io::ErrorKind::Interrupted => {}
+                Err(failure) => panic!("the response did not arrive: {failure}"),
+            }
+        }
+        assert!(!response.is_empty(), "the connection closed saying nothing");
         String::from_utf8_lossy(&response).into_owned()
     }
 }
