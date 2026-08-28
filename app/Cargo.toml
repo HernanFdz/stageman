@@ -20,22 +20,108 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+# This crate is compiled twice, for two machines, and the features are how it
+# is told which. `server` is the daemon: it operates the instance, so it names
+# the internal crates and everything that touches a disk. `web` is the bundle
+# served to a page, and names almost nothing.
+#
+# **Every server-side dependency is optional on purpose.** A `cfg` in the
+# source does not stop cargo building a dependency — only the manifest does —
+# so gating the code and leaving the dependency unconditional would compile
+# `stageman-core`, and with it the credential types and the cipher, for the
+# browser. That is the rule in
+# `docs/decisions/0022-the-browser-never-sees-the-domain.md`, and this list is
+# where it is actually enforced.
+[features]
+default = ["server"]
+server = [
+    "dep:etcetera",
+    "dep:parking_lot",
+    "dep:rand",
+    "dep:serde_json",
+    "dep:stageman-agent",
+    "dep:stageman-core",
+    "dep:stageman-job",
+    "dep:stageman-orchestrator",
+    "dep:thiserror",
+    "dep:tokio",
+    "dep:tracing",
+    "dep:tracing-subscriber",
+    "dep:uuid",
+    "dioxus/fullstack",
+    "dioxus/server",
+]
+web = ["dioxus/fullstack", "dioxus/web"]
+
 [dependencies]
-parking_lot = "0.12.5"
-rand = "0.10.2"
-serde_json = "1.0.151"
-stageman-agent.workspace = true
-stageman-core.workspace = true
-stageman-job.workspace = true
-stageman-orchestrator.workspace = true
-thiserror = "2.0.20"
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros"] }
-tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
-uuid = { version = "1.26.0", features = ["v4"] }
+# Both halves. The renderer is selected by a feature above rather than here,
+# which is why this line names no platform at all.
+#
+# Pinned exactly, and to a version that is not the newest. `dx` generates the
+# glue this hydrates against, so the CLI and the library are one thing shipped
+# as two packages and a mismatch is reported on every start — see
+# `docs/conventions.md` §5. An ordinary caret requirement would let a routine
+# `cargo update` walk away from whichever `dx` is installed, silently, which is
+# the failure this is pinned to prevent rather than a preference for old code.
+# Raising it means installing the matching `dx`, which is a deliberate act on
+# every machine that builds the browser half.
+dioxus = "=0.7.9"
+# Both halves, and the reason the view has its own types: what crosses a server
+# function has to serialise, and what the browser is handed must be nothing
+# more than that.
+serde = { version = "1.0.228", features = ["derive"] }
+# An attribute and nothing else — it compiles to nothing unless cargo-mutants
+# is the one building. Needed here for the browser's entry point, which no
+# configuration the tests run under compiles at all.
+mutants = "0.0.4"
+
+etcetera = { version = "0.11.0", optional = true }
+parking_lot = { version = "0.12.5", optional = true }
+rand = { version = "0.10.2", optional = true }
+serde_json = { version = "1.0.151", optional = true }
+stageman-agent = { workspace = true, optional = true }
+stageman-core = { workspace = true, optional = true }
+stageman-job = { workspace = true, optional = true }
+stageman-orchestrator = { workspace = true, optional = true }
+thiserror = { version = "2.0.20", optional = true }
+tokio = { version = "1.53.1", features = [
+    "macros",
+    "net",
+    "rt-multi-thread",
+], optional = true }
+tracing = { version = "0.1.44", optional = true }
+tracing-subscriber = { version = "0.3.23", features = [
+    "env-filter",
+    "fmt",
+], optional = true }
+uuid = { version = "1.26.0", features = ["v4"], optional = true }
 
 [lints]
 workspace = true
 
-[dev-dependencies]
+# Scoped to the machines that can run it. A dev-dependency is not optional-able,
+# and `--all-targets` compiles the library's own test target for whatever is
+# being built — so an unscoped `tempfile` would be built for the browser by the
+# gate's wasm pass, for tests that are not compiled there.
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 tempfile = "3.27.0"
+
+# The example and the integration test state what the browser cannot build.
+# `required-features` makes cargo skip a target rather than fail on it, so the
+# wasm pass compiles what belongs there and says so, instead of needing a list
+# of exclusions that would have to be maintained by hand.
+#
+# The binary is deliberately not in that list. `dx` builds the *same* binary
+# for both halves, so a binary the browser cannot build is a client that cannot
+# be built at all — its `main` is split by feature instead, and the gate's wasm
+# pass compiles the entry point along with everything it reaches.
+
+[[example]]
+name = "propose"
+path = "examples/propose.rs"
+required-features = ["server"]
+
+[[test]]
+name = "starting"
+path = "tests/starting.rs"
+required-features = ["server"]

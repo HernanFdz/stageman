@@ -70,6 +70,89 @@ pub use agent_client_protocol::schema::v1::StopReason;
 /// [`printed`], which reads past this and discards the rest.
 const STDERR_LIMIT: usize = 8 * 1024;
 
+/// Where a container runtime is looked for, in order.
+///
+/// Absolute paths and never a search of `PATH`, which is the whole of what
+/// `docs/conventions.md` §3 forbids: an inherited variable differs between the
+/// shell you tested in and what a service manager supplies, and a list
+/// compiled in does not. Deterministic in the same way on every machine is the
+/// property being bought.
+///
+/// Ordered, and the order is a decision rather than an accident. Docker first
+/// because it is what most machines that have anything have; the package
+/// manager locations before the system ones on each platform, because a
+/// hand-installed runtime is the one somebody chose. A machine with both gets
+/// the first, and that is the cost of not asking — see
+/// `docs/decisions/0023-the-container-runtime-is-discovered-once.md`.
+#[cfg(target_os = "macos")]
+const CANDIDATES: &[&str] = &[
+    "/usr/local/bin/docker",
+    "/opt/homebrew/bin/docker",
+    "/Applications/Docker.app/Contents/Resources/bin/docker",
+    "/opt/homebrew/bin/podman",
+    "/usr/local/bin/podman",
+];
+
+/// Where a container runtime is looked for, in order.
+///
+/// See the macOS list above for why this is a list of absolute paths.
+#[cfg(target_os = "linux")]
+const CANDIDATES: &[&str] = &[
+    "/usr/bin/docker",
+    "/usr/local/bin/docker",
+    "/snap/bin/docker",
+    "/usr/bin/podman",
+    "/usr/local/bin/podman",
+];
+
+/// Where a container runtime is looked for, in order.
+///
+/// See the macOS list above for why this is a list of absolute paths.
+#[cfg(target_os = "windows")]
+const CANDIDATES: &[&str] = &[
+    r"C:\Program Files\Docker\Docker\resources\bin\docker.exe",
+    r"C:\Program Files\RedHat\Podman\podman.exe",
+];
+
+/// Nothing is known about where a runtime lives on this platform.
+///
+/// An empty list rather than a compile error, so that a platform nobody has
+/// tried still builds and fails honestly at startup with "none found" — which
+/// is a message somebody can act on, unlike a build that will not finish.
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+const CANDIDATES: &[&str] = &[];
+
+/// The first of [`candidates`] that is a file, as a runtime.
+///
+/// The whole of discovery, and deliberately a pure function of the list rather
+/// than a lazy static reading a fixed one. The static lives in the binary,
+/// because *what to do when there is none* is a decision about a program that
+/// cannot run rather than knowledge about container runtimes — and because a
+/// function taking its list can be tested for the absence, which a static
+/// reading the real list on a machine that has Docker never can.
+///
+/// # Examples
+///
+/// ```
+/// use stageman_agent::first_present;
+///
+/// assert!(first_present(&["/nowhere/at/all/docker"]).is_none());
+/// ```
+#[must_use]
+pub fn first_present(candidates: &[&str]) -> Option<ContainerRuntime> {
+    candidates
+        .iter()
+        .map(PathBuf::from)
+        .find(|candidate| candidate.is_file())
+        .map(ContainerRuntime::new)
+}
+
+/// Every place a runtime was looked for, for a message that has to say.
+#[must_use]
+pub const fn candidates() -> &'static [&'static str] {
+    CANDIDATES
+}
+
 /// Where the container runtime lives.
 ///
 /// A located path, never a name to be searched for. Of the two agents
@@ -969,6 +1052,70 @@ mod tests {
         assert_eq!(runtime.path(), Path::new("/usr/local/bin/docker"));
     }
 
+    /// The check that a filesystem test cannot make.
+    ///
+    /// This used to be an integration test driving the whole binary against a
+    /// deliberately broken runtime. Discovery took away the ability to point
+    /// the binary anywhere, so the check moves to the mechanism it was always
+    /// really about: `verify` asks for a version because that reaches the
+    /// daemon, and a client installed with nothing behind it looks perfectly
+    /// healthy to anything that merely looks for the file.
+    #[tokio::test]
+    async fn a_runtime_that_runs_and_refuses_is_not_usable() {
+        let refusing = ["/usr/bin/false", "/bin/false"]
+            .into_iter()
+            .map(PathBuf::from)
+            .find(|candidate| candidate.exists())
+            .expect("a standard utility that always refuses");
+
+        let failure = ContainerRuntime::new(refusing).verify().await;
+
+        assert!(
+            matches!(failure, Err(AgentError::Unusable { .. })),
+            "{failure:?}"
+        );
+    }
+
+    #[test]
+    fn nothing_installed_is_an_absence_rather_than_a_failure() {
+        assert_eq!(first_present(&[]), None);
+        assert_eq!(first_present(&["/nowhere/at/all/docker"]), None);
+    }
+
+    #[test]
+    fn the_first_path_that_is_there_is_the_one_used() {
+        let real = ["/usr/bin/false", "/bin/false"]
+            .into_iter()
+            .find(|candidate| Path::new(candidate).is_file())
+            .expect("a standard utility");
+
+        let found = first_present(&["/nowhere/at/all/docker", real]);
+
+        assert_eq!(found, Some(ContainerRuntime::new(PathBuf::from(real))));
+    }
+
+    /// A directory is not a runtime, which `exists` would not have caught.
+    #[test]
+    fn a_directory_where_a_runtime_would_be_is_not_one() {
+        assert_eq!(first_present(&["/usr/bin"]), None);
+    }
+
+    /// Every candidate is absolute, which is the property that makes this not
+    /// a `PATH` search.
+    #[test]
+    fn nothing_is_looked_for_relative_to_wherever_this_started() {
+        assert!(
+            !candidates().is_empty(),
+            "this platform knows nowhere to look"
+        );
+        for candidate in candidates() {
+            assert!(
+                Path::new(candidate).is_absolute(),
+                "{candidate} is not an absolute path"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn a_runtime_that_is_not_there_fails_as_a_runtime_rather_than_a_protocol() {
         let runtime = ContainerRuntime::new(PathBuf::from("/nonexistent/container/runtime"));
@@ -1096,7 +1243,6 @@ mod tests {
                     auth_token: Secret::new(credential.to_owned()),
                 },
             )]),
-            container_runtime: Some(PathBuf::from("/usr/local/bin/container-runtime")),
             ..State::default()
         }
     }
@@ -1290,7 +1436,7 @@ mod tests {
             Secret::new(raw.trim().to_owned())
         }
 
-        fn handout_of(runtime: &ContainerRuntime) -> (State, Handout) {
+        fn handout_of() -> (State, Handout) {
             let mut state = State::default();
             state.agents.insert(
                 Agent::Claude,
@@ -1298,7 +1444,6 @@ mod tests {
                     auth_token: credential(),
                 },
             );
-            state.container_runtime = Some(runtime.path().to_owned());
             let project = ProjectId::from_uuid(Uuid::from_u128(3));
             state.projects.insert(
                 project,
@@ -1319,7 +1464,7 @@ mod tests {
         #[ignore = "needs a container runtime, a built image and a credential; run `just image-session`"]
         async fn an_agent_answers_a_question() {
             let runtime = located_runtime();
-            let (_state, handout) = handout_of(&runtime);
+            let (_state, handout) = handout_of();
 
             let answer = ask(
                 &runtime,
@@ -1345,7 +1490,7 @@ mod tests {
         #[ignore = "needs a container runtime, a built image and a credential; run `just image-session`"]
         async fn a_session_outlives_the_container_stopping() {
             let runtime = located_runtime();
-            let (_state, handout) = handout_of(&runtime);
+            let (_state, handout) = handout_of();
             let name = "stageman-job-resume-probe";
             discard(&runtime, name).await.expect("a clean slate");
 
@@ -1391,7 +1536,7 @@ mod tests {
         #[ignore = "needs a container runtime, a built image and a credential; run `just image-session`"]
         async fn a_turn_cut_off_partway_can_still_be_picked_up() {
             let runtime = located_runtime();
-            let (_state, handout) = handout_of(&runtime);
+            let (_state, handout) = handout_of();
             let name = "stageman-job-midturn-probe";
             discard(&runtime, name).await.expect("a clean slate");
 

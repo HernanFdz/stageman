@@ -22,6 +22,19 @@ allow = [
     "ISC",
     "Unicode-3.0",
     "Zlib",
+    # The three below arrived with the dashboard's framework and are each
+    # permissive. Listed one at a time rather than by widening the policy,
+    # because the next one to appear should be a decision somebody takes.
+    #
+    # A public-domain dedication with a permissive fallback. Reaches this
+    # through a hex encoder in the router's macro.
+    "CC0-1.0",
+    # A data licence rather than a code one, which is right for what carries it
+    # here: a bundled set of certificate authority roots is data.
+    "CDLA-Permissive-2.0",
+    # The Boost licence: permissive, OSI-approved, and with no attribution
+    # requirement for binaries.
+    "BSL-1.0",
 ]
 confidence-threshold = 0.9
 # An allow-list entry no dependency happens to use is not a finding. Left at
@@ -47,20 +60,40 @@ private = { ignore = true }
 # `deps` recipe. Without that flag a stale entry rots silently, which is the
 # failure this whole section is trying to avoid.
 multiple-versions = "deny"
-skip = [
-    # Half the proc-macro ecosystem is still on syn 2 while the other half has
-    # moved to syn 3: `serde_derive`, `thiserror-impl`, `tokio-macros` and the
-    # protocol SDK's own derive are on 3; `darling`, `derive_more-impl`,
-    # `pin-project-internal`, `serde_with_macros`, `strum_macros` and
-    # `tracing-attributes` are on 2. Every one of those is already at its
-    # latest published version, so there is no lockfile edit that resolves
-    # this — only dropping the SDK would, and
-    # `docs/decisions/0014-the-protocols-own-sdk-and-our-own-spawning.md` took
-    # that deliberately.
-    #
-    # Revisit: nothing to do. When those six publish against syn 3 this entry
-    # stops matching and the gate fails until it is deleted.
-    { crate = "syn:2", reason = "transitive: six upstream proc-macro crates have not yet migrated to syn 3" },
+# Empty, and it was not always. A `syn:2` entry lived here, because half the
+# proc-macro ecosystem has moved to syn 3 and half has not. It is gone rather
+# than resolved: the subtree below carries syn 2 as well, and a version skipped
+# there is skipped everywhere — so the entry stopped matching anything and
+# cargo-deny said so on every run. That is the masking cost named below,
+# arriving on the very first commit that could demonstrate it.
+skip = []
+
+# One entry, and it is the honest shape of the problem rather than an escape
+# from it. The dashboard's framework brings a tree of its own, and that tree
+# contains twenty-eight crates at two versions — `windows-sys`, `getrandom`,
+# `thiserror`, `rand` and the rest. Not one of them is a version this project
+# picked, and no edit here resolves any of them: they are upstream's choices on
+# upstream's release cadence.
+#
+# The alternative was twenty-eight `skip` entries, which is precisely what the
+# note above says an exemption list must not become — at that length nobody
+# reads it, and a real duplicate hides in the middle of it. So the subtree is
+# exempt in one line that says why, and `multiple-versions = "deny"` keeps
+# every one of its teeth everywhere this project actually chooses a dependency.
+#
+# What it costs: anything duplicated *inside* this subtree stops being reported
+# outside it too, because cargo-deny skips the version rather than the edge.
+# There is already one case — `syn` is at 2 and 3 across this workspace, the
+# protocol SDK's derive being on 3 and six other proc-macro crates on 2, and
+# nothing reports it now. That was a `skip` entry with its own reasoning until
+# this line made it redundant. The trade is worth knowing before adding a
+# dependency and trusting silence.
+#
+# Revisit: when the framework's own tree settles, or if this project ever needs
+# to audit a specific duplicate inside it — narrow to named `skip` entries
+# then, with the tree in front of you.
+skip-tree = [
+    { crate = "dioxus", depth = 20, reason = "the dashboard framework's own dependency tree, which this project does not choose versions in" },
 ]
 # A wildcard version is not reproducible and not auditable.
 wildcards = "deny"

@@ -47,17 +47,14 @@ jobs:
       # Empty on a push, where `mutants` falls back to working the base out
       # itself. On a pull request this is what the branch is actually proposed
       # against, which is the diff worth mutating.
-      - run: just verify "${{ github.event.pull_request.base.sha }}"
-
-      # The tests `just check` deliberately cannot run, because it must work on
-      # a machine that has only a toolchain — see docs/conventions.md §5. They
-      # are ignored rather than absent so that they are counted as skipped
-      # rather than invisible, and this is the thing that keeps them honest:
-      # ignored tests nothing ever runs rot, and rotting tests are worse than
-      # none because they read as coverage.
+      # One step, because there is one bar. Since
+      # docs/decisions/0023-the-container-runtime-is-discovered-once.md,
+      # `verify` builds the image and runs the container tests itself — they
+      # used to be two steps here because the gate had to run on a machine with
+      # only a toolchain, and it no longer does. A runner has a container
+      # runtime already installed, which is what makes this work unchanged.
       #
       # What stays out is the set that needs a paid credential and reaches a
       # model. Those cannot run here and are run by hand with
       # `just image-session`, which is a real limit rather than an oversight.
-      - run: just image
-      - run: just image-handshake
+      - run: just verify "${{ github.event.pull_request.base.sha }}"

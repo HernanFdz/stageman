@@ -88,7 +88,6 @@ async fn propose() -> Result<(), String> {
             auth_token: agent_token,
         },
     );
-    state.container_runtime = Some(runtime.path().to_owned());
     let project = ProjectId::from_uuid(Uuid::new_v4());
     let mut credentials = std::collections::BTreeMap::new();
     credentials.insert(Platform::GitHub, platform_token);

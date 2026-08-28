@@ -21,4 +21,4 @@ components = ["clippy", "rustfmt"]
 # Listing it here makes rustup install it on demand, for the pinned toolchain,
 # on every machine that clones this repository.
 #
-# targets = ["wasm32-unknown-unknown"]
+targets = ["wasm32-unknown-unknown"]
