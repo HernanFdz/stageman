@@ -43,12 +43,18 @@ starts. Obtaining a credential is a one-time step you do wherever you happen to
 be, and only its result goes into stageman. The first run is the only thing
 that asks you anything — and on a machine with no terminal to ask on, it will
 take those answers from the environment instead, once, to bring the instance
-into existence.
+into existence. Those answers are `STAGEMAN_AGENT_TOKEN`, the agent's
+credential, and `STAGEMAN_CONTAINER_RUNTIME`, the runtime's path — set both and
+nothing is asked; set neither and the terminal is.
 
 Starting it needs two things named in the environment: `STAGEMAN_KEY`, the
 base64 key its file is encrypted under, and `STAGEMAN_STATE`, where that file
 lives. Neither has a default, because a daemon started by a service manager
 inherits a working directory nobody chose.
+
+What gets reported is `STAGEMAN_LOG`, read on every run rather than only the
+first. It takes the same filter syntax as `RUST_LOG` and defaults to `warn` —
+enough to see what needs attention, not a commentary on things going right.
 
 Which agents are configured is yours to decide, the orchestrator picks one per
 job from what you have set up, and the dashboard shows which agent ran each
