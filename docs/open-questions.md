@@ -114,33 +114,26 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   become things somebody has to handle. Settled by building it, and worth
   building before the orchestrator has a second caller rather than after.
 
-- **Which tools does a job's image need, and who decides?**
-  `docs/decisions/0012-agents-run-in-containers.md` has the image carrying "the
-  agent and the platform tools a job needs", installed at build time. The first
-  real job this system ran proposed a change to this repository and said so
-  itself, in its own pull request: it could not run `just check`, because
-  neither `just` nor `cargo` is in the image. Verified afterwards — the image
-  has git and gh and no Rust toolchain at all.
+- **May a project carry an image of its own?**
+  `docs/decisions/0019-a-projects-tooling-is-the-projects-business.md` settled
+  who *decides* what a job needs — the project, and never stageman — and left
+  who *provides* it open. Declaring a prerequisite does not put a toolchain in
+  a container.
 
-  That is not a defect in the image, it is a question 0012 did not ask. The
-  tools a job needs are a property of the **project**, and the image is built
-  per **agent**. A Rust project needs a toolchain, a Python one needs something
-  else, and both need the same agent — so one axis is being asked to carry two.
+  Two shapes remain. An image per project, built from an agent's as a base,
+  which is correct and multiplies what somebody has to build and keep current.
+  Or a project naming packages installed when its container starts, which
+  `docs/decisions/0012-agents-run-in-containers.md` rejected for the agent
+  because installing on every start puts minutes in front of every signal — an
+  argument that is genuinely weaker here, since a job is not on a signal's
+  critical path and starts far less often than triage does.
 
-  Three shapes are available and none is obviously right. An image per project,
-  built from an agent base, which is correct and multiplies the images somebody
-  has to build. A project declaring packages installed when its container
-  starts, which 0012 rejected for the agent on the grounds that installing on
-  every start puts minutes in front of every signal — an argument that is
-  weaker for a job than it was for triage, since a job is not on a signal's
-  critical path. Or leaving it, which is what happens today.
-
-  Leaving it is worse than it sounds, and that is the part worth deciding on.
-  An agent that cannot run the tests still opens a pull request, and the whole
-  purpose of the gate is that nobody has to trust a change which has not passed
-  it. A proposal that says "I could not verify this" is honest and still shifts
-  the work back to a human, which is the thing this system exists to avoid.
-  Settled by deciding whether a project may carry an image of its own.
+  What makes this worth answering rather than living with: an agent that cannot
+  run a project's checks still opens a pull request. The proposal is honest
+  about it — the first one this system made said so unprompted — but honesty
+  hands the verification back to a person, which is the work this system exists
+  to remove. Settled by the second project this ever runs against, because one
+  project's answer is indistinguishable from a special case.
 
 - **What should happen when an agent credential expires while nobody is
   watching?** It will, and it lands on every job at once. The options run from

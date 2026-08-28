@@ -271,3 +271,26 @@ it lands.
   and the only kind that changes behaviour without changing control flow, so it
   is also the only kind that can be rewritten completely without a single test
   going red.
+
+## 5. What this project needs installed
+
+Beyond the Rust toolchain and `just` that `AGENTS.md` names for every project
+built from this gate, this one needs:
+
+- **A container runtime** — Docker or Podman. Every agent runs inside a
+  container, including the one the orchestrator thinks with, so nothing here
+  runs an agent without one. See
+  `docs/decisions/0012-agents-run-in-containers.md`.
+- **The agent image, built** — `just image`. The container tests skip without
+  it rather than failing, so a green `just check` on a machine that has never
+  built it is not evidence the containers work; `just image-handshake` is.
+
+Neither is needed for `just check`, which is deliberate: the gate stays
+runnable on a machine with nothing but a toolchain, and the things that need
+more are ignored tests behind their own recipes.
+
+**What a *job's* container needs is a different question and not this one.**
+That is about the project a job works on rather than about this repository, and
+`docs/decisions/0019-a-projects-tooling-is-the-projects-business.md` says why
+stageman does not answer it.
+

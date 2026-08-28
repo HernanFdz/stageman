@@ -250,6 +250,20 @@ mutants base="":
 mutants-full:
     cargo mutants --workspace --no-shuffle
 
+# -------------------------------------------------------------------- hooks
+
+# Git never clones hooks, so this is opt-in per checkout and has to be. What it
+# points at is tracked in `.githooks/`, which means the hook is versioned with
+# the code it checks — something a hook living in `.git/hooks/` never is.
+#
+# It is a convenience and not a guarantee: `--no-verify` skips it, and a clone
+# that never runs this has no hook. The guarantee is the workflow plus a rule
+# that a pull request cannot merge until it passes.
+[doc("Point git at this repository's tracked hooks, so the gate runs before a commit")]
+hooks:
+    git config core.hooksPath .githooks
+    @echo "hooks installed: the gate now runs before each commit (--no-verify skips it)"
+
 # ------------------------------------------------------------------- extras
 
 [doc("Tight edit loop with warnings suppressed. NOT a gate — `just check` is.")]
