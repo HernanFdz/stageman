@@ -128,7 +128,9 @@ dashboard *arguments:
     fi
     export STAGEMAN_KEY="$(cat "$key")"
     export STAGEMAN_STATE="${STAGEMAN_STATE:-$scratch/instance.json}"
-    echo "instance    $STAGEMAN_STATE"
+    # Deliberately not echoed here. The binary prints where its instance is as
+    # part of the summary it prints anyway, so saying it first only produces
+    # the same line twice, several seconds apart, with a build between them.
     dx serve --fullstack --package stageman {{ arguments }} \
         @client --no-default-features --features web \
         @server --features server
