@@ -13,8 +13,12 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-stageman-agent.workspace = true
+stageman-agent = { version = "0.1.0", path = "../agent" }
 stageman-core.workspace = true
+thiserror = "2.0.20"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["macros", "rt"] }

@@ -108,9 +108,39 @@ enum StartupError {
     /// The container runtime is missing or not working.
     #[error("the container runtime is not usable")]
     Runtime(#[source] AgentError),
+    /// The runtime would not say what containers it has.
+    ///
+    /// Fatal at startup rather than merely reported: an instance that cannot
+    /// see its own containers cannot tell a job worth resuming from one that
+    /// is gone, and would quietly start a second container for work already
+    /// running.
+    #[error("what the last run left behind could not be established")]
+    Sweep(#[source] stageman_job::JobError),
 }
 
+/// How much is reported, when the environment does not say.
+///
+/// A default rather than a policy. `warn` is what an operator who set nothing
+/// should see: things they can act on, and not a commentary on things going
+/// right.
+const DEFAULT_VERBOSITY: &str = "warn";
+
+/// The variable that overrides how much is reported.
+const VERBOSITY_VARIABLE: &str = "STAGEMAN_LOG";
+
 fn main() -> ExitCode {
+    // Standard error, which is a real answer for a process somebody started
+    // and is watching, and a placeholder for the daemon this becomes — see
+    // `docs/decisions/0018-diagnostics-are-emitted-through-tracing.md`, which
+    // takes the first and defers the second on purpose.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_env(VERBOSITY_VARIABLE)
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(DEFAULT_VERBOSITY)),
+        )
+        .with_writer(std::io::stderr)
+        .init();
+
     match tokio::runtime::Runtime::new() {
         Ok(runtime) => match runtime.block_on(start()) {
             Ok(()) => ExitCode::SUCCESS,
@@ -127,6 +157,13 @@ fn main() -> ExitCode {
 }
 
 /// Prints a failure and everything underneath it.
+///
+/// Deliberately not through `tracing`, and the distinction is worth keeping:
+/// this is the program's last word to whoever ran it, not a record of
+/// something that happened. Routing it through a level would let
+/// `STAGEMAN_LOG` silence the reason the process exited, which is the one
+/// message that must never be filterable.
+///
 ///
 /// The chain rather than the top line alone: every error here wraps a more
 /// specific one, and "the instance could not be opened" without the reason
@@ -163,11 +200,26 @@ async fn start() -> Result<(), StartupError> {
     let runtime = ContainerRuntime::new(store.read().container_runtime.clone());
     runtime.verify().await.map_err(StartupError::Runtime)?;
 
+    // Before anything else could act on the instance: what the last run left
+    // is reconciled with what this one believes, per
+    // `docs/decisions/0015-a-job-survives-the-daemon-dying.md`.
+    let swept = stageman::reconcile(&store, &runtime)
+        .await
+        .map_err(StartupError::Sweep)?;
+
     println!();
     println!("stageman is configured and its container runtime answers.");
     println!("  agent      {:?}", store.read().orchestrator_agent);
     println!("  runtime    {}", runtime.path().display());
     println!("  projects   {}", store.read().projects.len());
+    println!(
+        "  swept      {} resumed, {} failed, {} stranded",
+        swept.resumed, swept.failed, swept.stranded
+    );
+    println!(
+        "  left alone {} unidentified, {} naming a forgotten job",
+        swept.unidentified, swept.forgotten
+    );
     println!();
     println!("There is no dashboard yet, so there is nothing further to run.");
     Ok(())

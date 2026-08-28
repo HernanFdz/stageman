@@ -46,28 +46,25 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   that permits opening a pull request but not merging one is the same question
   wearing a different hat, and answering it once answers both.
 
-- **Which logging does this use, and where does its output go?** The store has
-  the first thing that needs one: a snapshot write that fails inside a `Drop`
-  can only be reported, never returned, and it currently goes to standard error
-  as a placeholder rather than a choice. `tracing` with `tracing-subscriber` is
-  the leading candidate — structured, and its span model suits a system whose
-  work is naturally nested inside a job. The harder half is where output goes:
+- **Where does a log line go?**
+  `docs/decisions/0018-diagnostics-are-emitted-through-tracing.md` settled how
+  one is *emitted* and deliberately settled nothing about where it ends up.
+  Standard error is a real answer for a process an operator started and is
+  watching, and a placeholder for the daemon this becomes:
   `docs/decisions/0005-conversation-happens-on-channels.md` has the dashboard
-  showing logs, so writing to a terminal nobody is attached to is not enough,
-  and a failure an operator never sees is close to a failure that was
-  swallowed. Settled by the first thing that needs to *read* a log rather than
-  write one, which is the dashboard.
+  showing logs, and a failure nobody sees is close to one that was swallowed.
 
-  Sharpened since this was written, and the sharpening is most of the work:
-  **instance-wide and project-level logs are two concepts, not one with two
-  sources.** A snapshot that will not write, or a runtime that has stopped
-  answering, is a fact about the installation — an operator's problem, read
-  wherever somebody looks when nothing works at all. What a job's agent says is
-  about one project's work, is read by whoever is watching that job, and
-  belongs beside the job that produced it. They differ in who reads them, when,
-  and what they are for, so answering both with one mechanism is the way this
-  gets built wrong; treating them as the same thing has to be a decision
-  somebody takes rather than a default nobody noticed.
+  The hard part is that **instance-wide and project-level output are two
+  concepts, not one with two sources.** A snapshot that will not write is a
+  fact about the installation. What a job's agent says is about one project's
+  work. They differ in who reads them, when, and what for — so answering both
+  with one destination is the way this gets built wrong, and calling them the
+  same has to be a decision somebody takes rather than a default nobody
+  noticed. Spans are how they could be routed apart, and no span exists yet
+  because nothing has run long enough to need one.
+
+  Settled by the first thing that needs to *read* a log rather than write one,
+  which is still the dashboard.
 
 - **Does a stopped container behave the same way on every runtime this has to
   run on?** `docs/decisions/0015-a-job-survives-the-daemon-dying.md` rests on
@@ -89,7 +86,15 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   of the rule depends on what finishing looks like. The leading candidate is
   that an operator retires a job from the dashboard and that removes its
   container, with automatic retirement later: an agent that judges itself
-  finished asks for confirmation on a channel and retires on the answer. Note
+  finished asks for confirmation on a channel and retires on the answer.
+
+  One part is now settled by default rather than by decision, which is worth
+  saying out loud: the startup sweep removes *nothing*. A container it cannot
+  place is reported and left, because a container is where a job's work lives
+  and "I did not recognise this, so I deleted it" is the wrong answer when the
+  instance is the thing that is wrong — a snapshot restored from an older
+  backup, most obviously. So nothing is ever removed automatically today, and
+  the question below is entirely about when that should change. Note
   what that second half already is — a job asking a question and waiting for a
   human, which is
   `docs/decisions/0005-conversation-happens-on-channels.md` and the last item
@@ -124,18 +129,7 @@ Intended next steps, in order, each with its reason. Written as intentions, not
 progress: "next X, because Y" — never "X is 60% done", which is both derivable
 and wrong within a day.
 
-- Next, a job as a thing that runs rather than a record of one that did.
-  **core** gains the states `docs/architecture.md` §1 says it holds and does
-  not yet, and **job** gains the crate that starts one. The container half is
-  built — named, labelled, retained, resumable, and tested to all four — so
-  what is missing is anything that knows a job is *running*, which is also what
-  a sweep has to consult in order to tell a container worth resuming from an
-  orphan worth removing.
-- Then startup sweeps and resumes, which is the last piece of
-  `docs/decisions/0015-a-job-survives-the-daemon-dying.md` and the first time
-  its bar in `docs/conventions.md` §4 can be tested as a whole rather than in
-  parts.
-- Then one job end to end, as the proof of concept: a project configured, an
+- Next, one job end to end, as the proof of concept: a project configured, an
   agent started in its own container, and a change proposed. Deliberately
   before the two mitigations above rather than after — they are far easier to
   design against something that runs than against something imagined.

@@ -210,9 +210,16 @@ pub enum Platform {
 
 /// One agent, in one workspace, working on one project.
 ///
-/// A job happens once. There is no retry and no resume: a second attempt is a
-/// new job with its own workspace, which is why nothing here records an
-/// attempt count.
+/// A job happens once and there is no retry: a second attempt is a new job with
+/// its own workspace, which is why nothing here records an attempt count. It
+/// may outlive the process supervising it, and resuming is not retrying — the
+/// same job carries on, which is the distinction
+/// `docs/decisions/0015-a-job-survives-the-daemon-dying.md` turns on.
+///
+/// Nothing here names the container it runs in. The name is derived from the
+/// job's identifier, so there is no moment at which a container exists and the
+/// value naming it has not been written down — a field would have that gap, and
+/// a container nothing can name is the one leak 0015 has to prevent.
 ///
 /// It holds no credential, which is why it crosses the snapshot boundary
 /// unchanged while the types around it need a sealed counterpart.
@@ -240,6 +247,51 @@ pub struct Job {
     /// Named for the record rather than for the work, so it stays true once
     /// there is a gap between a job existing and an agent starting.
     pub created_at: Timestamp,
+    /// Where it has got to.
+    pub progress: Progress,
+}
+
+/// Where a job has got to.
+///
+/// The states `docs/architecture.md` §1 says this crate holds. Deliberately
+/// three and not more: they are what somebody has to *act* on, and a state
+/// nobody acts on differently is a label rather than a state.
+///
+/// Note what is absent. There is no *interrupted*, although a job's container
+/// is stopped every time the daemon dies. That is a fact about the runtime and
+/// not about the work: the job is still running, and startup's job is to make
+/// the containers match rather than to move the job somewhere new — see
+/// `docs/decisions/0015-a-job-survives-the-daemon-dying.md`, where resuming is
+/// the same job continuing. A state for it would have to be left behind on
+/// every resume, and the first crash between the two would strand a job in a
+/// state nothing clears.
+///
+/// There is also no `Default`. A job is created running, so the value is never
+/// in doubt at the one moment a default would be consulted — and a job whose
+/// progress was filled in by nobody is exactly the kind of record that later
+/// reads as fact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Progress {
+    /// Started, and nothing has said it is over.
+    ///
+    /// What a sweep looks for: a running job whose container is stopped is one
+    /// to restart, and a container whose job is not running is not.
+    Running,
+    /// The agent finished its turn.
+    ///
+    /// Says the work ended, not that it succeeded — nothing here can see
+    /// whether a proposal was any good, and
+    /// `docs/decisions/0002-never-merge-never-deploy.md` means a human reads it
+    /// before it counts for anything. Claiming more would be a claim this
+    /// system is not in a position to make.
+    Completed,
+    /// It could not be finished, and this is what went wrong.
+    ///
+    /// Prose for a person reading the dashboard, like `reason` — not a code to
+    /// branch on. What a job that fails ought to do beyond this is
+    /// `docs/open-questions.md`'s question about credentials expiring, wearing
+    /// a different hat.
+    Failed(String),
 }
 
 /// A repository this instance watches, and everything belonging to it.
@@ -316,6 +368,43 @@ impl State {
             orchestrator_agent,
             container_runtime,
         }
+    }
+
+    /// Every job this instance believes is still running.
+    ///
+    /// What a sweep puts back to work after the process supervising them died.
+    /// Believed rather than observed: this says what the instance recorded, and
+    /// whether a container is actually up is a question for the runtime — see
+    /// `docs/decisions/0015-a-job-survives-the-daemon-dying.md`, where
+    /// reconciling the two is startup's job rather than a state of its own.
+    pub fn running(&self) -> impl Iterator<Item = JobId> + '_ {
+        self.projects.values().flat_map(|project| {
+            project
+                .jobs
+                .iter()
+                .filter(|(_, job)| job.progress == Progress::Running)
+                .map(|(id, _)| *id)
+        })
+    }
+
+    /// A job, whichever project it belongs to.
+    ///
+    /// Jobs are keyed inside their project, because a job belongs to exactly
+    /// one and `docs/architecture.md` §2 leans on that. A sweep works from a
+    /// container's name, which says the job and not the project, so it needs
+    /// the search this does.
+    #[must_use]
+    pub fn job(&self, job: JobId) -> Option<&Job> {
+        self.projects
+            .values()
+            .find_map(|project| project.jobs.get(&job))
+    }
+
+    /// A job, for recording what became of it.
+    pub fn job_mut(&mut self, job: JobId) -> Option<&mut Job> {
+        self.projects
+            .values_mut()
+            .find_map(|project| project.jobs.get_mut(&job))
     }
 
     /// Converts to the form that goes on disk, sealing every credential.
@@ -784,7 +873,7 @@ pub enum HandoutError {
 mod tests {
     use super::{
         Agent, AgentConfig, BASE64, Handout, HandoutError, Job, JobId, Key, NONCE_LEN, Nonce,
-        OpenError, Platform, Project, ProjectId, Secret, Snapshot, State,
+        OpenError, Platform, Progress, Project, ProjectId, Secret, Snapshot, State,
     };
     use base64::Engine as _;
     use jiff::Timestamp;
@@ -822,6 +911,7 @@ mod tests {
                 reason: "an issue was opened".to_owned(),
                 kickoff: "work on it".to_owned(),
                 created_at: Timestamp::UNIX_EPOCH,
+                progress: Progress::Running,
             },
         );
         Project {
@@ -1131,5 +1221,69 @@ mod tests {
             shown.contains("GitHub"),
             "it should still say what it holds"
         );
+    }
+
+    #[test]
+    fn a_jobs_progress_survives_the_snapshot_boundary() {
+        let mut state = populated();
+        let project = state
+            .projects
+            .values_mut()
+            .next()
+            .expect("the populated state has one");
+        let job = project
+            .jobs
+            .values_mut()
+            .next()
+            .expect("that project has one job");
+        job.progress = Progress::Failed("the credential had expired".to_owned());
+
+        let recovered = state
+            .seal(&key(), &mut counting_nonces())
+            .expect("sealing succeeds")
+            .open(&key())
+            .expect("and opens again");
+
+        let carried = recovered
+            .projects
+            .values()
+            .next()
+            .and_then(|project| project.jobs.values().next())
+            .map(|job| job.progress.clone());
+
+        assert_eq!(
+            carried,
+            Some(Progress::Failed("the credential had expired".to_owned()))
+        );
+    }
+
+    #[test]
+    fn running_finds_a_job_wherever_its_project_is() {
+        let state = populated();
+        let found: Vec<JobId> = state.running().collect();
+
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(state.job(found[0]).is_some());
+    }
+
+    #[test]
+    fn a_job_that_has_finished_is_not_running() {
+        let mut state = populated();
+        let id = state.running().next().expect("one to start with");
+
+        state.job_mut(id).expect("it is there").progress = Progress::Completed;
+
+        assert_eq!(state.running().count(), 0);
+        assert!(
+            state.job(id).is_some(),
+            "finishing is not forgetting: the record stays"
+        );
+    }
+
+    #[test]
+    fn a_job_this_instance_never_had_is_not_found() {
+        let state = populated();
+
+        assert!(state.job(JobId::from_uuid(Uuid::from_u128(404))).is_none());
     }
 }

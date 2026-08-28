@@ -18,7 +18,10 @@ use std::path::{Path, PathBuf};
 use parking_lot::{Mutex, MutexGuard};
 use rand::rngs::{StdRng, SysRng};
 use rand::{Rng as _, SeedableRng as _};
-use stageman_core::{Key, NONCE_LEN, Nonce, OpenError, SealError, Snapshot, State};
+use stageman_agent::{ContainerRuntime, StopReason};
+use stageman_core::{
+    JobId, Key, NONCE_LEN, Nonce, OpenError, Progress, SealError, Snapshot, State,
+};
 
 /// An instance could not be opened.
 #[derive(Debug, thiserror::Error)]
@@ -223,17 +226,209 @@ impl Drop for StateGuard<'_> {
         if let Err(error) = self.store.write(&self.state) {
             // Deliberately not a panic and deliberately not propagated: a drop
             // cannot report, no caller could repair a full disk, and the state
-            // in memory is still correct. Which logging this should go through
-            // is not yet decided.
-            eprintln!("stageman: {error}");
+            // in memory is still correct. It says what happened and not where
+            // that should go, which is the whole of
+            // `docs/decisions/0018-diagnostics-are-emitted-through-tracing.md`
+            // — the destination is still an open question and this line does
+            // not have to know the answer.
+            tracing::error!(%error, "the instance could not be written");
         }
+    }
+}
+
+/// What a sweep found, and what it did about it.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Swept {
+    /// Jobs put back to work.
+    pub resumed: usize,
+    /// Jobs whose resumption failed, and which are recorded as failed.
+    pub failed: usize,
+    /// Containers whose names this version does not understand.
+    ///
+    /// Almost always a container from an older version of this project: odd,
+    /// and benign.
+    pub unidentified: usize,
+    /// Containers naming a job this instance has no record of.
+    ///
+    /// Counted apart from the above because it means something worse. The name
+    /// parsed, so the container was made by a version that names them as this
+    /// one does — and the job it names is *gone from the instance*. That is a
+    /// snapshot restored from an older backup, or hand-edited, or a write that
+    /// never landed: work exists that this instance no longer knows it asked
+    /// for. Blurring the two would hide the serious one behind the harmless
+    /// one.
+    pub forgotten: usize,
+    /// Jobs believed to be running with no container to run in.
+    pub stranded: usize,
+}
+
+/// Reconciles what the runtime actually has against what the instance believes.
+///
+/// The last piece of `docs/decisions/0015-a-job-survives-the-daemon-dying.md`,
+/// and it runs in **app** because reconciling needs both the store and the
+/// doing, and this is the only crate allowed to name both —
+/// `docs/architecture.md` §1.
+///
+/// It walks the two directions separately, because they answer different
+/// questions and only one of them is about work. From *jobs* to containers:
+/// every job the instance believes is running goes back to work. From
+/// *containers* to jobs: anything the instance cannot place is reported. The
+/// second exists because the first can only ever see what the instance already
+/// knows, and a container it has lost is exactly the one worth finding — which
+/// is the other half of `docs/conventions.md` §4's bar.
+///
+/// **Nothing unplaceable is removed**, and there are two ways to be
+/// unplaceable — a name this version cannot read, and a name that reads
+/// perfectly and points at a job the instance has lost. The second is the
+/// worse one and is reported apart from the first. A container is where a job's work
+/// lives, so "I did not recognise this, so I deleted it" is the wrong answer
+/// when the instance is the thing that is wrong — a snapshot restored from an
+/// older backup, most obviously. Reporting costs an operator a decision;
+/// removing could cost them the work. Retention proper is still open in
+/// `docs/open-questions.md`.
+///
+/// It resumes each job in turn and waits for it, which is right while nothing
+/// else is running and wrong the moment there is a dashboard to serve.
+/// `docs/conventions.md` §3 says orchestrator work never happens on the
+/// request path; this is not on one yet, but a startup that waits for several
+/// agents to finish is a dashboard that does not appear for minutes. Whoever
+/// adds the server moves this onto its own task, and the shape of it will want
+/// a span per job — see `docs/open-questions.md` on where log lines go.
+///
+/// # Errors
+///
+/// Fails only if the runtime will not say what containers it has. A single
+/// job that cannot be resumed is recorded as failed and does not stop the
+/// others: one broken job is not a reason to abandon the rest.
+pub async fn reconcile(
+    store: &Store,
+    runtime: &ContainerRuntime,
+) -> Result<Swept, stageman_job::JobError> {
+    let left = stageman_job::left_behind(runtime).await?;
+
+    let unplaceable = unplaceable(&left, &store.read());
+    for container in &unplaceable {
+        match container {
+            Unplaceable::Unidentified(name) => tracing::warn!(
+                container = %name,
+                "a container this instance started, under a name it does not understand; \
+                 left alone rather than removed"
+            ),
+            Unplaceable::Forgotten(name, job) => tracing::warn!(
+                container = %name,
+                %job,
+                "a container naming a job this instance has no record of — the instance may \
+                 have lost work it started; left alone rather than removed"
+            ),
+        }
+    }
+
+    // Counted by collecting rather than by incrementing. The gate denies
+    // arithmetic that can overflow, and the escape hatches that quiet it are
+    // exactly the ones `.quality/gate-reference.md` warns produce silent wrong
+    // values — a counter is not worth either.
+    let believed_running: Vec<JobId> = store.read().running().collect();
+    let mut resumed: Vec<JobId> = Vec::new();
+    let mut failed: Vec<JobId> = Vec::new();
+    let mut stranded: Vec<JobId> = Vec::new();
+
+    for job in believed_running {
+        if !left.iter().any(|abandoned| abandoned.job == Some(job)) {
+            // Believed running with nothing to run in. Not resumable and not
+            // removable, because there is nothing there — so it is recorded as
+            // failed, which is the one outcome that stops it being swept for
+            // ever afterwards.
+            tracing::warn!(%job, "believed to be running, but it has no container");
+            record(
+                store,
+                job,
+                Progress::Failed("its container is gone".to_owned()),
+            );
+            stranded.push(job);
+            continue;
+        }
+
+        match stageman_job::resume(runtime, job, stageman_orchestrator::resumption_notice()).await {
+            Ok(answer) if answer.stop_reason == StopReason::EndTurn => {
+                record(store, job, Progress::Completed);
+                resumed.push(job);
+            }
+            Ok(answer) => {
+                let why = format!("the agent stopped: {:?}", answer.stop_reason);
+                tracing::warn!(%job, stop_reason = ?answer.stop_reason, "resumed and did not finish");
+                record(store, job, Progress::Failed(why));
+                failed.push(job);
+            }
+            Err(error) => {
+                tracing::warn!(%job, %error, "could not be put back to work");
+                record(store, job, Progress::Failed(error.to_string()));
+                failed.push(job);
+            }
+        }
+    }
+
+    Ok(Swept {
+        resumed: resumed.len(),
+        failed: failed.len(),
+        unidentified: unplaceable
+            .iter()
+            .filter(|container| matches!(container, Unplaceable::Unidentified(_)))
+            .count(),
+        forgotten: unplaceable
+            .iter()
+            .filter(|container| matches!(container, Unplaceable::Forgotten(..)))
+            .count(),
+        stranded: stranded.len(),
+    })
+}
+
+/// Why a container could not be matched to work this instance knows about.
+///
+/// Two cases and not one, because an operator does something different about
+/// each. Pulled out of [`reconcile`] so the distinction can be tested without
+/// a container runtime: it is a judgement about names and records, and neither
+/// needs anything running to check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Unplaceable<'a> {
+    /// Its name says nothing this version understands.
+    Unidentified(&'a str),
+    /// Its name says which job, and this instance has no such job.
+    Forgotten(&'a str, JobId),
+}
+
+/// Everything the runtime has that the instance cannot account for.
+fn unplaceable<'a>(left: &'a [stageman_job::Abandoned], state: &State) -> Vec<Unplaceable<'a>> {
+    left.iter()
+        .filter_map(|abandoned| match abandoned.job {
+            None => Some(Unplaceable::Unidentified(&abandoned.container)),
+            Some(job) if state.job(job).is_none() => {
+                Some(Unplaceable::Forgotten(&abandoned.container, job))
+            }
+            Some(_) => None,
+        })
+        .collect()
+}
+
+/// Writes what became of a job, and persists it.
+///
+/// Silent when the job is not there: the only caller has just read it out of
+/// this same store, and a job removed in between is not something this could
+/// report to anybody who could act on it.
+fn record(store: &Store, job: JobId, progress: Progress) {
+    let mut state = store.update();
+    if let Some(recorded) = state.job_mut(job) {
+        recorded.progress = progress;
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{LoadError, Store};
-    use stageman_core::{Agent, AgentConfig, Key, Project, ProjectId, Secret, State, Uuid};
+    use super::{LoadError, Store, Swept, Unplaceable, reconcile, unplaceable};
+    use stageman_agent::ContainerRuntime;
+    use stageman_core::{
+        Agent, AgentConfig, Job, JobId, Key, Progress, Project, ProjectId, Secret, State,
+        Timestamp, Uuid,
+    };
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
@@ -352,5 +547,150 @@ mod tests {
             Store::load(path, Key::new([4; 32])),
             Err(LoadError::Open(_))
         ));
+    }
+
+    /// A runtime that answers every query with nothing, so a sweep can be
+    /// tested without a container. `docker ps` returning no lines is exactly
+    /// what an instance with nothing left behind looks like.
+    fn empty_runtime() -> ContainerRuntime {
+        let accepting = ["/usr/bin/true", "/bin/true"]
+            .into_iter()
+            .map(PathBuf::from)
+            .find(|candidate| candidate.exists())
+            .expect("a standard utility that succeeds");
+        ContainerRuntime::new(accepting)
+    }
+
+    fn with_a_running_job() -> (State, JobId) {
+        let mut state = configured();
+        let project = ProjectId::from_uuid(Uuid::from_u128(1));
+        let job = JobId::from_uuid(Uuid::from_u128(2));
+        let mut jobs = BTreeMap::new();
+        jobs.insert(
+            job,
+            Job {
+                agent: Agent::Claude,
+                reason: "an issue was opened".to_owned(),
+                kickoff: "work on it".to_owned(),
+                created_at: Timestamp::UNIX_EPOCH,
+                progress: Progress::Running,
+            },
+        );
+        state.projects.insert(
+            project,
+            Project {
+                name: "example".to_owned(),
+                repository: "https://example.invalid/repo".to_owned(),
+                credentials: BTreeMap::new(),
+                jobs,
+            },
+        );
+        (state, job)
+    }
+
+    /// A job the instance believes is running, with nothing to run in. It
+    /// cannot be resumed and there is nothing to remove, so it is recorded as
+    /// failed — which is also what stops it being swept for on every start
+    /// from now on.
+    #[tokio::test]
+    async fn a_job_whose_container_is_gone_is_recorded_as_failed() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let (state, job) = with_a_running_job();
+        let store = Store::create(snapshot_path(&directory), key(), state).expect("it can write");
+
+        let swept = reconcile(&store, &empty_runtime())
+            .await
+            .expect("the runtime answers");
+
+        assert_eq!(swept.stranded, 1, "{swept:?}");
+        assert_eq!(swept.resumed, 0);
+        assert!(matches!(
+            store.read().job(job).map(|j| j.progress.clone()),
+            Some(Progress::Failed(_))
+        ));
+    }
+
+    /// And having said so once, it must not say so again: a swept instance
+    /// converges rather than reporting the same casualty on every start.
+    #[tokio::test]
+    async fn a_second_sweep_finds_nothing_left_to_do() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let (state, _) = with_a_running_job();
+        let store = Store::create(snapshot_path(&directory), key(), state).expect("it can write");
+
+        let first = reconcile(&store, &empty_runtime()).await.expect("answers");
+        let again = reconcile(&store, &empty_runtime()).await.expect("answers");
+
+        assert_eq!(first.stranded, 1);
+        assert_eq!(again, Swept::default(), "it should have settled");
+    }
+
+    /// The outcome of a sweep is written, not merely held: the point of
+    /// recording a casualty is that the next start does not repeat it, and the
+    /// next start reads a file.
+    #[tokio::test]
+    async fn what_a_sweep_decided_survives_reopening_the_instance() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let path = snapshot_path(&directory);
+        let (state, job) = with_a_running_job();
+        let store = Store::create(path.clone(), key(), state).expect("it can write");
+
+        reconcile(&store, &empty_runtime()).await.expect("answers");
+        drop(store);
+
+        let reopened = Store::load(path, key())
+            .expect("it opens")
+            .expect("it is there");
+        assert!(matches!(
+            reopened.read().job(job).map(|j| j.progress.clone()),
+            Some(Progress::Failed(_))
+        ));
+    }
+
+    fn left(container: &str, job: Option<JobId>) -> stageman_job::Abandoned {
+        stageman_job::Abandoned {
+            container: container.to_owned(),
+            job,
+        }
+    }
+
+    /// The distinction that decides what an operator does next, checked without
+    /// a container runtime because it is a judgement about names and records.
+    #[test]
+    fn a_name_that_cannot_be_read_and_one_naming_a_lost_job_are_told_apart() {
+        let (state, known) = with_a_running_job();
+        let lost = JobId::from_uuid(Uuid::from_u128(404));
+        let containers = [
+            left("stageman-job-from-an-older-scheme", None),
+            left(&stageman_job::container(lost), Some(lost)),
+            left(&stageman_job::container(known), Some(known)),
+        ];
+
+        let found = unplaceable(&containers, &state);
+
+        assert_eq!(
+            found,
+            vec![
+                Unplaceable::Unidentified("stageman-job-from-an-older-scheme"),
+                Unplaceable::Forgotten(&stageman_job::container(lost), lost),
+            ],
+            "a container for a job the instance still has is placeable"
+        );
+    }
+
+    /// The serious case has to carry the identifier, because it is the only
+    /// thing an operator can search their backups for.
+    #[test]
+    fn a_container_naming_a_forgotten_job_reports_which_job() {
+        let (state, _) = with_a_running_job();
+        let lost = JobId::from_uuid(Uuid::from_u128(7));
+
+        let containers = [left(&stageman_job::container(lost), Some(lost))];
+        let found = unplaceable(&containers, &state);
+
+        assert!(
+            matches!(found.first(), Some(Unplaceable::Forgotten(_, job)) if *job == lost),
+            "{found:?}"
+        );
     }
 }
