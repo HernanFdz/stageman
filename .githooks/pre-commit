@@ -1,26 +1,23 @@
 #!/bin/sh
-# Runs the gate before a commit is allowed.
+# The gate, before a commit is allowed.
 #
-# It runs `just check` and nothing narrower, deliberately. A hook that checks a
-# *subset* becomes a second definition of what passing means, and the two
-# definitions drift — at which point "it committed fine locally" and "CI is
-# red" are both true and nobody can say which is wrong.
+# `just check` and nothing narrower: a hook checking a *subset of the gate*
+# becomes a second definition of what passing means, and then "it committed
+# fine locally" and "CI is red" are both true with nothing to say which is
+# wrong.
 #
-# Three things this is not, worth knowing before relying on it:
+# It is not the bar. The bar is `just verify`, which adds mutation testing, and
+# it runs in `pre-push` beside this file and in CI. That is not a discrepancy
+# but git's own staging: this can only ever let through something `pre-push`
+# then stops, which is a warning arriving earlier rather than a different
+# standard. Mutation testing scales with the size of a branch's diff, so paying
+# it per commit would buy a `--no-verify` habit, and a hook everybody skips
+# checks nothing.
 #
-#   * Not automatic. Git does not clone hooks. It arrives with `just hooks`,
-#     which points `core.hooksPath` here, and a fresh clone that never runs
-#     that has no hook at all.
-#   * Not a barrier. `git commit --no-verify` skips it, by design and by git's
-#     design. That is a feature — offline, `cargo deny` cannot reach the
-#     advisory database and the gate fails for a reason unrelated to the change.
-#   * Not the thing that protects the default branch. That is the workflow in
-#     `.github/workflows/gate.yml` plus a rule requiring it to pass before a
-#     pull request may merge. Those cannot be bypassed from a laptop, and this
-#     can.
-#
-# What it is: the fastest possible way to find out, which is worth about three
-# seconds.
+# Not automatic either: git never clones hooks, so this arrives with
+# `just hooks` and a checkout that skipped it has none. `--no-verify` bypasses
+# it, deliberately — offline, `cargo deny` cannot reach the advisory database
+# and the gate fails for a reason unrelated to the change.
 set -e
 
 if ! command -v just >/dev/null 2>&1; then
