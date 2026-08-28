@@ -1,0 +1,21 @@
+# How `dx` builds this crate. Only `dx` reads it — `cargo` and therefore
+# `just check` do not, which is the property the stylesheet arrangement below
+# depends on.
+
+[application]
+# `dx` fetches the Tailwind binary itself and compiles the first into the
+# second, before invoking the compiler — which matters, because `asset!` reads
+# the output while expanding.
+#
+# Note what is *not* here: `asset_dir`. Measured rather than assumed — a file
+# placed in it is not copied into the bundle, because assets are bundled by
+# being referenced rather than by sitting in a directory. Setting it would look
+# like it served this stylesheet and would not.
+tailwind_input = "tailwind.css"
+tailwind_output = "assets/styles.css"
+
+[web.app]
+title = "stageman"
+
+[web.watcher]
+watch_path = ["src", "assets", "tailwind.css"]
