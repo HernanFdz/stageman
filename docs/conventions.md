@@ -233,6 +233,18 @@ justify is usually obsolete.
   that `fmt` cannot be found in `core`, as though the standard library had
   developed a hole. The other two are prefixed for symmetry, because a naming
   rule with one unexplained exception is a rule nobody remembers.
+- **`main` is protected: a change lands through a pull request, or not at all.**
+  Pushing to it is refused by the forge, for whoever is pushing — a person, an
+  agent, or this project running against itself. The gate runs there as a
+  required check, so a branch that cannot pass cannot merge, which is the only
+  barrier in the three this project has that a laptop cannot skip. The other
+  two, `just hooks` and `just check`, are conveniences that find the problem
+  sooner.
+
+  This is worth stating rather than discovering: the first thing anybody does
+  with finished work is try to push it, and a rule enforced only by a remote's
+  refusal teaches itself expensively.
+
 - **Dependency versions live in `Cargo.toml` and are not restated here.** They
   are derivable, they go stale, and `just drift` cannot catch a version number
   in prose. Gotchas belong here; numbers do not.
@@ -300,6 +312,22 @@ built from this gate, this one needs:
 Neither is needed for `just check`, which is deliberate: the gate stays
 runnable on a machine with nothing but a toolchain, and the things that need
 more are ignored tests behind their own recipes.
+
+**Two credentials, if you want to run the tests that cost money.**
+`just image-session` drives a real agent against a real model, and
+`just propose` opens a real pull request. Both read from files this repository
+ignores rather than from the environment, so nothing inherits them by accident:
+
+- `.local/anthropic-token` — what the agent authenticates with. Needed by
+  `just image-session`, which is the only thing exercising session resumption
+  and a job running end to end.
+- `.local/github-token` — needed by `just propose` alone. A fine-grained token
+  scoped to this one repository, with contents and pull requests write, and
+  nothing else.
+
+Neither is needed for `just check` or `just image-handshake`, and neither is
+run by continuous integration — which is why those tests report as skipped
+there and why that number is not zero.
 
 **What a *job's* container needs is a different question and not this one.**
 That is about the project a job works on rather than about this repository, and
