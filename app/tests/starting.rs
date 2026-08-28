@@ -193,7 +193,15 @@ const PATIENCE: Duration = Duration::from_secs(10);
 /// deleting the line that prints the address and watching the suite time out
 /// instead of go red.
 ///
-/// End of file before that line means it exited instead of serving, and the
+/// **The thread keeps reading after it has what it came for**, and that is
+/// load-bearing rather than tidy. Returning early drops the pipe, and the
+/// child's next `println!` then writes to a pipe with no reader — which fails,
+/// and which Rust's printing macros turn into a panic. The child dies, and a
+/// client that has already connected gets a closed socket with nothing on it.
+/// That is not hypothetical: it is what continuous integration failed with,
+/// twice, on a machine fast enough to win the race that this one loses.
+///
+/// End of file before the address means it exited instead of serving, and the
 /// output it did produce is the only evidence of why — so it is reported
 /// rather than swallowed.
 fn listening(stdout: ChildStdout) -> (String, String) {
@@ -202,16 +210,19 @@ fn listening(stdout: ChildStdout) -> (String, String) {
     let (found, arrived) = mpsc::channel();
     std::thread::spawn(move || {
         let mut said = String::new();
+        let mut reported = false;
         for line in BufReader::new(stdout).lines() {
             let Ok(line) = line else { break };
             said.push_str(&line);
             said.push('\n');
-            if let Some((_, address)) = line.split_once(MARKER) {
-                let _ = found.send(Some((said, address.trim().to_owned())));
-                return;
+            if !reported && let Some((_, address)) = line.split_once(MARKER) {
+                let _ = found.send(Some((said.clone(), address.trim().to_owned())));
+                reported = true;
             }
         }
-        let _ = found.send(None);
+        if !reported {
+            let _ = found.send(None);
+        }
     });
 
     match arrived.recv_timeout(PATIENCE) {
