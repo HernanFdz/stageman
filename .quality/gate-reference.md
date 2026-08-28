@@ -176,6 +176,30 @@ claim about your code. Reach for `.quality/doc-symbols-ignore` only for names
 that genuinely recur, and keep that list short — if it grows, your docs are
 probably describing another codebase, which is its own rule violation.
 
+## `just drift-doc-paths` passes locally and fails in CI
+
+**Cause:** a backticked path in `docs/` that exists on your machine and in no
+clone. The check resolves citations against the working tree, so a gitignored
+file — a credential, a scratch note, anything under a local-only directory —
+satisfies it where it was written and nowhere else. Every reviewer sees green;
+every fresh checkout sees red.
+
+**Correct fix:** do not cite it as a path. `is_path_like` needs a `/`, so
+naming the file and its directory separately (`` `token-file` ``, in the
+`.local` directory) says the same thing and claims nothing about the
+repository.
+
+**Wrong fix:** adding it to `.quality/generated-paths`. That list is for build
+artifacts with a generator, and each entry is a promise that some command
+creates the file before anything needs it. A credential has no generator, so
+the promise would be false and the next fresh-clone failure would be silent.
+
+**Worth knowing:** the check reads `docs/` only. The same citation in
+`AGENTS.md` or `README.md` is not examined, so moving a sentence between them
+changes whether it is checked.
+
+---
+
 ## `just drift-doc-paths` reports `0 path(s) cited`
 
 Not a failure. It means the check examined nothing, and it says so on purpose: a

@@ -318,12 +318,19 @@ more are ignored tests behind their own recipes.
 `just propose` opens a real pull request. Both read from files this repository
 ignores rather than from the environment, so nothing inherits them by accident:
 
-- `.local/anthropic-token` — what the agent authenticates with. Needed by
+- **`anthropic-token`** — what the agent authenticates with. Needed by
   `just image-session`, which is the only thing exercising session resumption
   and a job running end to end.
-- `.local/github-token` — needed by `just propose` alone. A fine-grained token
+- **`github-token`** — needed by `just propose` alone. A fine-grained token
   scoped to this one repository, with contents and pull requests write, and
   nothing else.
+
+Both live in the gitignored `.local` directory, and are named here without it
+on purpose. `just drift` resolves every backticked path in this directory
+against the repository, so citing one that exists on the machine writing the
+sentence and in no clone passes locally and fails everywhere else. That is not
+hypothetical: it is what this paragraph did when it was first written, and the
+check caught it in continuous integration rather than here.
 
 Neither is needed for `just check` or `just image-handshake`, and neither is
 run by continuous integration — which is why those tests report as skipped
