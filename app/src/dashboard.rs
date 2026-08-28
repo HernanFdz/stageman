@@ -37,6 +37,8 @@ use dioxus::prelude::*;
 use dioxus::server::axum::Extension;
 use serde::{Deserialize, Serialize};
 
+use crate::ui::{Badge, BadgeTone, Card, EmptyState};
+
 /// One instance, as much of it as a page is allowed to know.
 ///
 /// Counts and names, and nothing that could be a credential. That is a
@@ -154,6 +156,25 @@ impl Instance {
     }
 }
 
+/// The dashboard's stylesheet.
+///
+/// Resolved at compile time, which is the only way this framework will serve a
+/// file at all — assets are bundled because something referenced them, and a
+/// directory of files nothing references is copied nowhere. It is also why
+/// this crate has a build script: the file is Tailwind's output and therefore
+/// absent on a fresh clone, so something has to guarantee it exists before the
+/// macro looks. See
+/// `docs/decisions/0025-a-build-script-guarantees-the-stylesheet-exists.md`.
+// Fires inside the macro's own expansion, on a `&[u8]` this code never
+// writes or names. Nothing here can be restructured to satisfy it, and the
+// lint is about volatile access to composite types — which an embedded asset
+// handle is not doing.
+#[expect(
+    clippy::volatile_composites,
+    reason = "raised against third-party macro output, not against anything written here"
+)]
+const STYLESHEET: Asset = asset!("/assets/styles.css");
+
 /// The dashboard.
 ///
 /// [`use_server_future`] rather than `use_resource`, and the difference is the
@@ -166,50 +187,94 @@ pub fn Dashboard() -> Element {
     let reading = use_server_future(instance)?;
 
     rsx! {
-        h1 { "stageman" }
-        match reading.cloned() {
-            Some(Ok(instance)) => rsx! { Summary { instance } },
-            // Shown rather than logged. The one thing that reaches this is a
-            // server assembled without an instance, and a blank page would
-            // send whoever hit it to read the source.
-            Some(Err(failure)) => rsx! {
-                p { "The instance could not be read: {failure}" }
-            },
-            // Unreachable once the future above has resolved, and written out
-            // rather than unwrapped because "unreachable" is a claim about
-            // somebody else's code.
-            None => rsx! { p { "Reading the instance…" } },
+        document::Stylesheet { href: STYLESHEET }
+        div { class: "min-h-screen bg-background font-sans text-foreground",
+            header { class: "border-b border-border bg-surface",
+                div { class: "mx-auto flex max-w-5xl items-baseline gap-3 px-6 py-4",
+                    h1 { class: "text-base font-semibold tracking-tight", "stageman" }
+                    p { class: "text-xs text-muted-foreground",
+                        "an orchestration platform for sleepless coding agents"
+                    }
+                }
+            }
+            main { class: "mx-auto max-w-5xl px-6 py-6",
+                match reading.cloned() {
+                    Some(Ok(instance)) => rsx! { Summary { instance } },
+                    // Shown rather than logged. The one thing that reaches this
+                    // is a server assembled without an instance, and a blank
+                    // page would send whoever hit it to read the source.
+                    Some(Err(failure)) => rsx! {
+                        Card { title: "This instance could not be read",
+                            p { class: "text-sm text-failed", "{failure}" }
+                        }
+                    },
+                    // Unreachable once the future above has resolved, and
+                    // written out rather than unwrapped because "unreachable"
+                    // is a claim about somebody else's code.
+                    None => rsx! {
+                        p { class: "text-sm text-muted-foreground", "Reading the instance…" }
+                    },
+                }
+            }
         }
     }
 }
 
 /// One instance, rendered.
 ///
-/// Deliberately unstyled. This is the piece that proves a page can be served
-/// with real state on it; deciding what a dashboard looks like against a
-/// screen this thin would be deciding it from a guess.
+/// Two cards, because an instance is two things an operator asks about
+/// separately: what this machine can do, and what it is watching. Deliberately
+/// dense — this is a console, not a landing page, and the thing being
+/// optimised for is scanning several projects rather than admiring one.
 #[component]
 fn Summary(instance: Instance) -> Element {
     rsx! {
-        dl {
-            dt { "runtime" }
-            dd { "{instance.container_runtime}" }
-            dt { "agents" }
-            dd { "{instance.agents}" }
-            dt { "projects" }
-            dd { "{instance.projects.len()}" }
-        }
-        if instance.projects.is_empty() {
-            p { "Nothing is being watched yet." }
-        } else {
-            ul {
-                // Keyed by position rather than by name, because nothing makes
-                // a project's name unique — an operator types it. A duplicate
-                // key is not a warning in Dioxus, it is two list entries the
-                // renderer believes are the same one.
-                for (position , project) in instance.projects.iter().enumerate() {
-                    li { key: "{position}",
-                        "{project.name} — {project.repository} — {project.running} of {project.jobs} job(s) running"
+        div { class: "flex flex-col gap-4",
+            Card {
+                title: "This machine",
+                note: "Found at startup, and not configurable — every agent runs in a container.",
+                dl { class: "grid grid-cols-[auto_1fr] gap-x-6 gap-y-1.5 text-sm",
+                    dt { class: "text-muted-foreground", "runtime" }
+                    dd { class: "font-mono text-xs", "{instance.container_runtime}" }
+                    dt { class: "text-muted-foreground", "agents" }
+                    dd { "{instance.agents}" }
+                }
+            }
+            Card {
+                title: "Projects",
+                aside: rsx! {
+                    Badge { "{instance.projects.len()}" }
+                },
+                if instance.projects.is_empty() {
+                    EmptyState {
+                        title: "Nothing is being watched yet.",
+                        note: "A project needs an agent to think with and at least one its jobs \
+                               can run on, so agents come first.",
+                    }
+                } else {
+                    ul { class: "divide-y divide-border",
+                        // Keyed by position rather than by name, because
+                        // nothing makes a project's name unique — an operator
+                        // types it. A duplicate key is not a warning in
+                        // Dioxus, it is two list entries the renderer believes
+                        // are the same one.
+                        for (position , project) in instance.projects.iter().enumerate() {
+                            li { key: "{position}", class: "flex items-baseline gap-3 py-2 first:pt-0 last:pb-0",
+                                span { class: "text-sm font-medium", "{project.name}" }
+                                span { class: "truncate font-mono text-xs text-faint-foreground",
+                                    "{project.repository}"
+                                }
+                                span { class: "ml-auto shrink-0",
+                                    if project.running > 0 {
+                                        Badge { tone: BadgeTone::Running,
+                                            "{project.running} of {project.jobs} running"
+                                        }
+                                    } else {
+                                        Badge { "{project.jobs} job(s)" }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }

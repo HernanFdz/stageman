@@ -95,6 +95,7 @@ tracing-subscriber = { version = "0.3.23", features = [
     "fmt",
 ], optional = true }
 uuid = { version = "1.26.0", features = ["v4"], optional = true }
+tw_merge = "0.1"
 
 [lints]
 workspace = true

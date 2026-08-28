@@ -1,0 +1,46 @@
+/* The dashboard's stylesheet, compiled by `dx` and served as a static file.
+   Never linked into the binary: `just dashboard` produces it, `just check`
+   does not need it, and a build without it renders unstyled rather than
+   failing — see
+   `docs/decisions/0025-the-stylesheet-is-fetched-not-linked-into-the-binary.md`. */
+
+@import "tailwindcss";
+
+/* Every colour the dashboard uses, named for its role rather than its value.
+   A component says `bg-surface` and not `bg-white`, so that what a thing *is*
+   survives changing what it looks like — and so a dark theme is a second block
+   here rather than an edit to every component.
+
+   The names follow the convention the Dioxus component registries emit, which
+   is a practical choice rather than an aesthetic one: a component lifted from
+   one of them needs no translation. Reasoning in
+   `docs/decisions/0026-the-dashboards-vocabulary-is-a-token-set.md`. */
+@theme {
+    --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    /* Monospace is load-bearing here rather than decorative. Almost everything
+       this dashboard shows is an identifier, a path, or a container name, and
+       those are read character by character. */
+    --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+
+    --color-background: #fbfbfa;
+    --color-foreground: #1c1b1a;
+
+    --color-surface: #ffffff;
+    --color-surface-muted: #f4f3f1;
+
+    --color-muted-foreground: #6d6a66;
+    --color-faint-foreground: #9a9691;
+
+    --color-border: #e6e3df;
+    --color-border-strong: #d2cec8;
+
+    --color-primary: #2f6f4e;
+    --color-primary-foreground: #ffffff;
+
+    /* One colour per job state, and no more. `docs/conventions.md` §2 says a
+       job has three, so this has three — a fourth token would be an invitation
+       to invent a fourth state in the view rather than in the domain. */
+    --color-running: #2f6f4e;
+    --color-completed: #4a6d8c;
+    --color-failed: #a33a2c;
+}

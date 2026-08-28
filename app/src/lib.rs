@@ -19,6 +19,7 @@ mod instance;
 mod serving;
 
 pub mod dashboard;
+pub mod ui;
 
 #[cfg(feature = "server")]
 pub use instance::{
