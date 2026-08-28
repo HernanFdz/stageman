@@ -27,6 +27,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::path::PathBuf;
 
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Key as CipherKey, Nonce as CipherNonce};
@@ -150,6 +151,17 @@ pub enum Agent {
 }
 
 impl Agent {
+    /// Every agent that exists.
+    ///
+    /// The one place adding a variant has to be updated by hand, and worth
+    /// being explicit about why that is tolerable: every *behavioural* site is
+    /// a match and so fails to compile until the new agent is handled, which is
+    /// the property the closed set exists for. A list is not a match, so
+    /// forgetting this one costs a missing menu entry rather than a wrong
+    /// answer — the cheapest failure of the set, and the only one available
+    /// without a derive this crate would otherwise have no use for.
+    pub const ALL: &'static [Self] = &[Self::Claude];
+
     /// What this agent is good for, in prose.
     ///
     /// Not decoration and not operator-editable: the orchestrator chooses which
@@ -274,6 +286,18 @@ pub struct State {
     /// what lets every later caller look it up without handling an absence
     /// that a working instance never has.
     pub orchestrator_agent: Agent,
+    /// Where the container runtime lives on this machine.
+    ///
+    /// A located path and never a name to be searched for, because a daemon
+    /// that searches works when you test it by hand and fails under a service
+    /// manager — `docs/conventions.md` §3 states the rule and
+    /// `docs/decisions/0017-the-runtimes-path-is-recorded-in-the-instance.md`
+    /// says why it is recorded *here*, rather than in an environment that has
+    /// the same problem.
+    ///
+    /// The one value in a snapshot that describes the machine rather than the
+    /// work, which is worth knowing before moving a snapshot to another one.
+    pub container_runtime: PathBuf,
 }
 
 impl State {
@@ -283,13 +307,14 @@ impl State {
     /// invariant above hold by construction: there is no moment at which an
     /// instance exists without something to think with.
     #[must_use]
-    pub fn new(orchestrator_agent: Agent, config: AgentConfig) -> Self {
+    pub fn new(orchestrator_agent: Agent, config: AgentConfig, container_runtime: PathBuf) -> Self {
         let mut agents = BTreeMap::new();
         agents.insert(orchestrator_agent, config);
         Self {
             agents,
             projects: BTreeMap::new(),
             orchestrator_agent,
+            container_runtime,
         }
     }
 
@@ -354,6 +379,7 @@ impl State {
             agents,
             projects,
             orchestrator_agent: self.orchestrator_agent,
+            container_runtime: self.container_runtime.clone(),
         })
     }
 }
@@ -535,6 +561,13 @@ pub struct Snapshot {
     pub projects: BTreeMap<ProjectId, SealedProject>,
     /// Which agent the orchestrator thinks with.
     pub orchestrator_agent: Agent,
+    /// Where the container runtime lives on this machine.
+    ///
+    /// Not a credential, so it is stored as it was given. It is also the only
+    /// field here that will be wrong if this file is opened on a different
+    /// machine, which fails at startup rather than quietly — see
+    /// `docs/decisions/0017-the-runtimes-path-is-recorded-in-the-instance.md`.
+    pub container_runtime: PathBuf,
 }
 
 impl Snapshot {
@@ -551,6 +584,7 @@ impl Snapshot {
             agents,
             projects,
             orchestrator_agent,
+            container_runtime,
         } = self;
 
         let agents = agents
@@ -593,6 +627,7 @@ impl Snapshot {
             agents,
             projects,
             orchestrator_agent,
+            container_runtime,
         })
     }
 }
@@ -754,9 +789,17 @@ mod tests {
     use base64::Engine as _;
     use jiff::Timestamp;
     use std::collections::BTreeMap;
+    use std::path::PathBuf;
     use uuid::Uuid;
 
     const TOKEN: &str = "ghp-not-a-real-token";
+
+    /// Where a test pretends the container runtime lives.
+    ///
+    /// Never resolved: nothing in this crate runs a program, and a path that
+    /// exists on the machine running the tests would make them pass for a
+    /// reason unrelated to what they check.
+    const RUNTIME: &str = "/usr/local/bin/container-runtime";
 
     fn configured() -> State {
         State::new(
@@ -764,6 +807,7 @@ mod tests {
             AgentConfig {
                 auth_token: Secret::new("agent-token".to_owned()),
             },
+            PathBuf::from(RUNTIME),
         )
     }
 
@@ -876,6 +920,15 @@ mod tests {
         let json = serde_json::to_string(&sealed()).expect("a snapshot serialises");
         assert!(!json.contains(TOKEN));
         assert!(!json.contains("agent-token"));
+    }
+
+    #[test]
+    fn a_snapshot_remembers_where_the_container_runtime_lives() {
+        let recovered = sealed()
+            .open(&key())
+            .expect("the snapshot opens with the key it was sealed under");
+
+        assert_eq!(recovered.container_runtime, PathBuf::from(RUNTIME));
     }
 
     #[test]

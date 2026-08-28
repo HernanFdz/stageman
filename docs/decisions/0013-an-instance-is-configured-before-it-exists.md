@@ -45,11 +45,22 @@ half-written, or written by an older version — so the two guards answer
 different questions. One says this instance was built correctly; the other says
 this file can be believed.
 
-A first run cannot currently be provisioned unattended, because it wants a
-terminal. `docs/vision.md` §3 explicitly contemplates a machine nobody sits at,
-so this will need the same values accepted from the environment, prompting only
-when interactive. Not built yet, and recorded here so that it is a known gap
-rather than a surprise on the first server install.
+A first run wants a terminal. `docs/vision.md` §3 explicitly contemplates a
+machine nobody sits at, so this needs the same values accepted from the
+environment, prompting only when interactive.
+
+**Built, and sooner than this record expected.** The trigger was named as the
+first server install; what actually arrived first was the observation that a
+flow only a human can drive is a flow nothing can test, and the first run is
+the one place an instance comes into existence. The credential and the
+container runtime's path are taken from the environment when they are set and
+asked for in the terminal when they are not. *Which* agent is deliberately not
+among them: the set is closed and holds one, so it would be a question with a
+single possible answer.
+
+Note what this does not weaken. A *running* instance still reads no credential
+from its environment — this is configuration answered once, at the moment an
+instance is created, and everything after it comes from the sealed file.
 
 `README.md` changes shape slightly: the first credential is entered in the
 terminal, the rest in the dashboard.
@@ -58,5 +69,8 @@ Reversal is cheap — the flow is one function and a constructor — but it woul
 mean reintroducing a state the rest of the code has stopped handling, which is
 the expensive half.
 
-Revisit when the first non-interactive install happens, which is the trigger for
-the environment fallback rather than for changing this.
+Revisit if configuring an instance ever needs an answer that cannot be given
+ahead of time. The environment fallback works because every question a first
+run asks has an answer somebody already knows; a question that depends on what
+the previous answer produced would need a different shape, and that is what
+would make this record wrong rather than merely extended.

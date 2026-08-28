@@ -113,24 +113,9 @@ Intended next steps, in order, each with its reason. Written as intentions, not
 progress: "next X, because Y" — never "X is 60% done", which is both derivable
 and wrong within a day.
 
-- Next, a session that can be prompted, with the credentials it needs arriving
-  at container start. This is the first time
-  `docs/decisions/0009-jobs-hold-their-own-platform-credentials.md` is exercised
-  rather than described, and the first time the pure function
-  `docs/architecture.md` §1 promises in **core** — deciding what a child agent
-  process is handed — has to exist. It was going to be "a workspace and a
-  credential"; `docs/decisions/0016-the-agent-clones-the-repository.md` removed
-  the workspace half, since nothing delivers a repository any more.
-- Then the app grows a binary, so that the first-run prompt in
-  `docs/decisions/0013-an-instance-is-configured-before-it-exists.md`, and the
-  key read from the environment, have somewhere to live. It moved up the queue:
-  resuming needs a startup to hook into, so this is now the thing standing
-  between `docs/decisions/0015-a-job-survives-the-daemon-dying.md` and being
-  real.
-- Then jobs survive a restart for real — containers named from their job,
+- Next, jobs survive a restart for real — containers named from their job,
   labelled for sweeping, and startup restarting and resuming what it finds.
-  Deliberately after a job can run at all, because a resume test needs
-  something worth resuming.
+  There is a startup to hook into now, which is what it was waiting for.
 - Then one job end to end, as the proof of concept: a project configured, an
   agent started in its own container, and a change proposed. Deliberately
   before the two mitigations above rather than after — they are far easier to

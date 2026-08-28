@@ -248,6 +248,7 @@ mod tests {
             AgentConfig {
                 auth_token: Secret::new("agent-token".to_owned()),
             },
+            PathBuf::from("/usr/local/bin/container-runtime"),
         )
     }
 

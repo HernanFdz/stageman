@@ -184,7 +184,10 @@ justify is usually obsolete.
   in the dashboard.** A missing container runtime and a snapshot that cannot be
   written are the first kind — nothing works without them, and the worst moment
   to discover it is three in the morning on the first signal that mattered.
-  Writing the snapshot once at startup is exactly this rule, already built.
+  Both are built: the snapshot is written once at startup, and the recorded
+  runtime is asked for its version, which reaches the daemon rather than merely
+  finding the file — a client installed with nothing behind it looks perfectly
+  healthy to any check of the filesystem.
 
   A credential that has stopped working is the *second* kind, and refusing to
   start over one would be a trap: the dashboard is where credentials get fixed,

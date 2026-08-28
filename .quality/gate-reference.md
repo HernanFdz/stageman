@@ -90,7 +90,14 @@ intended value for that failure — `"abc".parse::<i32>().unwrap_or_default()` i
 fine if unparseable genuinely means zero. It is wrong everywhere else, and the
 distinction is a judgement made per site, never a mechanical substitution.
 
-These are already allowed in tests; you should not need an exemption there.
+These are already allowed in tests; you should not need an exemption there —
+with one gap worth knowing before you go looking for a knob that does not
+exist. `allow-expect-in-tests` and its siblings recognise `#[test]` functions
+and `#[cfg(test)]` modules. A file under `tests/` is its own crate, so a *helper*
+there — a fixture builder, a command runner — is not inside either and the lint
+fires on it while firing on nothing in the tests themselves. Put the
+`#[expect(…, reason = "…")]` at the top of that file rather than moving working
+code into the test bodies to satisfy a detection rule.
 
 ---
 

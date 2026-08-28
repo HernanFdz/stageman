@@ -91,6 +91,49 @@ impl ContainerRuntime {
     pub fn path(&self) -> &Path {
         &self.0
     }
+
+    /// Proves the recorded runtime is there and answers.
+    ///
+    /// The startup check `docs/conventions.md` §3 asks for. A missing runtime
+    /// is the kind of failure that makes an instance unusable rather than one
+    /// job, so it belongs at startup: the worst moment to discover it is three
+    /// in the morning on the first signal that mattered.
+    ///
+    /// It asks for a version rather than merely testing that the file is
+    /// there, because on the runtimes this targets that reaches the daemon —
+    /// so a client installed without a daemon running, which looks perfectly
+    /// healthy to any check of the filesystem, fails here instead of on the
+    /// first job.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the path cannot be run at all, or if it runs and reports
+    /// failure. The two are separate variants because one means the path is
+    /// wrong and the other means the runtime is not working, and an operator
+    /// does something different about each.
+    pub async fn verify(&self) -> Result<(), AgentError> {
+        let reported = tokio::process::Command::new(self.path())
+            .arg("version")
+            .kill_on_drop(true)
+            .output()
+            .await
+            .map_err(|source| AgentError::Runtime {
+                path: self.0.clone(),
+                source,
+            })?;
+
+        if reported.status.success() {
+            return Ok(());
+        }
+        Err(AgentError::Unusable {
+            path: self.0.clone(),
+            message: String::from_utf8_lossy(&reported.stderr)
+                .trim()
+                .chars()
+                .take(STDERR_LIMIT)
+                .collect(),
+        })
+    }
 }
 
 /// The image tag an agent's container is started from.
@@ -181,6 +224,19 @@ pub enum AgentError {
         /// What the operating system said.
         #[source]
         source: io::Error,
+    },
+    /// The runtime ran and reported that it is not working.
+    ///
+    /// Distinct from [`AgentError::Runtime`], which means the path is wrong.
+    /// A client installed with no daemon behind it passes every test of the
+    /// filesystem and fails here, and telling an operator their path is wrong
+    /// when their daemon is merely stopped sends them to fix the wrong thing.
+    #[error("the container runtime at {path} is not working: {message}")]
+    Unusable {
+        /// Where the runtime was found.
+        path: PathBuf,
+        /// What it said about itself, truncated.
+        message: String,
     },
     /// The runtime started without giving the streams the protocol needs.
     #[error("the container runtime offered no channel to speak the protocol over")]
@@ -757,6 +813,7 @@ mod tests {
             AgentConfig {
                 auth_token: Secret::new(credential.to_owned()),
             },
+            PathBuf::from("/usr/local/bin/container-runtime"),
         )
     }
 
@@ -877,6 +934,7 @@ mod tests {
                 AgentConfig {
                     auth_token: credential(),
                 },
+                located_runtime().path().to_owned(),
             );
             let handout = Handout::for_triage(&state).expect("a configured instance");
 
@@ -895,5 +953,39 @@ mod tests {
                 answer.text
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_runtime_that_is_not_there_fails_as_a_missing_path() {
+        let runtime = ContainerRuntime::new(PathBuf::from("/nonexistent/container/runtime"));
+
+        assert!(matches!(
+            runtime.verify().await,
+            Err(AgentError::Runtime { .. })
+        ));
+    }
+
+    /// A path that exists and runs but is not a container runtime must read as
+    /// *not working* rather than as *not there*, since the two send an operator
+    /// to different places.
+    ///
+    /// It stands in for a runtime with the one utility guaranteed to run and
+    /// refuse. Locations differ between platforms, so the candidates are tried
+    /// in turn — and the first attempt at this used a utility that *succeeds*
+    /// when given an argument, which passed the check it was meant to fail.
+    #[tokio::test]
+    async fn a_path_that_is_not_a_container_runtime_fails_as_unusable() {
+        let refusing = ["/usr/bin/false", "/bin/false"]
+            .into_iter()
+            .map(PathBuf::from)
+            .find(|candidate| candidate.exists())
+            .expect("a utility that always refuses");
+
+        let refused = ContainerRuntime::new(refusing).verify().await;
+
+        assert!(
+            matches!(refused, Err(AgentError::Unusable { .. })),
+            "{refused:?}"
+        );
     }
 }
