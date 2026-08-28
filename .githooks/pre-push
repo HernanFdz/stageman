@@ -1,0 +1,24 @@
+#!/bin/sh
+# The bar, before anything leaves this machine.
+#
+# `just verify` — the gate plus mutation testing — which is the identical
+# recipe CI runs on the other side. That identity is the point: if these
+# differed, a push could pass locally and fail remotely, or worse, pass
+# remotely something a laptop had refused.
+#
+# Here rather than in `pre-commit` because mutation testing costs time
+# proportional to a branch's whole diff, and a bar paid per commit is a bar
+# skipped with `--no-verify`. Pushing is the moment the work stops being
+# private, which is exactly when it is worth waiting for.
+#
+# `--no-verify` skips this too. What cannot be skipped is CI, which runs the
+# same recipe and gates the merge.
+set -e
+
+if ! command -v just >/dev/null 2>&1; then
+    echo "pre-push: 'just' is not installed — see AGENTS.md" >&2
+    echo "pre-push: push with --no-verify to skip this check" >&2
+    exit 1
+fi
+
+just verify

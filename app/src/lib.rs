@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use parking_lot::{Mutex, MutexGuard};
 use rand::rngs::{StdRng, SysRng};
 use rand::{Rng as _, SeedableRng as _};
-use stageman_agent::{ContainerRuntime, StopReason};
+use stageman_agent::{Answer, ContainerRuntime, StopReason};
 use stageman_core::{
     Agent, Handout, Job, JobId, Key, NONCE_LEN, Nonce, OpenError, Progress, ProjectId, SealError,
     Snapshot, State, Timestamp,
@@ -311,17 +311,15 @@ pub async fn run(
     }
 
     let progress = match stageman_job::start(runtime, &handout, job, &kickoff).await {
-        Ok(answer) if answer.stop_reason == StopReason::EndTurn => Progress::Completed,
-        Ok(answer) => {
-            let why = format!("the agent stopped: {:?}", answer.stop_reason);
-            tracing::warn!(%job, stop_reason = ?answer.stop_reason, "did not finish");
-            Progress::Failed(why)
-        }
-        Err(error) => {
-            tracing::warn!(%job, %error, "could not be run");
-            Progress::Failed(error.to_string())
-        }
+        Ok(answer) => outcome(&answer),
+        Err(error) => Progress::Failed(error.to_string()),
     };
+    // Derived from the outcome rather than from a second look at the stop
+    // reason. Two conditions saying the same thing can disagree, and mutation
+    // testing found this one untested when it was separate.
+    if let Progress::Failed(ref why) = progress {
+        tracing::warn!(%job, %why, "the job did not finish");
+    }
 
     record(store, job, progress.clone());
     Ok((job, progress))
@@ -419,9 +417,7 @@ pub async fn reconcile(
     // exactly the ones `.quality/gate-reference.md` warns produce silent wrong
     // values — a counter is not worth either.
     let believed_running: Vec<JobId> = store.read().running().collect();
-    let mut resumed: Vec<JobId> = Vec::new();
-    let mut failed: Vec<JobId> = Vec::new();
-    let mut stranded: Vec<JobId> = Vec::new();
+    let mut attended: Vec<Attended> = Vec::new();
 
     for job in believed_running {
         if !left.iter().any(|abandoned| abandoned.job == Some(job)) {
@@ -435,32 +431,64 @@ pub async fn reconcile(
                 job,
                 Progress::Failed("its container is gone".to_owned()),
             );
-            stranded.push(job);
+            attended.push(Attended::Stranded);
             continue;
         }
 
-        match stageman_job::resume(runtime, job, stageman_orchestrator::resumption_notice()).await {
-            Ok(answer) if answer.stop_reason == StopReason::EndTurn => {
-                record(store, job, Progress::Completed);
-                resumed.push(job);
-            }
-            Ok(answer) => {
-                let why = format!("the agent stopped: {:?}", answer.stop_reason);
-                tracing::warn!(%job, stop_reason = ?answer.stop_reason, "resumed and did not finish");
-                record(store, job, Progress::Failed(why));
-                failed.push(job);
-            }
-            Err(error) => {
-                tracing::warn!(%job, %error, "could not be put back to work");
-                record(store, job, Progress::Failed(error.to_string()));
-                failed.push(job);
-            }
+        let progress =
+            match stageman_job::resume(runtime, job, stageman_orchestrator::resumption_notice())
+                .await
+            {
+                Ok(answer) => outcome(&answer),
+                Err(error) => Progress::Failed(error.to_string()),
+            };
+        if let Progress::Failed(ref why) = progress {
+            tracing::warn!(%job, %why, "could not be put back to work");
         }
+        attended.push(Attended::from(&progress));
+        record(store, job, progress);
     }
 
-    Ok(Swept {
-        resumed: resumed.len(),
-        failed: failed.len(),
+    Ok(tallied(&attended, &unplaceable))
+}
+
+/// What a sweep did about one job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Attended {
+    /// Put back to work, and it finished.
+    Resumed,
+    /// Tried and did not finish, or could not be tried at all.
+    Failed,
+    /// Believed to be running with no container to run in.
+    Stranded,
+}
+
+impl From<&Progress> for Attended {
+    /// Only a job that finished counts as resumed.
+    ///
+    /// Written as a conversion rather than as a branch inside the sweep
+    /// because mutation testing found the branch untested: inverting it swaps
+    /// the resumed and failed tallies, which is a sweep that reports the
+    /// opposite of what happened, and nothing noticed.
+    fn from(progress: &Progress) -> Self {
+        match progress {
+            Progress::Completed => Self::Resumed,
+            Progress::Running | Progress::Failed(_) => Self::Failed,
+        }
+    }
+}
+
+/// Counts what a sweep did.
+///
+/// Separated from doing it so the arithmetic can be checked without a
+/// container runtime. Counting is exactly the kind of code that is obviously
+/// right and occasionally is not.
+fn tallied(attended: &[Attended], unplaceable: &[Unplaceable<'_>]) -> Swept {
+    let counted = |wanted: Attended| attended.iter().filter(|had| **had == wanted).count();
+    Swept {
+        resumed: counted(Attended::Resumed),
+        failed: counted(Attended::Failed),
+        stranded: counted(Attended::Stranded),
         unidentified: unplaceable
             .iter()
             .filter(|container| matches!(container, Unplaceable::Unidentified(_)))
@@ -469,8 +497,7 @@ pub async fn reconcile(
             .iter()
             .filter(|container| matches!(container, Unplaceable::Forgotten(..)))
             .count(),
-        stranded: stranded.len(),
-    })
+    }
 }
 
 /// Why a container could not be matched to work this instance knows about.
@@ -500,6 +527,27 @@ fn unplaceable<'a>(left: &'a [stageman_job::Abandoned], state: &State) -> Vec<Un
         .collect()
 }
 
+/// What an agent's answer means for the job that produced it.
+///
+/// Pulled out of the two callers that had it inline, and tested, because
+/// mutation testing found it untested in both: the guard could be replaced
+/// with `true`, with `false`, or inverted, and every test still passed. It is
+/// the line that decides whether a job succeeded, which makes it close to the
+/// worst line in this crate to have had no test — a system that records
+/// failures as successes is worse than one that records nothing.
+///
+/// Anything short of finishing the turn is a failure, and the stop reason is
+/// carried into the message rather than collapsed. A turn cut off by a token
+/// limit and one the agent refused are both "not finished", and an operator
+/// does something different about each.
+fn outcome(answer: &Answer) -> Progress {
+    if answer.stop_reason == StopReason::EndTurn {
+        Progress::Completed
+    } else {
+        Progress::Failed(format!("the agent stopped: {:?}", answer.stop_reason))
+    }
+}
+
 /// Writes what became of a job, and persists it.
 ///
 /// Silent when the job is not there: the only caller has just read it out of
@@ -514,8 +562,11 @@ fn record(store: &Store, job: JobId, progress: Progress) {
 
 #[cfg(test)]
 mod tests {
-    use super::{LoadError, Store, Swept, Unplaceable, reconcile, run, unplaceable};
-    use stageman_agent::ContainerRuntime;
+    use super::{
+        Attended, LoadError, Store, Swept, Unplaceable, outcome, reconcile, run, tallied,
+        unplaceable,
+    };
+    use stageman_agent::{Answer, ContainerRuntime, StopReason};
     use stageman_core::{
         Agent, AgentConfig, Job, JobId, Key, Progress, Project, ProjectId, Secret, State,
         Timestamp, Uuid,
@@ -913,5 +964,93 @@ mod tests {
                 .await
                 .expect("it is removable");
         }
+    }
+
+    fn answered(stop_reason: StopReason) -> Answer {
+        Answer {
+            text: "whatever it said".to_owned(),
+            stop_reason,
+        }
+    }
+
+    /// The line mutation testing found untested. Finishing the turn is the
+    /// only thing that counts as having finished.
+    #[test]
+    fn only_a_finished_turn_counts_as_a_completed_job() {
+        assert_eq!(outcome(&answered(StopReason::EndTurn)), Progress::Completed);
+    }
+
+    /// Every other way a turn can end is a failure, and each is checked rather
+    /// than one standing in for the rest: a guard replaced by `true` passes a
+    /// test that only ever looks at the successful case.
+    #[test]
+    fn every_other_ending_is_a_failure() {
+        for ending in [
+            StopReason::MaxTokens,
+            StopReason::MaxTurnRequests,
+            StopReason::Refusal,
+            StopReason::Cancelled,
+        ] {
+            assert!(
+                matches!(outcome(&answered(ending)), Progress::Failed(_)),
+                "{ending:?} should not read as success"
+            );
+        }
+    }
+
+    /// The stop reason survives into the message, because "it did not finish"
+    /// and "it refused" send an operator to different places.
+    #[test]
+    fn a_failure_says_how_the_turn_ended() {
+        let Progress::Failed(why) = outcome(&answered(StopReason::Refusal)) else {
+            panic!("a refusal is not a completed job");
+        };
+
+        assert!(why.contains("Refusal"), "{why}");
+    }
+
+    /// The conversion mutation testing found untested. Inverting it makes a
+    /// sweep report the opposite of what happened.
+    #[test]
+    fn only_a_completed_job_counts_as_resumed() {
+        assert_eq!(Attended::from(&Progress::Completed), Attended::Resumed);
+        assert_eq!(
+            Attended::from(&Progress::Failed("anything".to_owned())),
+            Attended::Failed
+        );
+        // Still running when the sweep looked is not success either: it means
+        // the resume did not reach an ending.
+        assert_eq!(Attended::from(&Progress::Running), Attended::Failed);
+    }
+
+    #[test]
+    fn a_tally_counts_each_kind_separately() {
+        let attended = [
+            Attended::Resumed,
+            Attended::Resumed,
+            Attended::Failed,
+            Attended::Stranded,
+        ];
+        let unplaceable = [
+            Unplaceable::Unidentified("older-scheme"),
+            Unplaceable::Forgotten("a-name", JobId::from_uuid(Uuid::from_u128(9))),
+            Unplaceable::Forgotten("another", JobId::from_uuid(Uuid::from_u128(10))),
+        ];
+
+        assert_eq!(
+            tallied(&attended, &unplaceable),
+            Swept {
+                resumed: 2,
+                failed: 1,
+                stranded: 1,
+                unidentified: 1,
+                forgotten: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn a_sweep_that_found_nothing_counts_nothing() {
+        assert_eq!(tallied(&[], &[]), Swept::default());
     }
 }

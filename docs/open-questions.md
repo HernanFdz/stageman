@@ -114,6 +114,27 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   become things somebody has to handle. Settled by building it, and worth
   building before the orchestrator has a second caller rather than after.
 
+- **May a project carry an image of its own?**
+  `docs/decisions/0019-a-projects-tooling-is-the-projects-business.md` settled
+  who *decides* what a job needs — the project, and never stageman — and left
+  who *provides* it open. Declaring a prerequisite does not put a toolchain in
+  a container.
+
+  Two shapes remain. An image per project, built from an agent's as a base,
+  which is correct and multiplies what somebody has to build and keep current.
+  Or a project naming packages installed when its container starts, which
+  `docs/decisions/0012-agents-run-in-containers.md` rejected for the agent
+  because installing on every start puts minutes in front of every signal — an
+  argument that is genuinely weaker here, since a job is not on a signal's
+  critical path and starts far less often than triage does.
+
+  What makes this worth answering rather than living with: an agent that cannot
+  run a project's checks still opens a pull request. The proposal is honest
+  about it — the first one this system made said so unprompted — but honesty
+  hands the verification back to a person, which is the work this system exists
+  to remove. Settled by the second project this ever runs against, because one
+  project's answer is indistinguishable from a special case.
+
 - **What should happen when an agent credential expires while nobody is
   watching?** It will, and it lands on every job at once. The options run from
   failing each job loudly and showing it on the dashboard, to pausing the
@@ -137,6 +158,21 @@ and wrong within a day.
   repository somebody owns and a credential that can push to it, and the thing
   it produces is visible to other people. Deliberately still before the two
   mitigations above, which are far easier to design against something that runs.
+- Then move the end-to-end tests out of the crates they test. A test that drives
+  a whole flow — a job from kickoff to a cloned repository, a session surviving
+  its container stopping — belongs in `tests/`, where it is a separate crate
+  that may use only the public API. That is what an end-to-end test should
+  exercise, and it is a check nothing else performs: the missing re-exports that
+  once made `Greeting` and `Answer` unreadable without taking the protocol
+  library as a direct dependency would have shown up immediately as a test that
+  would not compile.
+
+  The split is not clean and the rule is what decides it, rather than the word
+  *end-to-end*. A test reaching for a private helper — the container-argument
+  builders, the label constant, the name parser — is a unit test by definition
+  and stays where it is. Roughly half of the ignored tests are in each group,
+  so this is a move for some and not a reorganisation of all.
+
 - Then a way to configure a project at all. One is currently built in a test,
   and an operator has no way to add one, because adding projects is the
   dashboard's job and there is no dashboard. Worth stating as its own step

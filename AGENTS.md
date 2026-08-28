@@ -16,6 +16,42 @@ it has decided live in `docs/conventions.md` — read that first, then this.
 
 @docs/conventions.md
 
+## What must already be installed
+
+Two things, and everything else follows from them.
+
+**A Rust toolchain**, via rustup. `rust-toolchain.toml` pins the exact version,
+so rustup fetches the right one on first use and there is nothing to choose:
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+**`just`**, which is how every command here is spelled. Once Rust is present
+this works anywhere, and a system package manager will also have it:
+
+```sh
+cargo install just
+```
+
+The tools the gate itself needs — the test runner, the dependency auditor, the
+mutation tester — are installed by `just check` on a machine missing them and
+silent on one that is not. So there is no list here to drift from the justfile,
+which is the point.
+
+**Then, once per clone:**
+
+```sh
+just hooks
+```
+
+That points git at this repository's tracked hooks, so the gate runs before a
+commit and the full bar before a push. Git never clones hooks, so nothing does
+this for you, and a checkout that skips it has none.
+
+Anything a *particular* project needs beyond this is in `docs/conventions.md`,
+because it differs per project and this file does not.
+
 ## Before your first reply
 
 First section because it runs first. Do this before answering the opening
@@ -50,7 +86,11 @@ messages carry the reasoning. Usually faster than reading the code and guessing.
 - **Docs-first.** `docs/` is the source of truth for the design. Align the docs
   before writing code, and reconcile them in the **same commit** as the change.
 - **The gate is `just check`.** Run it before claiming anything is done. Not
-  "it compiles" — the gate. For a tighter inner loop use `just lint`, which
+  "it compiles" — the gate. `just hooks` makes it run before each commit, which
+  is a convenience rather than a guarantee: git never clones hooks, and
+  `--no-verify` skips them. What actually protects a branch is the same gate
+  running in continuous integration, with a rule that a pull request cannot
+  merge until it passes. For a tighter inner loop use `just lint`, which
   runs the full compiler frontend and so catches every compile error; it just
   does not run the tests.
 - **Stable Rust.** No nightly, no unstable features. Where a design cannot be

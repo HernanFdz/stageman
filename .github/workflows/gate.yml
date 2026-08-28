@@ -28,32 +28,36 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
-    name: check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: just,cargo-nextest,cargo-deny
-      - run: just check
-
-  mutants:
-    # `just verify` is check + mutants; `check` has already run as its own job,
-    # so this runs only the part that job did not.
-    name: mutants (changed code only)
-    needs: check
+  # One job, because there is one gate. `just verify` is the bar — the same
+  # recipe the pre-push hook runs — so a single required status check covers
+  # everything, and nobody has to remember to add a second one to the ruleset
+  # when a second job appears.
+  gate:
+    name: gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          # `just mutants` diffs against a base commit, so it needs history.
+          # Mutation testing diffs against a base commit, which needs history.
           fetch-depth: 0
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
-          tool: just,cargo-nextest,cargo-mutants
-      # On a pull request, mutate what the PR changes. On a push, the recipe
-      # falls back to HEAD~1 by itself.
-      - run: just mutants "${{ github.event.pull_request.base.sha }}"
+          tool: just,cargo-nextest,cargo-deny,cargo-mutants
+      # Empty on a push, where `mutants` falls back to working the base out
+      # itself. On a pull request this is what the branch is actually proposed
+      # against, which is the diff worth mutating.
+      - run: just verify "${{ github.event.pull_request.base.sha }}"
+
+      # The tests `just check` deliberately cannot run, because it must work on
+      # a machine that has only a toolchain — see docs/conventions.md §5. They
+      # are ignored rather than absent so that they are counted as skipped
+      # rather than invisible, and this is the thing that keeps them honest:
+      # ignored tests nothing ever runs rot, and rotting tests are worse than
+      # none because they read as coverage.
+      #
+      # What stays out is the set that needs a paid credential and reaches a
+      # model. Those cannot run here and are run by hand with
+      # `just image-session`, which is a real limit rather than an oversight.
+      - run: just image
+      - run: just image-handshake

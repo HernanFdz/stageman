@@ -1,0 +1,29 @@
+#!/bin/sh
+# The gate, before a commit is allowed.
+#
+# `just check` and nothing narrower: a hook checking a *subset of the gate*
+# becomes a second definition of what passing means, and then "it committed
+# fine locally" and "CI is red" are both true with nothing to say which is
+# wrong.
+#
+# It is not the bar. The bar is `just verify`, which adds mutation testing, and
+# it runs in `pre-push` beside this file and in CI. That is not a discrepancy
+# but git's own staging: this can only ever let through something `pre-push`
+# then stops, which is a warning arriving earlier rather than a different
+# standard. Mutation testing scales with the size of a branch's diff, so paying
+# it per commit would buy a `--no-verify` habit, and a hook everybody skips
+# checks nothing.
+#
+# Not automatic either: git never clones hooks, so this arrives with
+# `just hooks` and a checkout that skipped it has none. `--no-verify` bypasses
+# it, deliberately — offline, `cargo deny` cannot reach the advisory database
+# and the gate fails for a reason unrelated to the change.
+set -e
+
+if ! command -v just >/dev/null 2>&1; then
+    echo "pre-commit: 'just' is not installed — see AGENTS.md" >&2
+    echo "pre-commit: commit with --no-verify to skip this check" >&2
+    exit 1
+fi
+
+just check

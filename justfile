@@ -214,8 +214,12 @@ deps:
 
 # -------------------------------------------------------------------- verify
 
-[doc("Everything in `check`, plus mutation testing. Run before pushing.")]
-verify: check mutants
+# Takes the base so that one recipe is the bar everywhere it is enforced — a
+# pre-push hook and CI both run this, and CI knows the base of a pull request
+# while a laptop does not. Empty means `mutants` works it out, which is what a
+# hook wants.
+[doc("Everything in `check`, plus mutation testing. The bar for pushing.")]
+verify base="": check (mutants base)
 
 # The declared rust-version is decorative unless something builds against it, and
 # clippy::incompatible_msrv catches std-API breaks only, never new syntax.
@@ -249,6 +253,21 @@ mutants base="":
 [doc("Full mutation sweep over the whole tree. Slow — run deliberately.")]
 mutants-full:
     cargo mutants --workspace --no-shuffle
+
+# -------------------------------------------------------------------- hooks
+
+# Git never clones hooks, so this is opt-in per checkout and has to be. What it
+# points at is tracked in `.githooks/`, which means the hook is versioned with
+# the code it checks — something a hook living in `.git/hooks/` never is.
+#
+# It is a convenience and not a guarantee: `--no-verify` skips it, and a clone
+# that never runs this has no hook. The guarantee is the workflow plus a rule
+# that a pull request cannot merge until it passes.
+[doc("Point git at this repository's tracked hooks, so the gate runs before a commit")]
+hooks:
+    git config core.hooksPath .githooks
+    @echo "hooks installed: check before each commit, verify before each push"
+    @echo "(--no-verify skips either; CI runs verify regardless)"
 
 # ------------------------------------------------------------------- extras
 
