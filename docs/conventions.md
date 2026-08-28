@@ -54,9 +54,13 @@ reaches for a plausible synonym writes code that reads correctly and names the
 wrong thing — and review does not catch it precisely because it reads correctly.
 Record the near-miss too: the term you rejected, and what it would have implied.
 
-- **project** — one repository, together with the channels bound to it and the
-  credentials those channels need. One instance manages several. Everything
-  else in this list belongs to exactly one project, always.
+- **project** — one repository, together with the channels bound to it, the
+  credentials those channels need, and the agents it runs on: one for its
+  orchestrator to think with, and a non-empty set its jobs may use. One
+  instance manages several. Everything else in this list belongs to exactly one
+  project, always — including the orchestrator, which is a project's rather
+  than an instance's, per
+  `docs/decisions/0020-the-orchestrator-belongs-to-a-project.md`.
 - **channel** — somewhere the orchestrator watches and a job can speak into.
   Two-directional by definition, which is why it is not called a *source* or a
   *feed*: the same Slack that carries a question out carries the answer back.
@@ -188,6 +192,14 @@ justify is usually obsolete.
   runtime is asked for its version, which reaches the daemon rather than merely
   finding the file — a client installed with nothing behind it looks perfectly
   healthy to any check of the filesystem.
+
+  Both of those are conditional on there being something to check. An instance
+  starts with nothing configured — no agents, no projects, no runtime — and an
+  instance with nothing to run is not unusable, it is empty; see
+  `docs/decisions/0021-an-instance-starts-empty.md`. So a runtime is verified
+  when one has been configured, and what must not happen is a project created
+  against a runtime nothing has checked. The rule is unchanged: the check moves
+  to where the requirement begins.
 
   A credential that has stopped working is the *second* kind, and refusing to
   start over one would be a trap: the dashboard is where credentials get fixed,

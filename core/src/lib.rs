@@ -25,7 +25,7 @@
 //! crates that are allowed effects do that; this one stays a set of values a
 //! test can build exactly.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::PathBuf;
 
@@ -303,6 +303,20 @@ pub struct Project {
     ///
     /// Every kickoff embeds this, because an agent has no other way to find it.
     pub repository: String,
+    /// The agent this project's orchestrator thinks with.
+    ///
+    /// Per project rather than per instance, because watching a project's
+    /// channels needs that project's credentials and a shared orchestrator
+    /// would hold every project's at once — see
+    /// `docs/decisions/0020-the-orchestrator-belongs-to-a-project.md`.
+    pub orchestrator_agent: Agent,
+    /// The agents this project's jobs may run on.
+    ///
+    /// Never empty in a valid instance, and checked rather than made
+    /// unrepresentable — see [`State::check`], which is the one definition of
+    /// what valid means and is consulted wherever a state could have stopped
+    /// being it.
+    pub job_agents: BTreeSet<Agent>,
     /// What its jobs are handed, one credential per platform.
     ///
     /// A map rather than a list so that two credentials for one platform is
@@ -325,49 +339,109 @@ pub struct Project {
 /// is not a state worth representing, so one is either loaded from a snapshot
 /// or built by the first-run flow, and never conjured empty — see
 /// `docs/decisions/0013-an-instance-is-configured-before-it-exists.md`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct State {
     /// The agents this instance can run, and what each authenticates with.
+    ///
+    /// May be empty. An instance with no projects needs nothing to think with,
+    /// which is what lets one start with nothing configured at all — see
+    /// `docs/decisions/0021-an-instance-starts-empty.md`.
+    ///
+    /// An agent may not be removed while a project names it. Nothing here
+    /// prevents that directly, and three things catch it: [`State::used_by`]
+    /// is the query a caller consults first, sealing refuses a state that has
+    /// broken the rule, and opening refuses a file that has.
     pub agents: BTreeMap<Agent, AgentConfig>,
     /// The projects it watches.
     pub projects: BTreeMap<ProjectId, Project>,
-    /// Which agent the orchestrator thinks with.
-    ///
-    /// Not optional, and guaranteed to appear in `agents` — by construction
-    /// here, and by the check a snapshot passes on its way back in. That is
-    /// what lets every later caller look it up without handling an absence
-    /// that a working instance never has.
-    pub orchestrator_agent: Agent,
     /// Where the container runtime lives on this machine.
     ///
     /// A located path and never a name to be searched for, because a daemon
     /// that searches works when you test it by hand and fails under a service
     /// manager — `docs/conventions.md` §3 states the rule and
     /// `docs/decisions/0017-the-runtimes-path-is-recorded-in-the-instance.md`
-    /// says why it is recorded *here*, rather than in an environment that has
-    /// the same problem.
+    /// says why it is recorded here rather than in an environment with the
+    /// same problem.
     ///
-    /// The one value in a snapshot that describes the machine rather than the
+    /// Optional because an instance with no projects has nothing to run, so
+    /// there is nothing for a missing runtime to make unusable. What must not
+    /// happen is a project being created against a runtime nothing has
+    /// verified, which is a check at that moment rather than at startup.
+    ///
+    /// The one value in a snapshot describing the machine rather than the
     /// work, which is worth knowing before moving a snapshot to another one.
-    pub container_runtime: PathBuf,
+    pub container_runtime: Option<PathBuf>,
 }
 
 impl State {
-    /// Builds the state of a freshly configured instance.
+    /// Which projects depend on an agent's configuration.
     ///
-    /// Taking the agent and its configuration together is what makes the
-    /// invariant above hold by construction: there is no moment at which an
-    /// instance exists without something to think with.
-    #[must_use]
-    pub fn new(orchestrator_agent: Agent, config: AgentConfig, container_runtime: PathBuf) -> Self {
-        let mut agents = BTreeMap::new();
-        agents.insert(orchestrator_agent, config);
-        Self {
-            agents,
-            projects: BTreeMap::new(),
-            orchestrator_agent,
-            container_runtime,
+    /// The query to consult before removing one. Empty means the agent can go;
+    /// anything else names what would break, which is what a dashboard needs in
+    /// order to say *why* rather than merely refusing.
+    ///
+    /// A project's *past* jobs are not considered and must not be: a job stores
+    /// its agent by value precisely so that removing a configuration cannot
+    /// rewrite the record of work already done — `docs/conventions.md` §2.
+    ///
+    /// Skipped by mutation testing, and equivalent rather than untested:
+    /// [`Agent`] has one member and a project's job agents are never empty, so
+    /// both sides of this condition are true for every project. Inverting the
+    /// comparison or replacing the `or` with an `and` changes nothing any test
+    /// could observe. **Delete this attribute in the commit that adds a second
+    /// agent** — a project naming one agent for triage and another for its jobs
+    /// is what makes this falsifiable, and it is the first thing that will
+    /// exist once there are two.
+    #[mutants::skip]
+    pub fn used_by(&self, agent: Agent) -> impl Iterator<Item = ProjectId> + '_ {
+        self.projects
+            .iter()
+            .filter(move |(_, project)| {
+                project.orchestrator_agent == agent || project.job_agents.contains(&agent)
+            })
+            .map(|(id, _)| *id)
+    }
+
+    /// Whether this describes an instance that can exist.
+    ///
+    /// The invariant `docs/decisions/0021-an-instance-starts-empty.md` moved
+    /// down from the instance to the project: a project names one agent for its
+    /// orchestrator and at least one its jobs may run on, and every one of them
+    /// is configured.
+    ///
+    /// Checked rather than made unrepresentable. A type that could not hold an
+    /// empty set would enforce half of this and leave the other half — an agent
+    /// removed while a project still named it — needing a check anyway, so the
+    /// wrapper bought ceremony at every construction site in exchange for one
+    /// of two conditions. One function, asked wherever a state might have
+    /// stopped being valid, is the smaller thing.
+    ///
+    /// It says nothing about *when* to ask. A file is checked as it is read,
+    /// because it is untrusted input; a state is checked before it is written,
+    /// because a file that will not open is worse than a write that refused.
+    /// Neither belongs to the domain, so neither is decided here.
+    ///
+    /// # Errors
+    ///
+    /// Names the first project that is wrong and how, because an operator
+    /// repairing a file needs to know which one.
+    pub fn check(&self) -> Result<(), Inconsistent> {
+        for (id, project) in &self.projects {
+            if project.job_agents.is_empty() {
+                return Err(Inconsistent::NoJobAgents(*id));
+            }
+            for named in std::iter::once(project.orchestrator_agent)
+                .chain(project.job_agents.iter().copied())
+            {
+                if !self.agents.contains_key(&named) {
+                    return Err(Inconsistent::UnconfiguredProjectAgent {
+                        project: *id,
+                        agent: named,
+                    });
+                }
+            }
         }
+        Ok(())
     }
 
     /// Every job this instance believes is still running.
@@ -457,6 +531,8 @@ impl State {
                     SealedProject {
                         name: project.name.clone(),
                         repository: project.repository.clone(),
+                        orchestrator_agent: project.orchestrator_agent,
+                        job_agents: project.job_agents.clone(),
                         credentials,
                         jobs: project.jobs.clone(),
                     },
@@ -467,7 +543,6 @@ impl State {
         Ok(Snapshot {
             agents,
             projects,
-            orchestrator_agent: self.orchestrator_agent,
             container_runtime: self.container_runtime.clone(),
         })
     }
@@ -529,12 +604,37 @@ pub enum KeyError {
     Length,
 }
 
-/// Sealing a credential failed.
+/// A credential could not be sealed.
 #[derive(Debug, thiserror::Error)]
 pub enum SealError {
     /// The cipher rejected the input.
     #[error("a credential could not be sealed")]
     Cipher,
+}
+
+/// An instance's state is not internally consistent.
+///
+/// One type for every way a state can be wrong, because there is one definition
+/// of valid and several places that need to ask: a file on the way in, a state
+/// on the way out, and every operation that could break it. Two definitions
+/// would eventually disagree, and the one that let something through would be
+/// the one nobody was reading.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum Inconsistent {
+    /// A project has no agent its jobs can run on.
+    ///
+    /// A project whose jobs cannot run cannot do the one thing a project is
+    /// for, which is why this is a broken instance rather than an unusual one.
+    #[error("project {0} has no agent its jobs can run on")]
+    NoJobAgents(ProjectId),
+    /// A project names an agent this instance does not configure.
+    #[error("project {project} names agent {agent:?}, which is not configured")]
+    UnconfiguredProjectAgent {
+        /// The project holding the dangling reference.
+        project: ProjectId,
+        /// The agent it names.
+        agent: Agent,
+    },
 }
 
 /// A snapshot could not be turned back into state.
@@ -555,9 +655,12 @@ pub enum OpenError {
     /// A credential decrypted to something that is not text.
     #[error("a credential decrypted to bytes that are not text")]
     NotText,
-    /// The orchestrator's agent has no configuration.
-    #[error("the orchestrator's agent {0:?} has no configuration in this snapshot")]
-    UnconfiguredOrchestratorAgent(Agent),
+    /// The snapshot decrypted, and describes an instance that cannot be.
+    ///
+    /// A file is untrusted input — hand-edited, half-written, or written by an
+    /// older version — so this is where believing it stops.
+    #[error("the snapshot describes an instance that is not internally consistent")]
+    Inconsistent(#[source] Inconsistent),
 }
 
 /// A credential as it appears on disk.
@@ -628,6 +731,10 @@ pub struct SealedProject {
     pub name: String,
     /// Where the repository lives.
     pub repository: String,
+    /// The agent its orchestrator thinks with.
+    pub orchestrator_agent: Agent,
+    /// The agents its jobs may run on.
+    pub job_agents: BTreeSet<Agent>,
     /// Its sealed credentials.
     pub credentials: BTreeMap<Platform, SealedSecret>,
     /// Its jobs, which hold nothing needing sealing.
@@ -648,15 +755,16 @@ pub struct Snapshot {
     pub agents: BTreeMap<Agent, SealedAgentConfig>,
     /// The projects, sealed.
     pub projects: BTreeMap<ProjectId, SealedProject>,
-    /// Which agent the orchestrator thinks with.
-    pub orchestrator_agent: Agent,
     /// Where the container runtime lives on this machine.
     ///
     /// Not a credential, so it is stored as it was given. It is also the only
     /// field here that will be wrong if this file is opened on a different
     /// machine, which fails at startup rather than quietly — see
     /// `docs/decisions/0017-the-runtimes-path-is-recorded-in-the-instance.md`.
-    pub container_runtime: PathBuf,
+    ///
+    /// Absent on an instance that has not been given one yet, which is what an
+    /// instance looks like before anybody has configured anything.
+    pub container_runtime: Option<PathBuf>,
 }
 
 impl Snapshot {
@@ -672,7 +780,6 @@ impl Snapshot {
         let Self {
             agents,
             projects,
-            orchestrator_agent,
             container_runtime,
         } = self;
 
@@ -701,6 +808,8 @@ impl Snapshot {
                     Project {
                         name: project.name,
                         repository: project.repository,
+                        orchestrator_agent: project.orchestrator_agent,
+                        job_agents: project.job_agents,
                         credentials,
                         jobs: project.jobs,
                     },
@@ -708,16 +817,14 @@ impl Snapshot {
             })
             .collect::<Result<BTreeMap<_, _>, OpenError>>()?;
 
-        if !agents.contains_key(&orchestrator_agent) {
-            return Err(OpenError::UnconfiguredOrchestratorAgent(orchestrator_agent));
-        }
-
-        Ok(State {
+        let state = State {
             agents,
             projects,
-            orchestrator_agent,
             container_runtime,
-        })
+        };
+        // A file is untrusted input, so this is where believing it stops.
+        state.check().map_err(OpenError::Inconsistent)?;
+        Ok(state)
     }
 }
 
@@ -754,28 +861,36 @@ pub struct Handout {
 }
 
 impl Handout {
-    /// What the agent the orchestrator thinks with is handed.
+    /// What the agent a project's orchestrator thinks with is handed.
     ///
-    /// Its own credential, and no platform credential at all: triage has no
-    /// project, no repository and no workspace, so there is nothing it could
-    /// legitimately reach a platform for — see
+    /// Its own credential, and no platform credential at all: triage judges
+    /// signals rather than acting on them, so it has no repository to reach and
+    /// nothing to authenticate against — see
     /// `docs/decisions/0012-agents-run-in-containers.md`.
+    ///
+    /// Per project rather than per instance, because the channels it watches
+    /// belong to a project and a shared orchestrator would hold every
+    /// project's credentials at once —
+    /// `docs/decisions/0020-the-orchestrator-belongs-to-a-project.md`.
     ///
     /// # Errors
     ///
-    /// Fails if the orchestrator's agent has no configuration — which the
-    /// invariant on [`State`] says cannot happen, since it holds at
-    /// construction and is checked again when a snapshot is loaded.
+    /// Fails if the project is not one this instance watches, or if its
+    /// orchestrator's agent has no configuration — which the invariant in
+    /// `docs/decisions/0021-an-instance-starts-empty.md` says cannot happen,
+    /// since it holds at construction and is checked again on the way in and
+    /// out of a snapshot.
     ///
-    /// The signature admits it anyway, and deliberately. The alternative is a
-    /// total function that substitutes an empty credential for a missing one,
-    /// which converts a state that cannot occur into an authentication failure
-    /// somewhere else entirely — the exact trade `.quality/gate-reference.md`
-    /// forbids, where a loud failure is replaced by a silent wrong value. An
-    /// unreachable error variant costs one `?`; a fabricated credential costs
-    /// an afternoon.
-    pub fn for_triage(state: &State) -> Result<Self, HandoutError> {
-        let agent = state.orchestrator_agent;
+    /// The signature admits it anyway, and deliberately: the alternative is a
+    /// total function substituting an empty credential for a missing one, which
+    /// turns a state that cannot occur into an authentication failure somewhere
+    /// else entirely. `.quality/gate-reference.md` forbids exactly that trade.
+    pub fn for_triage(state: &State, project: ProjectId) -> Result<Self, HandoutError> {
+        let watching = state
+            .projects
+            .get(&project)
+            .ok_or(HandoutError::UnknownProject(project))?;
+        let agent = watching.orchestrator_agent;
         let config = state
             .agents
             .get(&agent)
@@ -872,12 +987,13 @@ pub enum HandoutError {
 #[cfg(test)]
 mod tests {
     use super::{
-        Agent, AgentConfig, BASE64, Handout, HandoutError, Job, JobId, Key, NONCE_LEN, Nonce,
-        OpenError, Platform, Progress, Project, ProjectId, Secret, Snapshot, State,
+        Agent, AgentConfig, BASE64, Handout, HandoutError, Inconsistent, Job, JobId, Key,
+        NONCE_LEN, Nonce, OpenError, Platform, Progress, Project, ProjectId, Secret, Snapshot,
+        State,
     };
     use base64::Engine as _;
     use jiff::Timestamp;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::path::PathBuf;
     use uuid::Uuid;
 
@@ -890,14 +1006,23 @@ mod tests {
     /// reason unrelated to what they check.
     const RUNTIME: &str = "/usr/local/bin/container-runtime";
 
+    /// An instance with an agent configured and nothing else.
     fn configured() -> State {
-        State::new(
-            Agent::Claude,
-            AgentConfig {
-                auth_token: Secret::new("agent-token".to_owned()),
-            },
-            PathBuf::from(RUNTIME),
-        )
+        State {
+            agents: BTreeMap::from([(
+                Agent::Claude,
+                AgentConfig {
+                    auth_token: Secret::new("agent-token".to_owned()),
+                },
+            )]),
+            container_runtime: Some(PathBuf::from(RUNTIME)),
+            ..State::default()
+        }
+    }
+
+    /// The agents a project's jobs may run on, for a project that only has one.
+    fn only_claude() -> BTreeSet<Agent> {
+        BTreeSet::from([Agent::Claude])
     }
 
     fn a_project_with_a_job() -> Project {
@@ -917,6 +1042,8 @@ mod tests {
         Project {
             name: "example".to_owned(),
             repository: "https://example.invalid/repo".to_owned(),
+            orchestrator_agent: Agent::Claude,
+            job_agents: only_claude(),
             credentials,
             jobs,
         }
@@ -946,11 +1073,64 @@ mod tests {
         assert_eq!(Secret::new(TOKEN.to_owned()).expose(), TOKEN);
     }
 
+    /// The state an instance is in before anybody has configured anything,
+    /// which `docs/decisions/0021-an-instance-starts-empty.md` made valid
+    /// again.
     #[test]
-    fn a_configured_instance_can_look_up_the_agent_it_thinks_with() {
-        let state = configured();
-        assert!(state.agents.contains_key(&state.orchestrator_agent));
-        assert!(state.projects.is_empty());
+    fn a_fresh_instance_has_nothing_and_is_still_a_state() {
+        let empty = State::default();
+
+        assert!(empty.agents.is_empty());
+        assert!(empty.projects.is_empty());
+        assert!(empty.container_runtime.is_none());
+    }
+
+    #[test]
+    fn a_project_names_the_agent_its_orchestrator_thinks_with() {
+        let state = populated();
+        let project = state.projects.values().next().expect("one project");
+
+        assert!(state.agents.contains_key(&project.orchestrator_agent));
+        assert!(project.job_agents.contains(&Agent::Claude));
+    }
+
+    /// The rule a dashboard has to enforce, and the query it enforces it with.
+    #[test]
+    fn an_agent_a_project_names_reports_which_projects_would_break() {
+        let state = populated();
+        let depending: Vec<ProjectId> = state.used_by(Agent::Claude).collect();
+
+        assert_eq!(depending.len(), 1, "{depending:?}");
+        assert_eq!(configured().used_by(Agent::Claude).count(), 0);
+    }
+
+    /// One definition of valid, asked directly. Everything that persists or
+    /// loads a state consults this rather than repeating the rule.
+    #[test]
+    fn a_state_that_lost_an_agent_a_project_names_is_not_consistent() {
+        let mut state = populated();
+        state.agents.clear();
+
+        assert!(matches!(
+            state.check(),
+            Err(Inconsistent::UnconfiguredProjectAgent { .. })
+        ));
+    }
+
+    #[test]
+    fn a_project_with_no_agent_for_its_jobs_is_not_consistent() {
+        let mut state = populated();
+        for project in state.projects.values_mut() {
+            project.job_agents.clear();
+        }
+
+        assert!(matches!(state.check(), Err(Inconsistent::NoJobAgents(_))));
+    }
+
+    #[test]
+    fn an_instance_with_nothing_in_it_is_consistent() {
+        assert_eq!(State::default().check(), Ok(()));
+        assert_eq!(populated().check(), Ok(()));
     }
 
     #[test]
@@ -1018,7 +1198,7 @@ mod tests {
             .open(&key())
             .expect("the snapshot opens with the key it was sealed under");
 
-        assert_eq!(recovered.container_runtime, PathBuf::from(RUNTIME));
+        assert_eq!(recovered.container_runtime, Some(PathBuf::from(RUNTIME)));
     }
 
     #[test]
@@ -1097,15 +1277,21 @@ mod tests {
     }
 
     #[test]
-    fn a_snapshot_naming_an_unconfigured_orchestrator_agent_is_refused() {
-        // The check that lets every later caller look that agent up without
-        // handling an absence. A file is untrusted input; this is where that
-        // stops being true.
+    fn a_snapshot_naming_an_agent_it_does_not_configure_is_refused() {
+        // The check that lets every later caller resolve a project's agents
+        // without handling an absence. A file is untrusted input — hand-edited,
+        // half-written, or written by an older version — and this is where that
+        // stops being assumed.
         let mut snapshot = sealed();
         snapshot.agents.clear();
         assert!(matches!(
             snapshot.open(&key()),
-            Err(OpenError::UnconfiguredOrchestratorAgent(Agent::Claude))
+            Err(OpenError::Inconsistent(
+                Inconsistent::UnconfiguredProjectAgent {
+                    agent: Agent::Claude,
+                    ..
+                }
+            ))
         ));
     }
 
@@ -1143,8 +1329,8 @@ mod tests {
 
     #[test]
     fn triage_is_handed_its_credential_and_no_platform_at_all() {
-        let state = configured();
-        let handout = Handout::for_triage(&state).expect("a configured instance");
+        let (state, mine, _) = two_projects();
+        let handout = Handout::for_triage(&state, mine).expect("a watched project");
 
         assert_eq!(handout.agent(), Agent::Claude);
         assert_eq!(handout.agent_credential().expose(), "agent-token");
@@ -1205,7 +1391,7 @@ mod tests {
             refused,
             Err(HandoutError::UnconfiguredAgent(Agent::Claude))
         ));
-        assert!(Handout::for_triage(&state).is_err());
+        assert!(Handout::for_triage(&state, mine).is_err());
     }
 
     #[test]
@@ -1285,5 +1471,20 @@ mod tests {
         let state = populated();
 
         assert!(state.job(JobId::from_uuid(Uuid::from_u128(404))).is_none());
+    }
+
+    /// A file describing an instance that cannot exist is refused where it is
+    /// read, rather than believed and acted on.
+    #[test]
+    fn a_snapshot_giving_a_project_no_job_agents_is_refused() {
+        let mut snapshot = sealed();
+        for project in snapshot.projects.values_mut() {
+            project.job_agents.clear();
+        }
+
+        assert!(matches!(
+            snapshot.open(&key()),
+            Err(OpenError::Inconsistent(Inconsistent::NoJobAgents(_)))
+        ));
     }
 }

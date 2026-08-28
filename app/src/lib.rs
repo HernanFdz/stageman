@@ -20,8 +20,8 @@ use rand::rngs::{StdRng, SysRng};
 use rand::{Rng as _, SeedableRng as _};
 use stageman_agent::{Answer, ContainerRuntime, StopReason};
 use stageman_core::{
-    Agent, Handout, Job, JobId, Key, NONCE_LEN, Nonce, OpenError, Progress, ProjectId, SealError,
-    Snapshot, State, Timestamp,
+    Agent, Handout, Inconsistent, Job, JobId, Key, NONCE_LEN, Nonce, OpenError, Progress,
+    ProjectId, SealError, Snapshot, State, Timestamp,
 };
 
 /// An instance could not be opened.
@@ -47,6 +47,17 @@ pub enum LoadError {
 /// A snapshot could not be written.
 #[derive(Debug, thiserror::Error)]
 pub enum SaveError {
+    /// The state describes an instance that cannot exist.
+    ///
+    /// Refused before it reaches disk rather than after. The same check runs
+    /// when a file is read, so writing an inconsistent state would produce one
+    /// that cannot be opened — turning a mistake somebody could still undo into
+    /// an instance nobody can start.
+    ///
+    /// It lives here rather than in the domain's sealing, which is about
+    /// cryptography and has no business judging whether a state makes sense.
+    #[error("the state describes an instance that is not internally consistent")]
+    Inconsistent(#[source] Inconsistent),
     /// Credentials could not be sealed.
     #[error("credentials could not be sealed")]
     Seal(#[source] SealError),
@@ -150,6 +161,7 @@ impl Store {
     }
 
     fn write(&self, state: &State) -> Result<(), SaveError> {
+        state.check().map_err(SaveError::Inconsistent)?;
         let mut rng = self.rng.lock();
         let mut nonces = || {
             let mut nonce: Nonce = [0; NONCE_LEN];
@@ -571,7 +583,7 @@ mod tests {
         Agent, AgentConfig, Job, JobId, Key, Progress, Project, ProjectId, Secret, State,
         Timestamp, Uuid,
     };
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
 
@@ -579,14 +591,22 @@ mod tests {
         Key::new([3; 32])
     }
 
+    /// An instance with one agent configured and nothing else.
     fn configured() -> State {
-        State::new(
-            Agent::Claude,
-            AgentConfig {
-                auth_token: Secret::new("agent-token".to_owned()),
-            },
-            PathBuf::from("/usr/local/bin/container-runtime"),
-        )
+        State {
+            agents: BTreeMap::from([(
+                Agent::Claude,
+                AgentConfig {
+                    auth_token: Secret::new("agent-token".to_owned()),
+                },
+            )]),
+            container_runtime: Some(PathBuf::from("/usr/local/bin/container-runtime")),
+            ..State::default()
+        }
+    }
+
+    fn only_claude() -> BTreeSet<Agent> {
+        BTreeSet::from([Agent::Claude])
     }
 
     fn snapshot_path(directory: &TempDir) -> PathBuf {
@@ -643,6 +663,8 @@ mod tests {
                 Project {
                     name: "example".to_owned(),
                     repository: "https://example.invalid/repo".to_owned(),
+                    orchestrator_agent: Agent::Claude,
+                    job_agents: only_claude(),
                     credentials: BTreeMap::new(),
                     jobs: BTreeMap::new(),
                 },
@@ -723,6 +745,8 @@ mod tests {
             Project {
                 name: "example".to_owned(),
                 repository: "https://example.invalid/repo".to_owned(),
+                orchestrator_agent: Agent::Claude,
+                job_agents: only_claude(),
                 credentials: BTreeMap::new(),
                 jobs,
             },
@@ -866,19 +890,22 @@ mod tests {
             repository: &str,
             runtime: &ContainerRuntime,
         ) -> (State, ProjectId) {
-            let mut state = State::new(
+            let mut state = State::default();
+            state.agents.insert(
                 Agent::Claude,
                 AgentConfig {
                     auth_token: credential(),
                 },
-                runtime.path().to_owned(),
             );
+            state.container_runtime = Some(runtime.path().to_owned());
             let project = ProjectId::from_uuid(Uuid::from_u128(11));
             state.projects.insert(
                 project,
                 Project {
                     name: "hello".to_owned(),
                     repository: repository.to_owned(),
+                    orchestrator_agent: Agent::Claude,
+                    job_agents: only_claude(),
                     // No platform credential: the repository is public, so this
                     // also checks that a job with nothing to authenticate with
                     // is a perfectly ordinary job rather than a broken one.
@@ -1052,5 +1079,22 @@ mod tests {
     #[test]
     fn a_sweep_that_found_nothing_counts_nothing() {
         assert_eq!(tallied(&[], &[]), Swept::default());
+    }
+
+    /// A state that cannot exist must not reach disk, because the same check
+    /// runs when a file is read: writing it would turn something still
+    /// repairable into an instance that will not start.
+    #[test]
+    fn an_inconsistent_state_is_refused_before_it_is_written() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let (state, _) = with_a_running_job();
+        let store = Store::create(snapshot_path(&directory), key(), state).expect("it can write");
+
+        store.update().agents.clear();
+
+        // The write refused, so what is on disk is still the instance that was
+        // valid — and it still opens.
+        let reopened = Store::load(snapshot_path(&directory), key()).expect("it still opens");
+        assert!(reopened.is_some());
     }
 }
