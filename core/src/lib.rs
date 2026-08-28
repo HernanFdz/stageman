@@ -195,75 +195,6 @@ pub struct AgentConfig {
     pub auth_token: Secret,
 }
 
-/// The agents a project's jobs may run on.
-///
-/// Never empty, and that is a property of the type rather than a rule somebody
-/// checks: a project whose jobs have no agent to run on cannot do the one thing
-/// a project is for. Deserialisation goes through the same constructor, so a
-/// hand-edited snapshot with an empty set is refused where it is read rather
-/// than believed and acted upon — see
-/// `docs/decisions/0021-an-instance-starts-empty.md`.
-///
-/// Separate from the agent a project's orchestrator thinks with, and
-/// deliberately not required to contain it. Triage and work are different
-/// tasks, and a cheap agent judging signals while a capable one does the work
-/// is a configuration somebody will want.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "BTreeSet<Agent>", into = "BTreeSet<Agent>")]
-pub struct JobAgents(BTreeSet<Agent>);
-
-impl JobAgents {
-    /// The agents a project's jobs may run on.
-    ///
-    /// # Errors
-    ///
-    /// Fails if the set is empty.
-    pub fn new(agents: BTreeSet<Agent>) -> Result<Self, EmptyJobAgents> {
-        if agents.is_empty() {
-            return Err(EmptyJobAgents);
-        }
-        Ok(Self(agents))
-    }
-
-    /// Whether a project's jobs may run on this agent.
-    ///
-    /// Mutation testing cannot distinguish this from `true`, and that is
-    /// honest rather than a gap: [`Agent`] has one member, a set of them is
-    /// never empty, so every valid value of this type allows the only agent
-    /// there is. The mutant is equivalent until a second agent exists —
-    /// **delete this attribute in the commit that adds one**, because the
-    /// mutant stops being equivalent in the same change.
-    #[mutants::skip]
-    #[must_use]
-    pub fn allows(&self, agent: Agent) -> bool {
-        self.0.contains(&agent)
-    }
-
-    /// Every agent a project's jobs may run on.
-    pub fn iter(&self) -> impl Iterator<Item = Agent> + '_ {
-        self.0.iter().copied()
-    }
-}
-
-impl TryFrom<BTreeSet<Agent>> for JobAgents {
-    type Error = EmptyJobAgents;
-
-    fn try_from(agents: BTreeSet<Agent>) -> Result<Self, Self::Error> {
-        Self::new(agents)
-    }
-}
-
-impl From<JobAgents> for BTreeSet<Agent> {
-    fn from(agents: JobAgents) -> Self {
-        agents.0
-    }
-}
-
-/// A project was given no agent for its jobs to run on.
-#[derive(Debug, thiserror::Error)]
-#[error("a project needs at least one agent its jobs can run on")]
-pub struct EmptyJobAgents;
-
 /// A platform a project's jobs act on.
 ///
 /// One variant for now, which is the one a job cannot work without: cloning the
@@ -380,7 +311,12 @@ pub struct Project {
     /// `docs/decisions/0020-the-orchestrator-belongs-to-a-project.md`.
     pub orchestrator_agent: Agent,
     /// The agents this project's jobs may run on.
-    pub job_agents: JobAgents,
+    ///
+    /// Never empty in a valid instance, and checked rather than made
+    /// unrepresentable — see [`State::check`], which is the one definition of
+    /// what valid means and is consulted wherever a state could have stopped
+    /// being it.
+    pub job_agents: BTreeSet<Agent>,
     /// What its jobs are handed, one credential per platform.
     ///
     /// A map rather than a list so that two credentials for one platform is
@@ -448,36 +384,60 @@ impl State {
     /// its agent by value precisely so that removing a configuration cannot
     /// rewrite the record of work already done — `docs/conventions.md` §2.
     ///
-    /// Skipped by mutation testing for the reason [`JobAgents::allows`] is:
-    /// with one agent in existence both sides of this condition are true for
-    /// every project, so inverting the comparison or replacing the `or` with
-    /// an `and` changes nothing any test could observe. **Delete this attribute
-    /// in the commit that adds a second agent** — a project naming one agent
-    /// for triage and another for its jobs is what makes this falsifiable, and
-    /// it is the first thing that will exist once there are two.
+    /// Skipped by mutation testing, and equivalent rather than untested:
+    /// [`Agent`] has one member and a project's job agents are never empty, so
+    /// both sides of this condition are true for every project. Inverting the
+    /// comparison or replacing the `or` with an `and` changes nothing any test
+    /// could observe. **Delete this attribute in the commit that adds a second
+    /// agent** — a project naming one agent for triage and another for its jobs
+    /// is what makes this falsifiable, and it is the first thing that will
+    /// exist once there are two.
     #[mutants::skip]
     pub fn used_by(&self, agent: Agent) -> impl Iterator<Item = ProjectId> + '_ {
         self.projects
             .iter()
             .filter(move |(_, project)| {
-                project.orchestrator_agent == agent || project.job_agents.allows(agent)
+                project.orchestrator_agent == agent || project.job_agents.contains(&agent)
             })
             .map(|(id, _)| *id)
     }
 
-    /// Every agent a project names is configured.
+    /// Whether this describes an instance that can exist.
     ///
     /// The invariant `docs/decisions/0021-an-instance-starts-empty.md` moved
-    /// down from the instance to the project. Checked on the way out as well as
-    /// on the way in, so that a state which has broken it cannot reach disk —
-    /// a file that will not open is a worse outcome than a write that refused.
-    fn every_named_agent_is_configured(&self) -> Result<(), (ProjectId, Agent)> {
+    /// down from the instance to the project: a project names one agent for its
+    /// orchestrator and at least one its jobs may run on, and every one of them
+    /// is configured.
+    ///
+    /// Checked rather than made unrepresentable. A type that could not hold an
+    /// empty set would enforce half of this and leave the other half — an agent
+    /// removed while a project still named it — needing a check anyway, so the
+    /// wrapper bought ceremony at every construction site in exchange for one
+    /// of two conditions. One function, asked wherever a state might have
+    /// stopped being valid, is the smaller thing.
+    ///
+    /// It says nothing about *when* to ask. A file is checked as it is read,
+    /// because it is untrusted input; a state is checked before it is written,
+    /// because a file that will not open is worse than a write that refused.
+    /// Neither belongs to the domain, so neither is decided here.
+    ///
+    /// # Errors
+    ///
+    /// Names the first project that is wrong and how, because an operator
+    /// repairing a file needs to know which one.
+    pub fn check(&self) -> Result<(), Inconsistent> {
         for (id, project) in &self.projects {
-            for named in
-                std::iter::once(project.orchestrator_agent).chain(project.job_agents.iter())
+            if project.job_agents.is_empty() {
+                return Err(Inconsistent::NoJobAgents(*id));
+            }
+            for named in std::iter::once(project.orchestrator_agent)
+                .chain(project.job_agents.iter().copied())
             {
                 if !self.agents.contains_key(&named) {
-                    return Err((*id, named));
+                    return Err(Inconsistent::UnconfiguredProjectAgent {
+                        project: *id,
+                        agent: named,
+                    });
                 }
             }
         }
@@ -544,14 +504,6 @@ impl State {
         key: &Key,
         nonces: &mut impl FnMut() -> Nonce,
     ) -> Result<Snapshot, SealError> {
-        // Refused on the way out as well as on the way in. A state that has
-        // lost an agent a project names would otherwise be written to a file
-        // that then refuses to open, which turns a repairable mistake into an
-        // instance nobody can start.
-        if let Err((project, agent)) = self.every_named_agent_is_configured() {
-            return Err(SealError::UnconfiguredProjectAgent { project, agent });
-        }
-
         let agents = self
             .agents
             .iter()
@@ -652,16 +604,30 @@ pub enum KeyError {
     Length,
 }
 
-/// A snapshot could not be produced.
+/// A credential could not be sealed.
 #[derive(Debug, thiserror::Error)]
 pub enum SealError {
     /// The cipher rejected the input.
     #[error("a credential could not be sealed")]
     Cipher,
-    /// A project names an agent this instance no longer configures.
+}
+
+/// An instance's state is not internally consistent.
+///
+/// One type for every way a state can be wrong, because there is one definition
+/// of valid and several places that need to ask: a file on the way in, a state
+/// on the way out, and every operation that could break it. Two definitions
+/// would eventually disagree, and the one that let something through would be
+/// the one nobody was reading.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum Inconsistent {
+    /// A project has no agent its jobs can run on.
     ///
-    /// Refused here rather than written, because the same check on the way back
-    /// in would turn it into a file that cannot be opened.
+    /// A project whose jobs cannot run cannot do the one thing a project is
+    /// for, which is why this is a broken instance rather than an unusual one.
+    #[error("project {0} has no agent its jobs can run on")]
+    NoJobAgents(ProjectId),
+    /// A project names an agent this instance does not configure.
     #[error("project {project} names agent {agent:?}, which is not configured")]
     UnconfiguredProjectAgent {
         /// The project holding the dangling reference.
@@ -689,14 +655,12 @@ pub enum OpenError {
     /// A credential decrypted to something that is not text.
     #[error("a credential decrypted to bytes that are not text")]
     NotText,
-    /// A project names an agent the snapshot does not configure.
-    #[error("project {project} names agent {agent:?}, which this snapshot does not configure")]
-    UnconfiguredProjectAgent {
-        /// The project holding the dangling reference.
-        project: ProjectId,
-        /// The agent it names.
-        agent: Agent,
-    },
+    /// The snapshot decrypted, and describes an instance that cannot be.
+    ///
+    /// A file is untrusted input — hand-edited, half-written, or written by an
+    /// older version — so this is where believing it stops.
+    #[error("the snapshot describes an instance that is not internally consistent")]
+    Inconsistent(#[source] Inconsistent),
 }
 
 /// A credential as it appears on disk.
@@ -770,7 +734,7 @@ pub struct SealedProject {
     /// The agent its orchestrator thinks with.
     pub orchestrator_agent: Agent,
     /// The agents its jobs may run on.
-    pub job_agents: JobAgents,
+    pub job_agents: BTreeSet<Agent>,
     /// Its sealed credentials.
     pub credentials: BTreeMap<Platform, SealedSecret>,
     /// Its jobs, which hold nothing needing sealing.
@@ -853,26 +817,14 @@ impl Snapshot {
             })
             .collect::<Result<BTreeMap<_, _>, OpenError>>()?;
 
-        // A file is untrusted input, so every reference a project makes is
-        // resolved before anything downstream is allowed to assume it does.
-        for (id, project) in &projects {
-            for named in
-                std::iter::once(project.orchestrator_agent).chain(project.job_agents.iter())
-            {
-                if !agents.contains_key(&named) {
-                    return Err(OpenError::UnconfiguredProjectAgent {
-                        project: *id,
-                        agent: named,
-                    });
-                }
-            }
-        }
-
-        Ok(State {
+        let state = State {
             agents,
             projects,
             container_runtime,
-        })
+        };
+        // A file is untrusted input, so this is where believing it stops.
+        state.check().map_err(OpenError::Inconsistent)?;
+        Ok(state)
     }
 }
 
@@ -1035,8 +987,8 @@ pub enum HandoutError {
 #[cfg(test)]
 mod tests {
     use super::{
-        Agent, AgentConfig, BASE64, Handout, HandoutError, Job, JobAgents, JobId, Key, NONCE_LEN,
-        Nonce, OpenError, Platform, Progress, Project, ProjectId, SealError, Secret, Snapshot,
+        Agent, AgentConfig, BASE64, Handout, HandoutError, Inconsistent, Job, JobId, Key,
+        NONCE_LEN, Nonce, OpenError, Platform, Progress, Project, ProjectId, Secret, Snapshot,
         State,
     };
     use base64::Engine as _;
@@ -1069,8 +1021,8 @@ mod tests {
     }
 
     /// The agents a project's jobs may run on, for a project that only has one.
-    fn only_claude() -> JobAgents {
-        JobAgents::new(BTreeSet::from([Agent::Claude])).expect("one is not none")
+    fn only_claude() -> BTreeSet<Agent> {
+        BTreeSet::from([Agent::Claude])
     }
 
     fn a_project_with_a_job() -> Project {
@@ -1139,7 +1091,7 @@ mod tests {
         let project = state.projects.values().next().expect("one project");
 
         assert!(state.agents.contains_key(&project.orchestrator_agent));
-        assert!(project.job_agents.allows(Agent::Claude));
+        assert!(project.job_agents.contains(&Agent::Claude));
     }
 
     /// The rule a dashboard has to enforce, and the query it enforces it with.
@@ -1152,18 +1104,33 @@ mod tests {
         assert_eq!(configured().used_by(Agent::Claude).count(), 0);
     }
 
-    /// A state that has lost an agent a project names must refuse to be
-    /// written, because the same check on the way back in would otherwise turn
-    /// it into a file that cannot be opened at all.
+    /// One definition of valid, asked directly. Everything that persists or
+    /// loads a state consults this rather than repeating the rule.
     #[test]
-    fn a_state_that_lost_an_agent_a_project_names_will_not_seal() {
+    fn a_state_that_lost_an_agent_a_project_names_is_not_consistent() {
         let mut state = populated();
         state.agents.clear();
 
         assert!(matches!(
-            state.seal(&key(), &mut counting_nonces()),
-            Err(SealError::UnconfiguredProjectAgent { .. })
+            state.check(),
+            Err(Inconsistent::UnconfiguredProjectAgent { .. })
         ));
+    }
+
+    #[test]
+    fn a_project_with_no_agent_for_its_jobs_is_not_consistent() {
+        let mut state = populated();
+        for project in state.projects.values_mut() {
+            project.job_agents.clear();
+        }
+
+        assert!(matches!(state.check(), Err(Inconsistent::NoJobAgents(_))));
+    }
+
+    #[test]
+    fn an_instance_with_nothing_in_it_is_consistent() {
+        assert_eq!(State::default().check(), Ok(()));
+        assert_eq!(populated().check(), Ok(()));
     }
 
     #[test]
@@ -1319,31 +1286,13 @@ mod tests {
         snapshot.agents.clear();
         assert!(matches!(
             snapshot.open(&key()),
-            Err(OpenError::UnconfiguredProjectAgent {
-                agent: Agent::Claude,
-                ..
-            })
+            Err(OpenError::Inconsistent(
+                Inconsistent::UnconfiguredProjectAgent {
+                    agent: Agent::Claude,
+                    ..
+                }
+            ))
         ));
-    }
-
-    /// An empty set is refused where the file is read, rather than believed and
-    /// acted on. The type makes it unconstructible; this covers the one way in
-    /// that does not go through the constructor.
-    #[test]
-    fn a_snapshot_giving_a_project_no_job_agents_is_refused() {
-        let mut encoded: serde_json::Value =
-            serde_json::to_value(sealed()).expect("a snapshot encodes");
-        let projects = encoded
-            .get_mut("projects")
-            .and_then(serde_json::Value::as_object_mut)
-            .expect("it has projects");
-        for project in projects.values_mut() {
-            project["job_agents"] = serde_json::json!([]);
-        }
-
-        let refused = serde_json::from_value::<Snapshot>(encoded);
-
-        assert!(refused.is_err(), "an empty set should not deserialise");
     }
 
     #[test]
@@ -1524,17 +1473,18 @@ mod tests {
         assert!(state.job(JobId::from_uuid(Uuid::from_u128(404))).is_none());
     }
 
-    /// The one part of `JobAgents` that mutation testing can falsify today:
-    /// what went in comes back out.
+    /// A file describing an instance that cannot exist is refused where it is
+    /// read, rather than believed and acted on.
     #[test]
-    fn a_projects_job_agents_are_the_ones_it_was_given() {
-        let agents = only_claude();
+    fn a_snapshot_giving_a_project_no_job_agents_is_refused() {
+        let mut snapshot = sealed();
+        for project in snapshot.projects.values_mut() {
+            project.job_agents.clear();
+        }
 
-        assert_eq!(agents.iter().collect::<Vec<Agent>>(), vec![Agent::Claude]);
-    }
-
-    #[test]
-    fn a_project_cannot_be_given_no_agents_for_its_jobs() {
-        assert!(JobAgents::new(BTreeSet::new()).is_err());
+        assert!(matches!(
+            snapshot.open(&key()),
+            Err(OpenError::Inconsistent(Inconsistent::NoJobAgents(_)))
+        ));
     }
 }

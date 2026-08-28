@@ -32,9 +32,24 @@ runtime. Everything is configured through the dashboard, and `State` has a
 
 The invariant 0013 protected is not lost, it moves. **A project names one agent
 for its orchestrator and a non-empty set of agents its jobs may use, and every
-one of them is configured.** That holds at construction and is re-checked when
-a snapshot is loaded — the same two guards 0013 built, at the level where the
-requirement actually lives.
+one of them is configured.**
+
+It is *checked* rather than made unrepresentable, and that was settled the
+second way round. A wrapper type refusing an empty set was written first and
+then removed: it enforced one of the two conditions and left the other — an
+agent removed while a project still named it — needing a check anyway, so it
+bought ceremony at every construction site in exchange for half the property.
+One function, asked wherever a state might have stopped being valid, is smaller
+than a type plus a check — and it leaves one definition of *valid* rather than
+two that can drift apart.
+
+Where it is asked is not the domain's business, and the first attempt got that
+wrong by making sealing refuse. Sealing is cryptography; whether a state makes
+sense is a different question, and conflating them had `seal` returning an
+error that has nothing to do with a cipher. A file is checked as it is read,
+because it is untrusted input. A state is checked before it is written, by the
+store rather than by the domain, because a file that will not open is a worse
+outcome than a write that refused.
 
 An agent's configuration may not be removed while a project names it.
 Historical jobs are unaffected, because `docs/conventions.md` §2 already has a

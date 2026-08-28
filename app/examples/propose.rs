@@ -21,9 +21,7 @@ use std::process::ExitCode;
 
 use stageman::Store;
 use stageman_agent::ContainerRuntime;
-use stageman_core::{
-    Agent, AgentConfig, JobAgents, Key, Platform, Project, ProjectId, Secret, State, Uuid,
-};
+use stageman_core::{Agent, AgentConfig, Key, Platform, Project, ProjectId, Secret, State, Uuid};
 
 /// The work this job is asked to do.
 ///
@@ -100,8 +98,7 @@ async fn propose() -> Result<(), String> {
             name: "stageman".to_owned(),
             repository: repository.clone(),
             orchestrator_agent: Agent::Claude,
-            job_agents: JobAgents::new(std::collections::BTreeSet::from([Agent::Claude]))
-                .map_err(|error| error.to_string())?,
+            job_agents: std::collections::BTreeSet::from([Agent::Claude]),
             credentials,
             jobs: std::collections::BTreeMap::new(),
         },

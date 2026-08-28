@@ -1083,7 +1083,7 @@ mod tests {
         );
     }
 
-    use stageman_core::{AgentConfig, Handout, Job, JobAgents, Project, ProjectId, State, Uuid};
+    use stageman_core::{AgentConfig, Handout, Job, Project, ProjectId, State, Uuid};
     use std::collections::BTreeMap;
 
     /// An instance configured with one agent and nothing else.
@@ -1101,8 +1101,8 @@ mod tests {
         }
     }
 
-    fn only_claude() -> JobAgents {
-        JobAgents::new(std::collections::BTreeSet::from([Agent::Claude])).expect("one is not none")
+    fn only_claude() -> std::collections::BTreeSet<Agent> {
+        std::collections::BTreeSet::from([Agent::Claude])
     }
 
     /// An instance with one project, so a handout can carry a platform

@@ -20,8 +20,8 @@ use rand::rngs::{StdRng, SysRng};
 use rand::{Rng as _, SeedableRng as _};
 use stageman_agent::{Answer, ContainerRuntime, StopReason};
 use stageman_core::{
-    Agent, Handout, Job, JobId, Key, NONCE_LEN, Nonce, OpenError, Progress, ProjectId, SealError,
-    Snapshot, State, Timestamp,
+    Agent, Handout, Inconsistent, Job, JobId, Key, NONCE_LEN, Nonce, OpenError, Progress,
+    ProjectId, SealError, Snapshot, State, Timestamp,
 };
 
 /// An instance could not be opened.
@@ -47,6 +47,17 @@ pub enum LoadError {
 /// A snapshot could not be written.
 #[derive(Debug, thiserror::Error)]
 pub enum SaveError {
+    /// The state describes an instance that cannot exist.
+    ///
+    /// Refused before it reaches disk rather than after. The same check runs
+    /// when a file is read, so writing an inconsistent state would produce one
+    /// that cannot be opened — turning a mistake somebody could still undo into
+    /// an instance nobody can start.
+    ///
+    /// It lives here rather than in the domain's sealing, which is about
+    /// cryptography and has no business judging whether a state makes sense.
+    #[error("the state describes an instance that is not internally consistent")]
+    Inconsistent(#[source] Inconsistent),
     /// Credentials could not be sealed.
     #[error("credentials could not be sealed")]
     Seal(#[source] SealError),
@@ -150,6 +161,7 @@ impl Store {
     }
 
     fn write(&self, state: &State) -> Result<(), SaveError> {
+        state.check().map_err(SaveError::Inconsistent)?;
         let mut rng = self.rng.lock();
         let mut nonces = || {
             let mut nonce: Nonce = [0; NONCE_LEN];
@@ -568,8 +580,8 @@ mod tests {
     };
     use stageman_agent::{Answer, ContainerRuntime, StopReason};
     use stageman_core::{
-        Agent, AgentConfig, Job, JobAgents, JobId, Key, Progress, Project, ProjectId, Secret,
-        State, Timestamp, Uuid,
+        Agent, AgentConfig, Job, JobId, Key, Progress, Project, ProjectId, Secret, State,
+        Timestamp, Uuid,
     };
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::{Path, PathBuf};
@@ -593,8 +605,8 @@ mod tests {
         }
     }
 
-    fn only_claude() -> JobAgents {
-        JobAgents::new(BTreeSet::from([Agent::Claude])).expect("one is not none")
+    fn only_claude() -> BTreeSet<Agent> {
+        BTreeSet::from([Agent::Claude])
     }
 
     fn snapshot_path(directory: &TempDir) -> PathBuf {
@@ -1067,5 +1079,22 @@ mod tests {
     #[test]
     fn a_sweep_that_found_nothing_counts_nothing() {
         assert_eq!(tallied(&[], &[]), Swept::default());
+    }
+
+    /// A state that cannot exist must not reach disk, because the same check
+    /// runs when a file is read: writing it would turn something still
+    /// repairable into an instance that will not start.
+    #[test]
+    fn an_inconsistent_state_is_refused_before_it_is_written() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let (state, _) = with_a_running_job();
+        let store = Store::create(snapshot_path(&directory), key(), state).expect("it can write");
+
+        store.update().agents.clear();
+
+        // The write refused, so what is on disk is still the instance that was
+        // valid — and it still opens.
+        let reopened = Store::load(snapshot_path(&directory), key()).expect("it still opens");
+        assert!(reopened.is_some());
     }
 }
