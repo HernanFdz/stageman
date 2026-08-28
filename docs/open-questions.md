@@ -58,6 +58,17 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   swallowed. Settled by the first thing that needs to *read* a log rather than
   write one, which is the dashboard.
 
+  Sharpened since this was written, and the sharpening is most of the work:
+  **instance-wide and project-level logs are two concepts, not one with two
+  sources.** A snapshot that will not write, or a runtime that has stopped
+  answering, is a fact about the installation — an operator's problem, read
+  wherever somebody looks when nothing works at all. What a job's agent says is
+  about one project's work, is read by whoever is watching that job, and
+  belongs beside the job that produced it. They differ in who reads them, when,
+  and what they are for, so answering both with one mechanism is the way this
+  gets built wrong; treating them as the same thing has to be a decision
+  somebody takes rather than a default nobody noticed.
+
 - **Does a stopped container behave the same way on every runtime this has to
   run on?** `docs/decisions/0015-a-job-survives-the-daemon-dying.md` rests on
   one measurement taken on Docker Desktop on macOS: hard-killing the attached
@@ -113,9 +124,17 @@ Intended next steps, in order, each with its reason. Written as intentions, not
 progress: "next X, because Y" — never "X is 60% done", which is both derivable
 and wrong within a day.
 
-- Next, jobs survive a restart for real — containers named from their job,
-  labelled for sweeping, and startup restarting and resuming what it finds.
-  There is a startup to hook into now, which is what it was waiting for.
+- Next, a job as a thing that runs rather than a record of one that did.
+  **core** gains the states `docs/architecture.md` §1 says it holds and does
+  not yet, and **job** gains the crate that starts one. The container half is
+  built — named, labelled, retained, resumable, and tested to all four — so
+  what is missing is anything that knows a job is *running*, which is also what
+  a sweep has to consult in order to tell a container worth resuming from an
+  orphan worth removing.
+- Then startup sweeps and resumes, which is the last piece of
+  `docs/decisions/0015-a-job-survives-the-daemon-dying.md` and the first time
+  its bar in `docs/conventions.md` §4 can be tested as a whole rather than in
+  parts.
 - Then one job end to end, as the proof of concept: a project configured, an
   agent started in its own container, and a change proposed. Deliberately
   before the two mitigations above rather than after — they are far easier to

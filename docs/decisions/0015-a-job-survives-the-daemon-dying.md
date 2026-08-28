@@ -116,6 +116,18 @@ this needs a different answer for that agent — most likely failing the job
 loudly, since a job that silently resumes into an empty context is worse than
 one that stops.
 
+**A retained container keeps its credential at rest, where `--rm` used to take
+it away.** Variables named at creation belong to the runtime's own record of a
+container, so a *stopped* container's configuration still holds the credential
+in the clear — verified by inspecting one. Nothing about that is created by
+this decision except its duration: the record used to vanish when the container
+did, and now lasts as long as the container is kept. It is not the snapshot's
+problem, since
+`docs/decisions/0011-state-is-a-snapshot-not-a-database.md` seals what it
+stores, and it is the runtime's storage rather than this project's — but it is
+a place a credential now sits that it did not before, and whoever answers
+retention is also answering how long it sits there.
+
 Containers accumulate, one writable layer per job. When a finished job's
 container is removed is deliberately unanswered here and tracked in
 `docs/open-questions.md`, because it cannot be answered before a job exists to
