@@ -150,6 +150,19 @@ Intended next steps, in order, each with its reason. Written as intentions, not
 progress: "next X, because Y" — never "X is 60% done", which is both derivable
 and wrong within a day.
 
+- Next, the dashboard — and its first piece proves the shape rather than draws
+  a screen. Dioxus is named in `docs/architecture.md` §1 and has never been
+  compiled here. It arrives with a server-function model and a client that
+  compiles to WebAssembly, and both shape everything built against them, so the
+  smallest thing that serves a page and reads real state through a server
+  function is worth having before any screen is designed against a guess.
+
+  It also has to settle a gate question in the same breath. `cargo` builds the
+  host side only, so a client that does not compile for its own target would
+  pass `just check` untouched, and the gate would silently stop covering half
+  the application. Deciding that after two screens exist is deciding it too
+  late.
+
 - Then move the end-to-end tests out of the crates they test. A test that drives
   a whole flow — a job from kickoff to a cloned repository, a session surviving
   its container stopping — belongs in `tests/`, where it is a separate crate
@@ -164,19 +177,6 @@ and wrong within a day.
   builders, the label constant, the name parser — is a unit test by definition
   and stays where it is. Roughly half of the ignored tests are in each group,
   so this is a move for some and not a reorganisation of all.
-
-- Next, the dashboard — and its first piece proves the shape rather than draws
-  a screen. Dioxus is named in `docs/architecture.md` §1 and has never been
-  compiled here. It arrives with a server-function model and a client that
-  compiles to WebAssembly, and both shape everything built against them, so the
-  smallest thing that serves a page and reads real state through a server
-  function is worth having before any screen is designed against a guess.
-
-  It also has to settle a gate question in the same breath. `cargo` builds the
-  host side only, so a client that does not compile for its own target would
-  pass `just check` untouched, and the gate would silently stop covering half
-  the application. Deciding that after two screens exist is deciding it too
-  late.
 
 - Then the agents and projects views, which is where configuring an instance
   finally becomes possible at all. Agents first, because
