@@ -34,15 +34,17 @@
     )
 )]
 
-mod agents_view;
+pub(crate) mod agents_view;
 mod error;
 mod instance_view;
+mod projects_view;
 
 use dioxus::prelude::*;
 
 pub use agents_view::{Agent, AgentsView};
 pub use error::{DashboardError, DashboardResult};
-pub use instance_view::{Instance, InstanceView, Project};
+pub use instance_view::{Instance, InstanceView};
+pub use projects_view::{Project, ProjectsView};
 
 /// The dashboard's stylesheet.
 ///
@@ -75,6 +77,9 @@ pub enum Route {
 
         #[route("/agents")]
         AgentsView {},
+
+        #[route("/projects")]
+        ProjectsView {},
 }
 
 /// The whole dashboard.
@@ -107,6 +112,7 @@ pub fn Shell() -> Element {
                     nav { class: "flex items-baseline gap-4 text-sm",
                         NavLink { to: Route::InstanceView {}, "Instance" }
                         NavLink { to: Route::AgentsView {}, "Agents" }
+                        NavLink { to: Route::ProjectsView {}, "Projects" }
                     }
                 }
             }
@@ -169,6 +175,12 @@ const fn wire_name(agent: stageman_core::Agent) -> (&'static str, &'static str) 
     }
 }
 
+/// What a screen calls an agent.
+#[cfg(feature = "server")]
+fn shown(agent: stageman_core::Agent) -> String {
+    wire_name(agent).1.to_owned()
+}
+
 /// The projects that would break if this agent were forgotten.
 ///
 /// Names rather than identifiers, because an identifier means nothing to
@@ -181,6 +193,72 @@ fn dependents(state: &stageman_core::State, agent: stageman_core::Agent) -> Vec<
         .used_by(agent)
         .filter_map(|project| state.projects.get(&project))
         .map(|project| project.name.clone())
+        .collect()
+}
+
+/// What the browser calls a platform.
+#[cfg(feature = "server")]
+const fn wire_platform(platform: stageman_core::Platform) -> &'static str {
+    match platform {
+        stageman_core::Platform::GitHub => "github",
+    }
+}
+
+/// The platform named by a wire identifier.
+///
+/// The same arrangement as agents: the vocabulary is the dashboard's, so the
+/// match is here, and adding a platform to the domain stops this compiling
+/// until somebody decides what the browser calls it.
+///
+/// # Errors
+///
+/// Fails if nothing is called that.
+#[cfg(feature = "server")]
+fn named_platform(identifier: &str) -> DashboardResult<stageman_core::Platform> {
+    match identifier {
+        "github" => Ok(stageman_core::Platform::GitHub),
+        _ => Err(DashboardError::UnknownPlatform {
+            name: identifier.to_owned(),
+        }),
+    }
+}
+
+/// One project, as the browser sees it.
+#[cfg(feature = "server")]
+fn projected(id: stageman_core::ProjectId, project: &stageman_core::Project) -> Project {
+    Project {
+        id: id.to_string(),
+        name: project.name.clone(),
+        repository: project.repository.clone(),
+        orchestrator: wire_name(project.orchestrator_agent).1.to_owned(),
+        job_agents: project
+            .job_agents
+            .iter()
+            .map(|agent| wire_name(*agent).1.to_owned())
+            .collect(),
+        // Which platforms have one, never what it is. There is nowhere on this
+        // type to put a credential, which is the point.
+        platforms: project
+            .credentials
+            .keys()
+            .map(|platform| wire_platform(*platform).to_owned())
+            .collect(),
+        running: project
+            .jobs
+            .values()
+            .filter(|job| job.progress == stageman_core::Progress::Running)
+            .count(),
+        jobs: project.jobs.len(),
+    }
+}
+
+/// Every project this instance watches.
+#[cfg(feature = "server")]
+fn watching(state: &stageman_core::State) -> Vec<Project> {
+    state
+        .projects
+        .iter()
+        .map(|(id, project)| projected(*id, project))
         .collect()
 }
 
@@ -204,7 +282,9 @@ fn listed(state: &stageman_core::State) -> Vec<Agent> {
 
 #[cfg(all(test, feature = "server"))]
 mod tests {
-    use super::{DashboardError, dependents, listed, named, wire_name};
+    use super::{
+        DashboardError, dependents, listed, named, named_platform, shown, wire_name, wire_platform,
+    };
     use stageman_core::{Agent, AgentConfig, Project, ProjectId, Secret, State};
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -242,6 +322,39 @@ mod tests {
 
     /// The set is closed, so anything else is a stale page or a hand-made
     /// request rather than something an operator can fix.
+    /// One platform, so this is written out rather than looped.
+    ///
+    /// It becomes a loop over the set when there is a second, in the same way
+    /// the agent tests above already are — and until then a loop over one
+    /// element is noise the linter is right to object to.
+    #[test]
+    fn a_platform_identifier_round_trips_too() {
+        let platform = stageman_core::Platform::GitHub;
+        let id = wire_platform(platform);
+
+        assert!(!id.is_empty());
+        assert_eq!(named_platform(id), Ok(platform));
+    }
+
+    #[test]
+    fn an_identifier_naming_no_platform_is_refused() {
+        assert_eq!(
+            named_platform("gitlab"),
+            Err(DashboardError::UnknownPlatform {
+                name: "gitlab".to_owned()
+            })
+        );
+    }
+
+    /// What a screen calls an agent is what a refusal has to name.
+    #[test]
+    fn an_agent_is_shown_by_the_name_the_screen_uses() {
+        for agent in Agent::ALL {
+            assert_eq!(shown(*agent), wire_name(*agent).1);
+            assert!(!shown(*agent).is_empty());
+        }
+    }
+
     #[test]
     fn an_identifier_naming_nothing_is_refused_rather_than_guessed() {
         assert_eq!(

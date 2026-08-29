@@ -9,6 +9,7 @@ use dioxus::prelude::*;
 use dioxus::server::axum::Extension;
 use serde::{Deserialize, Serialize};
 
+use super::Project;
 use super::error::DashboardResult;
 use crate::ui::{Badge, BadgeTone, Card, EmptyState};
 
@@ -39,22 +40,6 @@ pub struct Instance {
     pub agents: usize,
     /// The projects this instance watches.
     pub projects: Vec<Project>,
-}
-
-/// One project, as much of it as a page is allowed to know.
-///
-/// Its credentials are absent by construction — this type has nowhere to put
-/// them.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Project {
-    /// What to call it.
-    pub name: String,
-    /// The repository its jobs work on.
-    pub repository: String,
-    /// How many of its jobs are still running.
-    pub running: usize,
-    /// How many jobs it has had in total, running or finished.
-    pub jobs: usize,
 }
 
 /// Everything the dashboard shows, read from the instance this process is
@@ -111,20 +96,10 @@ impl Instance {
         Self {
             container_runtime: crate::RUNTIME.path().display().to_string(),
             agents: state.agents.len(),
-            projects: state
-                .projects
-                .values()
-                .map(|project| Project {
-                    name: project.name.clone(),
-                    repository: project.repository.clone(),
-                    running: project
-                        .jobs
-                        .values()
-                        .filter(|job| job.progress == stageman_core::Progress::Running)
-                        .count(),
-                    jobs: project.jobs.len(),
-                })
-                .collect(),
+            // The same projection the projects screen reads, rather than a
+            // second one. This screen shows fewer of its fields; that is a
+            // decision about the view and not a reason for another type.
+            projects: super::watching(state),
         }
     }
 }
