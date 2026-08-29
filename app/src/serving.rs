@@ -315,11 +315,96 @@ async fn start() -> Result<(), StartupError> {
     // both paths.
     let router = router.layer(axum::Extension(Arc::clone(&store)));
 
+    // One task per project that has somewhere to listen. Spawned rather than
+    // awaited, and after the sweep rather than before: a reply arriving for a
+    // job the sweep has not yet placed would be routed against a state that is
+    // still being repaired.
+    //
+    // `docs/conventions.md` §3 keeps this off the request path, which matters
+    // more here than anywhere — a socket is open for as long as the process is,
+    // and awaiting one would mean the dashboard never starts.
+    crate::listen(&store, runtime);
+
     announce(runtime, &store, &swept, serving, bundle.as_deref(), &path)?;
 
     axum::serve(listener, router)
         .await
         .map_err(StartupError::Serving)
+}
+
+/// How many channels this instance can hear replies on.
+///
+/// A channel bound without the credential that listens is counted as nothing,
+/// which is the point: it is the ordinary shape of a project that speaks and
+/// is not answered, and it is also what a half-finished setup looks like.
+fn listening(state: &stageman_core::State) -> usize {
+    state
+        .projects
+        .values()
+        .filter(|project| {
+            project
+                .channels
+                .values()
+                .any(|bound| bound.listen_credential.is_some())
+        })
+        .count()
+}
+
+#[cfg(test)]
+mod listening_tests {
+    use super::listening;
+    use stageman_core::{Agent, Channel, ChannelConfig, Project, ProjectId, Secret, State, Uuid};
+    use std::collections::{BTreeMap, BTreeSet};
+
+    /// A project with a channel, and a credential to listen with or not.
+    fn watching(name: &str, listens: bool) -> Project {
+        Project {
+            name: name.to_owned(),
+            repository: "https://example.invalid/repo".to_owned(),
+            orchestrator_agent: Agent::Claude,
+            job_agents: BTreeSet::from([Agent::Claude]),
+            credentials: BTreeMap::new(),
+            channels: BTreeMap::from([(
+                Channel::Slack,
+                ChannelConfig {
+                    address: format!("C-{name}"),
+                    credential: Secret::new("xoxb-token".to_owned()),
+                    listen_credential: listens.then(|| Secret::new("xapp-token".to_owned())),
+                },
+            )]),
+            jobs: BTreeMap::new(),
+        }
+    }
+
+    /// The count says what can be heard, not what is bound.
+    ///
+    /// The distinction this line exists for: a channel bound with no
+    /// credential to listen with is a project that speaks and is not answered,
+    /// which looks exactly like a half-finished setup and produces no warning
+    /// either way.
+    #[test]
+    fn only_a_channel_with_somewhere_to_listen_is_counted() {
+        let mut state = State::default();
+        assert_eq!(listening(&state), 0);
+
+        state.projects.insert(
+            ProjectId::from_uuid(Uuid::from_u128(1)),
+            watching("a", false),
+        );
+        assert_eq!(listening(&state), 0, "bound is not the same as listening");
+
+        state.projects.insert(
+            ProjectId::from_uuid(Uuid::from_u128(2)),
+            watching("b", true),
+        );
+        assert_eq!(listening(&state), 1);
+
+        state.projects.insert(
+            ProjectId::from_uuid(Uuid::from_u128(3)),
+            watching("c", true),
+        );
+        assert_eq!(listening(&state), 2);
+    }
 }
 
 /// Says what was found and where the dashboard is, on standard output.
@@ -341,6 +426,11 @@ fn announce(
     println!("  runtime    {}", runtime.path().display());
     println!("  agents     {}", store.read().agents.len());
     println!("  projects   {}", store.read().projects.len());
+    // Printed rather than logged, because the failure it answers is a channel
+    // bound with no credential to listen with — which is not an error, produces
+    // no warning, and is indistinguishable from a platform sending nothing.
+    // The count is the cheapest thing that tells them apart.
+    println!("  listening  {} channel(s)", listening(&store.read()));
     println!(
         "  swept      {} resumed, {} failed, {} stranded",
         swept.resumed, swept.failed, swept.stranded

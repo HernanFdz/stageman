@@ -146,9 +146,22 @@ pub async fn create(
     // it *logs* a refusal rather than returning one. Mutating first would
     // therefore leave an instance that is invalid in memory and correct on
     // disk, with only a log line saying so.
+    // Checked here rather than in `State::check`, and the distinction matters.
+    // `State::check` is consulted when a snapshot is *read*, so a rule added
+    // there refuses to open an instance that already breaks it — putting the
+    // repair behind the door it just locked, which is the trap
+    // `docs/conventions.md` §3 names. An instance with two projects on one
+    // channel is ambiguous rather than unusable, so it is refused at the point
+    // somebody creates one and tolerated in a file that already has it.
+    if let Some(taken) = already_bound(&state, &channels) {
+        drop(state);
+        return Err(DashboardError::ChannelAlreadyBound { project: taken });
+    }
+
     let mut candidate = state.clone();
+    let created = stageman_core::ProjectId::from_uuid(uuid::Uuid::new_v4());
     candidate.projects.insert(
-        stageman_core::ProjectId::from_uuid(uuid::Uuid::new_v4()),
+        created,
         stageman_core::Project {
             name,
             repository,
@@ -171,7 +184,16 @@ pub async fn create(
 
     *state = candidate;
     let watching = watching_now(&state);
+    // Started here rather than only at startup. Binding a channel with a
+    // credential to listen with used to do nothing until the daemon was
+    // restarted, and nothing said so — which is indistinguishable from the
+    // platform sending nothing, and cost an evening to tell apart.
+    let listening = crate::listening_on(&state, created);
     drop(state);
+
+    if let Some(listening) = listening {
+        crate::listen_to(&instance.0, &crate::RUNTIME, listening);
+    }
 
     Ok(watching)
 }
@@ -308,6 +330,30 @@ fn binding(
         )])),
         _ => Err(DashboardError::ChannelIncomplete),
     }
+}
+
+/// The project already bound where these bindings would go, if any is.
+///
+/// Names it rather than merely refusing, because an operator looking at a
+/// channel identifier they just pasted cannot otherwise tell which of their
+/// projects has it.
+#[cfg(feature = "server")]
+fn already_bound(
+    state: &stageman_core::State,
+    wanted: &std::collections::BTreeMap<stageman_core::Channel, stageman_core::ChannelConfig>,
+) -> Option<String> {
+    state
+        .projects
+        .values()
+        .find(|project| {
+            wanted.iter().any(|(channel, binding)| {
+                project
+                    .channels
+                    .get(channel)
+                    .is_some_and(|held| held.address == binding.address)
+            })
+        })
+        .map(|project| project.name.clone())
 }
 
 /// A field that has to say something.
@@ -797,6 +843,7 @@ fn Field(label: String, children: Element) -> Element {
 #[cfg(all(test, feature = "server"))]
 mod server_tests {
     use super::{ChannelDraft, DashboardError, binding, busy};
+    use stageman_core::{ProjectId, State};
 
     /// The two boxes that bind a channel, plus the optional third.
     fn drafted(address: &str, credential: &str, listening: &str) -> ChannelDraft {
@@ -888,6 +935,52 @@ mod server_tests {
         assert_eq!(slack.address, "C0123456789");
         assert_eq!(slack.credential.expose(), "xoxb-not-a-real-token");
         assert_eq!(bound.len(), 1);
+    }
+
+    /// Two projects on one channel is refused, and the holder is named.
+    ///
+    /// The invariant inbound rests on. A message at the root would otherwise
+    /// belong to whichever orchestrator the search reached first — an ordering
+    /// rather than an answer — and if both listened, both would hear every
+    /// message and one job's reply would be delivered twice.
+    #[test]
+    fn a_channel_another_project_already_binds_is_refused() {
+        let mut state = State::default();
+        state.projects.insert(
+            ProjectId::from_uuid(uuid::Uuid::from_u128(1)),
+            Project {
+                name: "aviary".to_owned(),
+                repository: "https://example.invalid/aviary".to_owned(),
+                orchestrator_agent: Agent::Claude,
+                job_agents: BTreeSet::from([Agent::Claude]),
+                credentials: BTreeMap::new(),
+                channels: BTreeMap::from([(
+                    Channel::Slack,
+                    stageman_core::ChannelConfig {
+                        address: "C0123456789".to_owned(),
+                        credential: Secret::new("xoxb-token".to_owned()),
+                        listen_credential: None,
+                    },
+                )]),
+                jobs: BTreeMap::new(),
+            },
+        );
+
+        let wanted = binding(&drafted("C0123456789", "xoxb-other", "")).expect("a binding");
+        assert_eq!(
+            super::already_bound(&state, &wanted),
+            Some("aviary".to_owned()),
+            "it must name the project holding it, not merely refuse"
+        );
+
+        // A different channel on the same instance is fine, which is what
+        // stops this refusing every second project.
+        let elsewhere = binding(&drafted("C9999999999", "xoxb-other", "")).expect("a binding");
+        assert_eq!(super::already_bound(&state, &elsewhere), None);
+
+        // And binding nothing collides with nothing.
+        let none = binding(&drafted("", "", "")).expect("no binding");
+        assert_eq!(super::already_bound(&state, &none), None);
     }
 
     /// Listening is optional; listening with nowhere to listen is not.

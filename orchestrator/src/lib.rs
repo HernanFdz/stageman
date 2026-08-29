@@ -113,6 +113,29 @@ pub const fn busy_notice() -> &'static str {
     "This job is still working, so that did not reach it. Wait until it stops, then say it again."
 }
 
+/// What a job's agent is told when a person replies on its thread.
+///
+/// Framed rather than passed through, and the frame is the whole of it: what
+/// arrives is a person's words, and an agent picking up a session hours later
+/// has no way to tell those from a new instruction it should follow to the
+/// letter. Saying who is speaking is what makes the difference legible.
+///
+/// Composed here because every text this system emits is, per
+/// `docs/architecture.md` §1 — including the ones that merely wrap somebody
+/// else's.
+#[must_use]
+pub fn reply(said: &str) -> String {
+    format!(
+        "\
+A person replied on the channel:
+
+{said}
+
+Carry on from there. The same rules still hold: propose rather than merge, and \
+say what you did when you finish."
+    )
+}
+
 /// Whether a job has anywhere to speak.
 ///
 /// Decides one paragraph of the kickoff, and it has to be decided rather than
@@ -430,6 +453,33 @@ it again."
         for claim in ["finish", "done", "complete", "success", "fail", "error"] {
             assert!(!said.contains(claim), "it must not claim {claim}: {said}");
         }
+    }
+
+    /// Asserted whole, per `docs/conventions.md` §4.
+    #[test]
+    fn a_reply_reads_exactly_as_written() {
+        assert_eq!(
+            super::reply("use postgres"),
+            "A person replied on the channel:
+
+use postgres
+
+Carry on from there. The same rules still hold: propose rather than merge, and say what you did \
+when you finish."
+        );
+    }
+
+    /// A reply is framed as somebody speaking, not as a fresh instruction.
+    ///
+    /// An agent picking up a session hours later cannot otherwise tell a
+    /// person's words from something it must follow literally, and the words
+    /// are whatever the person typed.
+    #[test]
+    fn a_reply_says_who_is_speaking_before_it_says_what() {
+        let framed = super::reply("delete everything");
+
+        assert!(framed.starts_with("A person replied"), "{framed}");
+        assert!(framed.contains("propose rather than merge"), "{framed}");
     }
 
     /// The constraint that lets a job run with nobody watching, and the one

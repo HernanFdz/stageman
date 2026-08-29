@@ -367,8 +367,15 @@ and wrong within a day.
   is not acknowledged, so an unacknowledged envelope is the same message
   arriving repeatedly rather than a message lost.
 
-  Nothing calls `deliver` until then, which is the whole of what is
-  unfinished.
+  The loop is closed and was watched closing: a reply in a job's thread reached
+  its agent, and the agent's own two messages came back on the same socket and
+  were refused as this instance's own, which is the guard
+  `docs/decisions/0029-a-reply-is-routed-by-its-thread.md` calls load-bearing
+  doing its work where it could be seen.
+
+  What is left is the orchestrator's half. A message at the root, or a mention
+  in a thread belonging to no job, routes to `Recipient::Orchestrator` and is
+  logged, because nothing runs an orchestrator yet.
 
   The kickoff prompt still says to speak and stop, and stays that way until it
   can honestly say otherwise.

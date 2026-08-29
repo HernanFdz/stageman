@@ -95,6 +95,19 @@ pub enum DashboardError {
     #[error("a project needs at least one agent its jobs can run on")]
     JobAgentsMissing,
 
+    /// Another project already listens where this one would.
+    ///
+    /// Two projects on one channel makes routing ambiguous in the one place it
+    /// cannot be: a message at the root belongs to whichever orchestrator the
+    /// search reaches first, which is an ordering rather than an answer. If
+    /// both listen it is worse — both hear every message, and one job's reply
+    /// is delivered twice.
+    #[error("{project} is already bound to that channel")]
+    ChannelAlreadyBound {
+        /// The project that has it, as the screen names it.
+        project: String,
+    },
+
     /// A channel was given an address without a credential, or the reverse.
     ///
     /// A binding is two values and neither half works alone: an address with
@@ -191,9 +204,13 @@ impl DashboardError {
             | Self::AgentNotConfigured { .. }
             | Self::AgentNotOnProject { .. }
             | Self::ChannelIncomplete => StatusCode::BAD_REQUEST,
+            // The request is well formed and the instance is in a state that
+            // forbids it, which is what a conflict means.
             // Not a bad request: the request was well formed and the instance
             // is in a state that forbids it, which is what a conflict means.
-            Self::AgentInUse { .. } | Self::ProjectBusy { .. } => StatusCode::CONFLICT,
+            Self::AgentInUse { .. }
+            | Self::ProjectBusy { .. }
+            | Self::ChannelAlreadyBound { .. } => StatusCode::CONFLICT,
         }
     }
 }

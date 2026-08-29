@@ -64,6 +64,68 @@ pub async fn say_in(bound: &Speaking, thread: &Thread, text: &str) -> Result<(),
     Ok(())
 }
 
+/// Asks the platform something that takes no arguments, with one credential.
+///
+/// The two calls a listener makes before it can read anything — where to
+/// connect, and who this instance is — are both of this shape. Kept here
+/// rather than beside the listener because the reading of an answer is the
+/// same reading, and that is what [`understood_value`] guards.
+///
+/// # Errors
+///
+/// Fails if the platform cannot be reached, or refuses.
+#[mutants::skip]
+pub async fn ask(
+    endpoint: &str,
+    credential: &stageman_core::Secret,
+) -> Result<serde_json::Value, ChannelError> {
+    let answer = reqwest::Client::new()
+        .post(endpoint)
+        .bearer_auth(credential.expose())
+        .send()
+        .await
+        .map_err(|failure| ChannelError::Unreachable(failure.to_string()))?;
+
+    let status = answer.status().as_u16();
+    let body = answer
+        .text()
+        .await
+        .map_err(|failure| ChannelError::Unreachable(failure.to_string()))?;
+
+    understood_value(status, &body)
+}
+
+/// The same reading as [`understood`], stopping at the whole answer.
+///
+/// Split from it rather than duplicated, because the guard that matters — a
+/// refusal arriving as 200 — is the same guard and would otherwise be written
+/// twice and maintained once.
+///
+/// # Errors
+///
+/// Fails for the reasons [`understood`] does, except that it names no thread.
+fn understood_value(status: u16, body: &str) -> Result<serde_json::Value, ChannelError> {
+    if !(200..300).contains(&status) {
+        return Err(ChannelError::Unreachable(format!(
+            "the channel answered {status}"
+        )));
+    }
+
+    let answered: serde_json::Value = serde_json::from_str(body)
+        .map_err(|failure| ChannelError::Unreadable(failure.to_string()))?;
+
+    if answered.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err(ChannelError::Refused(
+            answered
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("no reason given")
+                .to_owned(),
+        ));
+    }
+    Ok(answered)
+}
+
 /// Posts one message and hands the answer to [`understood`].
 ///
 /// **Does the sending and decides nothing.** Everything that could be got
@@ -239,6 +301,41 @@ mod tests {
             ),
             "an answer naming no thread is not somewhere to speak"
         );
+    }
+
+    /// The same refusal guard, on the other reader.
+    ///
+    /// Two functions read an answer and both have to survive a refusal that
+    /// arrives as 200. Tested separately because they are separate code, and
+    /// the one that opens a socket fails in a way nobody would attribute to a
+    /// missing check: it would connect to a URL that is not there.
+    #[test]
+    fn a_refusal_is_a_refusal_for_the_other_reader_too() {
+        use super::understood_value;
+
+        assert!(matches!(
+            understood_value(200, r#"{"ok":false,"error":"invalid_auth"}"#),
+            Err(ChannelError::Refused(ref why)) if why == "invalid_auth"
+        ));
+        // Accepted and saying nothing is not a failure to read.
+        assert!(matches!(
+            understood_value(200, r#"{"ok":true}"#).map(|told| told
+                .get("url")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)),
+            Ok(None)
+        ));
+        assert_eq!(
+            understood_value(200, r#"{"ok":true,"url":"wss://example.invalid/link"}"#)
+                .expect("accepted")
+                .get("url")
+                .and_then(serde_json::Value::as_str),
+            Some("wss://example.invalid/link")
+        );
+        assert!(matches!(
+            understood_value(500, r#"{"ok":true}"#),
+            Err(ChannelError::Unreachable(_))
+        ));
     }
 
     /// A status outside the successful range never reaches the body.
