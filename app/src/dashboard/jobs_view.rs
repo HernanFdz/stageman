@@ -524,6 +524,7 @@ mod server_tests {
             orchestrator_agent: Agent::Claude,
             job_agents: agents,
             credentials: BTreeMap::new(),
+            channels: BTreeMap::new(),
             jobs: BTreeMap::new(),
         }
     }

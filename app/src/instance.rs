@@ -866,6 +866,7 @@ mod tests {
                     orchestrator_agent: Agent::Claude,
                     job_agents: only_claude(),
                     credentials: BTreeMap::new(),
+                    channels: BTreeMap::new(),
                     jobs: BTreeMap::new(),
                 },
             );
@@ -948,6 +949,7 @@ mod tests {
                 orchestrator_agent: Agent::Claude,
                 job_agents: only_claude(),
                 credentials: BTreeMap::new(),
+                channels: BTreeMap::new(),
                 jobs,
             },
         );
@@ -1106,6 +1108,7 @@ mod tests {
                     // also checks that a job with nothing to authenticate with
                     // is a perfectly ordinary job rather than a broken one.
                     credentials: BTreeMap::new(),
+                    channels: BTreeMap::new(),
                     jobs: BTreeMap::new(),
                 },
             );

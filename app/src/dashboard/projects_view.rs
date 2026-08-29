@@ -150,6 +150,12 @@ pub async fn create(
                 stageman_core::Platform::GitHub,
                 stageman_core::Secret::new(credential),
             )]),
+            // Empty, because the form does not ask yet. A project with no
+            // channel bound can still run work that never needs to ask — see
+            // `docs/decisions/0005-conversation-happens-on-channels.md` — so
+            // this is an ordinary project rather than a half-built one, and
+            // the form gains the field when Slack does.
+            channels: std::collections::BTreeMap::new(),
             jobs: std::collections::BTreeMap::new(),
         },
     );
@@ -647,6 +653,7 @@ mod server_tests {
             orchestrator_agent: Agent::Claude,
             job_agents: BTreeSet::from([Agent::Claude]),
             credentials: BTreeMap::new(),
+            channels: BTreeMap::new(),
             // Freshly minted rather than derived from a position, which would
             // need a conversion that can fail — and the gate is right that
             // defaulting such a conversion would silently give two jobs the
