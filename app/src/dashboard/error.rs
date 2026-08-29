@@ -95,6 +95,21 @@ pub enum DashboardError {
     #[error("a project needs at least one agent its jobs can run on")]
     JobAgentsMissing,
 
+    /// A channel was given an address without a credential, or the reverse.
+    ///
+    /// A binding is two values and neither half works alone: an address with
+    /// nothing to authenticate with cannot be reached, and a credential with
+    /// nowhere to point has nowhere to speak. Refused rather than stored,
+    /// because a half-bound channel looks bound on every screen and fails at
+    /// the one moment it is needed — which is a job with a question and
+    /// nowhere to put it.
+    ///
+    /// Distinct from [`DashboardError::Incomplete`], which says a required
+    /// field is empty. Both of these fields are optional; what is refused is
+    /// the combination.
+    #[error("a channel needs an address and a credential, or neither")]
+    ChannelIncomplete,
+
     /// A project names an agent that has no credential.
     ///
     /// The other half of what the domain calls an inconsistent instance, and
@@ -174,7 +189,8 @@ impl DashboardError {
             | Self::Incomplete { .. }
             | Self::JobAgentsMissing
             | Self::AgentNotConfigured { .. }
-            | Self::AgentNotOnProject { .. } => StatusCode::BAD_REQUEST,
+            | Self::AgentNotOnProject { .. }
+            | Self::ChannelIncomplete => StatusCode::BAD_REQUEST,
             // Not a bad request: the request was well formed and the instance
             // is in a state that forbids it, which is what a conflict means.
             Self::AgentInUse { .. } | Self::ProjectBusy { .. } => StatusCode::CONFLICT,

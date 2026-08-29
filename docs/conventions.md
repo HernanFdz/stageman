@@ -316,6 +316,27 @@ it lands.
   is a leak. That makes the test *harder* rather than laxer, because it now has
   to tell the two apart — a suite that merely counts what is left behind would
   pass on the leak and fail on the feature.
+- **A field added to the sealed form is defaulted, and a literal older file
+  proves it.** `docs/decisions/0011-state-is-a-snapshot-not-a-database.md`
+  versions nothing and says what that costs: an added field is free *with a
+  default*, and without one every existing snapshot stops loading — which
+  loses all of it, because there is only the one file. The gate cannot catch
+  this, and neither can a round-trip test: the current writer always emits
+  every field, so the input that breaks can only come from before the change.
+  Write the older file out as literal text and open it.
+
+  This is not the substituted default `.quality/gate-reference.md` forbids.
+  That rule is about replacing a failure with a guess; here the default is the
+  true answer, because a file written before the field existed described
+  something that genuinely did not have it. If that is *not* true of some
+  future field — if absence and emptiness would mean different things — then a
+  default is the wrong tool and the version field 0011 already names is the
+  right one.
+
+  Written down because it was learned the expensive way: the channel map was
+  added without a default, and the first thing anybody did with the build was
+  fail to open an instance holding five real projects.
+
 - **Kickoff prompts are snapshot-tested.** The prompt text the orchestrator
   composes is asserted as literal text, so a change to what a job is told to do
   shows up as a reviewable diff. Prompt text is the highest-leverage code here

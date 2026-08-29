@@ -251,6 +251,22 @@ fn named_platform(identifier: &str) -> DashboardResult<stageman_core::Platform> 
     }
 }
 
+/// What a screen calls a channel.
+///
+/// Deliberately without the counterpart a platform has. `named_platform` exists
+/// because a browser sends a platform identifier back when it sets a
+/// credential; nothing sends a channel back, because the form binds the one
+/// there is rather than choosing among them. A parser with no caller would be
+/// a guess about a route that does not exist yet, and adding a second channel
+/// stops this compiling until somebody names it — which is the property worth
+/// having.
+#[cfg(feature = "server")]
+const fn wire_channel(channel: stageman_core::Channel) -> &'static str {
+    match channel {
+        stageman_core::Channel::Slack => "Slack",
+    }
+}
+
 /// One project, as the browser sees it.
 #[cfg(feature = "server")]
 fn projected(id: stageman_core::ProjectId, project: &stageman_core::Project) -> Project {
@@ -270,6 +286,15 @@ fn projected(id: stageman_core::ProjectId, project: &stageman_core::Project) -> 
             .credentials
             .keys()
             .map(|platform| wire_platform(*platform).to_owned())
+            .collect(),
+        // Which channels are bound, never the address or the credential. The
+        // address is not a secret, but this type exists to carry what a screen
+        // needs, and no screen needs it yet — see
+        // `docs/decisions/0022-the-browser-never-sees-the-domain.md`.
+        channels: project
+            .channels
+            .keys()
+            .map(|channel| wire_channel(*channel).to_owned())
             .collect(),
         running: project
             .jobs
@@ -311,8 +336,8 @@ fn listed(state: &stageman_core::State) -> Vec<Agent> {
 #[cfg(all(test, feature = "server"))]
 mod tests {
     use super::{
-        DashboardError, dependents, identify, listed, named, named_platform, shown, wire_name,
-        wire_platform,
+        DashboardError, dependents, identify, listed, named, named_platform, shown, wire_channel,
+        wire_name, wire_platform,
     };
     use stageman_core::{Agent, AgentConfig, Project, ProjectId, Secret, State};
     use std::collections::{BTreeMap, BTreeSet};
@@ -364,6 +389,25 @@ mod tests {
 
         assert!(!id.is_empty());
         assert_eq!(named_platform(id), Ok(platform));
+    }
+
+    /// What a channel is called on a screen, asserted as the literal text.
+    ///
+    /// Not a round trip like the platform above, because there is deliberately
+    /// nothing to round trip through: nothing sends a channel identifier back,
+    /// so `wire_channel` has no parser and this name is only ever read. That
+    /// makes the name itself the whole of the contract — and mutation testing
+    /// is what said so, by replacing it with an empty string and with nonsense
+    /// and finding no test that minded.
+    ///
+    /// One channel, so written out rather than looped, on the same terms as
+    /// the platform above.
+    #[test]
+    fn a_channel_is_shown_by_a_name_that_says_something() {
+        let name = wire_channel(stageman_core::Channel::Slack);
+
+        assert!(!name.is_empty());
+        assert_eq!(name, "Slack");
     }
 
     #[test]
