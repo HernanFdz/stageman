@@ -85,6 +85,57 @@ Whatever it has to say appears in this thread. Job {job}."
     )
 }
 
+/// What a job's thread is told when its agent stops.
+///
+/// **Deliberately says nothing about how it went.** The instance knows the
+/// turn ended and cannot know whether that was an answer, a question, or an
+/// agent giving up — deciding would mean reading what it said, and reading it
+/// properly would mean another model call. A notice that guessed would be
+/// wrong often enough to be worse than one that does not try.
+///
+/// What it does carry is the fact worth having: the agent has stopped, so a
+/// reply now reaches it. While
+/// `docs/open-questions.md` has messaging a *running* job unsupported, that is
+/// the difference between a thread somebody can act on and one they cannot.
+#[must_use]
+pub const fn attention_notice() -> &'static str {
+    "⚠️ Check this out. The agent has stopped; a reply in this thread will reach it."
+}
+
+/// What a thread is told when a reply arrives for a job that is still working.
+///
+/// The honest version of a limitation rather than a silence. A person who
+/// replies and hears nothing concludes the reply was read, which is the one
+/// wrong belief available here — they would then wait for an answer that is
+/// not coming.
+#[must_use]
+pub const fn busy_notice() -> &'static str {
+    "This job is still working, so that did not reach it. Wait until it stops, then say it again."
+}
+
+/// What a job's agent is told when a person replies on its thread.
+///
+/// Framed rather than passed through, and the frame is the whole of it: what
+/// arrives is a person's words, and an agent picking up a session hours later
+/// has no way to tell those from a new instruction it should follow to the
+/// letter. Saying who is speaking is what makes the difference legible.
+///
+/// Composed here because every text this system emits is, per
+/// `docs/architecture.md` §1 — including the ones that merely wrap somebody
+/// else's.
+#[must_use]
+pub fn reply(said: &str) -> String {
+    format!(
+        "\
+A person replied on the channel:
+
+{said}
+
+Carry on from there. The same rules still hold: propose rather than merge, and \
+say what you did when you finish."
+    )
+}
+
 /// Whether a job has anywhere to speak.
 ///
 /// Decides one paragraph of the kickoff, and it has to be decided rather than
@@ -369,6 +420,66 @@ Whatever it has to say appears in this thread. Job \
             reporting < asking,
             "reporting must come first, or it reads as a special case of asking: {prompt}"
         );
+    }
+
+    /// Asserted as literal text, per `docs/conventions.md` §4.
+    ///
+    /// Both of these are read by a person on a channel and by nothing else, so
+    /// a rewrite would change what an operator sees and no other test would go
+    /// red.
+    #[test]
+    fn the_notices_read_exactly_as_written() {
+        assert_eq!(
+            super::attention_notice(),
+            "⚠️ Check this out. The agent has stopped; a reply in this thread will reach it."
+        );
+        assert_eq!(
+            super::busy_notice(),
+            "This job is still working, so that did not reach it. Wait until it stops, then say \
+it again."
+        );
+    }
+
+    /// The attention notice must not claim to know how it went.
+    ///
+    /// The instance sees a turn end and cannot tell an answer from a question
+    /// from an agent giving up. Every word suggesting otherwise is one an
+    /// operator would reasonably act on, so this is what stops a well-meant
+    /// "finished" being added later.
+    #[test]
+    fn the_attention_notice_says_nothing_about_how_it_went() {
+        let said = super::attention_notice().to_lowercase();
+
+        for claim in ["finish", "done", "complete", "success", "fail", "error"] {
+            assert!(!said.contains(claim), "it must not claim {claim}: {said}");
+        }
+    }
+
+    /// Asserted whole, per `docs/conventions.md` §4.
+    #[test]
+    fn a_reply_reads_exactly_as_written() {
+        assert_eq!(
+            super::reply("use postgres"),
+            "A person replied on the channel:
+
+use postgres
+
+Carry on from there. The same rules still hold: propose rather than merge, and say what you did \
+when you finish."
+        );
+    }
+
+    /// A reply is framed as somebody speaking, not as a fresh instruction.
+    ///
+    /// An agent picking up a session hours later cannot otherwise tell a
+    /// person's words from something it must follow literally, and the words
+    /// are whatever the person typed.
+    #[test]
+    fn a_reply_says_who_is_speaking_before_it_says_what() {
+        let framed = super::reply("delete everything");
+
+        assert!(framed.starts_with("A person replied"), "{framed}");
+        assert!(framed.contains("propose rather than merge"), "{framed}");
     }
 
     /// The constraint that lets a job run with nobody watching, and the one

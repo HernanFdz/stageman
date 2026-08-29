@@ -38,7 +38,9 @@ server = [
     "dep:etcetera",
     "dep:parking_lot",
     "dep:rand",
+    "dep:futures-util",
     "dep:reqwest",
+    "dep:tokio-tungstenite",
     "dep:serde_json",
     "dep:stageman-agent",
     "dep:stageman-core",
@@ -94,6 +96,20 @@ rand = { version = "0.10.2", optional = true }
 # where it was written and fails in continuous integration. Already in the
 # lockfile through the framework, so this adds a direct dependency and no new
 # audited code.
+# The transport a channel's replies arrive over. A websocket this process
+# opens outward, because the alternative wants a public HTTPS endpoint and this
+# is a daemon on somebody's own machine — see
+# `docs/decisions/0029-a-reply-is-routed-by-its-thread.md`.
+#
+# Roots are bundled rather than taken from the platform, for the reason the
+# HTTP client's backend is chosen the same way: a machine's certificate store
+# is a difference between where this was written and where it runs.
+# Stream and sink extensions for the websocket above, which offers neither.
+futures-util = { version = "0.3.31", default-features = false, optional = true }
+tokio-tungstenite = { version = "0.29.0", default-features = false, features = [
+    "connect",
+    "rustls-tls-webpki-roots",
+], optional = true }
 reqwest = { version = "0.12.28", default-features = false, features = [
     "json",
     "rustls-tls",
@@ -107,6 +123,7 @@ tokio = { version = "1.53.1", features = [
     "macros",
     "net",
     "rt-multi-thread",
+    "time",
 ], optional = true }
 tracing = { version = "0.1.44", optional = true }
 tracing-subscriber = { version = "0.3.23", features = [

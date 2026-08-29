@@ -16,7 +16,7 @@
 //! or an endpoint; it gets one command with one argument, per
 //! `docs/decisions/0028-stageman-ships-the-tool-that-speaks.md`.
 
-use stageman_core::{Channel, ChannelConfig, Thread};
+use stageman_core::{Channel, Speaking, Thread};
 
 /// Where Slack takes a message.
 const POST_MESSAGE: &str = "https://slack.com/api/chat.postMessage";
@@ -27,17 +27,103 @@ const POST_MESSAGE: &str = "https://slack.com/api/chat.postMessage";
 ///
 /// Fails if the channel cannot be reached, or refuses.
 pub async fn open_thread(
-    bound: &ChannelConfig,
+    bound: &Speaking,
     channel: Channel,
     text: &str,
 ) -> Result<Thread, ChannelError> {
     let posted = match channel {
-        Channel::Slack => slack_post(bound, text).await?,
+        Channel::Slack => slack_post(bound, text, None).await?,
     };
     Ok(Thread {
         channel,
         id: posted,
     })
+}
+
+/// Says something in a thread that already exists.
+///
+/// What the daemon uses to speak for itself — a notice that a job's agent has
+/// stopped, or that a reply could not be delivered. A job's *own* words never
+/// come through here: those go out through the tool in its container, per
+/// `docs/decisions/0028-stageman-ships-the-tool-that-speaks.md`, and keeping
+/// the two paths apart is what stops this becoming a second way for a job to
+/// talk.
+///
+/// # Errors
+///
+/// Fails if the channel cannot be reached, or refuses.
+///
+/// Skipped by mutation testing for the reason [`slack_post`] is: it chooses
+/// nothing. Everything that could be got wrong about an answer is in
+/// [`understood`], and reaching this needs a network.
+#[mutants::skip]
+pub async fn say_in(bound: &Speaking, thread: &Thread, text: &str) -> Result<(), ChannelError> {
+    match thread.channel {
+        Channel::Slack => slack_post(bound, text, Some(&thread.id)).await?,
+    };
+    Ok(())
+}
+
+/// Asks the platform something that takes no arguments, with one credential.
+///
+/// The two calls a listener makes before it can read anything — where to
+/// connect, and who this instance is — are both of this shape. Kept here
+/// rather than beside the listener because the reading of an answer is the
+/// same reading, and that is what [`understood_value`] guards.
+///
+/// # Errors
+///
+/// Fails if the platform cannot be reached, or refuses.
+#[mutants::skip]
+pub async fn ask(
+    endpoint: &str,
+    credential: &stageman_core::Secret,
+) -> Result<serde_json::Value, ChannelError> {
+    let answer = reqwest::Client::new()
+        .post(endpoint)
+        .bearer_auth(credential.expose())
+        .send()
+        .await
+        .map_err(|failure| ChannelError::Unreachable(failure.to_string()))?;
+
+    let status = answer.status().as_u16();
+    let body = answer
+        .text()
+        .await
+        .map_err(|failure| ChannelError::Unreachable(failure.to_string()))?;
+
+    understood_value(status, &body)
+}
+
+/// The same reading as [`understood`], stopping at the whole answer.
+///
+/// Split from it rather than duplicated, because the guard that matters — a
+/// refusal arriving as 200 — is the same guard and would otherwise be written
+/// twice and maintained once.
+///
+/// # Errors
+///
+/// Fails for the reasons [`understood`] does, except that it names no thread.
+fn understood_value(status: u16, body: &str) -> Result<serde_json::Value, ChannelError> {
+    if !(200..300).contains(&status) {
+        return Err(ChannelError::Unreachable(format!(
+            "the channel answered {status}"
+        )));
+    }
+
+    let answered: serde_json::Value = serde_json::from_str(body)
+        .map_err(|failure| ChannelError::Unreadable(failure.to_string()))?;
+
+    if answered.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err(ChannelError::Refused(
+            answered
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("no reason given")
+                .to_owned(),
+        ));
+    }
+    Ok(answered)
 }
 
 /// Posts one message and hands the answer to [`understood`].
@@ -47,13 +133,18 @@ pub async fn open_thread(
 /// request and two moves of a string. Reaching this at all needs a network, and
 /// a test with one would be testing Slack rather than this.
 #[mutants::skip]
-async fn slack_post(bound: &ChannelConfig, text: &str) -> Result<String, ChannelError> {
+async fn slack_post(
+    bound: &Speaking,
+    text: &str,
+    thread: Option<&str>,
+) -> Result<String, ChannelError> {
     let answer = reqwest::Client::new()
         .post(POST_MESSAGE)
         .bearer_auth(bound.credential.expose())
         .json(&Posting {
             channel: &bound.address,
             text,
+            thread_ts: thread,
         })
         .send()
         .await
@@ -119,6 +210,11 @@ fn understood(status: u16, body: &str) -> Result<String, ChannelError> {
 struct Posting<'a> {
     channel: &'a str,
     text: &'a str,
+    /// Absent when this opens a thread, and the parent's identifier when it
+    /// speaks in one. Skipped rather than sent as null, because the platform
+    /// reads a present-but-empty field as an address rather than as no address.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thread_ts: Option<&'a str>,
 }
 
 /// What Slack says back.
@@ -205,6 +301,41 @@ mod tests {
             ),
             "an answer naming no thread is not somewhere to speak"
         );
+    }
+
+    /// The same refusal guard, on the other reader.
+    ///
+    /// Two functions read an answer and both have to survive a refusal that
+    /// arrives as 200. Tested separately because they are separate code, and
+    /// the one that opens a socket fails in a way nobody would attribute to a
+    /// missing check: it would connect to a URL that is not there.
+    #[test]
+    fn a_refusal_is_a_refusal_for_the_other_reader_too() {
+        use super::understood_value;
+
+        assert!(matches!(
+            understood_value(200, r#"{"ok":false,"error":"invalid_auth"}"#),
+            Err(ChannelError::Refused(ref why)) if why == "invalid_auth"
+        ));
+        // Accepted and saying nothing is not a failure to read.
+        assert!(matches!(
+            understood_value(200, r#"{"ok":true}"#).map(|told| told
+                .get("url")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)),
+            Ok(None)
+        ));
+        assert_eq!(
+            understood_value(200, r#"{"ok":true,"url":"wss://example.invalid/link"}"#)
+                .expect("accepted")
+                .get("url")
+                .and_then(serde_json::Value::as_str),
+            Some("wss://example.invalid/link")
+        );
+        assert!(matches!(
+            understood_value(500, r#"{"ok":true}"#),
+            Err(ChannelError::Unreachable(_))
+        ));
     }
 
     /// A status outside the successful range never reaches the body.

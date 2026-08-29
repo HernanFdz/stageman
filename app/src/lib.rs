@@ -18,6 +18,8 @@ mod channel;
 #[cfg(feature = "server")]
 mod instance;
 #[cfg(feature = "server")]
+mod listening;
+#[cfg(feature = "server")]
 mod serving;
 
 pub mod dashboard;
@@ -27,8 +29,10 @@ pub use dashboard::Dashboard;
 
 #[cfg(feature = "server")]
 pub use instance::{
-    LoadError, RunError, SaveError, Started, StateGuard, StateRef, Store, Swept, begin, reconcile,
-    run, supervise,
+    LoadError, RunError, SaveError, Started, StateGuard, StateRef, Store, Swept, begin, deliver,
+    reconcile, run, supervise,
 };
+#[cfg(feature = "server")]
+pub use listening::{listen, listen_to, listening_on};
 #[cfg(feature = "server")]
 pub use serving::{RUNTIME, serve};

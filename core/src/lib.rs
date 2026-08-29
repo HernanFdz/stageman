@@ -252,6 +252,21 @@ pub struct ChannelConfig {
     /// watching a project's channels needs that project's credentials, and one
     /// holder of every project's at once is the shape being avoided.
     pub credential: Secret,
+    /// What listening on that channel needs, if this project listens at all.
+    ///
+    /// A second credential rather than a wider first one, because the two
+    /// authorise different things and are held by different processes.
+    /// [`Handout`] delivers `credential` above to a job's container and never
+    /// this: posting is what a job does, and opening an event stream is not.
+    /// A leaked job credential can therefore post in one channel, which is all
+    /// it could ever do — see
+    /// `docs/decisions/0029-a-reply-is-routed-by-its-thread.md`.
+    ///
+    /// Optional, and its absence is a working configuration rather than a
+    /// half-finished one: a project that speaks and does not listen is exactly
+    /// what existed before this, and `docs/decisions/0005-conversation-happens-on-channels.md`
+    /// only ever required somewhere to escalate *to*.
+    pub listen_credential: Option<Secret>,
 }
 
 /// Where one job's conversation happens.
@@ -565,11 +580,85 @@ impl State {
             .find_map(|project| project.jobs.get(&job))
     }
 
+    /// Which project a job belongs to.
+    ///
+    /// The companion to [`State::job`], and needed for the same reason: a job
+    /// is keyed inside its project, so anything arriving with only a job's
+    /// identifier — a container's name, a thread a reply came in — has to
+    /// search for the rest. Whoever speaks on that job's behalf needs the
+    /// project, because the channel binding is the project's.
+    #[must_use]
+    pub fn project_of(&self, job: JobId) -> Option<ProjectId> {
+        self.projects
+            .iter()
+            .find(|(_, project)| project.jobs.contains_key(&job))
+            .map(|(id, _)| *id)
+    }
+
     /// A job, for recording what became of it.
     pub fn job_mut(&mut self, job: JobId) -> Option<&mut Job> {
         self.projects
             .values_mut()
             .find_map(|project| project.jobs.get_mut(&job))
+    }
+
+    /// Who a message arriving on a channel is for.
+    ///
+    /// The rule in `docs/decisions/0029-a-reply-is-routed-by-its-thread.md`,
+    /// and the whole of it: **a message in a thread belonging to a job is for
+    /// that job; anything else is for the orchestrator, and only when it
+    /// mentions the bot.** Nothing else is read.
+    ///
+    /// The mention is required outside a thread and not inside one, which looks
+    /// inconsistent and is not. Inside a job's thread there is no ambiguity
+    /// about who is being addressed — the thread names them. Outside it, a
+    /// project's channel is a room people talk in, and answering everything
+    /// said there would make this the most tiresome member of it.
+    ///
+    /// A thread is matched on its channel as well as its identifier, because an
+    /// identifier is only unique within one channel.
+    ///
+    /// Note what is *not* consulted: whether the job is still running. A
+    /// finished job's thread still routes to it, and that is deliberate — the
+    /// thread is that job's conversation, and a person replying in it a day
+    /// later means the job. What happens when a job cannot take the message is
+    /// a question for whoever delivers it, not for this.
+    #[must_use]
+    pub fn recipient(&self, channel: Channel, arriving: &Arriving<'_>) -> Recipient {
+        // First, and before anything else can match.
+        if arriving.from_us {
+            return Recipient::Nobody;
+        }
+
+        if let Some(thread) = arriving.thread {
+            let found = self
+                .projects
+                .values()
+                .flat_map(|project| &project.jobs)
+                .find(|(_, job)| {
+                    job.thread.as_ref().is_some_and(|speaking| {
+                        speaking.channel == channel && speaking.id == thread
+                    })
+                });
+            if let Some((job, _)) = found {
+                return Recipient::Job(*job);
+            }
+        }
+
+        // Either at the root, or in a thread belonging to no job. Both are the
+        // orchestrator's, and both need the mention.
+        if !arriving.mentions {
+            return Recipient::Nobody;
+        }
+        self.projects
+            .iter()
+            .find(|(_, project)| {
+                project
+                    .channels
+                    .get(&channel)
+                    .is_some_and(|bound| bound.address == arriving.address)
+            })
+            .map_or(Recipient::Nobody, |(id, _)| Recipient::Orchestrator(*id))
     }
 
     /// Converts to the form that goes on disk, sealing every credential.
@@ -626,6 +715,11 @@ impl State {
                             SealedChannelConfig {
                                 address: config.address.clone(),
                                 credential: config.credential.seal(key, nonces())?,
+                                listen_credential: config
+                                    .listen_credential
+                                    .as_ref()
+                                    .map(|secret| secret.seal(key, nonces()))
+                                    .transpose()?,
                             },
                         ))
                     })
@@ -836,6 +930,14 @@ pub struct SealedChannelConfig {
     pub address: String,
     /// The sealed credential.
     pub credential: SealedSecret,
+    /// The sealed credential for listening, if this project listens.
+    ///
+    /// Defaulted, because bindings exist that were written before listening
+    /// did — `docs/conventions.md` §4. `None` and absent mean the same thing
+    /// here, which is what makes the default the true answer rather than a
+    /// substitute for one.
+    #[serde(default)]
+    pub listen_credential: Option<SealedSecret>,
 }
 
 /// A project as it appears on disk.
@@ -927,6 +1029,10 @@ impl Snapshot {
                             ChannelConfig {
                                 address: sealed.address,
                                 credential: sealed.credential.open(key)?,
+                                listen_credential: sealed
+                                    .listen_credential
+                                    .map(|secret| secret.open(key))
+                                    .transpose()?,
                             },
                         ))
                     })
@@ -951,6 +1057,70 @@ impl Snapshot {
         state.check().map_err(OpenError::Inconsistent)?;
         Ok(state)
     }
+}
+
+/// What one process is given in order to speak on a channel.
+///
+/// A narrower thing than [`ChannelConfig`], and narrower on purpose: a binding
+/// holds two credentials and only one of them belongs anywhere near a job.
+/// [`Handout`] carries this rather than the binding, so the credential that
+/// opens an event stream has nowhere to travel to — which is the property
+/// `docs/decisions/0029-a-reply-is-routed-by-its-thread.md` claims, made true
+/// by there being no field for it rather than by remembering to strip one.
+#[derive(Debug, Clone)]
+pub struct Speaking {
+    /// Where to speak.
+    pub address: String,
+    /// What to authenticate with.
+    pub credential: Secret,
+}
+
+impl ChannelConfig {
+    /// The half of this binding a process may be handed.
+    #[must_use]
+    pub fn speaking(&self) -> Speaking {
+        Speaking {
+            address: self.address.clone(),
+            credential: self.credential.clone(),
+        }
+    }
+}
+
+/// A message that arrived on a channel, as much of it as routing needs.
+///
+/// Deliberately not the platform's own event type. What decides where a message
+/// goes is four facts, and taking only those keeps the deciding in this crate —
+/// which has no I/O and can therefore be tested against every combination
+/// rather than against whichever ones a live workspace happens to produce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Arriving<'a> {
+    /// Where it arrived, as the platform names that place.
+    pub address: &'a str,
+    /// The thread it was in, if it was in one at all.
+    pub thread: Option<&'a str>,
+    /// Whether it named this project's bot.
+    pub mentions: bool,
+    /// Whether this instance is what said it.
+    ///
+    /// Carried into the decision rather than filtered before it, because
+    /// `docs/decisions/0029-a-reply-is-routed-by-its-thread.md` calls this
+    /// load-bearing and a line in an I/O function is the easiest kind to
+    /// delete. An agent posting a question produces an event; routed back to
+    /// that agent it answers, producing another. The loop costs a model call
+    /// per lap and would be found on an invoice.
+    pub from_us: bool,
+}
+
+/// Who an arriving message is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recipient {
+    /// The job whose thread it arrived in.
+    Job(JobId),
+    /// The orchestrator of the project that binds the channel.
+    Orchestrator(ProjectId),
+    /// Nobody, and this is the ordinary answer rather than a failure. Most
+    /// traffic in a project's channel is people talking to each other.
+    Nobody,
 }
 
 /// Exactly what one agent process is allowed to see, and nothing more.
@@ -983,7 +1153,7 @@ pub struct Handout {
     agent: Agent,
     agent_credential: Secret,
     platforms: BTreeMap<Platform, Secret>,
-    channels: BTreeMap<Channel, ChannelConfig>,
+    channels: BTreeMap<Channel, Speaking>,
     thread: Option<Thread>,
 }
 
@@ -1034,7 +1204,7 @@ impl Handout {
             agent,
             agent_credential: config.auth_token.clone(),
             platforms: BTreeMap::new(),
-            channels: watching.channels.clone(),
+            channels: speaking(watching),
             // The orchestrator speaks at the root of the channel, which is
             // what makes a reply there addressed to it. See
             // `docs/decisions/0029-a-reply-is-routed-by-its-thread.md`.
@@ -1069,7 +1239,7 @@ impl Handout {
             agent,
             agent_credential: config.auth_token.clone(),
             platforms: project.credentials.clone(),
-            channels: project.channels.clone(),
+            channels: speaking(project),
             // Narrowed by [`Handout::speaking_in`] once the job has a thread.
             thread: None,
         })
@@ -1104,13 +1274,13 @@ impl Handout {
 
     /// How this process reaches one channel, if it is bound to one.
     #[must_use]
-    pub fn channel(&self, channel: Channel) -> Option<&ChannelConfig> {
+    pub fn channel(&self, channel: Channel) -> Option<&Speaking> {
         self.channels.get(&channel)
     }
 
-    /// Every channel binding in this handout.
-    pub fn channels(&self) -> impl Iterator<Item = (Channel, &ChannelConfig)> {
-        self.channels.iter().map(|(c, config)| (*c, config))
+    /// Every channel this handout can speak on.
+    pub fn channels(&self) -> impl Iterator<Item = (Channel, &Speaking)> {
+        self.channels.iter().map(|(c, speaking)| (*c, speaking))
     }
 
     /// Narrows this to one thread, so the process speaks there rather than at
@@ -1157,6 +1327,18 @@ impl fmt::Debug for Handout {
     }
 }
 
+/// The speaking half of every channel a project binds.
+///
+/// A function rather than a `clone`, because a clone is what carried the
+/// listening credential into a handout in the first place.
+fn speaking(project: &Project) -> BTreeMap<Channel, Speaking> {
+    project
+        .channels
+        .iter()
+        .map(|(channel, bound)| (*channel, bound.speaking()))
+        .collect()
+}
+
 /// A handout could not be decided.
 #[derive(Debug, thiserror::Error)]
 pub enum HandoutError {
@@ -1171,9 +1353,9 @@ pub enum HandoutError {
 #[cfg(test)]
 mod tests {
     use super::{
-        Agent, AgentConfig, BASE64, Channel, ChannelConfig, Handout, HandoutError, Inconsistent,
-        Job, JobId, Key, NONCE_LEN, Nonce, OpenError, Platform, Progress, Project, ProjectId,
-        Secret, Snapshot, State, Thread,
+        Agent, AgentConfig, Arriving, BASE64, Channel, ChannelConfig, Handout, HandoutError,
+        Inconsistent, Job, JobId, Key, NONCE_LEN, Nonce, OpenError, Platform, Progress, Project,
+        ProjectId, Recipient, Secret, Snapshot, State, Thread,
     };
     use base64::Engine as _;
     use jiff::Timestamp;
@@ -1189,6 +1371,9 @@ mod tests {
     /// A second project's channel credential, so that a handout carrying the
     /// wrong one is detectable rather than merely non-empty.
     const ALIEN_CHANNEL_TOKEN: &str = "xoxb-belongs-to-somebody-else";
+    /// The second credential, which opens an event stream rather than posting.
+    /// Distinct again, so a handout carrying it is detectable.
+    const LISTEN_TOKEN: &str = "xapp-not-a-real-token";
 
     /// An instance with an agent configured and nothing else.
     fn configured() -> State {
@@ -1239,6 +1424,7 @@ mod tests {
         ChannelConfig {
             address: CHANNEL_ADDRESS.to_owned(),
             credential: Secret::new(CHANNEL_TOKEN.to_owned()),
+            listen_credential: Some(Secret::new(LISTEN_TOKEN.to_owned())),
         }
     }
 
@@ -1368,6 +1554,196 @@ mod tests {
         assert!(still_recorded);
     }
 
+    /// An instance with one project, one job, and that job speaking in a
+    /// thread — the smallest state a message can be routed against.
+    fn listening() -> (State, ProjectId, JobId, String) {
+        let mut state = configured();
+        let project = ProjectId::from_uuid(Uuid::from_u128(3));
+        state.projects.insert(project, a_project_with_a_job());
+        let job = *state
+            .projects
+            .get(&project)
+            .expect("just inserted")
+            .jobs
+            .keys()
+            .next()
+            .expect("a job");
+        let thread = "1728312345.678901".to_owned();
+        state.job_mut(job).expect("the job").thread = Some(Thread {
+            channel: Channel::Slack,
+            id: thread.clone(),
+        });
+        (state, project, job, thread)
+    }
+
+    /// The plain case: a reply in a job's thread is that job's.
+    ///
+    /// No mention needed, and that asymmetry is the rule rather than an
+    /// oversight — the thread already names who is being addressed.
+    #[test]
+    fn a_reply_in_a_jobs_thread_is_for_that_job() {
+        let (state, _, job, thread) = listening();
+
+        assert_eq!(
+            state.recipient(
+                Channel::Slack,
+                &Arriving {
+                    address: CHANNEL_ADDRESS,
+                    thread: Some(&thread),
+                    mentions: false,
+                    from_us: false,
+                }
+            ),
+            Recipient::Job(job)
+        );
+    }
+
+    /// A message at the root is the orchestrator's, when it asks to be.
+    #[test]
+    fn a_mention_at_the_root_is_for_the_orchestrator() {
+        let (state, project, _, _) = listening();
+        let at_root = |mentions| Arriving {
+            address: CHANNEL_ADDRESS,
+            thread: None,
+            mentions,
+            from_us: false,
+        };
+
+        assert_eq!(
+            state.recipient(Channel::Slack, &at_root(true)),
+            Recipient::Orchestrator(project)
+        );
+        // Two people talking in a project's channel are not addressing this.
+        assert_eq!(
+            state.recipient(Channel::Slack, &at_root(false)),
+            Recipient::Nobody
+        );
+    }
+
+    /// A thread belonging to no job is the orchestrator's, not nobody's.
+    ///
+    /// The hole this rule exists to close: replying inside a thread is how a
+    /// person answers a specific message, so somebody answering the
+    /// orchestrator will thread their reply under it. A rule that sent every
+    /// unrecognised thread to nobody would drop the message most clearly meant
+    /// for the orchestrator.
+    #[test]
+    fn a_mention_in_a_thread_belonging_to_nothing_is_for_the_orchestrator() {
+        let (state, project, _, _) = listening();
+
+        assert_eq!(
+            state.recipient(
+                Channel::Slack,
+                &Arriving {
+                    address: CHANNEL_ADDRESS,
+                    thread: Some("1111111111.000000"),
+                    mentions: true,
+                    from_us: false,
+                }
+            ),
+            Recipient::Orchestrator(project)
+        );
+    }
+
+    /// Nothing this instance said is ever routed anywhere.
+    ///
+    /// The loop guard, asserted at the point it is decided. Every other rule
+    /// would otherwise match: this is a reply in a job's thread, which is the
+    /// strongest match there is.
+    #[test]
+    fn nothing_this_instance_said_is_routed_back_to_it() {
+        let (state, _, _, thread) = listening();
+
+        for mentions in [true, false] {
+            assert_eq!(
+                state.recipient(
+                    Channel::Slack,
+                    &Arriving {
+                        address: CHANNEL_ADDRESS,
+                        thread: Some(&thread),
+                        mentions,
+                        from_us: true,
+                    }
+                ),
+                Recipient::Nobody,
+                "an instance answering itself is a loop that bills per lap"
+            );
+        }
+    }
+
+    /// A thread identifier is only unique within its channel.
+    #[test]
+    fn a_thread_on_another_channel_is_not_this_jobs_thread() {
+        let (mut state, project, job, thread) = listening();
+        // Move the job's thread to a channel this message did not arrive on.
+        // With one channel in the set this is the only way to say it, and it
+        // is the condition that stops being trivially true on the second.
+        state.job_mut(job).expect("the job").thread = Some(Thread {
+            channel: Channel::Slack,
+            id: format!("{thread}-elsewhere"),
+        });
+
+        assert_eq!(
+            state.recipient(
+                Channel::Slack,
+                &Arriving {
+                    address: CHANNEL_ADDRESS,
+                    thread: Some(&thread),
+                    mentions: false,
+                    from_us: false,
+                }
+            ),
+            Recipient::Nobody
+        );
+        assert_eq!(
+            state.projects.get(&project).expect("the project").name,
+            "example"
+        );
+    }
+
+    /// A channel nothing binds is nobody's, mention or not.
+    #[test]
+    fn a_message_from_a_channel_no_project_binds_is_nobodys() {
+        let (state, _, _, _) = listening();
+
+        assert_eq!(
+            state.recipient(
+                Channel::Slack,
+                &Arriving {
+                    address: "C-somewhere-else",
+                    thread: None,
+                    mentions: true,
+                    from_us: false,
+                }
+            ),
+            Recipient::Nobody
+        );
+    }
+
+    /// A finished job's thread still routes to it.
+    ///
+    /// Deliberate: the thread is that job's conversation, and somebody
+    /// replying in it a day later means that job. Whether it can still take
+    /// the message is the deliverer's problem, not this one's.
+    #[test]
+    fn a_finished_jobs_thread_still_routes_to_it() {
+        let (mut state, _, job, thread) = listening();
+        state.job_mut(job).expect("the job").progress = Progress::Completed;
+
+        assert_eq!(
+            state.recipient(
+                Channel::Slack,
+                &Arriving {
+                    address: CHANNEL_ADDRESS,
+                    thread: Some(&thread),
+                    mentions: false,
+                    from_us: false,
+                }
+            ),
+            Recipient::Job(job)
+        );
+    }
+
     fn key() -> Key {
         Key::new([7; 32])
     }
@@ -1406,6 +1782,7 @@ mod tests {
         assert!(!json.contains(TOKEN));
         assert!(!json.contains("agent-token"));
         assert!(!json.contains(CHANNEL_TOKEN), "{json}");
+        assert!(!json.contains(LISTEN_TOKEN), "{json}");
     }
 
     /// The other half of the sealing decision, asserted rather than assumed.
@@ -1464,6 +1841,11 @@ mod tests {
             .expect("the binding survived");
         assert_eq!(bound.address, CHANNEL_ADDRESS);
         assert_eq!(bound.credential.expose(), CHANNEL_TOKEN);
+        assert_eq!(
+            bound.listen_credential.as_ref().map(Secret::expose),
+            Some(LISTEN_TOKEN),
+            "both credentials cross the boundary, not only the one that posts"
+        );
     }
 
     #[test]
@@ -1727,6 +2109,9 @@ mod tests {
             ChannelConfig {
                 address: "C9999999999".to_owned(),
                 credential: Secret::new(ALIEN_CHANNEL_TOKEN.to_owned()),
+                // Speaks and does not listen, so both shapes cross every test
+                // below rather than only the fuller one.
+                listen_credential: None,
             },
         );
         state.projects.insert(theirs, other);
@@ -1853,6 +2238,55 @@ mod tests {
         assert_eq!(narrowed.channels().count(), 1);
     }
 
+    /// The credential that listens never reaches a handout at all.
+    ///
+    /// `docs/decisions/0029-a-reply-is-routed-by-its-thread.md` says the token
+    /// that opens an event stream stays in the daemon, and this is what makes
+    /// that a property rather than a promise: a handout carries [`Speaking`],
+    /// which has nowhere to put it.
+    ///
+    /// Worth a test even so, because the first version of this cloned the whole
+    /// binding and carried the listening credential into every job's handout —
+    /// where nothing delivered it onwards, so nothing failed and nothing said
+    /// so.
+    #[test]
+    fn a_handout_never_carries_the_credential_that_listens() {
+        let (state, mine, _) = two_projects();
+
+        for handout in [
+            Handout::for_job(&state, Agent::Claude, mine).expect("a watched project"),
+            Handout::for_triage(&state, mine).expect("a watched project"),
+        ] {
+            let bound = handout.channel(Channel::Slack).expect("a binding");
+            assert_eq!(bound.credential.expose(), CHANNEL_TOKEN);
+            assert_eq!(bound.address, CHANNEL_ADDRESS);
+
+            // The whole structure, in case a field is added later that does
+            // carry it. Formatting is redacted, so this reads the values.
+            let carried: Vec<&str> = handout
+                .channels()
+                .map(|(_, speaking)| speaking.credential.expose())
+                .collect();
+            assert!(!carried.contains(&LISTEN_TOKEN), "{carried:?}");
+        }
+
+        // And the state it was built from does hold it, so the test above is
+        // about the handout rather than about an empty fixture.
+        assert_eq!(
+            state
+                .projects
+                .get(&mine)
+                .expect("the project")
+                .channels
+                .get(&Channel::Slack)
+                .expect("its binding")
+                .listen_credential
+                .as_ref()
+                .map(Secret::expose),
+            Some(LISTEN_TOKEN)
+        );
+    }
+
     #[test]
     fn a_handout_for_a_project_this_instance_does_not_watch_is_refused() {
         let (state, _, _) = two_projects();
@@ -1948,6 +2382,18 @@ mod tests {
         assert!(
             state.job(id).is_some(),
             "finishing is not forgetting: the record stays"
+        );
+    }
+
+    /// A job's project is findable from the job alone.
+    #[test]
+    fn a_job_names_the_project_it_belongs_to() {
+        let (state, project, job, _) = listening();
+
+        assert_eq!(state.project_of(job), Some(project));
+        assert_eq!(
+            state.project_of(JobId::from_uuid(Uuid::from_u128(99))),
+            None
         );
     }
 
