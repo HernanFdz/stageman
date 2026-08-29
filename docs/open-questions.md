@@ -114,6 +114,11 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   become things somebody has to handle. Settled by building it, and worth
   building before the orchestrator has a second caller rather than after.
 
+  It now has a second consumer regardless of the orchestrator: a job that can
+  be *answered* on a channel needs exactly this, per the Slack entry under
+  Next. Two features waiting on one mechanism is the argument for building the
+  mechanism deliberately rather than twice, badly.
+
 - **Should the runtime be Podman only?** The list compiled in by
   `docs/decisions/0023-the-container-runtime-is-discovered-once.md` is ordered
   Docker first, so that is what continuous integration finds and what most
@@ -303,9 +308,47 @@ and wrong within a day.
   credential is already a route, and what is missing is changing a name, a
   repository, or the agents.
 
-- Then Slack end to end — a signal read, judged and turned into a job whose
-  prompt is snapshot-tested, and a question asked and answered without anyone
-  touching a terminal. Slack because it is the escalation path
-  rather than the richest source of work: until a job can ask something,
-  nothing can safely run unattended, so every other channel is blocked behind
-  this one. See `docs/decisions/0005-conversation-happens-on-channels.md`.
+- Then Slack, and it is two pieces rather than one. The difference is the
+  thing to understand before starting: **a job can speak now, and cannot be
+  spoken to yet.**
+
+  *Outbound needs nothing new.* A job's agent reaches Slack the way it reaches
+  GitHub — a command-line tool in its container, reading what it needs from
+  what the handout delivers. `docs/decisions/0009-jobs-hold-their-own-platform-credentials.md`
+  chose that shape and gave the reason: neither agent adapter examined serves
+  tools over the protocol connection, both want HTTP, and a containerised agent
+  reaching an endpoint means opening a path into an environment whose whole
+  purpose is not having one. A tool taking one argument — the message — and
+  reading the destination from its environment adds no new mechanism at all.
+
+  *Inbound needs the session to stay open.* A reply reaching the agent means
+  the connection outliving the turn that started it, which is the question two
+  entries above wearing different clothes. Jobs are its second consumer, which
+  is the argument for solving it properly rather than twice.
+
+  **A channel per project, and a thread per job.** A channel per job routes
+  more simply — the channel names the job — and costs a channel per job for
+  ever, which is the container-retention question again in a workspace nobody
+  can garbage-collect. It also needs a token that can create channels, where
+  posting into one does not, and widening that token cuts directly against the
+  question above about making a job's credentials narrower. A thread is the
+  unit a person already uses to scope a conversation, and the mapping from
+  thread to job is a lookup rather than a mechanism.
+
+  **A channel is not a platform**, and the vocabulary in `docs/conventions.md`
+  §2 separates them deliberately: a platform is something a project's jobs
+  *act on*, and a channel is somewhere a conversation happens. Slack
+  credentials therefore do not belong in a project's platform credentials, and
+  the domain needs somewhere for channels to live before any of this is built.
+
+  One coupling that decides the order. The instruction a job begins from
+  currently ends by telling it to ask and *stop* — "do not wait, nobody is
+  watching this terminal". Slack makes that false, but it cannot honestly
+  become "ask and wait" until inbound works. So the prompt changes with the
+  second piece, not the first, and `docs/conventions.md` §4 makes that a
+  reviewable diff.
+
+  Slack first among channels because it is the escalation path rather than the
+  richest source of work: until a job can ask something, nothing can safely run
+  unattended, so every other channel is blocked behind this one. See
+  `docs/decisions/0005-conversation-happens-on-channels.md`.
