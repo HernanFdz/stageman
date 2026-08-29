@@ -17,7 +17,7 @@ use rand::{Rng as _, SeedableRng as _};
 use stageman_agent::{Answer, ContainerRuntime, StopReason};
 use stageman_core::{
     Agent, Handout, Inconsistent, Job, JobId, Key, NONCE_LEN, Nonce, OpenError, Progress,
-    ProjectId, SealError, Snapshot, State, Timestamp,
+    ProjectId, SealError, Snapshot, Speaking, State, Thread, Timestamp,
 };
 
 /// An instance could not be opened.
@@ -483,7 +483,127 @@ pub async fn supervise(
     }
 
     record(store, job, progress.clone());
+    // Said whichever way it went. The agent has already reported for itself if
+    // it could; this says the one thing the agent cannot, which is that it has
+    // stopped and a reply now reaches it — and it is the only thing said at all
+    // when the agent was what failed.
+    notice(store, job, stageman_orchestrator::attention_notice()).await;
     (job, progress)
+}
+
+/// Says something in a job's thread, on the instance's own behalf.
+///
+/// Silent when the job has no thread, which is every job on a project with no
+/// channel bound. A failure to speak is logged and nothing more: this is a
+/// notice *about* an outcome, and failing the job over it would mean the
+/// outcome changed because the announcement of it did not arrive.
+#[mutants::skip]
+async fn notice(store: &Store, job: JobId, text: &str) {
+    let speaking = {
+        let state = store.read();
+        let found = speaking_for(&state, job);
+        drop(state);
+        found
+    };
+
+    let Some((bound, thread)) = speaking else {
+        return;
+    };
+    if let Err(why) = crate::channel::say_in(&bound, &thread, text).await {
+        tracing::warn!(%job, %why, "the job's thread could not be spoken to");
+    }
+}
+
+/// Where to speak on a job's behalf, if it has anywhere.
+///
+/// Pure, so that the several ways of having nowhere — no project, no thread,
+/// a thread on a channel the project no longer binds — are testable without a
+/// network. The function above only does the speaking.
+fn speaking_for(state: &State, job: JobId) -> Option<(Speaking, Thread)> {
+    let project = state.project_of(job)?;
+    let thread = state.job(job)?.thread.clone()?;
+    let bound = state
+        .projects
+        .get(&project)?
+        .channels
+        .get(&thread.channel)?
+        .speaking();
+    Some((bound, thread))
+}
+
+/// Whether a job can take a reply now, taking it if so.
+///
+/// **The check and the transition are one operation on purpose.** Split, two
+/// replies arriving together would both find the job idle and resume one
+/// container twice; together, the second finds it running and is refused. That
+/// makes the refusal a person sees for a genuinely busy job and the refusal
+/// that prevents a collision the same code, which is right — from the outside
+/// they are the same situation.
+fn accepting(state: &mut State, job: JobId) -> Accepted {
+    let Some(recorded) = state.job_mut(job) else {
+        return Accepted::Unknown;
+    };
+    if recorded.progress == Progress::Running {
+        return Accepted::Busy;
+    }
+    recorded.progress = Progress::Running;
+    Accepted::Taken
+}
+
+/// What [`accepting`] decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Accepted {
+    /// The job was idle and is now running.
+    Taken,
+    /// It was already working, so nothing was taken.
+    Busy,
+    /// This instance has no such job.
+    Unknown,
+}
+
+/// Hands a reply to the job whose thread it arrived in.
+///
+/// **The busy check and the transition to running happen under one lock**, and
+/// that is what serialises replies rather than anything else: two arriving at
+/// once would otherwise both find the job idle and resume the same container
+/// twice. The second one is refused and told so, which is the same answer a
+/// person gets for replying to a job that is genuinely still working — because
+/// from the outside it is the same situation.
+///
+/// Answering a job this instance does not have, or one with nothing to resume,
+/// is deliberately not this function's problem to hide: both come back as a
+/// refusal the caller says on the thread.
+pub async fn deliver(
+    store: &Store,
+    runtime: &ContainerRuntime,
+    job: JobId,
+    said: &str,
+) -> Progress {
+    let taken = {
+        let mut state = store.update();
+        let taken = accepting(&mut state, job);
+        drop(state);
+        taken
+    };
+    match taken {
+        Accepted::Unknown => return Progress::Failed("no such job".to_owned()),
+        Accepted::Busy => {
+            notice(store, job, stageman_orchestrator::busy_notice()).await;
+            return Progress::Running;
+        }
+        Accepted::Taken => {}
+    }
+
+    let progress = match stageman_job::resume(runtime, job, said).await {
+        Ok(answer) => outcome(&answer),
+        Err(error) => Progress::Failed(because(&error)),
+    };
+    if let Progress::Failed(ref why) = progress {
+        tracing::warn!(%job, %why, "the reply did not reach the job");
+    }
+    record(store, job, progress.clone());
+    notice(store, job, stageman_orchestrator::attention_notice()).await;
+    progress
 }
 
 /// Creates a job on a project and runs it to completion.
@@ -769,7 +889,7 @@ mod tests {
     };
     use stageman_agent::{Answer, ContainerRuntime, StopReason};
     use stageman_core::{
-        Agent, AgentConfig, Job, JobId, Key, Progress, Project, ProjectId, Secret, State,
+        Agent, AgentConfig, Job, JobId, Key, Progress, Project, ProjectId, Secret, State, Thread,
         Timestamp, Uuid,
     };
     use std::collections::{BTreeMap, BTreeSet};
@@ -791,6 +911,36 @@ mod tests {
             )]),
             ..State::default()
         }
+    }
+
+    /// An instance watching one project, with one job on it, running.
+    fn an_instance_with_a_job() -> (State, JobId) {
+        let mut state = configured();
+        let project = ProjectId::from_uuid(Uuid::from_u128(11));
+        let job = JobId::from_uuid(Uuid::from_u128(12));
+        state.projects.insert(
+            project,
+            Project {
+                name: "example".to_owned(),
+                repository: "https://example.invalid/repo".to_owned(),
+                orchestrator_agent: Agent::Claude,
+                job_agents: only_claude(),
+                credentials: BTreeMap::new(),
+                channels: BTreeMap::new(),
+                jobs: BTreeMap::from([(
+                    job,
+                    Job {
+                        agent: Agent::Claude,
+                        reason: "started by hand".to_owned(),
+                        kickoff: "do the thing".to_owned(),
+                        created_at: Timestamp::UNIX_EPOCH,
+                        progress: Progress::Running,
+                        thread: None,
+                    },
+                )]),
+            },
+        );
+        (state, job)
     }
 
     fn only_claude() -> BTreeSet<Agent> {
@@ -1038,6 +1188,87 @@ mod tests {
             },
         );
         (state, job)
+    }
+
+    /// The rule that serialises replies, and the one the user meets.
+    ///
+    /// Mutation testing found this untested by inverting the comparison, which
+    /// would deliver every reply to a job that was working and refuse every
+    /// one to a job that was idle — the exact opposite of the behaviour, with
+    /// no test going red.
+    #[test]
+    fn a_reply_is_taken_only_by_a_job_that_is_not_working() {
+        let (mut state, job) = an_instance_with_a_job();
+
+        // Running, so nothing is taken and nothing is changed.
+        assert_eq!(super::accepting(&mut state, job), super::Accepted::Busy);
+        assert_eq!(
+            state.job(job).expect("the job").progress,
+            Progress::Running,
+            "a refused reply must not move the job"
+        );
+
+        // Finished, so the reply is taken and the job goes back to work.
+        state.job_mut(job).expect("the job").progress = Progress::Completed;
+        assert_eq!(super::accepting(&mut state, job), super::Accepted::Taken);
+        assert_eq!(state.job(job).expect("the job").progress, Progress::Running);
+
+        // And taking it once is what stops a second taking it as well, which
+        // is the collision this exists to prevent.
+        assert_eq!(super::accepting(&mut state, job), super::Accepted::Busy);
+    }
+
+    /// A job this instance never had is neither taken nor busy.
+    #[test]
+    fn a_reply_for_a_job_this_instance_does_not_have_is_unknown() {
+        let (mut state, _) = an_instance_with_a_job();
+
+        assert_eq!(
+            super::accepting(&mut state, JobId::from_uuid(Uuid::from_u128(99))),
+            super::Accepted::Unknown
+        );
+    }
+
+    /// Where to speak, and the several ways of having nowhere.
+    #[test]
+    fn a_job_with_no_thread_has_nowhere_to_be_spoken_to() {
+        let (mut state, job) = an_instance_with_a_job();
+
+        // No thread: the ordinary case for a project with no channel bound.
+        assert!(super::speaking_for(&state, job).is_none());
+
+        // A thread, and a channel bound: somewhere to speak.
+        state.job_mut(job).expect("the job").thread = Some(Thread {
+            channel: stageman_core::Channel::Slack,
+            id: "1728312345.678901".to_owned(),
+        });
+        let project = state.project_of(job).expect("the project");
+        state
+            .projects
+            .get_mut(&project)
+            .expect("the project")
+            .channels
+            .insert(
+                stageman_core::Channel::Slack,
+                stageman_core::ChannelConfig {
+                    address: "C0123456789".to_owned(),
+                    credential: Secret::new("xoxb-not-a-real-token".to_owned()),
+                    listen_credential: None,
+                },
+            );
+        let (bound, thread) = super::speaking_for(&state, job).expect("somewhere to speak");
+        assert_eq!(bound.address, "C0123456789");
+        assert_eq!(thread.id, "1728312345.678901");
+
+        // A thread naming a channel the project no longer binds: nowhere
+        // again, rather than a panic or the wrong channel.
+        state
+            .projects
+            .get_mut(&project)
+            .expect("the project")
+            .channels
+            .clear();
+        assert!(super::speaking_for(&state, job).is_none());
     }
 
     /// A job the instance believes is running, with nothing to run in. It

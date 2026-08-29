@@ -32,12 +32,36 @@ pub async fn open_thread(
     text: &str,
 ) -> Result<Thread, ChannelError> {
     let posted = match channel {
-        Channel::Slack => slack_post(bound, text).await?,
+        Channel::Slack => slack_post(bound, text, None).await?,
     };
     Ok(Thread {
         channel,
         id: posted,
     })
+}
+
+/// Says something in a thread that already exists.
+///
+/// What the daemon uses to speak for itself — a notice that a job's agent has
+/// stopped, or that a reply could not be delivered. A job's *own* words never
+/// come through here: those go out through the tool in its container, per
+/// `docs/decisions/0028-stageman-ships-the-tool-that-speaks.md`, and keeping
+/// the two paths apart is what stops this becoming a second way for a job to
+/// talk.
+///
+/// # Errors
+///
+/// Fails if the channel cannot be reached, or refuses.
+///
+/// Skipped by mutation testing for the reason [`slack_post`] is: it chooses
+/// nothing. Everything that could be got wrong about an answer is in
+/// [`understood`], and reaching this needs a network.
+#[mutants::skip]
+pub async fn say_in(bound: &Speaking, thread: &Thread, text: &str) -> Result<(), ChannelError> {
+    match thread.channel {
+        Channel::Slack => slack_post(bound, text, Some(&thread.id)).await?,
+    };
+    Ok(())
 }
 
 /// Posts one message and hands the answer to [`understood`].
@@ -47,13 +71,18 @@ pub async fn open_thread(
 /// request and two moves of a string. Reaching this at all needs a network, and
 /// a test with one would be testing Slack rather than this.
 #[mutants::skip]
-async fn slack_post(bound: &Speaking, text: &str) -> Result<String, ChannelError> {
+async fn slack_post(
+    bound: &Speaking,
+    text: &str,
+    thread: Option<&str>,
+) -> Result<String, ChannelError> {
     let answer = reqwest::Client::new()
         .post(POST_MESSAGE)
         .bearer_auth(bound.credential.expose())
         .json(&Posting {
             channel: &bound.address,
             text,
+            thread_ts: thread,
         })
         .send()
         .await
@@ -119,6 +148,11 @@ fn understood(status: u16, body: &str) -> Result<String, ChannelError> {
 struct Posting<'a> {
     channel: &'a str,
     text: &'a str,
+    /// Absent when this opens a thread, and the parent's identifier when it
+    /// speaks in one. Skipped rather than sent as null, because the platform
+    /// reads a present-but-empty field as an address rather than as no address.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thread_ts: Option<&'a str>,
 }
 
 /// What Slack says back.

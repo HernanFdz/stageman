@@ -85,6 +85,34 @@ Whatever it has to say appears in this thread. Job {job}."
     )
 }
 
+/// What a job's thread is told when its agent stops.
+///
+/// **Deliberately says nothing about how it went.** The instance knows the
+/// turn ended and cannot know whether that was an answer, a question, or an
+/// agent giving up — deciding would mean reading what it said, and reading it
+/// properly would mean another model call. A notice that guessed would be
+/// wrong often enough to be worse than one that does not try.
+///
+/// What it does carry is the fact worth having: the agent has stopped, so a
+/// reply now reaches it. While
+/// `docs/open-questions.md` has messaging a *running* job unsupported, that is
+/// the difference between a thread somebody can act on and one they cannot.
+#[must_use]
+pub const fn attention_notice() -> &'static str {
+    "⚠️ Check this out. The agent has stopped; a reply in this thread will reach it."
+}
+
+/// What a thread is told when a reply arrives for a job that is still working.
+///
+/// The honest version of a limitation rather than a silence. A person who
+/// replies and hears nothing concludes the reply was read, which is the one
+/// wrong belief available here — they would then wait for an answer that is
+/// not coming.
+#[must_use]
+pub const fn busy_notice() -> &'static str {
+    "This job is still working, so that did not reach it. Wait until it stops, then say it again."
+}
+
 /// Whether a job has anywhere to speak.
 ///
 /// Decides one paragraph of the kickoff, and it has to be decided rather than
@@ -369,6 +397,39 @@ Whatever it has to say appears in this thread. Job \
             reporting < asking,
             "reporting must come first, or it reads as a special case of asking: {prompt}"
         );
+    }
+
+    /// Asserted as literal text, per `docs/conventions.md` §4.
+    ///
+    /// Both of these are read by a person on a channel and by nothing else, so
+    /// a rewrite would change what an operator sees and no other test would go
+    /// red.
+    #[test]
+    fn the_notices_read_exactly_as_written() {
+        assert_eq!(
+            super::attention_notice(),
+            "⚠️ Check this out. The agent has stopped; a reply in this thread will reach it."
+        );
+        assert_eq!(
+            super::busy_notice(),
+            "This job is still working, so that did not reach it. Wait until it stops, then say \
+it again."
+        );
+    }
+
+    /// The attention notice must not claim to know how it went.
+    ///
+    /// The instance sees a turn end and cannot tell an answer from a question
+    /// from an agent giving up. Every word suggesting otherwise is one an
+    /// operator would reasonably act on, so this is what stops a well-meant
+    /// "finished" being added later.
+    #[test]
+    fn the_attention_notice_says_nothing_about_how_it_went() {
+        let said = super::attention_notice().to_lowercase();
+
+        for claim in ["finish", "done", "complete", "success", "fail", "error"] {
+            assert!(!said.contains(claim), "it must not claim {claim}: {said}");
+        }
     }
 
     /// The constraint that lets a job run with nobody watching, and the one

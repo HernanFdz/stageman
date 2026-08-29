@@ -21,6 +21,28 @@ Questions blocking or shaping work, each with enough context to answer without
 re-deriving it. If you cannot state what would settle it, it is not a question
 yet — it is unease, and belongs in your own notes until it sharpens.
 
+- **Should a message reach a job that is already running?** Today it cannot,
+  and that is a limitation accepted deliberately rather than a gap nobody
+  noticed. A reply is delivered by resuming a stopped container, so it lands
+  only between turns — which covers the case the design was built for, an agent
+  that asked something and stopped. It does not cover the case a person will
+  hit first: realising *after* starting a job that the agent needs a piece of
+  context it was never given.
+
+  The symptom is "cannot message a running agent" and the cause is further
+  down. The protocol delivers a prompt to a session and the agent works until
+  its turn ends, so a mid-turn message needs the connection held open — the
+  question two entries below — *and* an agent that will read something while
+  working. The second half is not this project's to decide: it is a property
+  of whichever agent is running, and neither adapter examined has been checked
+  for it.
+
+  Settled by finding out what an agent does with a second prompt mid-turn.
+  Until then the daemon refuses such a message and says so on the thread, which
+  is the honest version of not supporting it. Note what that refusal is worth
+  keeping even afterwards: it is also what stops two replies resuming one
+  container at once.
+
 - **Should a job's environment have an egress allowlist?** Since
   `docs/decisions/0009-jobs-hold-their-own-platform-credentials.md`, a job holds
   credentials an agent could be talked into sending somewhere. Restricting
@@ -337,12 +359,16 @@ and wrong within a day.
   Slack app per project, and a reply routed by the thread it arrives in — and
   none of it is built. Two things stand in the way, and only one is work:
 
-  - **A binding is now two credentials**, and the form collects one. The
-    app-level token opens the socket and never enters a container, so it wants
-    somewhere to live that is not the handout.
-  - **A reply reaching a running job needs the session to outlive the turn that
-    started it**, which is the long-lived container question above, now with
-    its second consumer.
+  **Only the transport is left.** A binding holds the credential that listens,
+  the rule deciding who a message is for is a pure function with a test for
+  every branch, and delivery hands a reply to a job by resuming it. What is
+  missing is the thing that makes a real message arrive: opening the socket,
+  reading envelopes, and acknowledging each one — a platform redelivers what
+  is not acknowledged, so an unacknowledged envelope is the same message
+  arriving repeatedly rather than a message lost.
+
+  Nothing calls `deliver` until then, which is the whole of what is
+  unfinished.
 
   The kickoff prompt still says to speak and stop, and stays that way until it
   can honestly say otherwise.
