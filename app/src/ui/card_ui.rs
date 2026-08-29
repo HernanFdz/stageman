@@ -8,6 +8,13 @@ use tw_merge::tw_merge;
 pub struct CardProps {
     /// What this region is about.
     pub title: String,
+    /// Something belonging to the title — a count, most often.
+    ///
+    /// Separate from `aside` because they answer different questions. This one
+    /// qualifies the title and is read with it; `aside` is what you can *do*
+    /// here, and lives at the far end where actions belong.
+    #[props(default)]
+    pub badge: Option<Element>,
     /// An optional line under the title, for what the title cannot say.
     #[props(default)]
     pub note: Option<String>,
@@ -33,7 +40,12 @@ pub fn Card(props: CardProps) -> Element {
             ),
             header { class: "flex items-baseline justify-between gap-3 border-b border-border px-4 py-3",
                 div {
-                    h2 { class: "text-sm font-semibold text-foreground", "{props.title}" }
+                    div { class: "flex items-center gap-2",
+                        h2 { class: "text-sm font-semibold text-foreground", "{props.title}" }
+                        if let Some(badge) = props.badge {
+                            {badge}
+                        }
+                    }
                     if let Some(note) = props.note {
                         p { class: "mt-0.5 text-xs text-muted-foreground", "{note}" }
                     }
