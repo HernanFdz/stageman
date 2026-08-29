@@ -105,6 +105,20 @@ pub enum DashboardError {
         name: String,
     },
 
+    /// A project's jobs may not run on that agent.
+    ///
+    /// Distinct from an agent having no credential: this one is configured and
+    /// simply is not among the ones this project named. Refusing here rather
+    /// than letting the handout fail keeps the answer about the request rather
+    /// than about an instance that has stopped making sense.
+    #[error("{project} does not run its jobs on {name}")]
+    AgentNotOnProject {
+        /// The agent, as the screen names it.
+        name: String,
+        /// The project, as the screen names it.
+        project: String,
+    },
+
     /// Nothing by that name is a platform this knows about.
     #[error("no platform is called {name}")]
     UnknownPlatform {
@@ -159,7 +173,8 @@ impl DashboardError {
             Self::CredentialMissing
             | Self::Incomplete { .. }
             | Self::JobAgentsMissing
-            | Self::AgentNotConfigured { .. } => StatusCode::BAD_REQUEST,
+            | Self::AgentNotConfigured { .. }
+            | Self::AgentNotOnProject { .. } => StatusCode::BAD_REQUEST,
             // Not a bad request: the request was well formed and the instance
             // is in a state that forbids it, which is what a conflict means.
             Self::AgentInUse { .. } | Self::ProjectBusy { .. } => StatusCode::CONFLICT,

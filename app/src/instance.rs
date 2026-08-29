@@ -256,12 +256,53 @@ pub enum RunError {
     Handout(#[source] stageman_core::HandoutError),
 }
 
-/// Creates a job on a project and runs it to completion.
+/// A failure and everything underneath it, as one line of prose.
 ///
-/// The whole of the doing, in the one crate allowed to name both the store and
-/// the job — `docs/architecture.md` §1. What the orchestrator will eventually
-/// decide (which project, which agent, why, and what work) arrives here as
-/// arguments, because nothing decides it yet.
+/// `to_string` on an error renders only its outermost line, and every error
+/// that reaches a job's record wraps a more specific one — so recording the
+/// outer line alone throws away the only part that says what actually went
+/// wrong. A job that failed because a credential was rejected read as "the
+/// job's agent could not be run", and the reason was only ever visible by
+/// asking the container runtime for the container's output.
+///
+/// One line rather than several, because this is going into a record that a
+/// dashboard shows as prose — `docs/conventions.md` §2 keeps a failure as
+/// something to read rather than a code to branch on, and the whole chain is
+/// what there is to read.
+fn because(failure: &dyn std::error::Error) -> String {
+    let mut told = failure.to_string();
+    let mut cause = std::error::Error::source(failure);
+    while let Some(reason) = cause {
+        told.push_str(": ");
+        told.push_str(&reason.to_string());
+        cause = reason.source();
+    }
+    told
+}
+
+/// A job that exists and has not been run yet.
+///
+/// The gap between those two is the whole reason this type is separate, and it
+/// is deliberately narrow: a job is recorded before its container exists, so
+/// something has to carry what the container will need from the moment of
+/// recording to the moment of starting. Holding it means a caller can answer a
+/// request with a job that is already in the instance, and start it afterwards
+/// on a task of its own.
+pub struct Started {
+    job: JobId,
+    handout: Handout,
+    kickoff: String,
+}
+
+impl Started {
+    /// Which job this is.
+    #[must_use]
+    pub const fn job(&self) -> JobId {
+        self.job
+    }
+}
+
+/// Records a job on a project, ready to be run.
 ///
 /// **The record is written before the container exists, and the order is not
 /// arbitrary.** Killed in between, this leaves a job believed to be running
@@ -271,19 +312,26 @@ pub enum RunError {
 /// cannot place is a container it must not remove. One ordering produces a
 /// problem that resolves itself; the other produces one that needs a person.
 ///
+/// Separate from [`supervise`] so that the two halves can happen at different
+/// times. A request that starts a job must answer while the job runs — see
+/// `docs/conventions.md` §3 on keeping supervision off the request path — and
+/// it can only answer with the job if the job already exists.
+///
+/// The instruction the agent begins from is composed here, from the work, by
+/// the orchestrator. Nothing else composes one: `docs/architecture.md` §1 puts
+/// every place an instruction is authored in that one crate, which is what
+/// makes the snapshot-testing rule in `docs/conventions.md` §4 mean anything.
+///
 /// # Errors
 ///
 /// Fails if the project is unknown, or if a handout cannot be decided for it.
-/// A job that *runs* and fails is not an error here: it is a recorded outcome,
-/// returned as [`Progress::Failed`], because the job happened.
-pub async fn run(
+pub fn begin(
     store: &Store,
-    runtime: &ContainerRuntime,
     project: ProjectId,
     agent: Agent,
     reason: &str,
     work: &str,
-) -> Result<(JobId, Progress), RunError> {
+) -> Result<Started, RunError> {
     let (repository, handout) = {
         let state = store.read();
         let repository = state
@@ -318,9 +366,31 @@ pub async fn run(
         }
     }
 
+    Ok(Started {
+        job,
+        handout,
+        kickoff,
+    })
+}
+
+/// Runs a job that has been recorded, to completion.
+///
+/// Returns rather than fails when the job goes badly: a job that runs and
+/// fails is a recorded outcome and not an error, because the job happened.
+pub async fn supervise(
+    store: &Store,
+    runtime: &ContainerRuntime,
+    started: Started,
+) -> (JobId, Progress) {
+    let Started {
+        job,
+        handout,
+        kickoff,
+    } = started;
+
     let progress = match stageman_job::start(runtime, &handout, job, &kickoff).await {
         Ok(answer) => outcome(&answer),
-        Err(error) => Progress::Failed(error.to_string()),
+        Err(error) => Progress::Failed(because(&error)),
     };
     // Derived from the outcome rather than from a second look at the stop
     // reason. Two conditions saying the same thing can disagree, and mutation
@@ -330,7 +400,36 @@ pub async fn run(
     }
 
     record(store, job, progress.clone());
-    Ok((job, progress))
+    (job, progress)
+}
+
+/// Creates a job on a project and runs it to completion.
+///
+/// The whole of the doing, in the one crate allowed to name both the store and
+/// the job — `docs/architecture.md` §1. What the orchestrator will eventually
+/// decide (which project, which agent, why, and what work) arrives here as
+/// arguments, because nothing decides it yet.
+///
+/// Both halves, for a caller that has nothing else to do until the job is
+/// over. A caller that does — a request, most obviously — uses [`begin`] and
+/// [`supervise`] separately.
+///
+/// # Errors
+///
+/// Fails if the project is unknown, or if a handout cannot be decided for it.
+/// A job that *runs* and fails is not an error here: it is a recorded outcome,
+/// returned as [`Progress::Failed`], because the job happened.
+pub async fn run(
+    store: &Store,
+    runtime: &ContainerRuntime,
+    project: ProjectId,
+    agent: Agent,
+    reason: &str,
+    work: &str,
+) -> Result<(JobId, Progress), RunError> {
+    let started = begin(store, project, agent, reason, work)?;
+
+    Ok(supervise(store, runtime, started).await)
 }
 
 /// What a sweep found, and what it did about it.
@@ -448,7 +547,7 @@ pub async fn reconcile(
                 .await
             {
                 Ok(answer) => outcome(&answer),
-                Err(error) => Progress::Failed(error.to_string()),
+                Err(error) => Progress::Failed(because(&error)),
             };
         if let Progress::Failed(ref why) = progress {
             tracing::warn!(%job, %why, "could not be put back to work");
@@ -613,6 +712,43 @@ mod tests {
 
     fn only_claude() -> BTreeSet<Agent> {
         BTreeSet::from([Agent::Claude])
+    }
+
+    /// A recorded failure carries the reason, not just the category.
+    ///
+    /// The test that would have caught the thing this fixed: a job whose
+    /// agent was rejected recorded "the job's agent could not be run" and
+    /// nothing else, so the only way to learn that a credential had been
+    /// refused was to ask the container runtime for the container's output.
+    #[test]
+    fn a_failure_records_what_was_underneath_it() {
+        let underneath = stageman_agent::AgentError::Unusable {
+            path: PathBuf::from("/usr/local/bin/docker"),
+            message: "401 API key is invalid".to_owned(),
+        };
+        let reported = stageman_job::JobError::Agent(underneath);
+
+        let told = super::because(&reported);
+
+        assert!(
+            told.starts_with("the job's agent could not be run"),
+            "it should still say what kind of failure this was: {told}"
+        );
+        assert!(
+            told.contains("401 API key is invalid"),
+            "it should say what actually went wrong: {told}"
+        );
+    }
+
+    /// An error with nothing underneath reads exactly as it always did.
+    #[test]
+    fn a_failure_with_no_cause_is_unchanged() {
+        let alone = stageman_agent::AgentError::NoChannel;
+
+        assert_eq!(
+            super::because(&alone),
+            "the container runtime offered no channel to speak the protocol over"
+        );
     }
 
     /// A missing file is a first run; anything else is a failure.

@@ -25,7 +25,8 @@ pub use dashboard::Dashboard;
 
 #[cfg(feature = "server")]
 pub use instance::{
-    LoadError, RunError, SaveError, StateGuard, StateRef, Store, Swept, reconcile, run,
+    LoadError, RunError, SaveError, Started, StateGuard, StateRef, Store, Swept, begin, reconcile,
+    run, supervise,
 };
 #[cfg(feature = "server")]
 pub use serving::{RUNTIME, serve};

@@ -189,7 +189,7 @@ pub async fn credential(
     }
 
     let mut state = instance.0.update();
-    let identifier = identify(&state, &project)?;
+    let identifier = super::identify(&state, &project)?;
     let Some(watched) = state.projects.get_mut(&identifier) else {
         drop(state);
         return Err(DashboardError::UnknownProject { id: project });
@@ -218,7 +218,7 @@ pub async fn credential(
 #[post("/api/projects/forget", instance: Extension<std::sync::Arc<crate::Store>>)]
 pub async fn forget(project: String) -> DashboardResult<Watching> {
     let mut state = instance.0.update();
-    let identifier = identify(&state, &project)?;
+    let identifier = super::identify(&state, &project)?;
 
     let Some(watched) = state.projects.get(&identifier) else {
         drop(state);
@@ -254,29 +254,6 @@ fn busy(project: &stageman_core::Project) -> Option<usize> {
         .count();
 
     (running > 0).then_some(running)
-}
-
-/// The identifier a browser sent back, as this instance knows it.
-///
-/// Compared as text rather than parsed, so that a malformed identifier and an
-/// unknown one are the same answer — which they are, from the operator's side.
-///
-/// # Errors
-///
-/// Fails if nothing is watched under it.
-#[cfg(feature = "server")]
-fn identify(
-    state: &stageman_core::State,
-    identifier: &str,
-) -> DashboardResult<stageman_core::ProjectId> {
-    state
-        .projects
-        .keys()
-        .find(|known| known.to_string() == identifier)
-        .copied()
-        .ok_or_else(|| DashboardError::UnknownProject {
-            id: identifier.to_owned(),
-        })
 }
 
 /// A field that has to say something.
@@ -467,7 +444,13 @@ fn WatchedProject(project: Project) -> Element {
         // paddings and the eye reads it as a mistake.
         div { class: "flex flex-col gap-1.5 py-4 first:pt-0 last:pb-0",
             div { class: "flex items-baseline gap-3",
-                span { class: "text-sm font-medium", "{project.name}" }
+                Link {
+                    to: super::Route::ProjectJobsView {
+                        project: project.id.clone(),
+                    },
+                    class: "text-sm font-medium hover:underline",
+                    "{project.name}"
+                }
                 span { class: "truncate font-mono text-xs text-faint-foreground",
                     "{project.repository}"
                 }
@@ -641,8 +624,8 @@ fn Field(label: String, children: Element) -> Element {
 
 #[cfg(all(test, feature = "server"))]
 mod server_tests {
-    use super::{DashboardError, busy, identify};
-    use stageman_core::{Agent, Job, JobId, Progress, Project, ProjectId, State, Timestamp};
+    use super::busy;
+    use stageman_core::{Agent, Job, JobId, Progress, Project, Timestamp};
     use std::collections::{BTreeMap, BTreeSet};
 
     /// One job, in whatever state the caller needs it.
@@ -710,46 +693,6 @@ mod server_tests {
             ])),
             Some(2)
         );
-    }
-
-    /// An instance watching one project under a known identifier.
-    fn watching(id: ProjectId) -> State {
-        State {
-            agents: BTreeMap::new(),
-            projects: BTreeMap::from([(
-                id,
-                Project {
-                    name: "aviary".to_owned(),
-                    repository: "https://example.invalid/aviary".to_owned(),
-                    orchestrator_agent: Agent::Claude,
-                    job_agents: BTreeSet::from([Agent::Claude]),
-                    credentials: BTreeMap::new(),
-                    jobs: BTreeMap::new(),
-                },
-            )]),
-        }
-    }
-
-    /// An identifier the browser sends back finds the project it came from.
-    #[test]
-    fn an_identifier_finds_the_project_it_names() {
-        let id = ProjectId::from_uuid(uuid::Uuid::from_u128(9));
-        let state = watching(id);
-
-        assert_eq!(identify(&state, &id.to_string()), Ok(id));
-    }
-
-    /// Anything else is not found rather than matched to whatever is nearest.
-    #[test]
-    fn an_identifier_naming_nothing_finds_nothing() {
-        let state = watching(ProjectId::from_uuid(uuid::Uuid::from_u128(9)));
-        let other = ProjectId::from_uuid(uuid::Uuid::from_u128(10)).to_string();
-
-        assert_eq!(
-            identify(&state, &other),
-            Err(DashboardError::UnknownProject { id: other.clone() })
-        );
-        assert!(identify(&state, "not-an-identifier").is_err());
     }
 }
 
