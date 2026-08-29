@@ -38,5 +38,5 @@ fn main() -> std::process::ExitCode {
 #[mutants::skip]
 #[cfg(not(feature = "server"))]
 fn main() {
-    dioxus::launch(stageman::dashboard::Dashboard);
+    dioxus::launch(stageman::Dashboard);
 }

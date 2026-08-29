@@ -1,42 +1,15 @@
-//! What a page is allowed to know about an instance, and the route it reads
-//! through.
+//! What an instance looks like from the outside: this machine, and what it is
+//! watching.
 //!
-//! **The only module compiled for both halves**, which is what decides what
-//! may appear in it. Every type here is plain and serialisable, converted from
-//! the domain on the server and never the domain itself — see
-//! `docs/decisions/0022-the-browser-never-sees-the-domain.md`. What is in the
-//! browser is in the browser's hands, so what reaches it is chosen rather than
-//! inherited, which is the same rule
-//! `docs/decisions/0008-one-credential-per-agent.md` applies to an agent
-//! process wearing different clothes.
-//!
-//! It draws nothing. This is the first piece of the dashboard and its job is
-//! to prove the shape — a page served, and real state on it, through the two
-//! mechanisms everything else will be built on.
-
-// Scoped to the browser's half, where the request a server function turns into
-// is built from browser futures that are `!Send` by construction — there is
-// one thread there, and nothing to send anything to.
-//
-// Here rather than on the function, which is where it belongs and where it
-// does not survive: the server-function macro re-emits doc comments and drops
-// every other attribute, so an expectation written on the item never reaches
-// the code generated from it. Worth knowing before writing the next one — the
-// same attribute on the *server* side does work, because that half is the
-// original function rather than something generated from it.
-#![cfg_attr(
-    not(feature = "server"),
-    expect(
-        clippy::future_not_send,
-        reason = "there is one thread in a browser, and nothing to send it to"
-    )
-)]
+//! The screen somebody lands on, and the only one that says anything about the
+//! machine rather than about the work.
 
 use dioxus::prelude::*;
 #[cfg(feature = "server")]
 use dioxus::server::axum::Extension;
 use serde::{Deserialize, Serialize};
 
+use super::error::DashboardResult;
 use crate::ui::{Badge, BadgeTone, Card, EmptyState};
 
 /// One instance, as much of it as a page is allowed to know.
@@ -116,7 +89,7 @@ pub struct Project {
     )
 )]
 #[get("/api/instance", instance: Extension<std::sync::Arc<crate::Store>>)]
-pub async fn instance() -> ServerFnResult<Instance> {
+pub async fn instance() -> DashboardResult<Instance> {
     Ok(Instance::of(&instance.0.read()))
 }
 
@@ -156,26 +129,7 @@ impl Instance {
     }
 }
 
-/// The dashboard's stylesheet.
-///
-/// Resolved at compile time, which is the only way this framework will serve a
-/// file at all — assets are bundled because something referenced them, and a
-/// directory of files nothing references is copied nowhere. It is also why
-/// this crate has a build script: the file is Tailwind's output and therefore
-/// absent on a fresh clone, so something has to guarantee it exists before the
-/// macro looks. See
-/// `docs/decisions/0025-a-build-script-guarantees-the-stylesheet-exists.md`.
-// Fires inside the macro's own expansion, on a `&[u8]` this code never
-// writes or names. Nothing here can be restructured to satisfy it, and the
-// lint is about volatile access to composite types — which an embedded asset
-// handle is not doing.
-#[expect(
-    clippy::volatile_composites,
-    reason = "raised against third-party macro output, not against anything written here"
-)]
-const STYLESHEET: Asset = asset!("/assets/styles.css");
-
-/// The dashboard.
+/// The instance screen.
 ///
 /// [`use_server_future`] rather than `use_resource`, and the difference is the
 /// whole reason this exists: it runs on the server during the render, ships
@@ -183,39 +137,25 @@ const STYLESHEET: Asset = asset!("/assets/styles.css");
 /// second request. So a page arrives with the instance already on it, and the
 /// hydrated client agrees with the HTML it hydrated.
 #[component]
-pub fn Dashboard() -> Element {
+pub fn InstanceView() -> Element {
     let reading = use_server_future(instance)?;
 
     rsx! {
-        document::Stylesheet { href: STYLESHEET }
-        div { class: "min-h-screen bg-background font-sans text-foreground",
-            header { class: "border-b border-border bg-surface",
-                div { class: "mx-auto flex max-w-5xl items-baseline gap-3 px-6 py-4",
-                    h1 { class: "text-base font-semibold tracking-tight", "stageman" }
-                    p { class: "text-xs text-muted-foreground",
-                        "an orchestration platform for sleepless coding agents"
-                    }
+        match reading.cloned() {
+            Some(Ok(instance)) => rsx! { Summary { instance } },
+            // Shown rather than logged. A blank page would send whoever hit it
+            // to read the source.
+            Some(Err(reason)) => rsx! {
+                Card { title: "This instance could not be read",
+                    p { class: "text-sm text-failed", "{reason}" }
                 }
-            }
-            main { class: "mx-auto max-w-5xl px-6 py-6",
-                match reading.cloned() {
-                    Some(Ok(instance)) => rsx! { Summary { instance } },
-                    // Shown rather than logged. The one thing that reaches this
-                    // is a server assembled without an instance, and a blank
-                    // page would send whoever hit it to read the source.
-                    Some(Err(failure)) => rsx! {
-                        Card { title: "This instance could not be read",
-                            p { class: "text-sm text-failed", "{failure}" }
-                        }
-                    },
-                    // Unreachable once the future above has resolved, and
-                    // written out rather than unwrapped because "unreachable"
-                    // is a claim about somebody else's code.
-                    None => rsx! {
-                        p { class: "text-sm text-muted-foreground", "Reading the instance…" }
-                    },
-                }
-            }
+            },
+            // Unreachable once the future above has resolved, and written out
+            // rather than unwrapped because "unreachable" is a claim about
+            // somebody else's code.
+            None => rsx! {
+                p { class: "text-sm text-muted-foreground", "Reading the instance…" }
+            },
         }
     }
 }
