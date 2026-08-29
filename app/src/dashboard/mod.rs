@@ -37,6 +37,7 @@
 pub(crate) mod agents_view;
 mod error;
 mod instance_view;
+mod jobs_view;
 mod projects_view;
 
 use dioxus::prelude::*;
@@ -44,6 +45,7 @@ use dioxus::prelude::*;
 pub use agents_view::{Agent, AgentsView};
 pub use error::{DashboardError, DashboardResult};
 pub use instance_view::{Instance, InstanceView};
+pub use jobs_view::{Job, ProjectJobsView, Standing, Working};
 pub use projects_view::{Project, ProjectsView};
 
 /// The dashboard's stylesheet.
@@ -80,6 +82,9 @@ pub enum Route {
 
         #[route("/projects")]
         ProjectsView {},
+
+        #[route("/projects/:project")]
+        ProjectJobsView { project: String },
 }
 
 /// The whole dashboard.
@@ -173,6 +178,29 @@ const fn wire_name(agent: stageman_core::Agent) -> (&'static str, &'static str) 
     match agent {
         stageman_core::Agent::Claude => ("claude", "Claude"),
     }
+}
+
+/// The identifier a browser sent back, as this instance knows it.
+///
+/// Compared as text rather than parsed, so that a malformed identifier and an
+/// unknown one are the same answer — which they are, from the operator's side.
+///
+/// # Errors
+///
+/// Fails if nothing is watched under it.
+#[cfg(feature = "server")]
+fn identify(
+    state: &stageman_core::State,
+    identifier: &str,
+) -> DashboardResult<stageman_core::ProjectId> {
+    state
+        .projects
+        .keys()
+        .find(|known| known.to_string() == identifier)
+        .copied()
+        .ok_or_else(|| DashboardError::UnknownProject {
+            id: identifier.to_owned(),
+        })
 }
 
 /// What a screen calls an agent.
@@ -283,7 +311,8 @@ fn listed(state: &stageman_core::State) -> Vec<Agent> {
 #[cfg(all(test, feature = "server"))]
 mod tests {
     use super::{
-        DashboardError, dependents, listed, named, named_platform, shown, wire_name, wire_platform,
+        DashboardError, dependents, identify, listed, named, named_platform, shown, wire_name,
+        wire_platform,
     };
     use stageman_core::{Agent, AgentConfig, Project, ProjectId, Secret, State};
     use std::collections::{BTreeMap, BTreeSet};
@@ -374,6 +403,36 @@ mod tests {
             assert!(!id.is_empty(), "{agent:?} has no identifier");
             assert!(!name.is_empty(), "{agent:?} has no name");
         }
+    }
+
+    /// An identifier the browser sends back finds the project it came from.
+    #[test]
+    fn an_identifier_finds_the_project_it_names() {
+        let id = stageman_core::ProjectId::from_uuid(uuid::Uuid::from_u128(9));
+        let mut state = watching("aviary");
+        let project = state
+            .projects
+            .values()
+            .next()
+            .cloned()
+            .expect("the project");
+        state.projects.clear();
+        state.projects.insert(id, project);
+
+        assert_eq!(identify(&state, &id.to_string()), Ok(id));
+    }
+
+    /// Anything else is not found rather than matched to whatever is nearest.
+    #[test]
+    fn an_identifier_naming_nothing_finds_nothing() {
+        let state = watching("aviary");
+        let other = stageman_core::ProjectId::from_uuid(uuid::Uuid::from_u128(10)).to_string();
+
+        assert_eq!(
+            identify(&state, &other),
+            Err(DashboardError::UnknownProject { id: other.clone() })
+        );
+        assert!(identify(&state, "not-an-identifier").is_err());
     }
 
     /// The query the whole removal guard rests on.
