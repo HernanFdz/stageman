@@ -41,7 +41,7 @@ use agent_client_protocol::schema::v1::{
 };
 use agent_client_protocol::{ByteStreams, Client, ConnectionTo};
 use parking_lot::Mutex;
-use stageman_core::{Agent, Handout, Platform, Secret};
+use stageman_core::{Agent, Channel, Handout, Platform, Secret};
 use tokio::io::AsyncReadExt as _;
 use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
 
@@ -517,6 +517,38 @@ fn variables(handout: &Handout) -> Vec<(&'static str, Secret)> {
             credential.clone(),
         ));
     }
+
+    // Two per channel rather than one, because a binding is an address as well
+    // as a credential and `stageman-say` needs both to say anything.
+    //
+    // Namespaced, where `GH_TOKEN` above is not, and the asymmetry is the
+    // whole point: that name is `gh`'s contract and this project conforms to
+    // it, while these are this project's contract with a tool it ships itself.
+    // See `docs/decisions/0028-stageman-ships-the-tool-that-speaks.md`.
+    for (channel, bound) in handout.channels() {
+        let (address, credential, thread) = match channel {
+            Channel::Slack => (
+                "STAGEMAN_SLACK_CHANNEL",
+                "STAGEMAN_SLACK_TOKEN",
+                "STAGEMAN_SLACK_THREAD",
+            ),
+        };
+        // The address is not a secret and travels as one anyway, because this
+        // list is what the container is started with and a second mechanism
+        // for the non-secret half would be two things to keep in step.
+        set.push((address, Secret::new(bound.address.clone())));
+        set.push((credential, bound.credential.clone()));
+
+        // Set only when this process was narrowed to a thread on *this*
+        // channel, which is what makes its absence meaningful: no variable
+        // means speak at the root, and that is where the orchestrator belongs.
+        // Delivering an empty one instead would make the two cases identical
+        // to the tool reading them.
+        if let Some(speaking) = handout.thread().filter(|t| t.channel == channel) {
+            set.push((thread, Secret::new(speaking.id.clone())));
+        }
+    }
+
     set
 }
 
@@ -1200,6 +1232,103 @@ mod tests {
         );
     }
 
+    /// The tool in the image reads the variables this crate delivers.
+    ///
+    /// **The only test that closes this loop.** The names are chosen twice —
+    /// once in `variables` here and once in `stageman-say` in the image — and
+    /// nothing in Rust can see the second. A typo on either side produces a job
+    /// that is told it can speak, runs the tool, and is told there is no
+    /// channel bound; every unit test on both sides still passes.
+    ///
+    /// The network is off, so this reaches the *request* and never Slack. That
+    /// is the whole of what it needs: getting as far as a failed connection
+    /// means the tool found both variables, which is the thing under test.
+    /// Actually posting needs a real credential and is not something the gate
+    /// can have.
+    #[tokio::test]
+    #[ignore = "needs a container runtime and a built image; run `just image-handshake`"]
+    async fn the_tool_in_the_image_reads_the_variables_this_crate_delivers() {
+        let runtime = located_runtime();
+        let (state, project) = instance_with_a_channel("sk-ant-oat01-xyz");
+        let handout = Handout::for_job(&state, Agent::Claude, project)
+            .expect("a watched project")
+            // Narrowed, so all three names are on trial rather than two. The
+            // thread is the newest and the one whose absence is meaningful, so
+            // a typo in it would not fail — it would silently post at the root.
+            .speaking_in(stageman_core::Thread {
+                channel: Channel::Slack,
+                id: "1728312345.678901".to_owned(),
+            });
+        let delivered = variables(&handout);
+        assert_eq!(delivered.len(), 5, "{delivered:?}");
+
+        let mut command = tokio::process::Command::new(runtime.path());
+        command.args([
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--entrypoint",
+            "stageman-say",
+        ]);
+        for (name, value) in &delivered {
+            command.arg("--env").arg(name);
+            command.env(name, value.expose());
+        }
+        command
+            .arg(image(Agent::Claude))
+            .arg("does this reach anybody?");
+
+        let output = command
+            .output()
+            .await
+            .expect("the runtime runs a container");
+        let said = String::from_utf8_lossy(&output.stderr);
+
+        assert!(
+            !said.contains("No channel is bound"),
+            "the tool did not find the variables this crate delivered: {said}"
+        );
+        assert!(
+            said.contains("could not be reached"),
+            "expected a blocked request, got: {said}"
+        );
+        assert!(!said.contains("xoxb-not-a-real-token"), "{said}");
+    }
+
+    /// A project with nothing bound gets a tool that says so and stops.
+    ///
+    /// The other half of the pair, and the one an operator meets: the agent is
+    /// not told about the tool at all in that case, so anything reaching it is
+    /// an agent that found it anyway — and the answer has to be a refusal
+    /// rather than a crash.
+    #[tokio::test]
+    #[ignore = "needs a container runtime and a built image; run `just image-handshake`"]
+    async fn the_tool_refuses_cleanly_when_no_channel_is_bound() {
+        let runtime = located_runtime();
+
+        let output = tokio::process::Command::new(runtime.path())
+            .args([
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--entrypoint",
+                "stageman-say",
+                image(Agent::Claude),
+                "is anybody there?",
+            ])
+            .output()
+            .await
+            .expect("the runtime runs a container");
+
+        assert_eq!(output.status.code(), Some(3), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("No channel is bound"),
+            "{output:?}"
+        );
+    }
+
     /// An image nobody ever built must not read as an agent that cannot speak.
     ///
     /// Both fail as silence on the connection, and the error an operator gets
@@ -1276,6 +1405,106 @@ mod tests {
         (state, id)
     }
 
+    /// The same, with a channel bound.
+    ///
+    /// Separate from the fixture above rather than replacing it, because both
+    /// shapes are real and each is the subject of its own claim: a project with
+    /// nothing bound is a working project, per
+    /// `docs/decisions/0005-conversation-happens-on-channels.md`.
+    fn instance_with_a_channel(credential: &str) -> (State, ProjectId) {
+        let (mut state, id) = instance_with_a_project(credential);
+        state
+            .projects
+            .get_mut(&id)
+            .expect("the project was just inserted")
+            .channels
+            .insert(
+                Channel::Slack,
+                stageman_core::ChannelConfig {
+                    address: "C0123456789".to_owned(),
+                    credential: Secret::new("xoxb-not-a-real-token".to_owned()),
+                },
+            );
+        (state, id)
+    }
+
+    /// Both halves reach the container, under the names the tool this project
+    /// ships reads them from.
+    #[test]
+    fn a_job_is_delivered_both_halves_of_a_binding() {
+        let (state, project) = instance_with_a_channel("sk-ant-oat01-xyz");
+        let handout = Handout::for_job(&state, Agent::Claude, project).expect("a watched project");
+
+        let delivered = variables(&handout);
+        let named = |wanted: &str| {
+            delivered
+                .iter()
+                .find(|(name, _)| *name == wanted)
+                .map(|(_, value)| value.expose())
+        };
+
+        assert_eq!(named("STAGEMAN_SLACK_CHANNEL"), Some("C0123456789"));
+        assert_eq!(named("STAGEMAN_SLACK_TOKEN"), Some("xoxb-not-a-real-token"));
+    }
+
+    /// A job narrowed to a thread is told where to speak; one that is not,
+    /// is not told at all.
+    ///
+    /// The absence is the whole mechanism: no variable means the tool posts at
+    /// the root, which is where the orchestrator belongs. Delivering an empty
+    /// one would make the two cases indistinguishable to the tool.
+    #[test]
+    fn a_thread_is_delivered_only_when_there_is_one() {
+        let (state, project) = instance_with_a_channel("sk-ant-oat01-xyz");
+        let handout = Handout::for_job(&state, Agent::Claude, project).expect("a watched project");
+
+        let before: Vec<&str> = variables(&handout).iter().map(|(name, _)| *name).collect();
+        assert!(!before.contains(&"STAGEMAN_SLACK_THREAD"), "{before:?}");
+
+        let narrowed = handout.speaking_in(stageman_core::Thread {
+            channel: Channel::Slack,
+            id: "1728312345.678901".to_owned(),
+        });
+        let delivered = variables(&narrowed);
+        let thread = delivered
+            .iter()
+            .find(|(name, _)| *name == "STAGEMAN_SLACK_THREAD")
+            .map(|(_, value)| value.expose());
+
+        assert_eq!(thread, Some("1728312345.678901"));
+    }
+
+    /// The asymmetry `docs/decisions/0027-a-channel-is-not-a-platform.md` turns
+    /// on, followed all the way to delivery: triage gets the channel it watches
+    /// and still no platform credential.
+    #[test]
+    fn triage_is_delivered_the_channel_it_watches_and_still_no_platform() {
+        let (state, project) = instance_with_a_channel("sk-ant-oat01-xyz");
+        let handout = Handout::for_triage(&state, project).expect("a watched project");
+
+        let named: Vec<&str> = variables(&handout).iter().map(|(name, _)| *name).collect();
+
+        assert!(named.contains(&"STAGEMAN_SLACK_TOKEN"), "{named:?}");
+        assert!(named.contains(&"STAGEMAN_SLACK_CHANNEL"), "{named:?}");
+        assert!(!named.contains(&"GH_TOKEN"), "{named:?}");
+    }
+
+    /// A project with nothing bound is delivered nothing to speak with, rather
+    /// than an empty variable — which would leave `stageman-say` unable to tell
+    /// an unbound project from a broken one.
+    #[test]
+    fn a_job_with_no_channel_is_delivered_no_channel_variables() {
+        let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
+        let handout = Handout::for_job(&state, Agent::Claude, project).expect("a watched project");
+
+        let named: Vec<&str> = variables(&handout).iter().map(|(name, _)| *name).collect();
+
+        assert!(
+            !named.iter().any(|name| name.starts_with("STAGEMAN_SLACK")),
+            "{named:?}"
+        );
+    }
+
     #[test]
     fn an_oauth_token_and_an_api_key_go_to_different_variables() {
         assert_eq!(
@@ -1317,7 +1546,7 @@ mod tests {
     /// arguments must *name* each variable and never carry its value.
     #[test]
     fn no_credential_ever_appears_in_a_containers_arguments() {
-        let (state, project) = instance_with_a_project("sk-ant-oat01-secret-value");
+        let (state, project) = instance_with_a_channel("sk-ant-oat01-secret-value");
         let handout = Handout::for_job(&state, Agent::Claude, project).expect("a watched project");
 
         let arguments = session_arguments(handout.agent(), &variables(&handout));
@@ -1325,8 +1554,13 @@ mod tests {
 
         assert!(!line.contains("sk-ant-oat01-secret-value"), "{line}");
         assert!(!line.contains("gh-not-a-real-token"), "{line}");
+        // The newest credential, and the one a reviewer would not think to
+        // check: a channel binding arrived through a different map and a
+        // different loop, so it is a second chance to make the same mistake.
+        assert!(!line.contains("xoxb-not-a-real-token"), "{line}");
         assert!(line.contains("--env CLAUDE_CODE_OAUTH_TOKEN"), "{line}");
         assert!(line.contains("--env GH_TOKEN"), "{line}");
+        assert!(line.contains("--env STAGEMAN_SLACK_TOKEN"), "{line}");
     }
 
     #[test]

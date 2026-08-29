@@ -305,17 +305,56 @@ and wrong within a day.
   `docs/decisions/0027-a-channel-is-not-a-platform.md` records where they do:
   a second map on a project, carrying an address as well as a credential.
 
-  So a project can be bound to a channel, and nothing inside a container can
-  reach one. What is left for outbound is the adapter's delivery: a handout
-  carries the binding, and `variables` does not yet name what a Slack tool
-  would read it from. That is one match arm and the names it chooses, and the
-  names are the part worth getting right — they are a contract with whatever
-  command-line tool the image carries, in the same way `GH_TOKEN` already is.
+  Outbound is done, and it cost more than the sentence above it expected: a
+  handout carries the binding, the adapter delivers both halves, the image
+  ships `stageman-say`, and a job whose project has a channel is told about it.
+  The expectation that this was one match arm assumed a Slack CLI to conform to
+  the way `GH_TOKEN` conforms to `gh`, and there is none —
+  `docs/decisions/0028-stageman-ships-the-tool-that-speaks.md` records what
+  followed from having to write the tool instead.
 
-  Note what binding one does *not* yet do. Nothing watches a channel and
-  nothing posts to one, so a bound project and an unbound project behave
-  identically today; the dashboard says which is which, and that is the whole
-  of the difference until delivery lands.
+  **What is unverified is that a real message arrives.** Every test stops at a
+  blocked network, because posting needs a credential the gate cannot have.
+  There is no `slack-token` in `.local` and no paid test using one, which is
+  the same shape as `just image-session` and `just propose` and probably wants
+  the same answer.
+
+  Outbound now happens in a thread per job, and the daemon opens that thread
+  itself — a thread has no existence before the message it hangs from, and the
+  instance rather than the job has to know its identifier.
+
+  So what is left is inbound. Its shape is settled by
+  `docs/decisions/0029-a-reply-is-routed-by-its-thread.md` — Socket Mode, one
+  Slack app per project, and a reply routed by the thread it arrives in — and
+  none of it is built. Two things stand in the way, and only one is work:
+
+  - **A binding is now two credentials**, and the form collects one. The
+    app-level token opens the socket and never enters a container, so it wants
+    somewhere to live that is not the handout.
+  - **A reply reaching a running job needs the session to outlive the turn that
+    started it**, which is the long-lived container question above, now with
+    its second consumer.
+
+  The kickoff prompt still says to speak and stop, and stays that way until it
+  can honestly say otherwise.
+
+- Then have the daemon post into a job's thread when the **agent or its
+  container fails**, which is the one case the agent cannot report on: a
+  crashed agent says nothing, so a job that dies is silent everywhere except
+  the dashboard.
+
+  Deliberately only that case. Reporting what a job *did* is the agent's, and
+  the reasoning is worth keeping because the opposite was argued first: having
+  the daemon post every outcome would be more reliable, and it would put a
+  second author of channel text beside the agent, duplicating whatever the
+  agent already said. The split that survives is that each says what only it
+  can — the agent knows what happened, and the instance knows when the agent
+  stopped being able to say so.
+
+  Note what this does not fix. A job's answer still reaches nobody but the
+  channel: `Progress::Completed` carries no text, so the dashboard shows that a
+  job ended and never what it said. That is a separate gap and probably wants
+  the answer recorded on the job.
 
   One coupling that decides the order. The instruction a job begins from
   currently ends by telling it to ask and *stop* — "do not wait, nobody is
