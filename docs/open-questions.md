@@ -302,7 +302,13 @@ and wrong within a day.
   §2 separates them deliberately: a platform is something a project's jobs
   *act on*, and a channel is somewhere a conversation happens. Slack
   credentials therefore do not belong in a project's platform credentials, and
-  the domain needs somewhere for channels to live before any of this is built.
+  `docs/decisions/0027-a-channel-is-not-a-platform.md` records where they do:
+  a second map on a project, carrying an address as well as a credential.
+
+  So the domain has somewhere for a channel to live, and nothing yet puts one
+  there. Two things stand between that and outbound working, and they are
+  independent: the project form has no field to bind one with, and the
+  adapter's delivery does not name the variables a Slack tool would read.
 
   One coupling that decides the order. The instruction a job begins from
   currently ends by telling it to ask and *stop* — "do not wait, nobody is

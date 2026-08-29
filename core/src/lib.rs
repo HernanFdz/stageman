@@ -207,6 +207,53 @@ pub enum Platform {
     GitHub,
 }
 
+/// Somewhere the orchestrator watches and a job can speak into.
+///
+/// Two-directional by definition, which is the whole reason this is not a
+/// variant of [`Platform`] — see
+/// `docs/decisions/0027-a-channel-is-not-a-platform.md`. A platform is
+/// something a job *acts on*; a channel is where a conversation happens, and
+/// the orchestrator is on it as much as a job is.
+///
+/// A closed set for the same reason [`Agent`] is: reaching one needs code, and
+/// code is not something an operator supplies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum Channel {
+    /// The team chat, and the escalation path — see
+    /// `docs/decisions/0005-conversation-happens-on-channels.md`.
+    Slack,
+}
+
+/// What an operator supplies in order to bind one channel to a project.
+///
+/// Two values rather than one, which is the second half of why channels do not
+/// share the platform map: an address has nowhere to live in a map of bare
+/// credentials.
+///
+/// Deriving `Debug` is safe and deliberate. The credential redacts itself and
+/// the address is not one — it is a public identifier a person could read off
+/// the chat client — so there is nothing here for a hand-written formatter to
+/// hide that the field types do not already.
+#[derive(Debug, Clone)]
+pub struct ChannelConfig {
+    /// Where on that channel this project's conversation happens.
+    ///
+    /// For Slack, the identifier of the channel a project's threads hang from
+    /// — one channel per project, one thread per job.
+    ///
+    /// Called an address rather than a *destination* because
+    /// `docs/conventions.md` §2 rejects one-directional words for this concept:
+    /// the orchestrator watches this exact place, and a job posts to it.
+    pub address: String,
+    /// What the channel is reached with.
+    ///
+    /// Belongs to the project rather than the instance, for the reason
+    /// `docs/decisions/0020-the-orchestrator-belongs-to-a-project.md` gives:
+    /// watching a project's channels needs that project's credentials, and one
+    /// holder of every project's at once is the shape being avoided.
+    pub credential: Secret,
+}
+
 /// One agent, in one workspace, working on one project.
 ///
 /// A job happens once and there is no retry: a second attempt is a new job with
@@ -322,6 +369,19 @@ pub struct Project {
     /// unrepresentable, and ordered rather than hashed so the snapshot does not
     /// reshuffle itself between writes.
     pub credentials: BTreeMap<Platform, Secret>,
+    /// Where its conversations happen, one binding per channel.
+    ///
+    /// Separate from `credentials` above rather than folded into it — see
+    /// `docs/decisions/0027-a-channel-is-not-a-platform.md`, which is mostly an
+    /// argument about the two lines this splits into.
+    ///
+    /// **May be empty, and that is a working project rather than a broken
+    /// one.** [`State::check`] deliberately does not require a binding:
+    /// `docs/decisions/0005-conversation-happens-on-channels.md` says a project
+    /// with no conversational channel can still run work that never needs to
+    /// ask, and refusing to start one would make the escalation path a
+    /// prerequisite for work that never escalates.
+    pub channels: BTreeMap<Channel, ChannelConfig>,
     /// Its jobs, past and present.
     ///
     /// Nested rather than held globally so that "a job belongs to exactly one
@@ -516,6 +576,19 @@ impl State {
                     .iter()
                     .map(|(platform, secret)| Ok((*platform, secret.seal(key, nonces())?)))
                     .collect::<Result<BTreeMap<_, _>, SealError>>()?;
+                let channels = project
+                    .channels
+                    .iter()
+                    .map(|(channel, config)| {
+                        Ok((
+                            *channel,
+                            SealedChannelConfig {
+                                address: config.address.clone(),
+                                credential: config.credential.seal(key, nonces())?,
+                            },
+                        ))
+                    })
+                    .collect::<Result<BTreeMap<_, _>, SealError>>()?;
                 Ok((
                     *id,
                     SealedProject {
@@ -524,6 +597,7 @@ impl State {
                         orchestrator_agent: project.orchestrator_agent,
                         job_agents: project.job_agents.clone(),
                         credentials,
+                        channels,
                         jobs: project.jobs.clone(),
                     },
                 ))
@@ -710,6 +784,19 @@ pub struct SealedAgentConfig {
     pub auth_token: SealedSecret,
 }
 
+/// A channel binding as it appears on disk.
+///
+/// The address travels in the clear beside its sealed credential, because it is
+/// not a secret and sealing it would cost a nonce per write to hide a value the
+/// chat client shows anybody in the room.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SealedChannelConfig {
+    /// Where on that channel this project's conversation happens.
+    pub address: String,
+    /// The sealed credential.
+    pub credential: SealedSecret,
+}
+
 /// A project as it appears on disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SealedProject {
@@ -723,6 +810,8 @@ pub struct SealedProject {
     pub job_agents: BTreeSet<Agent>,
     /// Its sealed credentials.
     pub credentials: BTreeMap<Platform, SealedSecret>,
+    /// Its channel bindings, each with its credential sealed.
+    pub channels: BTreeMap<Channel, SealedChannelConfig>,
     /// Its jobs, which hold nothing needing sealing.
     pub jobs: BTreeMap<JobId, Job>,
 }
@@ -775,6 +864,19 @@ impl Snapshot {
                     .into_iter()
                     .map(|(platform, sealed)| Ok((platform, sealed.open(key)?)))
                     .collect::<Result<BTreeMap<_, _>, OpenError>>()?;
+                let channels = project
+                    .channels
+                    .into_iter()
+                    .map(|(channel, sealed)| {
+                        Ok((
+                            channel,
+                            ChannelConfig {
+                                address: sealed.address,
+                                credential: sealed.credential.open(key)?,
+                            },
+                        ))
+                    })
+                    .collect::<Result<BTreeMap<_, _>, OpenError>>()?;
                 Ok((
                     id,
                     Project {
@@ -783,6 +885,7 @@ impl Snapshot {
                         orchestrator_agent: project.orchestrator_agent,
                         job_agents: project.job_agents,
                         credentials,
+                        channels,
                         jobs: project.jobs,
                     },
                 ))
@@ -826,6 +929,7 @@ pub struct Handout {
     agent: Agent,
     agent_credential: Secret,
     platforms: BTreeMap<Platform, Secret>,
+    channels: BTreeMap<Channel, ChannelConfig>,
 }
 
 impl Handout {
@@ -835,6 +939,14 @@ impl Handout {
     /// signals rather than acting on them, so it has no repository to reach and
     /// nothing to authenticate against — see
     /// `docs/decisions/0012-agents-run-in-containers.md`.
+    ///
+    /// It does get the project's channel bindings, and that asymmetry is the
+    /// point rather than an inconsistency. Watching a project's channels is the
+    /// whole of what an orchestrator does — `docs/architecture.md` §1 — and
+    /// answering on one is a reaction it is allowed to take, so an orchestrator
+    /// that cannot reach a channel cannot do its job. A single map for both
+    /// kinds could not express this, which is the argument
+    /// `docs/decisions/0027-a-channel-is-not-a-platform.md` turns on.
     ///
     /// Per project rather than per instance, because the channels it watches
     /// belong to a project and a shared orchestrator would hold every
@@ -867,11 +979,16 @@ impl Handout {
             agent,
             agent_credential: config.auth_token.clone(),
             platforms: BTreeMap::new(),
+            channels: watching.channels.clone(),
         })
     }
 
     /// What a job's agent is handed: its own credential, plus the platform
-    /// credentials of the one project the job belongs to.
+    /// credentials and channel bindings of the one project the job belongs to.
+    ///
+    /// The channels are how a job speaks without a terminal, which
+    /// `docs/architecture.md` §2 makes an invariant: a job that needs a human
+    /// says so on a channel and stays alive.
     ///
     /// # Errors
     ///
@@ -893,6 +1010,7 @@ impl Handout {
             agent,
             agent_credential: config.auth_token.clone(),
             platforms: project.credentials.clone(),
+            channels: project.channels.clone(),
         })
     }
 
@@ -922,6 +1040,17 @@ impl Handout {
     pub fn platforms(&self) -> impl Iterator<Item = (Platform, &Secret)> {
         self.platforms.iter().map(|(p, s)| (*p, s))
     }
+
+    /// How this process reaches one channel, if it is bound to one.
+    #[must_use]
+    pub fn channel(&self, channel: Channel) -> Option<&ChannelConfig> {
+        self.channels.get(&channel)
+    }
+
+    /// Every channel binding in this handout.
+    pub fn channels(&self) -> impl Iterator<Item = (Channel, &ChannelConfig)> {
+        self.channels.iter().map(|(c, config)| (*c, config))
+    }
 }
 
 impl fmt::Debug for Handout {
@@ -937,6 +1066,7 @@ impl fmt::Debug for Handout {
             .field("agent", &self.agent)
             .field("agent_credential", &"<redacted>")
             .field("platforms", &self.platforms.keys().collect::<Vec<_>>())
+            .field("channels", &self.channels.keys().collect::<Vec<_>>())
             .finish()
     }
 }
@@ -955,9 +1085,9 @@ pub enum HandoutError {
 #[cfg(test)]
 mod tests {
     use super::{
-        Agent, AgentConfig, BASE64, Handout, HandoutError, Inconsistent, Job, JobId, Key,
-        NONCE_LEN, Nonce, OpenError, Platform, Progress, Project, ProjectId, Secret, Snapshot,
-        State,
+        Agent, AgentConfig, BASE64, Channel, ChannelConfig, Handout, HandoutError, Inconsistent,
+        Job, JobId, Key, NONCE_LEN, Nonce, OpenError, Platform, Progress, Project, ProjectId,
+        Secret, Snapshot, State,
     };
     use base64::Engine as _;
     use jiff::Timestamp;
@@ -965,6 +1095,14 @@ mod tests {
     use uuid::Uuid;
 
     const TOKEN: &str = "ghp-not-a-real-token";
+    /// Distinct from `TOKEN`, so a test that finds a credential where it should
+    /// not can say which map it escaped from.
+    const CHANNEL_TOKEN: &str = "xoxb-not-a-real-token";
+    /// Not a secret, and asserted to travel in the clear.
+    const CHANNEL_ADDRESS: &str = "C0123456789";
+    /// A second project's channel credential, so that a handout carrying the
+    /// wrong one is detectable rather than merely non-empty.
+    const ALIEN_CHANNEL_TOKEN: &str = "xoxb-belongs-to-somebody-else";
 
     /// An instance with an agent configured and nothing else.
     fn configured() -> State {
@@ -987,6 +1125,7 @@ mod tests {
     fn a_project_with_a_job() -> Project {
         let mut credentials = BTreeMap::new();
         credentials.insert(Platform::GitHub, Secret::new(TOKEN.to_owned()));
+        let channels = BTreeMap::from([(Channel::Slack, a_slack_binding())]);
         let mut jobs = BTreeMap::new();
         jobs.insert(
             JobId::from_uuid(Uuid::from_u128(9)),
@@ -1004,7 +1143,15 @@ mod tests {
             orchestrator_agent: Agent::Claude,
             job_agents: only_claude(),
             credentials,
+            channels,
             jobs,
+        }
+    }
+
+    fn a_slack_binding() -> ChannelConfig {
+        ChannelConfig {
+            address: CHANNEL_ADDRESS.to_owned(),
+            credential: Secret::new(CHANNEL_TOKEN.to_owned()),
         }
     }
 
@@ -1024,7 +1171,13 @@ mod tests {
     fn a_secret_nested_in_a_structure_does_not_leak() {
         // The failure this guards is not formatting a secret directly — nobody
         // does that. It is printing whatever happens to contain one.
-        assert!(!format!("{:?}", a_project_with_a_job()).contains(TOKEN));
+        //
+        // A project now nests two kinds, and the second is the one a derive
+        // could get wrong: `ChannelConfig` holds a `String` beside its
+        // credential, so this is what says the derive on it is still safe.
+        let shown = format!("{:?}", a_project_with_a_job());
+        assert!(!shown.contains(TOKEN), "{shown}");
+        assert!(!shown.contains(CHANNEL_TOKEN), "{shown}");
     }
 
     #[test]
@@ -1083,6 +1236,23 @@ mod tests {
         }
 
         assert!(matches!(state.check(), Err(Inconsistent::NoJobAgents(_))));
+    }
+
+    /// A project with nowhere to escalate is a working project.
+    ///
+    /// `docs/decisions/0005-conversation-happens-on-channels.md` says it can
+    /// still run work that never needs to ask, so requiring a binding would
+    /// make the escalation path a prerequisite for work that never escalates.
+    /// Asserted because the natural next change to [`State::check`] is to
+    /// demand one.
+    #[test]
+    fn a_project_with_no_channel_bound_is_still_consistent() {
+        let mut state = populated();
+        for project in state.projects.values_mut() {
+            project.channels.clear();
+        }
+
+        assert_eq!(state.check(), Ok(()));
     }
 
     #[test]
@@ -1148,6 +1318,20 @@ mod tests {
         let json = serde_json::to_string(&sealed()).expect("a snapshot serialises");
         assert!(!json.contains(TOKEN));
         assert!(!json.contains("agent-token"));
+        assert!(!json.contains(CHANNEL_TOKEN), "{json}");
+    }
+
+    /// The other half of the sealing decision, asserted rather than assumed.
+    ///
+    /// A channel's address is not a credential — it is an identifier the chat
+    /// client shows everybody in the room — so it is written in the clear, and
+    /// sealing it would spend a nonce per write to hide nothing. Worth a test
+    /// because the cautious-looking change is to seal it, and nothing else
+    /// would object.
+    #[test]
+    fn a_channels_address_is_not_sealed() {
+        let json = serde_json::to_string(&sealed()).expect("a snapshot serialises");
+        assert!(json.contains(CHANNEL_ADDRESS), "{json}");
     }
 
     /// A snapshot says nothing about the machine it was written on.
@@ -1187,6 +1371,12 @@ mod tests {
                 .map(Secret::expose),
             Some(TOKEN)
         );
+        let bound = project
+            .channels
+            .get(&Channel::Slack)
+            .expect("the binding survived");
+        assert_eq!(bound.address, CHANNEL_ADDRESS);
+        assert_eq!(bound.credential.expose(), CHANNEL_TOKEN);
     }
 
     #[test]
@@ -1212,7 +1402,15 @@ mod tests {
             .get(&Platform::GitHub)
             .expect("the credential is there")
             .nonce;
+        let channel_nonce = &project
+            .channels
+            .get(&Channel::Slack)
+            .expect("the binding is there")
+            .credential
+            .nonce;
         assert_ne!(agent_nonce, project_nonce);
+        assert_ne!(project_nonce, channel_nonce);
+        assert_ne!(agent_nonce, channel_nonce);
     }
 
     #[test]
@@ -1289,6 +1487,13 @@ mod tests {
             Platform::GitHub,
             Secret::new("not-yours-and-never-was".to_owned()),
         );
+        other.channels.insert(
+            Channel::Slack,
+            ChannelConfig {
+                address: "C9999999999".to_owned(),
+                credential: Secret::new(ALIEN_CHANNEL_TOKEN.to_owned()),
+            },
+        );
         state.projects.insert(theirs, other);
 
         (state, mine, theirs)
@@ -1305,6 +1510,25 @@ mod tests {
         assert!(handout.platform(Platform::GitHub).is_none());
     }
 
+    /// The asymmetry `docs/decisions/0027-a-channel-is-not-a-platform.md` is
+    /// built on, asserted beside the test that establishes the other half.
+    ///
+    /// An orchestrator watches its project's channels — that is the whole of
+    /// its remit — so a handout that withheld them the way it withholds
+    /// platform credentials would leave it unable to work.
+    #[test]
+    fn triage_is_handed_the_channels_it_has_to_watch() {
+        let (state, mine, _) = two_projects();
+        let handout = Handout::for_triage(&state, mine).expect("a watched project");
+
+        let watching = handout
+            .channel(Channel::Slack)
+            .expect("the binding came through");
+        assert_eq!(watching.address, CHANNEL_ADDRESS);
+        assert_eq!(watching.credential.expose(), CHANNEL_TOKEN);
+        assert_eq!(handout.channels().count(), 1);
+    }
+
     #[test]
     fn a_job_is_handed_its_own_projects_credentials() {
         let (state, mine, _) = two_projects();
@@ -1315,6 +1539,22 @@ mod tests {
             handout.platform(Platform::GitHub).map(Secret::expose),
             Some(TOKEN)
         );
+    }
+
+    /// How a job speaks without a terminal — the invariant in
+    /// `docs/architecture.md` §2 needs both halves of the binding, because an
+    /// agent that holds the credential and not the address has nowhere to put
+    /// the question.
+    #[test]
+    fn a_job_is_handed_the_channel_it_speaks_on() {
+        let (state, mine, _) = two_projects();
+        let handout = Handout::for_job(&state, Agent::Claude, mine).expect("a watched project");
+
+        let speaking = handout
+            .channel(Channel::Slack)
+            .expect("the binding came through");
+        assert_eq!(speaking.address, CHANNEL_ADDRESS);
+        assert_eq!(speaking.credential.expose(), CHANNEL_TOKEN);
     }
 
     /// The escape test `docs/conventions.md` §4 asks for, at the level where
@@ -1334,6 +1574,17 @@ mod tests {
 
         for (_, secret) in ours.platforms() {
             assert_ne!(secret.expose(), "not-yours-and-never-was");
+        }
+
+        // The same claim for the second map. Selection happens once per map,
+        // so a map added without being selected from is exactly the mistake
+        // this catches.
+        assert_eq!(
+            alien.channel(Channel::Slack).map(|c| c.credential.expose()),
+            Some(ALIEN_CHANNEL_TOKEN)
+        );
+        for (_, bound) in ours.channels() {
+            assert_ne!(bound.credential.expose(), ALIEN_CHANNEL_TOKEN);
         }
     }
 
@@ -1370,10 +1621,12 @@ mod tests {
 
         assert!(!shown.contains("agent-token"), "{shown}");
         assert!(!shown.contains(TOKEN), "{shown}");
+        assert!(!shown.contains(CHANNEL_TOKEN), "{shown}");
         assert!(
             shown.contains("GitHub"),
             "it should still say what it holds"
         );
+        assert!(shown.contains("Slack"), "{shown}");
     }
 
     #[test]

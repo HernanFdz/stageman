@@ -99,6 +99,7 @@ async fn propose() -> Result<(), String> {
             orchestrator_agent: Agent::Claude,
             job_agents: std::collections::BTreeSet::from([Agent::Claude]),
             credentials,
+            channels: std::collections::BTreeMap::new(),
             jobs: std::collections::BTreeMap::new(),
         },
     );

@@ -1269,6 +1269,7 @@ mod tests {
                 orchestrator_agent: Agent::Claude,
                 job_agents: only_claude(),
                 credentials,
+                channels: BTreeMap::new(),
                 jobs: BTreeMap::<_, Job>::new(),
             },
         );
@@ -1453,6 +1454,7 @@ mod tests {
                     orchestrator_agent: Agent::Claude,
                     job_agents: only_claude(),
                     credentials: BTreeMap::new(),
+                    channels: BTreeMap::new(),
                     jobs: BTreeMap::new(),
                 },
             );

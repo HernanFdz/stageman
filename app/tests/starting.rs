@@ -42,7 +42,8 @@ use std::time::Duration;
 
 use stageman::Store;
 use stageman_core::{
-    Agent, AgentConfig, Job, JobId, Key, Progress, Project, ProjectId, Secret, State, Timestamp,
+    Agent, AgentConfig, Channel, ChannelConfig, Job, JobId, Key, Progress, Project, ProjectId,
+    Secret, State, Timestamp,
 };
 
 /// A key, as an operator would supply it: thirty-two bytes of base64.
@@ -267,8 +268,17 @@ fn job(progress: Progress) -> Job {
     }
 }
 
+/// A channel credential, distinct from the agent's so that a test finding one
+/// where it should not be can say which it was.
+const CHANNEL_CREDENTIAL: &str = "not-a-real-channel-credential";
+
 /// An instance with one project in it, which is the smallest state that puts
 /// anything on the dashboard.
+///
+/// It binds a channel, which nothing on the dashboard reads. That is the point:
+/// the project below is the fixture the credential test runs against, and a
+/// project holding only an agent credential would stop covering the second kind
+/// the moment channels arrived.
 fn watching(name: &str, repository: &str) -> State {
     State {
         agents: BTreeMap::from([(
@@ -285,6 +295,13 @@ fn watching(name: &str, repository: &str) -> State {
                 orchestrator_agent: Agent::Claude,
                 job_agents: BTreeSet::from([Agent::Claude]),
                 credentials: BTreeMap::new(),
+                channels: BTreeMap::from([(
+                    Channel::Slack,
+                    ChannelConfig {
+                        address: "C0123456789".to_owned(),
+                        credential: Secret::new(CHANNEL_CREDENTIAL.to_owned()),
+                    },
+                )]),
                 jobs: BTreeMap::new(),
             },
         )]),
@@ -429,8 +446,8 @@ fn the_route_the_page_reads_through_answers_on_its_own() {
 /// `docs/conventions.md` §4 asks that secrets never render, and this is where
 /// that stops being about `Debug` and starts being about the network.
 ///
-/// The instance behind both of these holds an agent credential. Neither the
-/// page nor the route has any field to put it in — see
+/// The instance behind both of these holds an agent credential and a channel's.
+/// Neither the page nor the route has any field to put either in — see
 /// `docs/decisions/0022-the-browser-never-sees-the-domain.md` — so this test
 /// passes by construction today, which is exactly why it is worth writing: the
 /// construction is what a later field would change, and nothing else would
@@ -444,10 +461,12 @@ fn nothing_served_carries_a_credential() {
     let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
 
     for served in [running.get("/"), running.get("/api/instance")] {
-        assert!(
-            !served.contains("not-a-real-credential"),
-            "a credential reached the browser: {served}"
-        );
+        for secret in ["not-a-real-credential", CHANNEL_CREDENTIAL] {
+            assert!(
+                !served.contains(secret),
+                "a credential reached the browser: {served}"
+            );
+        }
     }
 }
 

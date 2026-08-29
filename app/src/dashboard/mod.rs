@@ -334,6 +334,7 @@ mod tests {
                     orchestrator_agent: Agent::Claude,
                     job_agents: BTreeSet::from([Agent::Claude]),
                     credentials: BTreeMap::new(),
+                    channels: BTreeMap::new(),
                     jobs: BTreeMap::new(),
                 },
             )]),

@@ -128,8 +128,13 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   this word type-checks.
 
 - **handout** — exactly what one agent process is allowed to see: its agent's
-  own credential, and the platform credentials of the one project it works for.
-  Nothing else, and nothing inherited. It is *decided* in the domain crate as a
+  own credential, and — of the one project it works for — that project's
+  platform credentials and its channel bindings. Nothing else, and nothing
+  inherited. The two project halves are not interchangeable and a handout can
+  carry one without the other: an orchestrator's gets the channels and no
+  platform credential at all, because watching a channel is its remit and
+  acting on a platform is not. See
+  `docs/decisions/0027-a-channel-is-not-a-platform.md`. It is *decided* in the domain crate as a
   pure function and *delivered* by an adapter, because which secrets a process
   may see is a question about configuration while what they are called is
   knowledge about one agent. Not *environment*, and that near-miss is the whole
