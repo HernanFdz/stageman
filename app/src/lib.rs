@@ -21,6 +21,8 @@ mod serving;
 pub mod dashboard;
 pub mod ui;
 
+pub use dashboard::Dashboard;
+
 #[cfg(feature = "server")]
 pub use instance::{
     LoadError, RunError, SaveError, StateGuard, StateRef, Store, Swept, reconcile, run,

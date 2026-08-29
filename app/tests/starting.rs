@@ -8,6 +8,12 @@
 //! are wrong, and that what a start produces is a dashboard with the instance
 //! already on it.
 //!
+//! It also covers the routes that binary serves, which is a second concern in
+//! one file and is noted as such: `docs/open-questions.md` intends to move
+//! whole-flow tests into their own crate, and that move is where these two
+//! should part company. Until then they share a harness rather than
+//! duplicating one.
+//!
 //! **A start that works no longer ends.** The binary serves until it is
 //! stopped, so the tests below split in two: the ones about refusing to start
 //! wait for an exit, and the ones about starting wait for the line that names
@@ -79,6 +85,16 @@ impl Serving {
         PathBuf::from(line.trim())
     }
 
+    /// The whole of the response to one `POST` of JSON, headers included.
+    fn post(&self, path: &str, body: &str) -> String {
+        self.request(&format!(
+            "POST {path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            self.address,
+            body.len()
+        ))
+    }
+
     /// The whole of the response to one `GET`, headers included.
     ///
     /// Written by hand rather than with an HTTP client, because `Connection:
@@ -98,13 +114,18 @@ impl Serving {
     /// fail against the partial text, which says far more than
     /// `ConnectionReset` did.
     fn get(&self, path: &str) -> String {
-        let mut connection = TcpStream::connect(&self.address).expect("the dashboard accepts");
-        write!(
-            connection,
+        self.request(&format!(
             "GET {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
             self.address
-        )
-        .expect("the request is sent");
+        ))
+    }
+
+    /// Writes a request and reads everything the server says back.
+    fn request(&self, request: &str) -> String {
+        let mut connection = TcpStream::connect(&self.address).expect("the dashboard accepts");
+        connection
+            .write_all(request.as_bytes())
+            .expect("the request is sent");
 
         let mut response = Vec::new();
         let mut chunk = [0_u8; 4096];
@@ -545,4 +566,97 @@ fn the_dashboard_counts_running_jobs_rather_than_all_of_them() {
 
     assert!(answer.contains(r#""running":0"#), "{answer}");
     assert!(answer.contains(r#""jobs":2"#), "{answer}");
+}
+
+/// An agent a project still names cannot be forgotten.
+///
+/// The guard that matters most on the agents screen, and the one no unit test
+/// can reach: it lives in a route, and what is being checked is that the
+/// refusal survives all the way to a status code rather than merely existing
+/// in a function. `docs/decisions/0021-an-instance-starts-empty.md` requires
+/// it, and mutation testing found it unprotected.
+#[test]
+fn an_agent_a_project_still_names_cannot_be_forgotten() {
+    let (_kept, snapshot) = scratch();
+    let watched = watching("aviary", "https://example.invalid/aviary");
+    drop(Store::create(snapshot.clone(), key(), watched).expect("it can write"));
+
+    let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
+    let refused = running.post("/api/agents/forget", r#"{"agent":"claude"}"#);
+
+    assert!(refused.contains("409"), "it should refuse: {refused}");
+    assert!(
+        refused.contains("aviary"),
+        "it should name what would break: {refused}"
+    );
+
+    // Still there, which is the half a status code does not prove.
+    let listing = running.get("/api/agents");
+    assert!(listing.contains(r#""configured":true"#), "{listing}");
+}
+
+/// A credential is accepted, kept, and never handed back.
+#[test]
+fn a_credential_is_taken_once_and_never_returned() {
+    let (_kept, snapshot) = scratch();
+
+    let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
+    let saved = running.post(
+        "/api/agents/configure",
+        r#"{"agent":"claude","credential":"sk-not-a-real-token"}"#,
+    );
+
+    assert!(saved.contains(r#""configured":true"#), "{saved}");
+    for served in [saved, running.get("/api/agents"), running.get("/agents")] {
+        assert!(
+            !served.contains("sk-not-a-real-token"),
+            "a credential reached the browser: {served}"
+        );
+    }
+}
+
+/// The navigation says which screen you are on.
+///
+/// Checked through the served markup because that is the only place the answer
+/// exists: the decision is one comparison inside a component, and a wrong
+/// highlight is the kind of thing nobody notices in review and everybody
+/// notices in use.
+///
+/// The first attempt at this test split the page on the link's `href` and read
+/// what followed, which quietly matched the document's `<base href="/">` and
+/// handed back the rest of the page — so both links were in scope and the test
+/// passed whichever way round the comparison went. Mutation testing caught it.
+/// Hence taking the anchor tag itself.
+#[test]
+fn the_navigation_marks_the_screen_being_looked_at() {
+    let (_kept, snapshot) = scratch();
+    let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
+
+    let agents = running.get("/agents");
+    let here = anchor(&agents, "/agents");
+    let elsewhere = anchor(&agents, "/");
+
+    assert!(
+        here.contains("font-medium"),
+        "the current screen should be marked: {here}"
+    );
+    assert!(
+        !elsewhere.contains("font-medium"),
+        "a screen you are not on should not be: {elsewhere}"
+    );
+}
+
+/// The opening tag of the link to `href`, and nothing after it.
+///
+/// Bounded at the tag's own `>` on purpose — see the test above for what
+/// happens when it is not.
+fn anchor(page: &str, href: &str) -> String {
+    let opening = format!("<a href=\"{href}\"");
+    let from = page
+        .find(&opening)
+        .unwrap_or_else(|| panic!("no link to {href} on the page"));
+    let rest = page.get(from..).unwrap_or_default();
+    let until = rest.find('>').unwrap_or(rest.len());
+
+    rest.get(..until).unwrap_or_default().to_owned()
 }

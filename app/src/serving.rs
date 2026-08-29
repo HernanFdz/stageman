@@ -25,7 +25,7 @@ use etcetera::BaseStrategy as _;
 use stageman_agent::{AgentError, ContainerRuntime};
 use stageman_core::{Key, KeyError, State};
 
-use crate::dashboard::Dashboard;
+use crate::Dashboard;
 use crate::{LoadError, Store};
 
 /// The variable the snapshot's encryption key arrives in, as base64.
