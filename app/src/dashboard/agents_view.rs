@@ -163,7 +163,7 @@ pub fn AgentsView() -> Element {
                     Card {
                         title: "Agents",
                         note: "An agent needs a credential before a project can name it.",
-                        aside: rsx! {
+                        badge: rsx! {
                             Badge { "{agents.iter().filter(|agent| agent.configured).count()} of {agents.len()}" }
                         },
                         if agents.is_empty() {

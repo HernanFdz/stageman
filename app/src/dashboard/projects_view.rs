@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use super::agents_view::Agent;
 use super::error::{DashboardError, DashboardResult};
-use crate::ui::{Badge, BadgeTone, Button, ButtonVariant, Card, EmptyState};
+use crate::ui::{Badge, BadgeTone, Button, Card, EmptyState, Modal};
 
 /// One project, as much of it as a page is allowed to know.
 ///
@@ -114,10 +114,12 @@ pub async fn create(
     repository: String,
     orchestrator: String,
     job_agents: Vec<String>,
+    credential: String,
 ) -> DashboardResult<Watching> {
     let name = required("name", &name)?;
     let repository = required("repository", &repository)?;
     let orchestrator_agent = super::named(&orchestrator)?;
+    let credential = required("credential", &credential)?;
     if job_agents.is_empty() {
         return Err(DashboardError::JobAgentsMissing);
     }
@@ -141,7 +143,13 @@ pub async fn create(
             repository,
             orchestrator_agent,
             job_agents,
-            credentials: std::collections::BTreeMap::new(),
+            // One platform, so one field. A second would make this a list
+            // here and on the form, and the closed set in the domain is what
+            // would force both.
+            credentials: std::collections::BTreeMap::from([(
+                stageman_core::Platform::GitHub,
+                stageman_core::Secret::new(credential),
+            )]),
             jobs: std::collections::BTreeMap::new(),
         },
     );
@@ -304,48 +312,127 @@ fn watching_now(state: &stageman_core::State) -> Watching {
 pub fn ProjectsView() -> Element {
     let mut reading = use_server_future(projects)?;
     let mut failure = use_signal(|| None::<DashboardError>);
-
-    let applied = move |outcome: DashboardResult<Watching>| match outcome {
-        Ok(fresh) => {
-            failure.set(None);
-            reading.set(Some(Ok(fresh)));
-        }
-        Err(reason) => failure.set(Some(reason)),
-    };
+    let mut adding = use_signal(|| false);
+    let mut draft = use_signal(Draft::default);
 
     rsx! {
         div { class: "flex flex-col gap-4",
-            if let Some(reason) = failure() {
-                Card { title: "That did not work",
-                    p { class: "text-sm text-failed", "{reason}" }
-                }
-            }
             match reading.cloned() {
                 Some(Ok(watching)) => rsx! {
                     Card {
                         title: "Projects",
                         note: "A project is a repository, the agents that work on it, and the \
-                               credentials those agents need.",
-                        aside: rsx! {
+                               credential those agents need to reach it.",
+                        badge: rsx! {
                             Badge { "{watching.projects.len()}" }
+                        },
+                        aside: rsx! {
+                            Button {
+                                // A glyph, because the card's title already
+                                // says what is being added and repeating it on
+                                // the control is the longest thing on the row
+                                // saying the least. Named for anyone not
+                                // looking at it.
+                                class: "px-2.5 text-base leading-none",
+                                aria_label: "New project",
+                                title: "New project",
+                                disabled: watching.available.is_empty(),
+                                onclick: {
+                                    // The first configured agent, which is
+                                    // what both fields start on. Taken here so
+                                    // the handler does not need the whole list.
+                                    let first = watching
+                                        .available
+                                        .first()
+                                        .map(|agent| agent.id.clone());
+                                    move |_| {
+                                        // Emptied on the way in rather than on
+                                        // the way out, so that a modal
+                                        // abandoned half-filled does not
+                                        // reopen holding what was abandoned.
+                                        draft.set(Draft {
+                                            orchestrator: first.clone().unwrap_or_default(),
+                                            job_agents: first.clone().into_iter().collect(),
+                                            ..Draft::default()
+                                        });
+                                        failure.set(None);
+                                        adding.set(true);
+                                    }
+                                },
+                                "+"
+                            }
                         },
                         if watching.projects.is_empty() {
                             EmptyState {
                                 title: "Nothing is being watched yet.",
-                                note: "Add one below. It needs an agent to think with and at \
-                                       least one its jobs can run on.",
+                                note: if watching.available.is_empty() {
+                                    "A project names one agent to think with and at least one its \
+                                     jobs run on, so configuring an agent comes first."
+                                } else {
+                                    "Add one. It needs a repository, the agents that work on it, \
+                                     and a credential to reach it with."
+                                },
                             }
                         } else {
                             ul { class: "divide-y divide-border",
                                 for project in watching.projects {
-                                    li { key: "{project.id}",
-                                        WatchedProject { project, onchanged: applied }
-                                    }
+                                    li { key: "{project.id}", WatchedProject { project } }
                                 }
                             }
                         }
                     }
-                    NewProject { available: watching.available, onchanged: applied }
+                    if adding() {
+                        Modal {
+                            title: "New project",
+                            onclose: move |()| adding.set(false),
+                            actions: rsx! {
+                                Button {
+                                    // Unavailable until pressing it would
+                                    // work, which is this screen's whole
+                                    // answer to an incomplete form for now —
+                                    // per-field messages are the better
+                                    // answer and are not this change.
+                                    class: "px-2.5 text-base leading-none",
+                                    aria_label: "Add",
+                                    title: "Add",
+                                    disabled: !draft().is_complete(),
+                                    onclick: move |_| async move {
+                                        let asked = draft();
+                                        match create(
+                                                asked.name,
+                                                asked.repository,
+                                                asked.orchestrator,
+                                                asked.job_agents,
+                                                asked.credential,
+                                            )
+                                            .await
+                                        {
+                                            Ok(fresh) => {
+                                                failure.set(None);
+                                                reading.set(Some(Ok(fresh)));
+                                                adding.set(false);
+                                            }
+                                            // Left open, deliberately: closing
+                                            // would throw away what was typed,
+                                            // and what is wrong is almost
+                                            // always in one field of it.
+                                            Err(reason) => failure.set(Some(reason)),
+                                        }
+                                    },
+                                    "✓"
+                                }
+                            },
+                            // Shown here rather than behind the modal, which is
+                            // where it used to be. Anything the screen could
+                            // have seen is caught by the control above being
+                            // unavailable, so what reaches this is a refusal
+                            // only the instance could make.
+                            if let Some(reason) = failure() {
+                                p { class: "mb-3 text-sm text-failed", "{reason}" }
+                            }
+                            ProjectForm { draft, available: watching.available }
+                        }
+                    }
                 },
                 Some(Err(reason)) => rsx! {
                     Card { title: "The projects could not be read",
@@ -360,21 +447,31 @@ pub fn ProjectsView() -> Element {
     }
 }
 
-/// One project, and what can be done to it.
+/// One project, as the list shows it.
+///
+/// Read-only, and that is a decision rather than a gap. What a project *is* is
+/// decided in one place — the form — and a list that also edited would be a
+/// second place, disagreeing about which fields matter and which are required.
+/// Changing one is the same form with different initial values, which is what
+/// [`ProjectForm`] takes.
 #[component]
-fn WatchedProject(project: Project, onchanged: EventHandler<DashboardResult<Watching>>) -> Element {
-    let mut token = use_signal(String::new);
-    let identifier = project.id.clone();
-    let idle = project.idle();
-
+fn WatchedProject(project: Project) -> Element {
     rsx! {
-        div { class: "flex flex-col gap-2 py-3 first:pt-0 last:pb-0",
+        // Roomier than the rows on the agents screen, and deliberately: an
+        // agent is one line and a project is three, so the same padding reads
+        // as cramped here.
+        //
+        // The first and last shed their outer padding entirely, so the space
+        // above the first row and below the last are both the card's own and
+        // therefore equal. Anything else makes the top gap the sum of two
+        // paddings and the eye reads it as a mistake.
+        div { class: "flex flex-col gap-1.5 py-4 first:pt-0 last:pb-0",
             div { class: "flex items-baseline gap-3",
                 span { class: "text-sm font-medium", "{project.name}" }
                 span { class: "truncate font-mono text-xs text-faint-foreground",
                     "{project.repository}"
                 }
-                span { class: "ml-auto flex shrink-0 items-baseline gap-2",
+                span { class: "ml-auto shrink-0",
                     if project.running > 0 {
                         Badge { tone: BadgeTone::Running, "{project.running} of {project.jobs} running" }
                     } else {
@@ -384,156 +481,139 @@ fn WatchedProject(project: Project, onchanged: EventHandler<DashboardResult<Watc
             }
             p { class: "text-xs text-muted-foreground",
                 "thinks with {project.orchestrator} · runs jobs on {project.job_agents.join(\", \")}"
-            }
-            div { class: "flex items-center gap-2",
-                input {
-                    r#type: "password",
-                    class: "w-full max-w-sm rounded-md border border-border bg-surface px-2 py-1.5 \
-                            font-mono text-xs placeholder:text-faint-foreground focus-visible:outline-none \
-                            focus-visible:ring-2 focus-visible:ring-primary",
-                    placeholder: if project.platforms.iter().any(|platform| platform == "github") {
-                        "replace the GitHub credential"
-                    } else {
-                        "paste a GitHub credential"
-                    },
-                    value: "{token}",
-                    oninput: move |event| token.set(event.value()),
-                }
-                Button {
-                    onclick: {
-                        let identifier = identifier.clone();
-                        move |_| {
-                            let identifier = identifier.clone();
-                            let supplied = token();
-                            async move {
-                                let outcome =
-                                    credential(identifier, "github".to_owned(), supplied).await;
-                                if outcome.is_ok() {
-                                    token.set(String::new());
-                                }
-                                onchanged.call(outcome);
-                            }
-                        }
-                    },
-                    "Save"
-                }
-                Button {
-                    variant: ButtonVariant::Danger,
-                    disabled: !idle,
-                    onclick: move |_| {
-                        let identifier = identifier.clone();
-                        async move { onchanged.call(forget(identifier).await) }
-                    },
-                    "Forget"
+                if project.platforms.is_empty() {
+                    " · no credential"
                 }
             }
         }
     }
 }
 
-/// The form that starts watching something new.
-#[component]
-fn NewProject(
-    available: Vec<Agent>,
-    onchanged: EventHandler<DashboardResult<Watching>>,
-) -> Element {
-    let mut name = use_signal(String::new);
-    let mut repository = use_signal(String::new);
-    let mut orchestrator = use_signal(|| {
-        available
-            .first()
-            .map_or_else(String::new, |agent| agent.id.clone())
-    });
-    let mut chosen = use_signal(|| {
-        available
-            .first()
-            .map(|agent| agent.id.clone())
-            .into_iter()
-            .collect::<Vec<_>>()
-    });
+/// Everything the form collects, which is everything a project is.
+///
+/// A struct rather than five handlers, because the form's whole purpose is to
+/// be filled in twice — once to create and once to change — and a caller
+/// should differ in what it *does* with the answer rather than in how it
+/// receives it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Draft {
+    /// What to call it.
+    pub name: String,
+    /// Where its jobs work.
+    pub repository: String,
+    /// The agent its orchestrator thinks with.
+    pub orchestrator: String,
+    /// The agents its jobs may run on.
+    pub job_agents: Vec<String>,
+    /// What reaches the repository.
+    pub credential: String,
+}
 
-    if available.is_empty() {
-        return rsx! {
-            Card { title: "Watch a repository",
-                EmptyState {
-                    title: "No agent has a credential yet.",
-                    note: "A project names one agent to think with and at least one its jobs run \
-                           on, so configuring an agent comes first.",
-                }
-            }
-        };
+impl Draft {
+    /// Whether this says everything a project needs.
+    ///
+    /// The same conditions the route enforces, and deliberately so: the point
+    /// is that the control which submits is unavailable until pressing it
+    /// would succeed, so the operator is never told off for something the
+    /// screen could see. It is not a second definition of validity — the route
+    /// still checks, because a browser is not a place to enforce anything —
+    /// but it is the screen refusing to ask the question badly.
+    ///
+    /// What it deliberately does *not* check is anything the domain decides:
+    /// whether the agents named are configured is `State::check`'s to answer,
+    /// and the form only offers agents that are.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        !self.name.trim().is_empty()
+            && !self.repository.trim().is_empty()
+            && !self.orchestrator.is_empty()
+            && !self.job_agents.is_empty()
+            && !self.credential.trim().is_empty()
     }
+}
+
+/// The form that describes a project.
+///
+/// **Controlled**: the caller owns the draft and this writes into it. That is
+/// what lets the control which submits live outside the form — in the modal's
+/// header, beside the way out — and it is what an edit will need too, since
+/// editing is this form over different initial values with a different handler.
+///
+/// It renders no submit of its own. A form that both collected and committed
+/// would have to be told where its button goes, which is the caller's business
+/// and not its own.
+#[component]
+fn ProjectForm(draft: Signal<Draft>, available: Vec<Agent>) -> Element {
+    let mut draft = draft;
 
     rsx! {
-        Card {
-            title: "Watch a repository",
-            note: "Everything here can be changed afterwards except the repository.",
-            div { class: "flex flex-col gap-3",
-                Field { label: "Name",
-                    input {
-                        class: FIELD,
-                        placeholder: "what to call it",
-                        value: "{name}",
-                        oninput: move |event| name.set(event.value()),
+        div { class: "flex flex-col gap-3",
+            Field { label: "Name",
+                input {
+                    class: FIELD,
+                    placeholder: "what to call it",
+                    value: "{draft().name}",
+                    oninput: move |event| draft.with_mut(|draft| draft.name = event.value()),
+                }
+            }
+            Field { label: "Repository",
+                input {
+                    class: FIELD,
+                    placeholder: "https://github.com/…",
+                    value: "{draft().repository}",
+                    oninput: move |event| draft.with_mut(|draft| draft.repository = event.value()),
+                }
+            }
+            Field { label: "Thinks with",
+                select {
+                    class: FIELD,
+                    value: "{draft().orchestrator}",
+                    onchange: move |event| {
+                        draft.with_mut(|draft| draft.orchestrator = event.value());
+                    },
+                    for agent in available.iter() {
+                        option { key: "{agent.id}", value: "{agent.id}", "{agent.name}" }
                     }
                 }
-                Field { label: "Repository",
-                    input {
-                        class: FIELD,
-                        placeholder: "https://github.com/…",
-                        value: "{repository}",
-                        oninput: move |event| repository.set(event.value()),
-                    }
-                }
-                Field { label: "Thinks with",
-                    select {
-                        class: FIELD,
-                        value: "{orchestrator}",
-                        onchange: move |event| orchestrator.set(event.value()),
-                        for agent in available.iter() {
-                            option { key: "{agent.id}", value: "{agent.id}", "{agent.name}" }
-                        }
-                    }
-                }
-                Field { label: "Runs jobs on",
-                    div { class: "flex flex-wrap gap-3",
-                        for agent in available.iter() {
-                            label { key: "{agent.id}", class: "flex items-center gap-1.5 text-sm",
-                                input {
-                                    r#type: "checkbox",
-                                    checked: chosen().contains(&agent.id),
-                                    onchange: {
-                                        let picked = agent.id.clone();
-                                        move |event: Event<FormData>| {
-                                            let picked = picked.clone();
-                                            chosen.with_mut(|chosen| {
-                                                chosen.retain(|held| held != &picked);
+            }
+            Field { label: "Runs jobs on",
+                div { class: "flex flex-wrap gap-3",
+                    for agent in available.iter() {
+                        label { key: "{agent.id}", class: "flex items-center gap-1.5 text-sm",
+                            input {
+                                r#type: "checkbox",
+                                checked: draft().job_agents.contains(&agent.id),
+                                onchange: {
+                                    let picked = agent.id.clone();
+                                    move |event: Event<FormData>| {
+                                        let picked = picked.clone();
+                                        draft
+                                            .with_mut(|draft| {
+                                                draft.job_agents.retain(|held| held != &picked);
                                                 if event.checked() {
-                                                    chosen.push(picked);
+                                                    draft.job_agents.push(picked);
                                                 }
                                             });
-                                        }
-                                    },
-                                }
-                                "{agent.name}"
+                                    }
+                                },
                             }
+                            "{agent.name}"
                         }
                     }
                 }
-                div {
-                    Button {
-                        onclick: move |_| async move {
-                            let outcome = create(name(), repository(), orchestrator(), chosen())
-                                .await;
-                            if outcome.is_ok() {
-                                name.set(String::new());
-                                repository.set(String::new());
-                            }
-                            onchanged.call(outcome);
-                        },
-                        "Watch it"
-                    }
+            }
+            Field { label: "GitHub credential",
+                input {
+                    r#type: "password",
+                    class: FIELD,
+                    placeholder: "a token scoped to this repository",
+                    value: "{draft().credential}",
+                    oninput: move |event| draft.with_mut(|draft| draft.credential = event.value()),
                 }
+            }
+            p { class: "text-xs text-faint-foreground",
+                "Scoped to this repository, with contents and pull requests write. A token that \
+                 reaches more than this project is a token every job on it could misuse."
             }
         }
     }
@@ -544,7 +624,7 @@ fn NewProject(
 /// A constant rather than a component, because the thing being shared is the
 /// appearance of a box and not its behaviour — a `select` and an `input`
 /// differ in everything except how they should look.
-const FIELD: &str = "w-full max-w-sm rounded-md border border-border bg-surface px-2 py-1.5 \
+const FIELD: &str = "w-full rounded-md border border-border bg-surface px-2 py-1.5 \
                      text-sm placeholder:text-faint-foreground focus-visible:outline-none \
                      focus-visible:ring-2 focus-visible:ring-primary";
 
@@ -675,7 +755,7 @@ mod server_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::Project;
+    use super::{Draft, Project};
 
     /// One project, with however many jobs running.
     fn watched(running: usize, jobs: usize) -> Project {
@@ -689,6 +769,57 @@ mod tests {
             running,
             jobs,
         }
+    }
+
+    /// A draft the form would accept.
+    fn filled() -> Draft {
+        Draft {
+            name: "aviary".to_owned(),
+            repository: "https://example.invalid/aviary".to_owned(),
+            orchestrator: "claude".to_owned(),
+            job_agents: vec!["claude".to_owned()],
+            credential: "ghp-not-a-real-token".to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_draft_with_every_answer_is_complete() {
+        assert!(filled().is_complete());
+    }
+
+    /// Every field is required, and the test says so one at a time.
+    ///
+    /// Written out rather than looped because the point is which field, and a
+    /// loop over closures would say it less clearly than five lines do.
+    #[test]
+    fn a_draft_missing_any_answer_is_not() {
+        let without = |change: fn(&mut Draft)| {
+            let mut draft = filled();
+            change(&mut draft);
+            draft
+        };
+
+        assert!(!without(|draft| draft.name.clear()).is_complete());
+        assert!(!without(|draft| draft.repository.clear()).is_complete());
+        assert!(!without(|draft| draft.orchestrator.clear()).is_complete());
+        assert!(!without(|draft| draft.job_agents.clear()).is_complete());
+        assert!(!without(|draft| draft.credential.clear()).is_complete());
+    }
+
+    /// Whitespace is not an answer.
+    ///
+    /// The route trims before judging, so a form that accepted spaces would
+    /// offer a control that fails — which is the one thing this check exists
+    /// to prevent.
+    #[test]
+    fn whitespace_does_not_count_as_an_answer() {
+        let mut draft = filled();
+        draft.name = "   ".to_owned();
+        assert!(!draft.is_complete());
+
+        let mut draft = filled();
+        draft.credential = "\t ".to_owned();
+        assert!(!draft.is_complete());
     }
 
     /// The screen must not offer what the route would refuse.

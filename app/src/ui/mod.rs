@@ -20,8 +20,10 @@ mod badge_ui;
 mod button_ui;
 mod card_ui;
 mod empty_state_ui;
+mod modal_ui;
 
 pub use badge_ui::{Badge, BadgeTone};
 pub use button_ui::{Button, ButtonVariant};
 pub use card_ui::Card;
 pub use empty_state_ui::EmptyState;
+pub use modal_ui::Modal;
