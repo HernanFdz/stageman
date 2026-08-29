@@ -271,44 +271,7 @@ Intended next steps, in order, each with its reason. Written as intentions, not
 progress: "next X, because Y" — never "X is 60% done", which is both derivable
 and wrong within a day.
 
-- Next, move the end-to-end tests out of the crates they test. A test that drives
-  a whole flow — a job from kickoff to a cloned repository, a session surviving
-  its container stopping — belongs in `tests/`, where it is a separate crate
-  that may use only the public API. That is what an end-to-end test should
-  exercise, and it is a check nothing else performs: the missing re-exports that
-  once made `Greeting` and `Answer` unreadable without taking the protocol
-  library as a direct dependency would have shown up immediately as a test that
-  would not compile.
-
-  The split is not clean and the rule is what decides it, rather than the word
-  *end-to-end*. A test reaching for a private helper — the container-argument
-  builders, the label constant, the name parser — is a unit test by definition
-  and stays where it is. Roughly half of the ignored tests are in each group,
-  so this is a move for some and not a reorganisation of all.
-
-- Then the agents and projects views, which is where configuring an instance
-  finally becomes possible at all. Agents first, because
-  `docs/decisions/0021-an-instance-starts-empty.md` has a project naming one
-  agent for its orchestrator and a non-empty set for its jobs: creating a
-  project is impossible until at least one exists, and an agent a project names
-  cannot be removed. `State::used_by` is the query that answers both, and it
-  names the projects that would break rather than merely refusing — which is
-  what lets a dashboard say *why*.
-
-- Next, an edit modal for a project, which closes a gap this created rather
-  than adding a feature. The projects list is read-only, and everything a
-  project is gets decided in one form — which is the right shape, and means
-  there is currently no way to change a repository's credential after it is
-  set. A token that expires therefore costs the project and its job history,
-  which is a worse answer than the one it replaced.
-
-  The form already takes the values it should start with and hands back what it
-  ended with, knowing nothing about where that goes, so editing is a second
-  caller rather than a second form. The route it needs mostly exists: setting a
-  credential is already a route, and what is missing is changing a name, a
-  repository, or the agents.
-
-- Then Slack, and it is two pieces rather than one. The difference is the
+- Next, Slack, and it is two pieces rather than one. The difference is the
   thing to understand before starting: **a job can speak now, and cannot be
   spoken to yet.**
 
@@ -352,3 +315,39 @@ and wrong within a day.
   richest source of work: until a job can ask something, nothing can safely run
   unattended, so every other channel is blocked behind this one. See
   `docs/decisions/0005-conversation-happens-on-channels.md`.
+
+- Then move the end-to-end tests out of the crates they test. A test that drives
+  a whole flow — a job from kickoff to a cloned repository, a session surviving
+  its container stopping — belongs in `tests/`, where it is a separate crate
+  that may use only the public API. That is what an end-to-end test should
+  exercise, and it is a check nothing else performs: the missing re-exports that
+  once made `Greeting` and `Answer` unreadable without taking the protocol
+  library as a direct dependency would have shown up immediately as a test that
+  would not compile.
+
+  It has since grown a second reason, and the more pressing one.
+  `app/tests/starting.rs` now carries two concerns: a binary that starts, and
+  the routes that binary serves. Its own module documentation says so and
+  points here. They share a harness rather than duplicating one, which is the
+  right trade until the move happens and the wrong one afterwards — the move is
+  where they part company.
+
+  The split is not clean and the rule is what decides it, rather than the word
+  *end-to-end*. A test reaching for a private helper — the container-argument
+  builders, the label constant, the name parser — is a unit test by definition
+  and stays where it is. Roughly half of the ignored tests are in each group,
+  so this is a move for some and not a reorganisation of all.
+
+- Then an edit modal for a project, which closes a gap this created rather
+  than adding a feature. The projects list is read-only, and everything a
+  project is gets decided in one form — which is the right shape, and means
+  there is currently no way to change a repository's credential after it is
+  set. A token that expires therefore costs the project and its job history,
+  which is a worse answer than the one it replaced.
+
+  The form already takes the values it should start with and hands back what it
+  ended with, knowing nothing about where that goes, so editing is a second
+  caller rather than a second form. The route it needs mostly exists: setting a
+  credential is already a route, and what is missing is changing a name, a
+  repository, or the agents.
+
