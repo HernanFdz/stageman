@@ -144,7 +144,10 @@ Record the near-miss too: the term you rejected, and what it would have implied.
 
 - **handout** — exactly what one agent process is allowed to see: its agent's
   own credential, and — of the one project it works for — that project's
-  platform credentials and its channel bindings. Nothing else, and nothing
+  platform credentials and the *speaking* half of its channel bindings. Half,
+  because a binding holds a second credential that opens an event stream, and
+  a job has no use for one: the handout carries a narrower type with nowhere
+  to put it, so that is a property rather than a rule somebody applies. Nothing else, and nothing
   inherited. The two project halves are not interchangeable and a handout can
   carry one without the other: an orchestrator's gets the channels and no
   platform credential at all, because watching a channel is its remit and

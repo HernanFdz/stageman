@@ -16,7 +16,7 @@
 //! or an endpoint; it gets one command with one argument, per
 //! `docs/decisions/0028-stageman-ships-the-tool-that-speaks.md`.
 
-use stageman_core::{Channel, ChannelConfig, Thread};
+use stageman_core::{Channel, Speaking, Thread};
 
 /// Where Slack takes a message.
 const POST_MESSAGE: &str = "https://slack.com/api/chat.postMessage";
@@ -27,7 +27,7 @@ const POST_MESSAGE: &str = "https://slack.com/api/chat.postMessage";
 ///
 /// Fails if the channel cannot be reached, or refuses.
 pub async fn open_thread(
-    bound: &ChannelConfig,
+    bound: &Speaking,
     channel: Channel,
     text: &str,
 ) -> Result<Thread, ChannelError> {
@@ -47,7 +47,7 @@ pub async fn open_thread(
 /// request and two moves of a string. Reaching this at all needs a network, and
 /// a test with one would be testing Slack rather than this.
 #[mutants::skip]
-async fn slack_post(bound: &ChannelConfig, text: &str) -> Result<String, ChannelError> {
+async fn slack_post(bound: &Speaking, text: &str) -> Result<String, ChannelError> {
     let answer = reqwest::Client::new()
         .post(POST_MESSAGE)
         .bearer_auth(bound.credential.expose())

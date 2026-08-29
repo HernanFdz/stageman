@@ -114,10 +114,19 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   become things somebody has to handle. Settled by building it, and worth
   building before the orchestrator has a second caller rather than after.
 
-  It now has a second consumer regardless of the orchestrator: a job that can
-  be *answered* on a channel needs exactly this, per the Slack entry under
-  Next. Two features waiting on one mechanism is the argument for building the
-  mechanism deliberately rather than twice, badly.
+  **It has one consumer, not two, and the correction is worth keeping.** This
+  entry used to claim that a job which can be *answered* needed the same
+  mechanism. It does not. A job's agent asks and stops, so its turn is over
+  and its container is merely stopped, with the session intact — and
+  `stageman_agent::resume` already restarts that container, loads the session
+  and delivers new text to it. A reply is that call with the reply as its text.
+
+  A held-open connection would only be needed if an agent had to block inside
+  a turn waiting for an answer, which is the design
+  `docs/architecture.md` §2 forbids outright. So the honesty rule that produced
+  *ask and stop* removed this blocker as a side effect, and what is left here
+  is the orchestrator's own case: not paying a container start per signal,
+  which is a cost rather than an obstacle.
 
 - **Should the runtime be Podman only?** The list compiled in by
   `docs/decisions/0023-the-container-runtime-is-discovered-once.md` is ordered

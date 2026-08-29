@@ -273,6 +273,14 @@ fn job(progress: Progress) -> Job {
 /// where it should not be can say which it was.
 const CHANNEL_CREDENTIAL: &str = "not-a-real-channel-credential";
 
+/// The credential that opens an event stream rather than posting.
+///
+/// Distinct from the one above so that the browser test can say which escaped.
+/// This one never enters a container either, so it is the credential with the
+/// fewest legitimate places to appear — see
+/// `docs/decisions/0029-a-reply-is-routed-by-its-thread.md`.
+const LISTEN_CREDENTIAL: &str = "not-a-real-listening-credential";
+
 /// An instance with one project in it, which is the smallest state that puts
 /// anything on the dashboard.
 ///
@@ -301,6 +309,7 @@ fn watching(name: &str, repository: &str) -> State {
                     ChannelConfig {
                         address: "C0123456789".to_owned(),
                         credential: Secret::new(CHANNEL_CREDENTIAL.to_owned()),
+                        listen_credential: Some(Secret::new(LISTEN_CREDENTIAL.to_owned())),
                     },
                 )]),
                 jobs: BTreeMap::new(),
@@ -462,7 +471,11 @@ fn nothing_served_carries_a_credential() {
     let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
 
     for served in [running.get("/"), running.get("/api/instance")] {
-        for secret in ["not-a-real-credential", CHANNEL_CREDENTIAL] {
+        for secret in [
+            "not-a-real-credential",
+            CHANNEL_CREDENTIAL,
+            LISTEN_CREDENTIAL,
+        ] {
             assert!(
                 !served.contains(secret),
                 "a credential reached the browser: {served}"

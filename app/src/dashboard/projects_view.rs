@@ -137,7 +137,7 @@ pub async fn create(
         .iter()
         .map(|agent| super::named(agent))
         .collect::<DashboardResult<_>>()?;
-    let channels = binding(&channel.address, &channel.credential)?;
+    let channels = binding(&channel)?;
 
     let mut state = instance.0.update();
 
@@ -284,20 +284,26 @@ fn busy(project: &stageman_core::Project) -> Option<usize> {
 /// Fails if exactly one half was given.
 #[cfg(feature = "server")]
 fn binding(
-    address: &str,
-    credential: &str,
+    channel: &ChannelDraft,
 ) -> DashboardResult<std::collections::BTreeMap<stageman_core::Channel, stageman_core::ChannelConfig>>
 {
-    let address = address.trim();
-    let credential = credential.trim();
+    let address = channel.address.trim();
+    let credential = channel.credential.trim();
+    let listening = channel.listen_credential.trim();
 
     match (address.is_empty(), credential.is_empty()) {
-        (true, true) => Ok(std::collections::BTreeMap::new()),
+        // Nothing bound. A credential to listen with and nowhere to listen is
+        // the one combination that cannot mean anything, so it is refused
+        // rather than dropped — silently ignoring a filled box is how somebody
+        // concludes the feature is broken.
+        (true, true) if listening.is_empty() => Ok(std::collections::BTreeMap::new()),
         (false, false) => Ok(std::collections::BTreeMap::from([(
             stageman_core::Channel::Slack,
             stageman_core::ChannelConfig {
                 address: address.to_owned(),
                 credential: stageman_core::Secret::new(credential.to_owned()),
+                listen_credential: (!listening.is_empty())
+                    .then(|| stageman_core::Secret::new(listening.to_owned())),
             },
         )])),
         _ => Err(DashboardError::ChannelIncomplete),
@@ -543,6 +549,13 @@ pub struct ChannelDraft {
     pub address: String,
     /// What reaches that channel.
     pub credential: String,
+    /// What listens on it, if this project is to be answered at all.
+    ///
+    /// Optional where the two above are both-or-neither: speaking without
+    /// listening is what this did before there was any listening, and is a
+    /// project that escalates and reads its answers somewhere else. Listening
+    /// without speaking is not a thing — there would be nothing to reply to.
+    pub listen_credential: String,
 }
 
 impl fmt::Debug for ChannelDraft {
@@ -556,6 +569,7 @@ impl fmt::Debug for ChannelDraft {
         f.debug_struct("ChannelDraft")
             .field("address", &self.address)
             .field("credential", &"<redacted>")
+            .field("listen_credential", &"<redacted>")
             .finish()
     }
 }
@@ -630,6 +644,9 @@ impl Draft {
             && !self.job_agents.is_empty()
             && !self.credential.trim().is_empty()
             && self.channel.address.trim().is_empty() == self.channel.credential.trim().is_empty()
+            // Listening needs somewhere to listen. The reverse is fine.
+            && (self.channel.listen_credential.trim().is_empty()
+                || !self.channel.address.trim().is_empty())
     }
 }
 
@@ -737,6 +754,17 @@ fn ProjectForm(draft: Signal<Draft>, available: Vec<Agent>) -> Element {
                     },
                 }
             }
+            Field { label: "Slack app-level token (optional)",
+                input {
+                    r#type: "password",
+                    class: FIELD,
+                    placeholder: "xapp-… , so replies reach the job",
+                    value: "{draft().channel.listen_credential}",
+                    oninput: move |event| {
+                        draft.with_mut(|draft| draft.channel.listen_credential = event.value());
+                    },
+                }
+            }
             p { class: "text-xs text-faint-foreground",
                 "Where a job asks when it hits something it cannot decide. Leave both empty and \
                  this project can only run work that never needs to ask. Give one without the \
@@ -768,7 +796,16 @@ fn Field(label: String, children: Element) -> Element {
 
 #[cfg(all(test, feature = "server"))]
 mod server_tests {
-    use super::{DashboardError, binding, busy};
+    use super::{ChannelDraft, DashboardError, binding, busy};
+
+    /// The two boxes that bind a channel, plus the optional third.
+    fn drafted(address: &str, credential: &str, listening: &str) -> ChannelDraft {
+        ChannelDraft {
+            address: address.to_owned(),
+            credential: credential.to_owned(),
+            listen_credential: listening.to_owned(),
+        }
+    }
     use stageman_core::{Agent, Channel, Job, JobId, Progress, Project, Secret, Timestamp};
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -827,12 +864,12 @@ mod server_tests {
     #[test]
     fn a_project_may_bind_no_channel_at_all() {
         assert!(
-            binding("", "")
+            binding(&drafted("", "", ""))
                 .expect("neither half is not a refusal")
                 .is_empty()
         );
         assert!(
-            binding("  ", "\t")
+            binding(&drafted("  ", "\t", ""))
                 .expect("whitespace is nothing")
                 .is_empty()
         );
@@ -841,8 +878,8 @@ mod server_tests {
     /// Both halves reach the domain, on the one channel there is.
     #[test]
     fn both_halves_bind_the_channel() {
-        let bound =
-            binding(" C0123456789 ", " xoxb-not-a-real-token ").expect("both halves are a binding");
+        let bound = binding(&drafted(" C0123456789 ", " xoxb-not-a-real-token ", ""))
+            .expect("both halves are a binding");
 
         let slack = bound.get(&Channel::Slack).expect("keyed by the channel");
         // Trimmed, because the boxes either side of a pasted token are the
@@ -851,6 +888,42 @@ mod server_tests {
         assert_eq!(slack.address, "C0123456789");
         assert_eq!(slack.credential.expose(), "xoxb-not-a-real-token");
         assert_eq!(bound.len(), 1);
+    }
+
+    /// Listening is optional; listening with nowhere to listen is not.
+    ///
+    /// The asymmetry is the point. Speaking without listening is what every
+    /// project did before there was any listening. A token to listen with and
+    /// no channel cannot mean anything, and dropping it silently is how
+    /// somebody concludes the feature is broken.
+    #[test]
+    fn listening_is_optional_but_needs_somewhere_to_listen() {
+        let bound = binding(&drafted("C0123456789", "xoxb-token", ""))
+            .expect("speaking without listening is a binding");
+        assert_eq!(
+            bound
+                .get(&Channel::Slack)
+                .and_then(|slack| slack.listen_credential.as_ref()),
+            None
+        );
+
+        let listening = binding(&drafted("C0123456789", "xoxb-token", "xapp-token"))
+            .expect("both is a binding too");
+        assert_eq!(
+            listening
+                .get(&Channel::Slack)
+                .and_then(|slack| slack.listen_credential.as_ref())
+                .map(Secret::expose),
+            Some("xapp-token")
+        );
+
+        assert!(
+            matches!(
+                binding(&drafted("", "", "xapp-token")),
+                Err(DashboardError::ChannelIncomplete)
+            ),
+            "a credential to listen with and nowhere to listen is refused"
+        );
     }
 
     /// Half a binding is refused rather than stored.
@@ -865,11 +938,11 @@ mod server_tests {
         // `assert_eq!` would widen the domain for the convenience of this
         // line. Only `Secret` carries that in this codebase.
         assert!(matches!(
-            binding("C0123456789", ""),
+            binding(&drafted("C0123456789", "", "")),
             Err(DashboardError::ChannelIncomplete)
         ));
         assert!(matches!(
-            binding("", "xoxb-not-a-real-token"),
+            binding(&drafted("", "xoxb-not-a-real-token", "")),
             Err(DashboardError::ChannelIncomplete)
         ));
     }
@@ -881,7 +954,8 @@ mod server_tests {
     /// that had been forgotten would first be visible.
     #[test]
     fn a_bound_credential_does_not_render() {
-        let bound = binding("C0123456789", "xoxb-not-a-real-token").expect("a binding");
+        let bound =
+            binding(&drafted("C0123456789", "xoxb-not-a-real-token", "")).expect("a binding");
         let shown = format!("{bound:?}");
 
         assert!(!shown.contains("xoxb-not-a-real-token"), "{shown}");
@@ -945,6 +1019,7 @@ mod tests {
             channel: ChannelDraft {
                 address: "C0123456789".to_owned(),
                 credential: "xoxb-not-a-real-token".to_owned(),
+                listen_credential: "xapp-not-a-real-token".to_owned(),
             },
         }
     }
@@ -1052,6 +1127,26 @@ mod tests {
 
         assert!(!shown.contains("xoxb-not-a-real-token"), "{shown}");
         assert!(shown.contains("C0123456789"), "{shown}");
+    }
+
+    /// Listening without a channel is refused on the screen too.
+    ///
+    /// The same rule as the route, so the control that submits goes
+    /// unavailable rather than the instance refusing after the fact.
+    #[test]
+    fn a_draft_listening_with_nowhere_to_listen_is_not_complete() {
+        assert!(
+            !without(|draft| {
+                draft.channel.address.clear();
+                draft.channel.credential.clear();
+            })
+            .is_complete(),
+            "a token to listen with and no channel is not a complete draft"
+        );
+
+        // And dropping only the listening token is fine, since speaking
+        // without listening is an ordinary project.
+        assert!(without(|draft| draft.channel.listen_credential.clear()).is_complete());
     }
 
     /// The screen must not offer what the route would refuse.

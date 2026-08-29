@@ -1423,6 +1423,7 @@ mod tests {
                 stageman_core::ChannelConfig {
                     address: "C0123456789".to_owned(),
                     credential: Secret::new("xoxb-not-a-real-token".to_owned()),
+                    listen_credential: Some(Secret::new("xapp-not-a-real-token".to_owned())),
                 },
             );
         (state, id)
