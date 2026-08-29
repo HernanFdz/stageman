@@ -811,6 +811,19 @@ pub struct SealedProject {
     /// Its sealed credentials.
     pub credentials: BTreeMap<Platform, SealedSecret>,
     /// Its channel bindings, each with its credential sealed.
+    ///
+    /// **Defaulted, because this field was added after snapshots existed.**
+    /// `docs/decisions/0011-state-is-a-snapshot-not-a-database.md` versions
+    /// nothing and says what that costs: an added field is free *with a
+    /// default*, and without one an existing file stops loading — which loses
+    /// everything, since there is only the one file.
+    ///
+    /// This is not the substituted default `.quality/gate-reference.md`
+    /// forbids. That rule is about replacing a failure with a guess; here the
+    /// empty map is the true answer, because a file written before channels
+    /// existed described a project that had none, and a project with none is
+    /// valid.
+    #[serde(default)]
     pub channels: BTreeMap<Channel, SealedChannelConfig>,
     /// Its jobs, which hold nothing needing sealing.
     pub jobs: BTreeMap<JobId, Job>,
@@ -1411,6 +1424,60 @@ mod tests {
         assert_ne!(agent_nonce, project_nonce);
         assert_ne!(project_nonce, channel_nonce);
         assert_ne!(agent_nonce, channel_nonce);
+    }
+
+    /// A file written before channels existed still opens.
+    ///
+    /// The regression test for the one failure mode
+    /// `docs/decisions/0011-state-is-a-snapshot-not-a-database.md` names:
+    /// nothing versions a snapshot, so a field added without a default stops
+    /// every existing file loading, and there is only the one file. It cost a
+    /// running instance to find out, which is the cheapest place it could have
+    /// happened and not somewhere to leave it.
+    ///
+    /// Written as literal text rather than by round-tripping, deliberately.
+    /// The current writer always emits every field, so a round trip cannot
+    /// produce the input that breaks — only a file from before the change can,
+    /// and this is one.
+    #[test]
+    fn a_snapshot_written_before_channels_existed_still_opens() {
+        let older = format!(
+            r#"{{
+              "agents": {{
+                "Claude": {{ "auth_token": {} }}
+              }},
+              "projects": {{
+                "00000000-0000-0000-0000-000000000003": {{
+                  "name": "example",
+                  "repository": "https://example.invalid/repo",
+                  "orchestrator_agent": "Claude",
+                  "job_agents": ["Claude"],
+                  "credentials": {{}},
+                  "jobs": {{}}
+                }}
+              }}
+            }}"#,
+            serde_json::to_string(
+                &Secret::new("agent-token".to_owned())
+                    .seal(&key(), [1; NONCE_LEN])
+                    .expect("sealing a well-formed secret")
+            )
+            .expect("a sealed secret serialises")
+        );
+
+        let parsed: Snapshot = serde_json::from_str(&older).expect("an older file still parses");
+        let state = parsed.open(&key()).expect("and still opens");
+        let project = state
+            .projects
+            .values()
+            .next()
+            .expect("the project survived");
+
+        assert!(
+            project.channels.is_empty(),
+            "a file that predates channels describes a project with none"
+        );
+        assert_eq!(project.name, "example");
     }
 
     #[test]

@@ -305,10 +305,17 @@ and wrong within a day.
   `docs/decisions/0027-a-channel-is-not-a-platform.md` records where they do:
   a second map on a project, carrying an address as well as a credential.
 
-  So the domain has somewhere for a channel to live, and nothing yet puts one
-  there. Two things stand between that and outbound working, and they are
-  independent: the project form has no field to bind one with, and the
-  adapter's delivery does not name the variables a Slack tool would read.
+  So a project can be bound to a channel, and nothing inside a container can
+  reach one. What is left for outbound is the adapter's delivery: a handout
+  carries the binding, and `variables` does not yet name what a Slack tool
+  would read it from. That is one match arm and the names it chooses, and the
+  names are the part worth getting right — they are a contract with whatever
+  command-line tool the image carries, in the same way `GH_TOKEN` already is.
+
+  Note what binding one does *not* yet do. Nothing watches a channel and
+  nothing posts to one, so a bound project and an unbound project behave
+  identically today; the dashboard says which is which, and that is the whole
+  of the difference until delivery lands.
 
   One coupling that decides the order. The instruction a job begins from
   currently ends by telling it to ask and *stop* — "do not wait, nobody is
