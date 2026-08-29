@@ -347,7 +347,17 @@ pub fn begin(
         (repository, handout)
     };
 
-    let kickoff = stageman_orchestrator::kickoff(&repository, work);
+    // What the job can be told depends on what it was handed. Asked of the
+    // handout rather than of the project, so the prompt and the variables the
+    // container is started with are decided from one value — two reads could
+    // disagree, and the way that shows up is a job told to run a tool whose
+    // credential it was not given.
+    let voice = if handout.channels().next().is_some() {
+        stageman_orchestrator::Voice::Channel
+    } else {
+        stageman_orchestrator::Voice::Silent
+    };
+    let kickoff = stageman_orchestrator::kickoff(&repository, work, voice);
     let job = JobId::from_uuid(uuid::Uuid::new_v4());
 
     {

@@ -305,17 +305,24 @@ and wrong within a day.
   `docs/decisions/0027-a-channel-is-not-a-platform.md` records where they do:
   a second map on a project, carrying an address as well as a credential.
 
-  So a project can be bound to a channel, and nothing inside a container can
-  reach one. What is left for outbound is the adapter's delivery: a handout
-  carries the binding, and `variables` does not yet name what a Slack tool
-  would read it from. That is one match arm and the names it chooses, and the
-  names are the part worth getting right — they are a contract with whatever
-  command-line tool the image carries, in the same way `GH_TOKEN` already is.
+  Outbound is done, and it cost more than the sentence above it expected: a
+  handout carries the binding, the adapter delivers both halves, the image
+  ships `stageman-say`, and a job whose project has a channel is told about it.
+  The expectation that this was one match arm assumed a Slack CLI to conform to
+  the way `GH_TOKEN` conforms to `gh`, and there is none —
+  `docs/decisions/0028-stageman-ships-the-tool-that-speaks.md` records what
+  followed from having to write the tool instead.
 
-  Note what binding one does *not* yet do. Nothing watches a channel and
-  nothing posts to one, so a bound project and an unbound project behave
-  identically today; the dashboard says which is which, and that is the whole
-  of the difference until delivery lands.
+  **What is unverified is that a real message arrives.** Every test stops at a
+  blocked network, because posting needs a credential the gate cannot have.
+  There is no `slack-token` in `.local` and no paid test using one, which is
+  the same shape as `just image-session` and `just propose` and probably wants
+  the same answer.
+
+  So what is left is inbound, and it is unchanged: a reply reaching a running
+  job needs the connection to outlive the turn that started it, which is the
+  long-lived container question above. The kickoff prompt still says to speak
+  and stop, and stays that way until it can honestly say otherwise.
 
   One coupling that decides the order. The instruction a job begins from
   currently ends by telling it to ask and *stop* — "do not wait, nobody is

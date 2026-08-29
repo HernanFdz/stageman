@@ -1,0 +1,86 @@
+#!/usr/bin/env node
+// Speaks on the channel bound to this job's project.
+//
+// One argument, the message; everything else comes from the environment, which
+// is what `docs/decisions/0009-jobs-hold-their-own-platform-credentials.md`
+// chose over hosting a tool the agent calls over the protocol connection. The
+// agent runs a command, and the command already knows where to speak.
+//
+// Named for saying rather than for asking, and for the act rather than for
+// Slack. A job asks a question with it, and equally says that it finished or
+// that it is stuck — and `docs/conventions.md` §2 defines a channel as
+// somewhere a job speaks into, not somewhere it interrogates. A second channel
+// changes what is below this line and nothing above it: not the name, not the
+// kickoff prompt that teaches it, and not the snapshot test on that prompt.
+//
+// Node rather than a shell script, and that is not a preference. The message is
+// written by an agent, so it arrives with whatever quoting, newlines and
+// backslashes the agent felt like using; building JSON by interpolating that
+// into a here-document is the injection this avoids by not existing. Node is in
+// the base image already, `JSON.stringify` is correct by construction, and
+// `fetch` needs nothing installed.
+
+// Wrapped in a function rather than written with top-level `await`, which
+// would make this a module — and whether an extensionless file is treated as
+// one depends on a Node flag that changed default mid-release. It would work
+// here and fail in the image, or the reverse, and the only place that shows up
+// is a job that cannot speak. Nothing about this needs module scope.
+const ENDPOINT = "https://slack.com/api/chat.postMessage";
+
+async function say() {
+  const message = process.argv[2];
+  if (process.argv.length !== 3 || message.trim() === "") {
+    console.error("usage: stageman-say '<what to say>'");
+    console.error("Speaks once, on the channel bound to this project.");
+    process.exit(2);
+  }
+
+  const token = process.env.STAGEMAN_SLACK_TOKEN;
+  const channel = process.env.STAGEMAN_SLACK_CHANNEL;
+  if (!token || !channel) {
+    // The ordinary case for a project with nothing bound, not a fault. Said
+    // plainly because the agent reads this and should stop rather than retry.
+    console.error(
+      "No channel is bound to this project, so there is nobody to say this to.",
+    );
+    process.exit(3);
+  }
+
+  let answer;
+  try {
+    answer = await fetch(ENDPOINT, {
+      method: "POST",
+      headers: {
+        // Never logged, and never an argument to anything: a credential on a
+        // command line is readable from the process table, and an agent that
+        // runs `ps` puts it in a transcript that leaves this machine.
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json; charset=utf-8",
+      },
+      body: JSON.stringify({ channel, text: message }),
+    });
+  } catch (failure) {
+    console.error(`The channel could not be reached: ${failure.message}`);
+    process.exit(1);
+  }
+
+  // **A refusal arrives as 200.** Slack answers `{"ok": false, "error": "..."}`
+  // with a perfectly successful status, so a check of the status alone reports
+  // every bad token and every wrong channel as a message delivered. That is the
+  // one mistake worth guarding here, because its failure mode is silence: the
+  // agent believes it asked, stops as instructed, and nobody was ever told.
+  if (!answer.ok) {
+    console.error(`The channel answered ${answer.status}.`);
+    process.exit(1);
+  }
+
+  const body = await answer.json();
+  if (!body.ok) {
+    console.error(`The channel refused it: ${body.error}`);
+    process.exit(1);
+  }
+
+  console.log("Said it.");
+}
+
+say();
