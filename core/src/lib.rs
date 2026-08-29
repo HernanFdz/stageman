@@ -254,6 +254,31 @@ pub struct ChannelConfig {
     pub credential: Secret,
 }
 
+/// Where one job's conversation happens.
+///
+/// A channel is bound to a project and shared by everything it runs, so a
+/// thread is what scopes a conversation down to one job —
+/// `docs/open-questions.md` chose a thread per job over a channel per job,
+/// because a channel per job is a workspace nobody can garbage-collect and
+/// needs a token that can create channels.
+///
+/// The identifier is opaque here and **must stay text**. For Slack it is the
+/// parent message's timestamp, which looks like a number and is not one:
+/// parsing it loses the microseconds and yields an identifier that addresses
+/// no message. The domain does not need to know that, and does need to not
+/// convert it.
+///
+/// It names its channel as well as the thread, because an identifier is only
+/// unique within one channel and a project's binding can be changed underneath
+/// a running job.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Thread {
+    /// The channel it is a thread on.
+    pub channel: Channel,
+    /// What identifies it there.
+    pub id: String,
+}
+
 /// One agent, in one workspace, working on one project.
 ///
 /// A job happens once and there is no retry: a second attempt is a new job with
@@ -295,6 +320,22 @@ pub struct Job {
     pub created_at: Timestamp,
     /// Where it has got to.
     pub progress: Progress,
+    /// Where its conversation happens, once there is one.
+    ///
+    /// **Not what makes a resumed job speak in the right place.** A container
+    /// keeps what it was created with, so a job put back to work is already
+    /// holding its thread — see
+    /// `docs/decisions/0015-a-job-survives-the-daemon-dying.md`, where resuming
+    /// restarts the same container rather than building a new one. This is
+    /// recorded for the other direction: a reply arrives naming a thread and
+    /// nothing else, so the instance needs to know which job that is, and that
+    /// lookup has to survive the process dying.
+    ///
+    /// Absent for a job on a project with no channel bound, and for every job
+    /// that existed before there were threads at all — which is why it is
+    /// defaulted, per `docs/conventions.md` §4.
+    #[serde(default)]
+    pub thread: Option<Thread>,
 }
 
 /// Where a job has got to.
@@ -943,6 +984,7 @@ pub struct Handout {
     agent_credential: Secret,
     platforms: BTreeMap<Platform, Secret>,
     channels: BTreeMap<Channel, ChannelConfig>,
+    thread: Option<Thread>,
 }
 
 impl Handout {
@@ -993,6 +1035,10 @@ impl Handout {
             agent_credential: config.auth_token.clone(),
             platforms: BTreeMap::new(),
             channels: watching.channels.clone(),
+            // The orchestrator speaks at the root of the channel, which is
+            // what makes a reply there addressed to it. See
+            // `docs/decisions/0029-a-reply-is-routed-by-its-thread.md`.
+            thread: None,
         })
     }
 
@@ -1024,6 +1070,8 @@ impl Handout {
             agent_credential: config.auth_token.clone(),
             platforms: project.credentials.clone(),
             channels: project.channels.clone(),
+            // Narrowed by [`Handout::speaking_in`] once the job has a thread.
+            thread: None,
         })
     }
 
@@ -1064,6 +1112,30 @@ impl Handout {
     pub fn channels(&self) -> impl Iterator<Item = (Channel, &ChannelConfig)> {
         self.channels.iter().map(|(c, config)| (*c, config))
     }
+
+    /// Narrows this to one thread, so the process speaks there rather than at
+    /// the root of the channel.
+    ///
+    /// Taken separately from the rest, and the asymmetry is honest rather than
+    /// awkward: everything else here is decided from configuration and can be
+    /// computed before anything happens, while a thread is minted at the moment
+    /// a job starts and cannot exist earlier. So the description is built in
+    /// two steps, and this is the second.
+    ///
+    /// Its absence is meaningful and not a default: a handout with no thread
+    /// speaks at the root of the channel, which is where the orchestrator
+    /// belongs and where a job does not.
+    #[must_use]
+    pub fn speaking_in(mut self, thread: Thread) -> Self {
+        self.thread = Some(thread);
+        self
+    }
+
+    /// The thread this process speaks in, if it was narrowed to one.
+    #[must_use]
+    pub const fn thread(&self) -> Option<&Thread> {
+        self.thread.as_ref()
+    }
 }
 
 impl fmt::Debug for Handout {
@@ -1080,6 +1152,7 @@ impl fmt::Debug for Handout {
             .field("agent_credential", &"<redacted>")
             .field("platforms", &self.platforms.keys().collect::<Vec<_>>())
             .field("channels", &self.channels.keys().collect::<Vec<_>>())
+            .field("thread", &self.thread)
             .finish()
     }
 }
@@ -1100,7 +1173,7 @@ mod tests {
     use super::{
         Agent, AgentConfig, BASE64, Channel, ChannelConfig, Handout, HandoutError, Inconsistent,
         Job, JobId, Key, NONCE_LEN, Nonce, OpenError, Platform, Progress, Project, ProjectId,
-        Secret, Snapshot, State,
+        Secret, Snapshot, State, Thread,
     };
     use base64::Engine as _;
     use jiff::Timestamp;
@@ -1148,6 +1221,7 @@ mod tests {
                 kickoff: "work on it".to_owned(),
                 created_at: Timestamp::UNIX_EPOCH,
                 progress: Progress::Running,
+                thread: None,
             },
         );
         Project {
@@ -1426,6 +1500,100 @@ mod tests {
         assert_ne!(agent_nonce, channel_nonce);
     }
 
+    /// A job records where its conversation happens, across the snapshot.
+    #[test]
+    fn a_jobs_thread_survives_the_snapshot_boundary() {
+        let mut state = populated();
+        let job = *state
+            .projects
+            .values()
+            .next()
+            .expect("a project")
+            .jobs
+            .keys()
+            .next()
+            .expect("a job");
+        state.job_mut(job).expect("the job").thread = Some(Thread {
+            channel: Channel::Slack,
+            id: "1728312345.678901".to_owned(),
+        });
+
+        let json = serde_json::to_string(
+            &state
+                .seal(&key(), &mut counting_nonces())
+                .expect("sealing cannot fail"),
+        )
+        .expect("a snapshot serialises");
+        let reopened: Snapshot = serde_json::from_str(&json).expect("and parses back");
+        let reopened = reopened.open(&key()).expect("and opens");
+
+        let thread = reopened
+            .job(job)
+            .expect("the job survived")
+            .thread
+            .clone()
+            .expect("and so did its thread");
+        assert_eq!(thread.channel, Channel::Slack);
+        // Text, not a number. Through an `f64` this comes back as
+        // 1728312345.6789012 or similar and addresses no message.
+        assert_eq!(thread.id, "1728312345.678901");
+    }
+
+    /// A job recorded before threads existed still opens, with none.
+    ///
+    /// The same rule as the channel map below, and the reason
+    /// `docs/conventions.md` §4 asks for this shape of test rather than a
+    /// round trip: the writer always emits the field, so only a file from
+    /// before the change can produce the input that breaks.
+    #[test]
+    fn a_job_recorded_before_threads_existed_still_opens() {
+        let older = format!(
+            r#"{{
+              "agents": {{ "Claude": {{ "auth_token": {} }} }},
+              "projects": {{
+                "00000000-0000-0000-0000-000000000003": {{
+                  "name": "example",
+                  "repository": "https://example.invalid/repo",
+                  "orchestrator_agent": "Claude",
+                  "job_agents": ["Claude"],
+                  "credentials": {{}},
+                  "channels": {{}},
+                  "jobs": {{
+                    "00000000-0000-0000-0000-000000000009": {{
+                      "agent": "Claude",
+                      "reason": "an issue was opened",
+                      "kickoff": "work on it",
+                      "created_at": "1970-01-01T00:00:00Z",
+                      "progress": "Running"
+                    }}
+                  }}
+                }}
+              }}
+            }}"#,
+            serde_json::to_string(
+                &Secret::new("agent-token".to_owned())
+                    .seal(&key(), [1; NONCE_LEN])
+                    .expect("sealing a well-formed secret")
+            )
+            .expect("a sealed secret serialises")
+        );
+
+        let parsed: Snapshot = serde_json::from_str(&older).expect("an older file still parses");
+        let state = parsed.open(&key()).expect("and still opens");
+        let job = state
+            .projects
+            .values()
+            .next()
+            .expect("the project survived")
+            .jobs
+            .values()
+            .next()
+            .expect("and its job");
+
+        assert!(job.thread.is_none(), "a job from before threads has none");
+        assert_eq!(job.reason, "an issue was opened");
+    }
+
     /// A file written before channels existed still opens.
     ///
     /// The regression test for the one failure mode
@@ -1653,6 +1821,36 @@ mod tests {
         for (_, bound) in ours.channels() {
             assert_ne!(bound.credential.expose(), ALIEN_CHANNEL_TOKEN);
         }
+    }
+
+    /// A handout speaks at the root until it is narrowed to a thread.
+    ///
+    /// The absence is what makes the orchestrator's handout mean "the root of
+    /// the channel", so it is asserted rather than assumed.
+    #[test]
+    fn a_handout_speaks_at_the_root_until_it_is_given_a_thread() {
+        let (state, mine, _) = two_projects();
+
+        let job = Handout::for_job(&state, Agent::Claude, mine).expect("a watched project");
+        assert!(job.thread().is_none());
+        assert!(
+            Handout::for_triage(&state, mine)
+                .expect("a watched project")
+                .thread()
+                .is_none(),
+            "triage speaks at the root, which is what a reply there addresses"
+        );
+
+        let narrowed = job.speaking_in(Thread {
+            channel: Channel::Slack,
+            id: "1728312345.678901".to_owned(),
+        });
+        assert_eq!(
+            narrowed.thread().map(|t| t.id.as_str()),
+            Some("1728312345.678901")
+        );
+        // Narrowing changes where it speaks and nothing about what it holds.
+        assert_eq!(narrowed.channels().count(), 1);
     }
 
     #[test]

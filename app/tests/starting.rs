@@ -265,6 +265,7 @@ fn job(progress: Progress) -> Job {
         kickoff: "do the thing".to_owned(),
         created_at: Timestamp::UNIX_EPOCH,
         progress,
+        thread: None,
     }
 }
 

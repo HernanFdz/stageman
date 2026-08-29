@@ -38,6 +38,7 @@ server = [
     "dep:etcetera",
     "dep:parking_lot",
     "dep:rand",
+    "dep:reqwest",
     "dep:serde_json",
     "dep:stageman-agent",
     "dep:stageman-core",
@@ -83,6 +84,20 @@ mutants = "0.0.4"
 etcetera = { version = "0.11.0", optional = true }
 parking_lot = { version = "0.12.5", optional = true }
 rand = { version = "0.10.2", optional = true }
+# The daemon's own half of a channel. A job's agent posts through a tool in its
+# container; opening the thread that job speaks in happens here, before the
+# container exists, so this side needs an HTTP client of its own.
+#
+# `rustls` rather than the default backend, deliberately: the default links the
+# platform's TLS library, which is a build dependency this project does not
+# otherwise have and differs per machine — exactly the kind of thing that works
+# where it was written and fails in continuous integration. Already in the
+# lockfile through the framework, so this adds a direct dependency and no new
+# audited code.
+reqwest = { version = "0.12.28", default-features = false, features = [
+    "json",
+    "rustls-tls",
+], optional = true }
 serde_json = { version = "1.0.151", optional = true }
 stageman-agent = { workspace = true, optional = true }
 stageman-core = { workspace = true, optional = true }

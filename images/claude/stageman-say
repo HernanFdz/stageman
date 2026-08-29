@@ -46,6 +46,19 @@ async function say() {
     process.exit(3);
   }
 
+  // A thread is addressed by its parent message and the channel together: the
+  // identifier is a message timestamp, and a timestamp is unique only within
+  // one channel. So `channel` is required whether or not this is threaded.
+  //
+  // It stays a string the whole way. It looks like a number and is not one —
+  // parsed as a float it loses the microseconds and addresses no message, and
+  // the failure reads like a permissions problem rather than a rounding one.
+  const payload = { channel, text: message };
+  const thread = process.env.STAGEMAN_SLACK_THREAD;
+  if (thread) {
+    payload.thread_ts = thread;
+  }
+
   let answer;
   try {
     answer = await fetch(ENDPOINT, {
@@ -57,7 +70,7 @@ async function say() {
         authorization: `Bearer ${token}`,
         "content-type": "application/json; charset=utf-8",
       },
-      body: JSON.stringify({ channel, text: message }),
+      body: JSON.stringify(payload),
     });
   } catch (failure) {
     console.error(`The channel could not be reached: ${failure.message}`);

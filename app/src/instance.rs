@@ -292,6 +292,9 @@ pub struct Started {
     job: JobId,
     handout: Handout,
     kickoff: String,
+    /// What the channel is told when this starts, composed with the kickoff so
+    /// that every text this system emits is authored in the one crate.
+    announcement: String,
 }
 
 impl Started {
@@ -359,6 +362,7 @@ pub fn begin(
     };
     let kickoff = stageman_orchestrator::kickoff(&repository, work, voice);
     let job = JobId::from_uuid(uuid::Uuid::new_v4());
+    let announcement = stageman_orchestrator::announcement(&repository, reason, job);
 
     {
         let mut state = store.update();
@@ -371,6 +375,7 @@ pub fn begin(
                     kickoff: kickoff.clone(),
                     created_at: Timestamp::now(),
                     progress: Progress::Running,
+                    thread: None,
                 },
             );
         }
@@ -380,7 +385,58 @@ pub fn begin(
         job,
         handout,
         kickoff,
+        announcement,
     })
+}
+
+/// Opens the thread a job speaks in, if its project has a channel bound.
+///
+/// Answers with the handout narrowed to that thread, or with the progress to
+/// record if it could not be opened.
+///
+/// **A channel that will not take a message fails the job**, rather than
+/// letting it run speaking at the root of the channel instead. The kickoff has
+/// already told this agent it can reach a person; running it anyway would make
+/// that quietly false, and `docs/conventions.md` §3 would rather a credential
+/// that has stopped working produce a visible job failure than a mystery. It
+/// is also the cheapest moment to fail — no container exists yet, so nothing
+/// outward-facing has happened.
+///
+/// Revisit if a transient outage turns out to fail jobs often enough to
+/// matter; the fallback is to run without a thread and say so loudly, which
+/// trades one kind of quiet for another and is worth taking only against
+/// evidence.
+async fn opening(
+    store: &Store,
+    job: JobId,
+    handout: Handout,
+    announcement: &str,
+) -> Result<Handout, Progress> {
+    let Some((channel, bound)) = handout
+        .channels()
+        .next()
+        .map(|(channel, bound)| (channel, bound.clone()))
+    else {
+        return Ok(handout);
+    };
+
+    match crate::channel::open_thread(&bound, channel, announcement).await {
+        Ok(thread) => {
+            {
+                let mut state = store.update();
+                if let Some(recorded) = state.job_mut(job) {
+                    recorded.thread = Some(thread.clone());
+                }
+            }
+            Ok(handout.speaking_in(thread))
+        }
+        Err(why) => {
+            tracing::warn!(%job, %why, "the job's thread could not be opened");
+            Err(Progress::Failed(format!(
+                "its channel could not be reached: {why}"
+            )))
+        }
+    }
 }
 
 /// Runs a job that has been recorded, to completion.
@@ -396,7 +452,24 @@ pub async fn supervise(
         job,
         handout,
         kickoff,
+        announcement,
     } = started;
+
+    // Before the container, because a container is given the thread it speaks
+    // in at creation and never afterwards — and after the record, because
+    // `begin` has already written the job. Killed between posting and
+    // recording, this leaves a thread nothing points at and the job opens
+    // another on the next attempt. That window is one snapshot write wide and
+    // the cost of losing it is a duplicate message rather than duplicated
+    // work, which is the trade `docs/decisions/0015-a-job-survives-the-daemon-dying.md`
+    // takes seriously for containers and can afford to take lightly here.
+    let handout = match opening(store, job, handout, &announcement).await {
+        Ok(handout) => handout,
+        Err(progress) => {
+            record(store, job, progress.clone());
+            return (job, progress);
+        }
+    };
 
     let progress = match stageman_job::start(runtime, &handout, job, &kickoff).await {
         Ok(answer) => outcome(&answer),
@@ -949,6 +1022,7 @@ mod tests {
                 kickoff: "work on it".to_owned(),
                 created_at: Timestamp::UNIX_EPOCH,
                 progress: Progress::Running,
+                thread: None,
             },
         );
         state.projects.insert(

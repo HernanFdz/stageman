@@ -99,6 +99,21 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   mount. The orchestrator's agent still has no workspace, and now for a plainer
   reason than having no repository — a workspace belongs to a job, and triage
   is not one.
+- **thread** — where one job's conversation happens on a channel. A channel
+  belongs to a project and everything it runs shares it, so a thread is what
+  narrows a conversation down to one job — which is also what makes a reply
+  routable, since a message arriving names its thread and nothing else. Not a
+  *conversation*, which is the thing that happens in one rather than the place
+  it happens in, and would leave nothing to call the identifier. The
+  orchestrator has none, deliberately: it speaks at the root of the channel,
+  and that is what makes a message there addressed to it rather than to any
+  job. See `docs/decisions/0029-a-reply-is-routed-by-its-thread.md`.
+
+  Its identifier is opaque to this project and **must stay text**. For Slack it
+  is the parent message's timestamp, which looks like a number and is not one:
+  parsed as one it loses the microseconds and addresses no message, and the
+  failure reads like a permissions problem.
+
 - **reason** — the free text the orchestrator writes when it creates a job,
   saying why it decided to. Prose meant for a human reading the dashboard, not
   a key pointing at a signal. It is the whole of a job's provenance, which is

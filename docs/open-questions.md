@@ -319,10 +319,42 @@ and wrong within a day.
   the same shape as `just image-session` and `just propose` and probably wants
   the same answer.
 
-  So what is left is inbound, and it is unchanged: a reply reaching a running
-  job needs the connection to outlive the turn that started it, which is the
-  long-lived container question above. The kickoff prompt still says to speak
-  and stop, and stays that way until it can honestly say otherwise.
+  Outbound now happens in a thread per job, and the daemon opens that thread
+  itself — a thread has no existence before the message it hangs from, and the
+  instance rather than the job has to know its identifier.
+
+  So what is left is inbound. Its shape is settled by
+  `docs/decisions/0029-a-reply-is-routed-by-its-thread.md` — Socket Mode, one
+  Slack app per project, and a reply routed by the thread it arrives in — and
+  none of it is built. Two things stand in the way, and only one is work:
+
+  - **A binding is now two credentials**, and the form collects one. The
+    app-level token opens the socket and never enters a container, so it wants
+    somewhere to live that is not the handout.
+  - **A reply reaching a running job needs the session to outlive the turn that
+    started it**, which is the long-lived container question above, now with
+    its second consumer.
+
+  The kickoff prompt still says to speak and stop, and stays that way until it
+  can honestly say otherwise.
+
+- Then have the daemon post into a job's thread when the **agent or its
+  container fails**, which is the one case the agent cannot report on: a
+  crashed agent says nothing, so a job that dies is silent everywhere except
+  the dashboard.
+
+  Deliberately only that case. Reporting what a job *did* is the agent's, and
+  the reasoning is worth keeping because the opposite was argued first: having
+  the daemon post every outcome would be more reliable, and it would put a
+  second author of channel text beside the agent, duplicating whatever the
+  agent already said. The split that survives is that each says what only it
+  can — the agent knows what happened, and the instance knows when the agent
+  stopped being able to say so.
+
+  Note what this does not fix. A job's answer still reaches nobody but the
+  channel: `Progress::Completed` carries no text, so the dashboard shows that a
+  job ended and never what it said. That is a separate gap and probably wants
+  the answer recorded on the job.
 
   One coupling that decides the order. The instruction a job begins from
   currently ends by telling it to ask and *stop* — "do not wait, nobody is

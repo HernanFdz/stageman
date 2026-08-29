@@ -526,14 +526,27 @@ fn variables(handout: &Handout) -> Vec<(&'static str, Secret)> {
     // it, while these are this project's contract with a tool it ships itself.
     // See `docs/decisions/0028-stageman-ships-the-tool-that-speaks.md`.
     for (channel, bound) in handout.channels() {
-        let (address, credential) = match channel {
-            Channel::Slack => ("STAGEMAN_SLACK_CHANNEL", "STAGEMAN_SLACK_TOKEN"),
+        let (address, credential, thread) = match channel {
+            Channel::Slack => (
+                "STAGEMAN_SLACK_CHANNEL",
+                "STAGEMAN_SLACK_TOKEN",
+                "STAGEMAN_SLACK_THREAD",
+            ),
         };
         // The address is not a secret and travels as one anyway, because this
         // list is what the container is started with and a second mechanism
         // for the non-secret half would be two things to keep in step.
         set.push((address, Secret::new(bound.address.clone())));
         set.push((credential, bound.credential.clone()));
+
+        // Set only when this process was narrowed to a thread on *this*
+        // channel, which is what makes its absence meaningful: no variable
+        // means speak at the root, and that is where the orchestrator belongs.
+        // Delivering an empty one instead would make the two cases identical
+        // to the tool reading them.
+        if let Some(speaking) = handout.thread().filter(|t| t.channel == channel) {
+            set.push((thread, Secret::new(speaking.id.clone())));
+        }
     }
 
     set
@@ -1237,8 +1250,17 @@ mod tests {
     async fn the_tool_in_the_image_reads_the_variables_this_crate_delivers() {
         let runtime = located_runtime();
         let (state, project) = instance_with_a_channel("sk-ant-oat01-xyz");
-        let handout = Handout::for_job(&state, Agent::Claude, project).expect("a watched project");
+        let handout = Handout::for_job(&state, Agent::Claude, project)
+            .expect("a watched project")
+            // Narrowed, so all three names are on trial rather than two. The
+            // thread is the newest and the one whose absence is meaningful, so
+            // a typo in it would not fail — it would silently post at the root.
+            .speaking_in(stageman_core::Thread {
+                channel: Channel::Slack,
+                id: "1728312345.678901".to_owned(),
+            });
         let delivered = variables(&handout);
+        assert_eq!(delivered.len(), 5, "{delivered:?}");
 
         let mut command = tokio::process::Command::new(runtime.path());
         command.args([
@@ -1423,6 +1445,33 @@ mod tests {
 
         assert_eq!(named("STAGEMAN_SLACK_CHANNEL"), Some("C0123456789"));
         assert_eq!(named("STAGEMAN_SLACK_TOKEN"), Some("xoxb-not-a-real-token"));
+    }
+
+    /// A job narrowed to a thread is told where to speak; one that is not,
+    /// is not told at all.
+    ///
+    /// The absence is the whole mechanism: no variable means the tool posts at
+    /// the root, which is where the orchestrator belongs. Delivering an empty
+    /// one would make the two cases indistinguishable to the tool.
+    #[test]
+    fn a_thread_is_delivered_only_when_there_is_one() {
+        let (state, project) = instance_with_a_channel("sk-ant-oat01-xyz");
+        let handout = Handout::for_job(&state, Agent::Claude, project).expect("a watched project");
+
+        let before: Vec<&str> = variables(&handout).iter().map(|(name, _)| *name).collect();
+        assert!(!before.contains(&"STAGEMAN_SLACK_THREAD"), "{before:?}");
+
+        let narrowed = handout.speaking_in(stageman_core::Thread {
+            channel: Channel::Slack,
+            id: "1728312345.678901".to_owned(),
+        });
+        let delivered = variables(&narrowed);
+        let thread = delivered
+            .iter()
+            .find(|(name, _)| *name == "STAGEMAN_SLACK_THREAD")
+            .map(|(_, value)| value.expose());
+
+        assert_eq!(thread, Some("1728312345.678901"));
     }
 
     /// The asymmetry `docs/decisions/0027-a-channel-is-not-a-platform.md` turns
