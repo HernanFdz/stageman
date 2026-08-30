@@ -925,6 +925,7 @@ mod tests {
                 job_agents: only_claude(),
                 credentials: BTreeMap::new(),
                 channels: BTreeMap::new(),
+                attending: stageman_core::Attending::default(),
                 jobs: BTreeMap::from([(
                     job,
                     Job {
@@ -1099,6 +1100,7 @@ mod tests {
                     credentials: BTreeMap::new(),
                     channels: BTreeMap::new(),
                     jobs: BTreeMap::new(),
+                    attending: stageman_core::Attending::default(),
                 },
             );
         }
@@ -1183,6 +1185,7 @@ mod tests {
                 credentials: BTreeMap::new(),
                 channels: BTreeMap::new(),
                 jobs,
+                attending: stageman_core::Attending::default(),
             },
         );
         (state, job)
@@ -1423,6 +1426,7 @@ mod tests {
                     credentials: BTreeMap::new(),
                     channels: BTreeMap::new(),
                     jobs: BTreeMap::new(),
+                    attending: stageman_core::Attending::default(),
                 },
             );
             (state, project)

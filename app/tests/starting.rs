@@ -313,6 +313,7 @@ fn watching(name: &str, repository: &str) -> State {
                     },
                 )]),
                 jobs: BTreeMap::new(),
+                attending: stageman_core::Attending::default(),
             },
         )]),
     }

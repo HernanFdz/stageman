@@ -1400,6 +1400,7 @@ mod tests {
                 credentials,
                 channels: BTreeMap::new(),
                 jobs: BTreeMap::<_, Job>::new(),
+                attending: stageman_core::Attending::default(),
             },
         );
         (state, id)
@@ -1691,6 +1692,7 @@ mod tests {
                     credentials: BTreeMap::new(),
                     channels: BTreeMap::new(),
                     jobs: BTreeMap::new(),
+                    attending: stageman_core::Attending::default(),
                 },
             );
             let handout = Handout::for_foreman(&state, project).expect("a watched project");

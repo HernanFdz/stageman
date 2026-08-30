@@ -420,6 +420,118 @@ pub enum Progress {
     Failed(String),
 }
 
+/// One message waiting for, or held by, a project's foreman.
+///
+/// Carries where to answer as well as what was said, because a foreman answers
+/// in the thread its message arrived under — see
+/// `docs/decisions/0029-a-reply-is-routed-by-its-thread.md`. Working that out
+/// when the turn starts rather than when the message arrives would mean
+/// looking it up from a message that may be hours old by then.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Errand {
+    /// What was said, as the person wrote it.
+    pub said: String,
+    /// Where an answer belongs.
+    pub thread: Thread,
+}
+
+/// What a project's foreman is doing, and what is waiting behind it.
+///
+/// **The shape is the invariant.** A foreman that is idle while messages wait
+/// is a state nothing should ever produce, and the way to be sure is for it to
+/// have no way of being written down: the queue exists only inside [`Working`],
+/// so "idle with something waiting" is not a bug to avoid but a sentence that
+/// cannot be said.
+///
+/// It also removes the case that would otherwise have to be handled and could
+/// not occur — taking from a queue that is known to be non-empty, and answering
+/// a `None` the compiler can see and a reader cannot.
+///
+/// [`Working`]: Attending::Working
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Attending {
+    /// Nothing in hand and nothing waiting.
+    #[default]
+    Idle,
+    /// One message in hand, and the rest in the order they arrived.
+    Working {
+        /// What its agent was given.
+        on: Errand,
+        /// What it will be given next, front first.
+        ///
+        /// Deliberately not a set and not keyed: two identical messages from a
+        /// person are two messages, and the order they arrived in is the only
+        /// order that makes sense to answer them in.
+        waiting: std::collections::VecDeque<Errand>,
+    },
+}
+
+impl Attending {
+    /// Takes a message, either to start on or to leave waiting.
+    ///
+    /// The whole of the arrival rule, and **one operation rather than a check
+    /// followed by an act** — which is what makes two messages arriving
+    /// together unable to both start a turn. Whichever reaches this first
+    /// finds `Idle`; the second cannot, because the first already changed it.
+    pub fn take(&mut self, errand: Errand) -> Taken {
+        match self {
+            Self::Idle => {
+                *self = Self::Working {
+                    on: errand,
+                    waiting: std::collections::VecDeque::new(),
+                };
+                Taken::Started
+            }
+            Self::Working { waiting, .. } => {
+                waiting.push_back(errand);
+                Taken::Waiting
+            }
+        }
+    }
+
+    /// Puts down the message in hand and picks up the next, if there is one.
+    ///
+    /// Answers with what to start next, and `None` only when nothing is left —
+    /// which is the one way this becomes [`Attending::Idle`]. A foreman
+    /// therefore cannot go idle while anything waits, without anybody having to
+    /// remember that.
+    pub fn finish(&mut self) -> Option<&Errand> {
+        if let Self::Working { mut waiting, .. } = std::mem::take(self)
+            && let Some(on) = waiting.pop_front()
+        {
+            *self = Self::Working { on, waiting };
+        }
+        self.on()
+    }
+
+    /// What its agent is working on, if anything.
+    #[must_use]
+    pub const fn on(&self) -> Option<&Errand> {
+        match self {
+            Self::Working { on, .. } => Some(on),
+            Self::Idle => None,
+        }
+    }
+
+    /// How many messages are waiting behind the one in hand.
+    #[must_use]
+    pub fn waiting(&self) -> usize {
+        match self {
+            Self::Working { waiting, .. } => waiting.len(),
+            Self::Idle => 0,
+        }
+    }
+}
+
+/// What became of a message handed to a foreman.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Taken {
+    /// The foreman was idle, and this message is now in hand.
+    Started,
+    /// It was already working, so this is waiting behind what it has.
+    Waiting,
+}
+
 /// A repository this instance watches, and everything belonging to it.
 #[derive(Debug, Clone)]
 pub struct Project {
@@ -467,6 +579,13 @@ pub struct Project {
     /// Nested rather than held globally so that "a job belongs to exactly one
     /// project" is structural instead of a field somebody has to keep true.
     pub jobs: BTreeMap<JobId, Job>,
+    /// What its foreman is doing, and what is waiting behind it.
+    ///
+    /// Per project because a foreman is, and persisted because a message
+    /// somebody sent must not be lost to a restart — the same reasoning
+    /// `docs/decisions/0015-a-job-survives-the-daemon-dying.md` applies to
+    /// work already begun.
+    pub attending: Attending,
 }
 
 /// Everything one instance knows.
@@ -758,6 +877,7 @@ impl State {
                         credentials,
                         channels,
                         jobs: project.jobs.clone(),
+                        attending: project.attending.clone(),
                     },
                 ))
             })
@@ -1001,6 +1121,13 @@ pub struct SealedProject {
     pub channels: BTreeMap<Channel, SealedChannelConfig>,
     /// Its jobs, which hold nothing needing sealing.
     pub jobs: BTreeMap<JobId, Job>,
+    /// What its foreman was doing, which holds nothing needing sealing either:
+    /// a message from a person is not a credential.
+    ///
+    /// Defaulted, because every snapshot written before foremen had an inbox
+    /// has no such field — `docs/conventions.md` §4.
+    #[serde(default)]
+    pub attending: Attending,
 }
 
 /// Everything one instance knows, as it appears on disk.
@@ -1078,6 +1205,7 @@ impl Snapshot {
                         credentials,
                         channels,
                         jobs: project.jobs,
+                        attending: project.attending,
                     },
                 ))
             })
@@ -1384,9 +1512,9 @@ pub enum HandoutError {
 #[cfg(test)]
 mod tests {
     use super::{
-        Agent, AgentConfig, Arriving, BASE64, Channel, ChannelConfig, Handout, HandoutError,
-        Inconsistent, Job, JobId, Key, NONCE_LEN, Nonce, OpenError, Platform, Progress, Project,
-        ProjectId, Recipient, Secret, Snapshot, State, Thread,
+        Agent, AgentConfig, Arriving, Attending, BASE64, Channel, ChannelConfig, Errand, Handout,
+        HandoutError, Inconsistent, Job, JobId, Key, NONCE_LEN, Nonce, OpenError, Platform,
+        Progress, Project, ProjectId, Recipient, Secret, Snapshot, State, Taken, Thread,
     };
     use base64::Engine as _;
     use jiff::Timestamp;
@@ -1448,6 +1576,7 @@ mod tests {
             credentials,
             channels,
             jobs,
+            attending: Attending::default(),
         }
     }
 
@@ -2455,6 +2584,157 @@ mod tests {
         assert!(
             state.job(id).is_some(),
             "finishing is not forgetting: the record stays"
+        );
+    }
+
+    fn errand(said: &str) -> Errand {
+        Errand {
+            said: said.to_owned(),
+            thread: Thread {
+                channel: Channel::Slack,
+                id: format!("{said}.thread"),
+            },
+        }
+    }
+
+    /// An idle foreman starts on what arrives; a working one queues it.
+    #[test]
+    fn the_first_message_starts_a_turn_and_the_rest_wait() {
+        let mut attending = Attending::default();
+        assert_eq!(attending, Attending::Idle);
+
+        assert_eq!(attending.take(errand("first")), Taken::Started);
+        assert_eq!(attending.on().map(|e| e.said.as_str()), Some("first"));
+        assert_eq!(attending.waiting(), 0);
+
+        // Everything after it waits, however many arrive.
+        for said in ["second", "third"] {
+            assert_eq!(attending.take(errand(said)), Taken::Waiting);
+        }
+        assert_eq!(attending.on().map(|e| e.said.as_str()), Some("first"));
+        assert_eq!(attending.waiting(), 2);
+    }
+
+    /// Two messages arriving together cannot both start a turn.
+    ///
+    /// Not a test of locking — that is the caller's — but of the reason
+    /// locking is enough: taking is one operation, so whichever runs first
+    /// leaves a state the second cannot mistake for idle.
+    #[test]
+    fn only_one_message_can_ever_start_a_turn() {
+        let mut attending = Attending::Idle;
+        let started = [errand("a"), errand("b")]
+            .into_iter()
+            .filter(|_| true)
+            .map(|e| attending.take(e))
+            .filter(|taken| *taken == Taken::Started)
+            .count();
+
+        assert_eq!(started, 1, "exactly one of them may begin");
+    }
+
+    /// Finishing picks up the next, in the order they arrived.
+    #[test]
+    fn messages_are_picked_up_in_the_order_they_arrived() {
+        let mut attending = Attending::Idle;
+        for said in ["first", "second", "third"] {
+            attending.take(errand(said));
+        }
+
+        assert_eq!(attending.finish().map(|e| e.said.as_str()), Some("second"));
+        assert_eq!(attending.waiting(), 1);
+        assert_eq!(attending.finish().map(|e| e.said.as_str()), Some("third"));
+        assert_eq!(attending.waiting(), 0);
+    }
+
+    /// A foreman goes idle only when nothing is left.
+    ///
+    /// The invariant the shape exists for: there is no way to reach `Idle`
+    /// while anything waits, because `Idle` has nowhere to keep it. This
+    /// asserts the behaviour; the type is what makes it true.
+    #[test]
+    fn a_foreman_goes_idle_only_with_an_empty_inbox() {
+        let mut attending = Attending::Idle;
+        attending.take(errand("only"));
+
+        assert_eq!(attending.finish(), None);
+        assert_eq!(attending, Attending::Idle);
+        assert_eq!(attending.waiting(), 0);
+
+        // And finishing when there was nothing in hand changes nothing.
+        assert_eq!(attending.finish(), None);
+        assert_eq!(attending, Attending::Idle);
+    }
+
+    /// What is waiting survives the snapshot, because a person sent it.
+    #[test]
+    fn an_inbox_survives_the_snapshot_boundary() {
+        let mut state = populated();
+        let project = *state.projects.keys().next().expect("a project");
+        let attending = &mut state
+            .projects
+            .get_mut(&project)
+            .expect("the project")
+            .attending;
+        attending.take(errand("in hand"));
+        attending.take(errand("waiting"));
+
+        let json = serde_json::to_string(
+            &state
+                .seal(&key(), &mut counting_nonces())
+                .expect("sealing cannot fail"),
+        )
+        .expect("a snapshot serialises");
+        let reopened: Snapshot = serde_json::from_str(&json).expect("and parses back");
+        let reopened = reopened.open(&key()).expect("and opens");
+
+        let attending = &reopened
+            .projects
+            .get(&project)
+            .expect("the project survived")
+            .attending;
+        assert_eq!(attending.on().map(|e| e.said.as_str()), Some("in hand"));
+        assert_eq!(attending.waiting(), 1);
+    }
+
+    /// A project recorded before foremen had an inbox still opens.
+    #[test]
+    fn a_project_recorded_before_the_inbox_existed_still_opens() {
+        let older = format!(
+            r#"{{
+              "agents": {{ "Claude": {{ "auth_token": {} }} }},
+              "projects": {{
+                "00000000-0000-0000-0000-000000000003": {{
+                  "name": "example",
+                  "repository": "https://example.invalid/repo",
+                  "orchestrator_agent": "Claude",
+                  "job_agents": ["Claude"],
+                  "credentials": {{}},
+                  "channels": {{}},
+                  "jobs": {{}}
+                }}
+              }}
+            }}"#,
+            serde_json::to_string(
+                &Secret::new("agent-token".to_owned())
+                    .seal(&key(), [1; NONCE_LEN])
+                    .expect("sealing a well-formed secret")
+            )
+            .expect("a sealed secret serialises")
+        );
+
+        let parsed: Snapshot = serde_json::from_str(&older).expect("an older file still parses");
+        let state = parsed.open(&key()).expect("and still opens");
+
+        assert_eq!(
+            state
+                .projects
+                .values()
+                .next()
+                .expect("the project survived")
+                .attending,
+            Attending::Idle,
+            "a project from before the inbox has nothing waiting"
         );
     }
 
