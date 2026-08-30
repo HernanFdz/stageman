@@ -276,8 +276,21 @@ pub async fn attend(
     );
 
     while let Some(frame) = socket.next().await {
-        let frame = frame
-            .map_err(|failure| crate::channel::ChannelError::Unreachable(failure.to_string()))?;
+        let frame = match frame {
+            Ok(frame) => frame,
+            // An ordinary end, which is most of them. The platform closes a
+            // long-lived connection on a schedule of its own and does not
+            // always say goodbye first, so this is the common path rather than
+            // a fault — and reporting it as one is how somebody learns to
+            // ignore what this reports.
+            Err(why) if ordinary_end(&why) => {
+                tracing::info!(%why, "the connection ended; opening another");
+                return Ok(());
+            }
+            Err(why) => {
+                return Err(crate::channel::ChannelError::Unreachable(why.to_string()));
+            }
+        };
         let tokio_tungstenite::tungstenite::Message::Text(text) = frame else {
             continue;
         };
@@ -311,13 +324,20 @@ pub async fn attend(
                 from_us,
                 ..
             } => {
-                tracing::info!(
-                    %address,
-                    thread = thread.as_deref().unwrap_or("(root)"),
-                    mentions,
-                    from_us,
-                    "heard somebody speak"
-                );
+                // Anything this instance said is the loop guard working, and
+                // there is one of these for every message it sends. Said at
+                // debug so that what is left at info is somebody talking to
+                // it.
+                if from_us {
+                    tracing::debug!(%address, "heard itself, and ignored it");
+                } else {
+                    tracing::info!(
+                        %address,
+                        thread = thread.as_deref().unwrap_or("(root)"),
+                        mentions,
+                        "heard somebody speak"
+                    );
+                }
                 let text = text.clone();
                 act(store, runtime, listening, &heard, &text).await;
             }
@@ -325,6 +345,38 @@ pub async fn attend(
         }
     }
     Ok(())
+}
+
+/// Whether a socket ending this way is the ordinary case.
+///
+/// **Most endings are.** A long-lived connection is closed by the platform on
+/// its own schedule, and it does not always complete a closing handshake
+/// first — a reset arrives as a protocol error and means nothing has gone
+/// wrong. Told apart from a real failure so that a warning stays worth
+/// reading: this is logged as the routine thing it is, and anything else is
+/// not.
+fn ordinary_end(why: &tokio_tungstenite::tungstenite::Error) -> bool {
+    use tokio_tungstenite::tungstenite::{Error, error::ProtocolError};
+
+    match why {
+        // A close the platform completed, and one it did not bother to —
+        // the same event, and which arrives depends on timing rather than on
+        // anything worth telling apart.
+        Error::ConnectionClosed
+        | Error::AlreadyClosed
+        | Error::Protocol(ProtocolError::ResetWithoutClosingHandshake) => true,
+        // A peer that vanished mid-read is the same event seen one layer
+        // lower, which is which depending on timing rather than on anything
+        // meaningful.
+        Error::Io(failure) => matches!(
+            failure.kind(),
+            std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::UnexpectedEof
+        ),
+        _ => false,
+    }
 }
 
 /// The envelope a frame has to be answered with, if it has one.
@@ -737,6 +789,38 @@ mod tests {
         // travel with the one that posts.
         assert_eq!(listening.speaking.credential.expose(), "xoxb-token");
         assert_eq!(listening.opening.expose(), "xapp-token");
+    }
+
+    /// A connection ending is usually nothing, and has to be told apart.
+    ///
+    /// **Found by reading a real log.** A reset arrived as a protocol error
+    /// every few minutes, was reported as a warning, and the listener quietly
+    /// reconnected and carried on — so the warning meant nothing, which is how
+    /// somebody learns to skip past the one that does.
+    #[test]
+    fn an_ordinary_disconnection_is_not_a_failure() {
+        use tokio_tungstenite::tungstenite::{Error, error::ProtocolError};
+
+        for ending in [
+            Error::ConnectionClosed,
+            Error::AlreadyClosed,
+            Error::Protocol(ProtocolError::ResetWithoutClosingHandshake),
+            Error::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+            Error::Io(std::io::Error::from(std::io::ErrorKind::UnexpectedEof)),
+        ] {
+            assert!(super::ordinary_end(&ending), "{ending:?} is how they end");
+        }
+
+        for broken in [
+            Error::Protocol(ProtocolError::HandshakeIncomplete),
+            Error::Io(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            Error::AttackAttempt,
+        ] {
+            assert!(
+                !super::ordinary_end(&broken),
+                "{broken:?} is worth somebody reading"
+            );
+        }
     }
 
     /// A frame with nothing to acknowledge is dropped rather than guessed at.
