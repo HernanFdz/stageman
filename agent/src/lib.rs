@@ -525,6 +525,13 @@ fn variables(handout: &Handout) -> Vec<(&'static str, Secret)> {
     // whole point: that name is `gh`'s contract and this project conforms to
     // it, while these are this project's contract with a tool it ships itself.
     // See `docs/decisions/0028-stageman-ships-the-tool-that-speaks.md`.
+    // What a foreman presents when it asks this instance for something. A job's
+    // handout has none, so a job's container is never given one — which is what
+    // stops a job creating jobs.
+    if let Some(warrant) = handout.warrant() {
+        set.push(("STAGEMAN_WARRANT", warrant.clone()));
+    }
+
     for (channel, bound) in handout.channels() {
         let (address, credential) = match channel {
             Channel::Slack => ("STAGEMAN_SLACK_CHANNEL", "STAGEMAN_SLACK_TOKEN"),
@@ -1583,6 +1590,7 @@ mod tests {
                 credentials,
                 channels: BTreeMap::new(),
                 jobs: BTreeMap::<_, Job>::new(),
+                warrant: None,
                 attending: stageman_core::Attending::default(),
             },
         );
@@ -1905,6 +1913,7 @@ mod tests {
                     credentials: BTreeMap::new(),
                     channels: BTreeMap::new(),
                     jobs: BTreeMap::new(),
+                    warrant: None,
                     attending: stageman_core::Attending::default(),
                 },
             );

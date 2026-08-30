@@ -373,6 +373,7 @@ mod listening_tests {
                 },
             )]),
             jobs: BTreeMap::new(),
+            warrant: None,
             attending: stageman_core::Attending::default(),
         }
     }

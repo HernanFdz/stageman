@@ -712,6 +712,7 @@ mod tests {
                 },
             )]),
             jobs: BTreeMap::new(),
+            warrant: None,
             attending: stageman_core::Attending::default(),
         };
         let id = ProjectId::from_uuid(Uuid::from_u128(1));

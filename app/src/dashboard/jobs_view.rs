@@ -527,6 +527,7 @@ mod server_tests {
             credentials: BTreeMap::new(),
             channels: BTreeMap::new(),
             jobs: BTreeMap::new(),
+            warrant: None,
             attending: stageman_core::Attending::default(),
         }
     }
