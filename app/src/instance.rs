@@ -1088,10 +1088,37 @@ async fn turn(
         (repository, handout)
     };
 
-    stageman_foreman::attend(runtime, &handout, project, &repository, &errand.said)
-        .await
-        .map(drop)
-        .map_err(|why| RunError::Foreman(why.to_string()))
+    // Read now rather than at the start of the session, because a project's
+    // set of job agents is edited from the dashboard and a session outlives
+    // those edits.
+    let agents: Vec<(&'static str, &'static str)> = {
+        let state = store.read();
+        let named = state
+            .projects
+            .get(&project)
+            .map_or_else(Vec::new, |watched| {
+                watched
+                    .job_agents
+                    .iter()
+                    .map(|agent| (crate::dashboard::wire_name(*agent).0, agent.description()))
+                    .collect()
+            });
+        drop(state);
+        named
+    };
+
+    stageman_foreman::attend(
+        runtime,
+        &handout,
+        project,
+        &repository,
+        &crate::asking::endpoint(*crate::asking::PORT),
+        &agents,
+        &errand.said,
+    )
+    .await
+    .map(drop)
+    .map_err(|why| RunError::Foreman(why.to_string()))
 }
 
 /// A fresh warrant.

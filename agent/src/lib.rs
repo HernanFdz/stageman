@@ -676,6 +676,13 @@ pub async fn ask(
 /// path for another".
 const THREAD_PATH: &str = "/tmp/stageman-thread";
 
+/// Where a container reads the address it asks this instance at.
+///
+/// A file for the same reason the thread is one: the port can be named by the
+/// environment, so an instance restarted with a different one would otherwise
+/// leave every existing container asking somewhere nothing is listening.
+const ENDPOINT_PATH: &str = "/tmp/stageman-endpoint";
+
 /// Puts the thread a container should speak in where it will read it.
 ///
 /// Copied in while the container is stopped, which is every moment between
@@ -706,13 +713,41 @@ async fn place_thread(
     let Some(thread) = thread else {
         return Ok(());
     };
+    place(runtime, name, THREAD_PATH, &thread.id).await
+}
 
-    // A thread identifier is not a credential, so a file under the system's
-    // temporary directory is the right place for it — unlike anything in
+/// Puts the address this instance answers at where a container will read it.
+///
+/// # Errors
+///
+/// Fails if it cannot be written or the runtime refuses the copy.
+#[mutants::skip]
+pub async fn place_endpoint(
+    runtime: &ContainerRuntime,
+    name: &str,
+    endpoint: Option<&str>,
+) -> Result<(), AgentError> {
+    let Some(endpoint) = endpoint else {
+        return Ok(());
+    };
+    place(runtime, name, ENDPOINT_PATH, endpoint).await
+}
+
+/// Copies one short value into a stopped container.
+#[mutants::skip]
+async fn place(
+    runtime: &ContainerRuntime,
+    name: &str,
+    path: &str,
+    value: &str,
+) -> Result<(), AgentError> {
+    // Neither of the values placed this way is a credential — a thread
+    // identifier and an address — so a file under the system's temporary
+    // directory is the right place to stage one, unlike anything in
     // `variables`, which never touches a filesystem at all.
-    let staged = std::env::temp_dir().join(format!("stageman-thread-{name}"));
-    std::fs::write(&staged, &thread.id).map_err(|source| AgentError::Container {
-        status: "writing the thread".to_owned(),
+    let staged = std::env::temp_dir().join(format!("stageman-place-{name}"));
+    std::fs::write(&staged, value).map_err(|source| AgentError::Container {
+        status: "writing what a container reads".to_owned(),
         message: source.to_string(),
     })?;
 
@@ -720,7 +755,7 @@ async fn place_thread(
         .args([
             "cp".as_ref(),
             staged.as_os_str(),
-            format!("{name}:{THREAD_PATH}").as_ref(),
+            format!("{name}:{path}").as_ref(),
         ])
         .kill_on_drop(true)
         .output()
@@ -769,6 +804,12 @@ fn retained_arguments(
     let mut arguments = vec![
         "create".to_owned(),
         "--interactive".to_owned(),
+        // So that one hostname reaches this instance whichever runtime is in
+        // use. Measured on both: Docker and Podman each honour it, and
+        // without it a container on Linux can reach the host by no name at
+        // all.
+        "--add-host".to_owned(),
+        "host.docker.internal:host-gateway".to_owned(),
         "--name".to_owned(),
         name.to_owned(),
         "--label".to_owned(),
@@ -792,10 +833,11 @@ fn retained_arguments(
 /// stopped containers too, so a clash is a loud message naming the container in
 /// the way rather than a silent reuse of somebody else's.
 #[mutants::skip]
-pub async fn begin(
+pub async fn begin_with(
     runtime: &ContainerRuntime,
     handout: &Handout,
     name: &str,
+    endpoint: Option<&str>,
     question: &str,
 ) -> Result<Answer, AgentError> {
     let delivering = variables(handout);
@@ -824,8 +866,26 @@ pub async fn begin(
     }
 
     place_thread(runtime, name, handout.thread()).await?;
+    place_endpoint(runtime, name, endpoint).await?;
     let container = spawn(runtime, &started_arguments(name), &delivering)?;
     converse(container, Opening::Fresh, question).await
+}
+
+/// Starts a retained container and puts the first question to it.
+///
+/// The shape [`begin_with`] takes when nothing needs an endpoint, which is
+/// every job: only a foreman asks this instance for anything.
+///
+/// # Errors
+///
+/// Fails as [`begin_with`] does.
+pub async fn begin(
+    runtime: &ContainerRuntime,
+    handout: &Handout,
+    name: &str,
+    question: &str,
+) -> Result<Answer, AgentError> {
+    begin_with(runtime, handout, name, None, question).await
 }
 
 /// What starts a container that already exists, attached.
@@ -1484,6 +1544,66 @@ mod tests {
         );
 
         drop(discard(&runtime, name).await);
+    }
+
+    /// Asking a tool for help is answered, never published.
+    ///
+    /// **Found by watching an agent use it.** Agents reach for `--help` before
+    /// using an unfamiliar command, and `stageman-say` took its one argument
+    /// as the message — so "--help" was posted to a real channel. Nothing
+    /// failed; the tool did exactly what it was told.
+    ///
+    /// Both tools, because the same reflex reaches both, and the second one
+    /// starts containers rather than posting messages.
+    #[tokio::test]
+    #[ignore = "needs a container runtime and a built image; run `just image-handshake`"]
+    async fn a_tool_asked_for_help_answers_rather_than_acting() {
+        let runtime = located_runtime();
+
+        for tool in ["stageman-say", "stageman-job"] {
+            let helped = tokio::process::Command::new(runtime.path())
+                .args([
+                    "run",
+                    "--rm",
+                    "--network",
+                    "none",
+                    "--entrypoint",
+                    tool,
+                    image(Agent::Claude),
+                    "--help",
+                ])
+                .output()
+                .await
+                .expect("the runtime runs a container");
+
+            assert!(helped.status.success(), "{tool} --help: {helped:?}");
+            let told = String::from_utf8_lossy(&helped.stdout);
+            assert!(told.contains(&format!("usage: {tool}")), "{told}");
+
+            // And anything else that looks like an option is refused rather
+            // than taken as content — a mistyped flag must not become a
+            // message on a channel or the reason for a job.
+            let refused = tokio::process::Command::new(runtime.path())
+                .args([
+                    "run",
+                    "--rm",
+                    "--network",
+                    "none",
+                    "--entrypoint",
+                    tool,
+                    image(Agent::Claude),
+                    "--nonsense",
+                ])
+                .output()
+                .await
+                .expect("the runtime runs a container");
+
+            assert_eq!(refused.status.code(), Some(2), "{tool}: {refused:?}");
+            assert!(
+                String::from_utf8_lossy(&refused.stderr).contains("is not an option"),
+                "{refused:?}"
+            );
+        }
     }
 
     /// A project with nothing bound gets a tool that says so and stops.

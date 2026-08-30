@@ -43,6 +43,29 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   keeping even afterwards: it is also what stops two replies resuming one
   container at once.
 
+- **Should the tools be delivered rather than baked into the image?**
+  `stageman-say` and `stageman-job` are copied in when the image is built, so
+  a container holds whatever version of them existed then — and a foreman's
+  container is long-lived by design. The first time the endpoint's contract
+  changed, an existing foreman kept sending the old shape and was refused,
+  which is a drift between two halves of this project that ship separately.
+
+  It is answerable with machinery that already exists: the thread and the
+  endpoint are copied into a stopped container before every start, and the
+  tools could be too — embedded in the binary and written in the same way, so
+  the tools always match the instance driving them. The image would then carry
+  only what it cannot: the agent, the runtime, `git` and `gh`.
+
+  What it costs is that the image stops being self-contained. `just
+  image-check` drives a container with no daemon in front of it, and a tool
+  delivered at start would not be there. Settled by deciding whether the image
+  is a thing that runs on its own or a thing this project drives — and it has
+  been both so far without anybody choosing.
+
+  Until then, a contract change means recreating every foreman's container,
+  and the endpoint says so rather than answering with a status nothing can act
+  on.
+
 - **Should a job's environment have an egress allowlist?** Since
   `docs/decisions/0009-jobs-hold-their-own-platform-credentials.md`, a job holds
   credentials an agent could be talked into sending somewhere. Restricting

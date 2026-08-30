@@ -181,6 +181,13 @@ fn started(variables: &[(&str, String)]) -> Serving {
         .env_clear()
         .env("IP", "127.0.0.1")
         .env("PORT", "0")
+        // Whichever port is free, for the job endpoint too. Every test here
+        // runs a real binary, and a fixed port would have them contending with
+        // each other and with whatever instance the operator is running — and
+        // any one of them that leaks would hold it. That is not hypothetical:
+        // a leaked mutation-testing process held this port and a real daemon
+        // quietly could not bind it, so a foreman talked to a zombie.
+        .env("STAGEMAN_JOB_PORT", "0")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     for (name, value) in variables {

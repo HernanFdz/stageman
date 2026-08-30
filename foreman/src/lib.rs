@@ -144,6 +144,8 @@ pub async fn attend(
     handout: &Handout,
     project: ProjectId,
     repository: &str,
+    endpoint: &str,
+    agents: &[(&str, &str)],
     said: &str,
 ) -> Result<Answer, ForemanError> {
     let name = container(project);
@@ -154,15 +156,21 @@ pub async fn attend(
     if continuing(&existing, &name) {
         // The thread comes from the handout every turn, which is the whole
         // point: one container, a different thread each time.
-        stageman_agent::resume(runtime, &name, handout.thread(), &asked(said))
+        // Written before every start, not once at creation: the port can be
+        // named by the environment, so an instance restarted with a different
+        // one would otherwise leave this container asking nowhere.
+        stageman_agent::place_endpoint(runtime, &name, Some(endpoint))
+            .await
+            .map_err(ForemanError::Agent)?;
+        stageman_agent::resume(runtime, &name, handout.thread(), &asked(said, agents))
             .await
             .map_err(ForemanError::Agent)
     } else {
         // The opening and the first message together, because a session that
         // was told who it is and then asked nothing would have spent a turn
         // saying hello.
-        let first = format!("{}\n\n{}", opening(repository), asked(said));
-        stageman_agent::begin(runtime, handout, &name, &first)
+        let first = format!("{}\n\n{}", opening(repository), asked(said, agents));
+        stageman_agent::begin_with(runtime, handout, &name, Some(endpoint), &first)
             .await
             .map_err(ForemanError::Agent)
     }
@@ -217,6 +225,19 @@ Nothing you write as ordinary output is seen by anybody. What you pass to \
 `stageman-say` lands in the thread of the message you are answering, so a \
 person can always see which of their messages you meant.
 
+**You do not do the work yourself.** You have no copy of the repository and no \
+credentials to reach it, and that is deliberate rather than something missing: \
+reaching a repository is a job's business, not yours. When something needs \
+doing, start a job:
+
+    stageman-job 'why this job exists' 'what the job should do'
+
+A job is one agent in a container of its own, holding this project's \
+credentials, which can clone the repository, change it and open a pull \
+request. It reports in a thread of its own. The first argument is prose a \
+person reads on the dashboard; the second is the whole instruction that job's \
+agent is given — it cannot see this conversation, so say everything it needs.
+
 **Decide rather than ask.** You may say anything you like, but nothing you say \
 comes back to you in this turn, and a person answering you starts a *new* turn \
 that may be behind several others. So never end a turn waiting for a reply: if \
@@ -234,17 +255,42 @@ have already been told."
 /// Framed rather than passed through, for the reason a job's reply is: what
 /// arrives is somebody's words, and a session that has been running for days
 /// has no other way to tell those from an instruction it wrote itself.
+///
+/// **The agents are named here rather than in the opening**, and that is the
+/// point of saying them every turn: a project's set of job agents is edited
+/// from the dashboard, and a session outlives those edits. Said once at the
+/// start, the list would be right until somebody changed it and wrong
+/// thereafter, with nothing to notice.
 #[must_use]
-pub fn asked(said: &str) -> String {
+pub fn asked(said: &str, agents: &[(&str, &str)]) -> String {
+    let choices = agents
+        .iter()
+        .map(|(named, described)| format!("  {named} — {described}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
     format!(
         "\
 A person said this to you on the channel:
 
 {said}
 
-Do what it asks, or answer it, or both. Then run `stageman-say` with your \
-answer before you finish: a turn that ends without running it has told nobody \
-anything, however much you wrote."
+Answer it, or start a job for it with `stageman-job`, or both. Then run \
+`stageman-say` before you finish: a turn that ends without running it has told \
+nobody anything, however much you wrote.
+
+The agents this project's jobs may run on, and what each is for:
+
+{choices}
+
+Choose one deliberately and name it first. It is your judgement to make — \
+`docs/decisions/0006-agents-are-pluggable.md` — and the list is said here \
+rather than at the start of this session because it can change while you are \
+still running.
+
+If a command fails, say what it printed rather than what you think it meant. \
+An explanation you inferred is one a person will act on, and you have no way \
+to check it."
     )
 }
 
@@ -850,6 +896,17 @@ Nothing you write as ordinary output is seen by anybody. What you pass to `stage
 in the thread of the message you are answering, so a person can always see which of their \
 messages you meant.
 
+**You do not do the work yourself.** You have no copy of the repository and no credentials to \
+reach it, and that is deliberate rather than something missing: reaching a repository is a job's \
+business, not yours. When something needs doing, start a job:
+
+    stageman-job 'why this job exists' 'what the job should do'
+
+A job is one agent in a container of its own, holding this project's credentials, which can \
+clone the repository, change it and open a pull request. It reports in a thread of its own. The \
+first argument is prose a person reads on the dashboard; the second is the whole instruction \
+that job's agent is given — it cannot see this conversation, so say everything it needs.
+
 **Decide rather than ask.** You may say anything you like, but nothing you say comes back to you \
 in this turn, and a person answering you starts a *new* turn that may be behind several others. \
 So never end a turn waiting for a reply: if you need a judgement nobody has given you, make the \
@@ -865,13 +922,25 @@ told."
     #[test]
     fn a_message_to_a_foreman_reads_exactly_as_written() {
         assert_eq!(
-            super::asked("look at the parser"),
+            super::asked("look at the parser", &[("claude", "General-purpose.")]),
             "A person said this to you on the channel:
 
 look at the parser
 
-Do what it asks, or answer it, or both. Then run `stageman-say` with your answer before you \
-finish: a turn that ends without running it has told nobody anything, however much you wrote."
+Answer it, or start a job for it with `stageman-job`, or both. Then run `stageman-say` before \
+you finish: a turn that ends without running it has told nobody anything, however much you \
+wrote.
+
+The agents this project's jobs may run on, and what each is for:
+
+  claude — General-purpose.
+
+Choose one deliberately and name it first. It is your judgement to make — \
+`docs/decisions/0006-agents-are-pluggable.md` — and the list is said here rather than at the \
+start of this session because it can change while you are still running.
+
+If a command fails, say what it printed rather than what you think it meant. An explanation you \
+inferred is one a person will act on, and you have no way to check it."
         );
     }
 
@@ -899,6 +968,73 @@ finish: a turn that ends without running it has told nobody anything, however mu
             told.contains("Nothing you write as ordinary output"),
             "{told}"
         );
+    }
+
+    /// A foreman is told to report what failed, not to explain it.
+    ///
+    /// **Found by watching one do the opposite.** A command answered with a
+    /// bare status, and the foreman told a person the job could not start
+    /// because only one may run at a time — a rule that does not exist, stated
+    /// with confidence, and acted on. An invented explanation is worse than no
+    /// explanation, because it stops the person looking.
+    #[test]
+    fn a_foreman_is_told_to_report_a_failure_rather_than_explain_it() {
+        let every = super::asked("do the thing", &[("claude", "General-purpose.")]);
+
+        assert!(every.contains("say what it printed"), "{every}");
+        assert!(every.contains("no way to check it"), "{every}");
+    }
+
+    /// The agents are named every turn, never once at the start.
+    ///
+    /// A project's set of job agents is edited from the dashboard, and a
+    /// foreman's session outlives those edits — it lasts as long as the
+    /// project. Said in the opening, the list would be right until somebody
+    /// changed it and wrong from then on, with nothing to notice and a foreman
+    /// naming an agent that is no longer allowed.
+    #[test]
+    fn the_agents_a_job_may_run_on_are_said_every_turn() {
+        let each = super::asked(
+            "do the thing",
+            &[("claude", "General-purpose."), ("other", "Narrow.")],
+        );
+
+        assert!(each.contains("claude — General-purpose."), "{each}");
+        assert!(each.contains("other — Narrow."), "{each}");
+        assert!(each.contains("name it first"), "{each}");
+
+        // And never in the opening, which is said once and cannot be revised.
+        let once = super::opening("https://example.invalid/repo");
+        assert!(
+            !once.contains("General-purpose."),
+            "a list said once goes stale the first time a project is edited: {once}"
+        );
+    }
+
+    /// The instruction has to say a foreman assigns work rather than doing it.
+    ///
+    /// **Found by running it.** The opening described only the talking half,
+    /// so a foreman asked to change a repository tried to change it, found it
+    /// had no credentials, and reported that as a blocker — correctly, since
+    /// it has none and never will. Every word of that answer was true and the
+    /// whole of it was the wrong thing to do.
+    ///
+    /// The missing credentials are asserted too, because a foreman that is not
+    /// told the absence is deliberate will keep reporting it as broken
+    /// configuration.
+    #[test]
+    fn a_foreman_is_told_to_start_jobs_rather_than_do_the_work() {
+        let told = super::opening("https://example.invalid/repo");
+
+        assert!(told.contains("stageman-job"), "{told}");
+        assert!(told.contains("do not do the work yourself"), "{told}");
+        assert!(
+            told.contains("deliberate rather than something missing"),
+            "an absence it is not told is deliberate reads as a fault: {told}"
+        );
+        // The job's instruction has to stand alone, because its agent never
+        // sees the conversation that produced it.
+        assert!(told.contains("cannot see this conversation"), "{told}");
     }
 
     /// A foreman is never told it may wait, which a job is allowed to do.

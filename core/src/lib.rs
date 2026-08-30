@@ -742,6 +742,31 @@ impl State {
             .find_map(|project| project.jobs.get(&job))
     }
 
+    /// Which project a warrant belongs to, if any does.
+    ///
+    /// The warrant both authorises and identifies: a foreman presenting one is
+    /// saying which project it speaks for by the fact of holding that value.
+    /// Nothing else has to be sent, and nothing sent could contradict it —
+    /// a request naming a project it has no warrant for is a request with the
+    /// wrong warrant.
+    ///
+    /// Compared in full and never by prefix. A warrant is the only thing
+    /// standing between any container on the machine and a foreman's
+    /// authority, per
+    /// `docs/decisions/0032-a-foreman-asks-the-instance-by-warrant.md`.
+    #[must_use]
+    pub fn warranted(&self, presented: &str) -> Option<ProjectId> {
+        self.projects
+            .iter()
+            .find(|(_, project)| {
+                project
+                    .warrant
+                    .as_ref()
+                    .is_some_and(|held| held.expose() == presented)
+            })
+            .map(|(id, _)| *id)
+    }
+
     /// Which project a job belongs to.
     ///
     /// The companion to [`State::job`], and needed for the same reason: a job
@@ -2563,6 +2588,36 @@ mod tests {
             None,
             "a job that could ask the instance for anything has a foreman's authority"
         );
+    }
+
+    /// A warrant names the project that holds it, and nothing else.
+    #[test]
+    fn a_warrant_says_which_project_it_speaks_for() {
+        let (mut state, mine, theirs) = two_projects();
+        state.projects.get_mut(&mine).expect("the project").warrant =
+            Some(Secret::new(WARRANT.to_owned()));
+
+        assert_eq!(state.warranted(WARRANT), Some(mine));
+
+        // A project with no warrant is never matched, however empty the value.
+        assert_eq!(state.warranted(""), None);
+        assert_eq!(state.warranted("warrant-somebody-invented"), None);
+        assert_eq!(
+            state
+                .projects
+                .get(&theirs)
+                .expect("the other project")
+                .warrant,
+            None
+        );
+
+        // Never by prefix, because a shorter guess must not open a longer
+        // secret.
+        // Sliced by characters rather than by byte index, which the gate is
+        // right to call a panic on any string it does not itself control.
+        let shorter: String = WARRANT.chars().take(5).collect();
+        assert_eq!(state.warranted(&shorter), None);
+        assert_eq!(state.warranted(&format!("{WARRANT}extra")), None);
     }
 
     /// A warrant is sealed like every other credential, and survives.

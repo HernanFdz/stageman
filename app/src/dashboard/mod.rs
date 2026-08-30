@@ -174,7 +174,7 @@ fn named(identifier: &str) -> DashboardResult<stageman_core::Agent> {
 
 /// What the browser calls an agent, and what to show for it.
 #[cfg(feature = "server")]
-const fn wire_name(agent: stageman_core::Agent) -> (&'static str, &'static str) {
+pub(crate) const fn wire_name(agent: stageman_core::Agent) -> (&'static str, &'static str) {
     match agent {
         stageman_core::Agent::Claude => ("claude", "Claude"),
     }
