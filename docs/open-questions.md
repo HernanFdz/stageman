@@ -274,7 +274,7 @@ yet — it is unease, and belongs in your own notes until it sharpens.
 
 - **How does a page find out that something changed?** Everything the dashboard
   shows is read once, while the page is rendered. A job finishing, a signal
-  arriving, an foreman deciding — none of it reaches a browser that is
+  arriving, a foreman deciding — none of it reaches a browser that is
   already open, and this is the first thing anybody will notice.
 
   The mechanisms are known and the choice between them is not: polling the
@@ -373,9 +373,26 @@ and wrong within a day.
   `docs/decisions/0029-a-reply-is-routed-by-its-thread.md` calls load-bearing
   doing its work where it could be seen.
 
-  What is left is the foreman's half. A message at the root, or a mention
-  in a thread belonging to no job, routes to `Recipient::Foreman` and is
-  logged, because nothing runs an foreman yet.
+  What is left is the foreman's half: nothing runs one, so a message routed to
+  `Recipient::Foreman` is logged rather than put in its inbox — enqueueing
+  without a consumer would grow a queue nobody drains and deliver it all at
+  once whenever a foreman first ran.
+
+  The state, the naming and the text are built. What remains is the turn, and
+  three things to get right that nothing has yet:
+
+  - **The startup sweep does not know a foreman's container.** It places one by
+    parsing its name as a job's, so a foreman's would count as a name this
+    version cannot read — reported as *odd, and benign*, which it is not.
+    `project_of` is the reverse it needs.
+  - **Beginning and resuming are different calls**, and which applies depends
+    on whether that project's container already holds a session. The instance
+    must not answer that from memory: a container is the truth, per
+    `docs/decisions/0015-a-job-survives-the-daemon-dying.md`, and
+    `stageman_agent::abandoned` reports what the runtime actually has.
+  - **A turn ending is what advances the inbox.** `Attending::finish` decides
+    what happens next and nothing calls it, so a foreman that finished would
+    stop rather than pick up what is waiting.
 
   The kickoff prompt still says to speak and stop, and stays that way until it
   can honestly say otherwise.

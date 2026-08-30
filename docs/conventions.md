@@ -181,7 +181,7 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   a job has no use for one: the handout carries a narrower type with nowhere
   to put it, so that is a property rather than a rule somebody applies. Nothing else, and nothing
   inherited. The two project halves are not interchangeable and a handout can
-  carry one without the other: an foreman's gets the channels and no
+  carry one without the other: a foreman's gets the channels and no
   platform credential at all, because watching a channel is its remit and
   acting on a platform is not. See
   `docs/decisions/0027-a-channel-is-not-a-platform.md`. It is *decided* in the domain crate as a

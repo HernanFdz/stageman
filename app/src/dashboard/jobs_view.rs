@@ -25,7 +25,7 @@ use crate::ui::{Badge, BadgeTone, Button, Card, EmptyState, Modal};
 /// Why a job started, when a person started it.
 ///
 /// Filled in rather than asked for. The vocabulary in `docs/conventions.md` §2
-/// calls a reason "why the foreman decided to" — and an foreman has
+/// calls a reason "why the foreman decided to" — and a foreman has
 /// a reason distinct from the work because it is judging a signal. A person
 /// pressing a button has no separate judgement to record: the provenance *is*
 /// that a person asked, and asking them to phrase that as well as the work

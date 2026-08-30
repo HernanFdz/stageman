@@ -23,7 +23,43 @@
 //! the credential invariant and `docs/conventions.md` §4 for why prompts are
 //! held to a test.
 
-use stageman_core::JobId;
+use stageman_core::{JobId, ProjectId};
+
+/// What every foreman's container is named for.
+///
+/// Parallel to the job crate's, and named from the project rather than
+/// recorded anywhere for the same reason: the name is known before the
+/// container exists, so there is no instant at which one is running and
+/// nothing can say whose it is — see
+/// `docs/decisions/0015-a-job-survives-the-daemon-dying.md`.
+const PREFIX: &str = "stageman-foreman-";
+
+/// The container a project's foreman thinks in.
+///
+/// One per project and long-lived, where a job's is one per job and
+/// ephemeral. That difference is the whole distinction between the two —
+/// `docs/decisions/0012-agents-run-in-containers.md` — and it is why this
+/// name is derived from the project: a foreman has no identifier of its own
+/// because there is exactly one per project, so the project *is* its identity.
+#[must_use]
+pub fn container(project: ProjectId) -> String {
+    format!("{PREFIX}{}", project.as_uuid())
+}
+
+/// Which project a container belongs to, if its name says so.
+///
+/// The reverse of [`container`], and it exists for the sweep rather than for
+/// this crate: a container carrying this project's label has to be placed as
+/// somebody's, and a foreman's would otherwise be counted as a name this
+/// version cannot read — which is reported as odd and benign, and would be
+/// neither.
+#[must_use]
+pub fn project_of(container: &str) -> Option<ProjectId> {
+    container
+        .strip_prefix(PREFIX)
+        .and_then(|rest| rest.parse().ok())
+        .map(ProjectId::from_uuid)
+}
 
 /// What a resumed job's agent is told about having been interrupted.
 ///
@@ -82,6 +118,59 @@ Starting a job on {repository}.
 {reason}
 
 Whatever it has to say appears in this thread. Job {job}."
+    )
+}
+
+/// The first thing a project's foreman is ever told.
+///
+/// Said once, at the start of a session that then lasts as long as the project
+/// does: every message after this is a turn on the same session, so the
+/// foreman remembers what it has already been asked and what it already did.
+///
+/// **The autonomy paragraph is the one that differs from a job's**, and it is
+/// not a stylistic difference. A job may ask a person something and stop,
+/// because the answer comes back into that job's own thread. A foreman cannot:
+/// by the time somebody answers, it may be several messages further on, and
+/// the answer arrives as a new turn in a different thread. So it is told to
+/// decide, and told what that costs.
+#[must_use]
+pub fn opening(repository: &str) -> String {
+    format!(
+        "\
+You are the foreman for {repository}.
+
+People talk to you on a channel. Each message they send you arrives as its own \
+turn, and you answer with stageman-say, which takes what you want to say as \
+its one argument. What you say lands in the thread of the message you are \
+answering, so a person can always see which of their messages you meant.
+
+**Decide rather than ask.** You may say anything you like, but nothing you say \
+comes back to you in this turn, and a person answering you starts a *new* turn \
+that may be behind several others. So never end a turn waiting for a reply: if \
+you need a judgement nobody has given you, make the most reasonable one \
+available and say plainly what you chose and why. Somebody reading the channel \
+can correct you, and that correction is its own message.
+
+You remember everything from earlier turns, so do not ask again for what you \
+have already been told."
+    )
+}
+
+/// What a foreman is told when a person sends it a message.
+///
+/// Framed rather than passed through, for the reason a job's reply is: what
+/// arrives is somebody's words, and a session that has been running for days
+/// has no other way to tell those from an instruction it wrote itself.
+#[must_use]
+pub fn asked(said: &str) -> String {
+    format!(
+        "\
+A person said this to you on the channel:
+
+{said}
+
+Do what it asks, or answer it, or both. Say what you did with stageman-say \
+before you finish — a turn that says nothing is a turn nobody can see."
     )
 }
 
@@ -251,7 +340,7 @@ lets you work unattended.
 
 #[cfg(test)]
 mod tests {
-    use super::{JobId, Voice, resumption_notice};
+    use super::{JobId, ProjectId, Voice, resumption_notice};
 
     /// Asserted as literal text, per `docs/conventions.md` §4. Prompt text is
     /// the only kind of code here that changes behaviour without changing
@@ -514,6 +603,89 @@ when you finish."
 
         assert!(framed.starts_with("A person replied"), "{framed}");
         assert!(framed.contains("propose rather than merge"), "{framed}");
+    }
+
+    /// A foreman's container is named for its project, both ways.
+    ///
+    /// Total and reversible, like a job's: every project has exactly one such
+    /// name and every such name says whose it is, which is what lets a sweep
+    /// place one from what the runtime reports rather than from what the
+    /// instance remembers.
+    #[test]
+    fn a_foremans_container_is_named_for_its_project_and_says_so() {
+        let project = ProjectId::from_uuid(stageman_core::Uuid::from_u128(7));
+        let named = super::container(project);
+
+        assert_eq!(
+            named,
+            "stageman-foreman-00000000-0000-0000-0000-000000000007"
+        );
+        assert_eq!(super::project_of(&named), Some(project));
+
+        // A job's container is not a foreman's, which is the distinction the
+        // sweep needs in order to place either.
+        assert_eq!(
+            super::project_of("stageman-job-00000000-0000-0000-0000-000000000007"),
+            None
+        );
+        assert_eq!(super::project_of("something-else-entirely"), None);
+        assert_eq!(super::project_of("stageman-foreman-not-a-uuid"), None);
+    }
+
+    /// Asserted whole, per `docs/conventions.md` §4.
+    #[test]
+    fn a_foremans_opening_reads_exactly_as_written() {
+        assert_eq!(
+            super::opening("https://example.invalid/repo"),
+            "You are the foreman for https://example.invalid/repo.
+
+People talk to you on a channel. Each message they send you arrives as its own turn, and you \
+answer with stageman-say, which takes what you want to say as its one argument. What you say \
+lands in the thread of the message you are answering, so a person can always see which of their \
+messages you meant.
+
+**Decide rather than ask.** You may say anything you like, but nothing you say comes back to you \
+in this turn, and a person answering you starts a *new* turn that may be behind several others. \
+So never end a turn waiting for a reply: if you need a judgement nobody has given you, make the \
+most reasonable one available and say plainly what you chose and why. Somebody reading the \
+channel can correct you, and that correction is its own message.
+
+You remember everything from earlier turns, so do not ask again for what you have already been \
+told."
+        );
+    }
+
+    /// Asserted whole, and framed as somebody speaking.
+    #[test]
+    fn a_message_to_a_foreman_reads_exactly_as_written() {
+        assert_eq!(
+            super::asked("look at the parser"),
+            "A person said this to you on the channel:
+
+look at the parser
+
+Do what it asks, or answer it, or both. Say what you did with stageman-say before you finish — \
+a turn that says nothing is a turn nobody can see."
+        );
+    }
+
+    /// A foreman is never told it may wait, which a job is allowed to do.
+    ///
+    /// The one instruction that must differ between the two. A job asks and
+    /// stops because the answer returns to its own thread; a foreman cannot,
+    /// because by the time somebody answers it may be several turns further
+    /// on. A prompt that let it wait would produce a foreman that stops
+    /// working and nobody could tell why.
+    #[test]
+    fn a_foreman_is_told_to_decide_rather_than_wait() {
+        let told = super::opening("https://example.invalid/repo");
+
+        assert!(told.contains("Decide rather than ask"), "{told}");
+        assert!(told.contains("never end a turn waiting"), "{told}");
+        assert!(
+            told.contains("say plainly what you chose"),
+            "deciding without saying so is invisible: {told}"
+        );
     }
 
     /// The constraint that lets a job run with nobody watching, and the one

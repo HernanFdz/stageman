@@ -1342,8 +1342,8 @@ impl Handout {
     ///
     /// It does get the project's channel bindings, and that asymmetry is the
     /// point rather than an inconsistency. Watching a project's channels is the
-    /// whole of what an foreman does — `docs/architecture.md` §1 — and
-    /// answering on one is a reaction it is allowed to take, so an foreman
+    /// whole of what a foreman does — `docs/architecture.md` §1 — and
+    /// answering on one is a reaction it is allowed to take, so a foreman
     /// that cannot reach a channel cannot do its job. A single map for both
     /// kinds could not express this, which is the argument
     /// `docs/decisions/0027-a-channel-is-not-a-platform.md` turns on.
@@ -2380,7 +2380,7 @@ mod tests {
     /// The asymmetry `docs/decisions/0027-a-channel-is-not-a-platform.md` is
     /// built on, asserted beside the test that establishes the other half.
     ///
-    /// An foreman watches its project's channels — that is the whole of
+    /// A foreman watches its project's channels — that is the whole of
     /// its remit — so a handout that withheld them the way it withholds
     /// platform credentials would leave it unable to work.
     #[test]
