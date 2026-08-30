@@ -299,6 +299,40 @@ say what you did when you finish."
     )
 }
 
+/// What a person is told the moment their message is accepted.
+///
+/// Said before any work begins, because the alternative is silence for as long
+/// as a turn takes — and a foreman that is three messages behind may be silent
+/// for a while. Somebody who hears nothing cannot tell *received and queued*
+/// from *ignored*, and the second is what they will assume.
+///
+/// **It carries the follow-up rule**, and this is the only place that rule is
+/// ever taught. Replying in this thread reaches nobody:
+/// `docs/decisions/0031-a-mention-is-what-makes-it-ours.md` sends a mention in
+/// a thread owning no job to a fixed refusal, and a foreman's threads own no
+/// job. Somebody who has just been answered will reply where they were
+/// answered unless told otherwise, so they are told here, once per thread,
+/// which is once per message.
+///
+/// `ahead` is how many messages this one is behind, counting the one being
+/// worked on. Said only when there are any, because "0 messages ahead" is
+/// noise where "working on this now" is an answer.
+#[must_use]
+pub fn received_notice(ahead: usize) -> String {
+    let standing = if ahead == 0 {
+        "Working on this now.".to_owned()
+    } else {
+        format!("It is behind {ahead} other message(s), so it may be a moment.")
+    };
+    format!(
+        "\
+Got it. {standing} The answer appears in this thread.
+
+Replies in this thread do not reach me — say anything new at the root of the \
+channel instead."
+    )
+}
+
 /// What a thread is told when a foreman's turn could not be taken at all.
 ///
 /// **Not the same as a foreman deciding it cannot help.** That is something it
@@ -642,6 +676,34 @@ say so at the root of the channel instead: it does not read replies here."
             "This job is still working, so that did not reach it. Wait until it stops, then say \
 it again."
         );
+    }
+
+    /// Every acknowledgement teaches the follow-up rule, whatever its standing.
+    ///
+    /// It is the only place that rule is ever taught, and somebody who has
+    /// just been answered will reply where they were answered unless told
+    /// otherwise. Asserted across both forms so a third cannot quietly drop it.
+    #[test]
+    fn an_acknowledgement_always_says_where_to_say_the_next_thing() {
+        for ahead in [0, 1, 7] {
+            let said = super::received_notice(ahead);
+
+            assert!(said.contains("do not reach me"), "{said}");
+            assert!(said.contains("root of the channel"), "{said}");
+        }
+    }
+
+    /// Waiting is said only when there is something to wait behind.
+    ///
+    /// "0 messages ahead" is noise where "working on this now" is an answer,
+    /// and the difference is what tells somebody whether to expect a pause.
+    #[test]
+    fn an_acknowledgement_says_how_far_behind_only_when_it_is() {
+        assert!(super::received_notice(0).contains("Working on this now"));
+        assert!(!super::received_notice(0).contains("behind"));
+
+        assert!(super::received_notice(2).contains("behind 2"));
+        assert!(!super::received_notice(2).contains("Working on this now"));
     }
 
     /// The stuck notice must say the message is gone, not that it is queued.

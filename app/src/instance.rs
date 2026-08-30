@@ -938,15 +938,45 @@ fn record(store: &Store, job: JobId, progress: Progress) {
 /// only one of them finds it idle.
 #[mutants::skip]
 pub async fn attend(store: &Store, runtime: &ContainerRuntime, project: ProjectId, said: Errand) {
-    let started = {
+    // Kept before the message is moved into the inbox, because the answer to
+    // it belongs under the message that asked.
+    let thread = said.thread.clone();
+    let (started, ahead) = {
         let mut state = store.update();
-        let taken = state
+        let attending = state
             .projects
             .get_mut(&project)
-            .map(|watched| watched.attending.take(said));
+            .map(|watched| &mut watched.attending);
+        let outcome = attending.map(|attending| {
+            let taken = attending.take(said);
+            // Counting the one in hand: from outside, everything not yet
+            // answered is ahead of this.
+            let ahead = match taken {
+                Taken::Started => 0,
+                Taken::Waiting => attending.waiting(),
+            };
+            (taken, ahead)
+        });
         drop(state);
-        taken
+        match outcome {
+            Some((taken, ahead)) => (Some(taken), ahead),
+            None => (None, 0),
+        }
     };
+
+    // Said at once, before any work. A foreman three messages behind is silent
+    // for a while, and somebody who hears nothing cannot tell queued from
+    // ignored.
+    if started.is_some() {
+        notice_in(
+            store,
+            project,
+            &thread,
+            &stageman_foreman::received_notice(ahead),
+        )
+        .await;
+    }
+
     if !drives(started) {
         return;
     }
