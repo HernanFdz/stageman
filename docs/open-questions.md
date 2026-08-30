@@ -124,17 +124,17 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   channel work, and the cheap thing to record now is that the two are the same
   problem.
 
-- **How is the orchestrator's long-lived container held open?**
+- **How is the foreman's long-lived container held open?**
   `docs/decisions/0012-agents-run-in-containers.md` puts the agent the
-  orchestrator thinks with in one long-lived container, on the reasoning that
+  foreman thinks with in one long-lived container, on the reasoning that
   per-signal containers buy nothing and cost a start every time. What is built
   starts one per question, which is a gap rather than a violation only because
-  nothing calls it yet — it becomes a violation the moment the orchestrator
+  nothing calls it yet — it becomes a violation the moment the foreman
   does. The obstacle is shape, not effort: the protocol library scopes a
   connection to a closure, so a connection outliving one call means a task that
   owns it and a channel to speak through, and that task's failure and shutdown
   become things somebody has to handle. Settled by building it, and worth
-  building before the orchestrator has a second caller rather than after.
+  building before the foreman has a second caller rather than after.
 
   **It has one consumer, not two, and the correction is worth keeping.** This
   entry used to claim that a job which can be *answered* needed the same
@@ -147,7 +147,7 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   a turn waiting for an answer, which is the design
   `docs/architecture.md` §2 forbids outright. So the honesty rule that produced
   *ask and stop* removed this blocker as a side effect, and what is left here
-  is the orchestrator's own case: not paying a container start per signal,
+  is the foreman's own case: not paying a container start per signal,
   which is a cost rather than an obstacle.
 
 - **Should the runtime be Podman only?** The list compiled in by
@@ -274,7 +274,7 @@ yet — it is unease, and belongs in your own notes until it sharpens.
 
 - **How does a page find out that something changed?** Everything the dashboard
   shows is read once, while the page is rendered. A job finishing, a signal
-  arriving, an orchestrator deciding — none of it reaches a browser that is
+  arriving, an foreman deciding — none of it reaches a browser that is
   already open, and this is the first thing anybody will notice.
 
   The mechanisms are known and the choice between them is not: polling the
@@ -373,9 +373,9 @@ and wrong within a day.
   `docs/decisions/0029-a-reply-is-routed-by-its-thread.md` calls load-bearing
   doing its work where it could be seen.
 
-  What is left is the orchestrator's half. A message at the root, or a mention
-  in a thread belonging to no job, routes to `Recipient::Orchestrator` and is
-  logged, because nothing runs an orchestrator yet.
+  What is left is the foreman's half. A message at the root, or a mention
+  in a thread belonging to no job, routes to `Recipient::Foreman` and is
+  logged, because nothing runs an foreman yet.
 
   The kickoff prompt still says to speak and stop, and stays that way until it
   can honestly say otherwise.

@@ -98,7 +98,7 @@ pub enum DashboardError {
     /// Another project already listens where this one would.
     ///
     /// Two projects on one channel makes routing ambiguous in the one place it
-    /// cannot be: a message at the root belongs to whichever orchestrator the
+    /// cannot be: a message at the root belongs to whichever foreman the
     /// search reaches first, which is an ordering rather than an answer. If
     /// both listen it is worse — both hear every message, and one job's reply
     /// is delivered twice.

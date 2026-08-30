@@ -1,10 +1,10 @@
 # The deciding. May name the domain and the agent contract — it runs an agent
-# for triage, the same way a job runs one for work. `stageman-job` is absent
+# to think with, the same way a job runs one to work with. `stageman-job` is absent
 # from the list below on purpose.
 
 [package]
-name = "stageman-orchestrator"
-description = "Channel watching, triage and job dispatch for stageman. Internal to the workspace."
+name = "stageman-foreman"
+description = "Channel watching, judgement and job dispatch for stageman. Internal to the workspace."
 publish = false
 version.workspace = true
 edition.workspace = true

@@ -24,7 +24,7 @@
 # below, so keep the `name := "value"` shape.
 image_tag := "stageman/claude:dev"
 
-[doc("Build the agent image that jobs and triage run inside")]
+[doc("Build the agent image that jobs and foremen run inside")]
 image:
     docker build -t {{ image_tag }} images/claude
 

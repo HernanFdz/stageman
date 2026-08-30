@@ -274,7 +274,7 @@ fn projected(id: stageman_core::ProjectId, project: &stageman_core::Project) -> 
         id: id.to_string(),
         name: project.name.clone(),
         repository: project.repository.clone(),
-        orchestrator: wire_name(project.orchestrator_agent).1.to_owned(),
+        foreman: wire_name(project.foreman_agent).1.to_owned(),
         job_agents: project
             .job_agents
             .iter()
@@ -356,7 +356,7 @@ mod tests {
                 Project {
                     name: name.to_owned(),
                     repository: "https://example.invalid/repo".to_owned(),
-                    orchestrator_agent: Agent::Claude,
+                    foreman_agent: Agent::Claude,
                     job_agents: BTreeSet::from([Agent::Claude]),
                     credentials: BTreeMap::new(),
                     channels: BTreeMap::new(),

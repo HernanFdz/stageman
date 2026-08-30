@@ -343,14 +343,14 @@ async fn act(
     match destination {
         stageman_core::Recipient::Job(job) => {
             tracing::info!(%job, "handing a reply to the job whose thread it is in");
-            let framed = stageman_orchestrator::reply(said);
+            let framed = stageman_foreman::reply(said);
             drop(crate::deliver(store, runtime, job, &framed).await);
         }
         // Nothing runs one yet. Logged rather than dropped, because the
         // routing rule already sends messages here and a silent destination is
         // indistinguishable from a broken one.
-        stageman_core::Recipient::Orchestrator(project) => {
-            tracing::info!(%project, "a message for the orchestrator, which does not run yet");
+        stageman_core::Recipient::Foreman(project) => {
+            tracing::info!(%project, "a message for the foreman, which does not run yet");
         }
         // Ordinary — most of what is said in a project's channel is people
         // talking to each other. Said at debug so that "nothing happened" can
@@ -644,7 +644,7 @@ mod tests {
         let bound = |listens: bool| Project {
             name: "aviary".to_owned(),
             repository: "https://example.invalid/aviary".to_owned(),
-            orchestrator_agent: Agent::Claude,
+            foreman_agent: Agent::Claude,
             job_agents: BTreeSet::from([Agent::Claude]),
             credentials: BTreeMap::new(),
             channels: BTreeMap::from([(

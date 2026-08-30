@@ -45,7 +45,7 @@ server = [
     "dep:stageman-agent",
     "dep:stageman-core",
     "dep:stageman-job",
-    "dep:stageman-orchestrator",
+    "dep:stageman-foreman",
     "dep:tokio",
     "dep:tracing",
     "dep:tracing-subscriber",
@@ -118,7 +118,7 @@ serde_json = { version = "1.0.151", optional = true }
 stageman-agent = { workspace = true, optional = true }
 stageman-core = { workspace = true, optional = true }
 stageman-job = { workspace = true, optional = true }
-stageman-orchestrator = { workspace = true, optional = true }
+stageman-foreman = { workspace = true, optional = true }
 tokio = { version = "1.53.1", features = [
     "macros",
     "net",

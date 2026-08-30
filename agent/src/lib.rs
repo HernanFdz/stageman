@@ -2,7 +2,7 @@
 //! implement it.
 //!
 //! Two shapes of use and one contract. A one-shot structured query is how the
-//! orchestrator thinks; a long-running session in a workspace is how a job
+//! foreman thinks; a long-running session in a workspace is how a job
 //! works. Both reach a model only by running a configured agent, never through
 //! a vendor's own service API — see
 //! `docs/decisions/0007-model-work-goes-through-an-agent-cli.md` for why that
@@ -541,7 +541,7 @@ fn variables(handout: &Handout) -> Vec<(&'static str, Secret)> {
 
         // Set only when this process was narrowed to a thread on *this*
         // channel, which is what makes its absence meaningful: no variable
-        // means speak at the root, and that is where the orchestrator belongs.
+        // means speak at the root, and that is where the foreman belongs.
         // Delivering an empty one instead would make the two cases identical
         // to the tool reading them.
         if let Some(speaking) = handout.thread().filter(|t| t.channel == channel) {
@@ -627,11 +627,11 @@ pub struct Answer {
 /// Puts one question to an agent and returns what it says.
 ///
 /// The one-shot shape of the contract in `docs/architecture.md` §1 — how the
-/// orchestrator thinks, rather than how a job works. The container is started,
+/// foreman thinks, rather than how a job works. The container is started,
 /// asked and destroyed.
 ///
 /// **It starts a container per question, and
-/// `docs/decisions/0012-agents-run-in-containers.md` says the orchestrator's
+/// `docs/decisions/0012-agents-run-in-containers.md` says the foreman's
 /// agent should run in one long-lived one.** That is not an oversight and not
 /// yet a violation, since nothing calls this yet; reusing a container means a
 /// connection outliving a single call, which is machinery this does not build.
@@ -1395,7 +1395,7 @@ mod tests {
             Project {
                 name: "example".to_owned(),
                 repository: "https://example.invalid/repo".to_owned(),
-                orchestrator_agent: Agent::Claude,
+                foreman_agent: Agent::Claude,
                 job_agents: only_claude(),
                 credentials,
                 channels: BTreeMap::new(),
@@ -1452,7 +1452,7 @@ mod tests {
     /// is not told at all.
     ///
     /// The absence is the whole mechanism: no variable means the tool posts at
-    /// the root, which is where the orchestrator belongs. Delivering an empty
+    /// the root, which is where the foreman belongs. Delivering an empty
     /// one would make the two cases indistinguishable to the tool.
     #[test]
     fn a_thread_is_delivered_only_when_there_is_one() {
@@ -1476,12 +1476,12 @@ mod tests {
     }
 
     /// The asymmetry `docs/decisions/0027-a-channel-is-not-a-platform.md` turns
-    /// on, followed all the way to delivery: triage gets the channel it watches
+    /// on, followed all the way to delivery: a foreman gets the channel it watches
     /// and still no platform credential.
     #[test]
-    fn triage_is_delivered_the_channel_it_watches_and_still_no_platform() {
+    fn a_foreman_is_delivered_the_channel_it_watches_and_still_no_platform() {
         let (state, project) = instance_with_a_channel("sk-ant-oat01-xyz");
-        let handout = Handout::for_triage(&state, project).expect("a watched project");
+        let handout = Handout::for_foreman(&state, project).expect("a watched project");
 
         let named: Vec<&str> = variables(&handout).iter().map(|(name, _)| *name).collect();
 
@@ -1519,9 +1519,9 @@ mod tests {
     }
 
     #[test]
-    fn triage_is_delivered_its_credential_and_nothing_else() {
+    fn a_foreman_is_delivered_its_credential_and_nothing_else() {
         let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
-        let handout = Handout::for_triage(&state, project).expect("a watched project");
+        let handout = Handout::for_foreman(&state, project).expect("a watched project");
 
         let delivered = variables(&handout);
 
@@ -1567,7 +1567,7 @@ mod tests {
     #[test]
     fn a_session_container_is_not_cut_off_from_the_network() {
         let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
-        let handout = Handout::for_triage(&state, project).expect("a watched project");
+        let handout = Handout::for_foreman(&state, project).expect("a watched project");
 
         let arguments = session_arguments(handout.agent(), &variables(&handout));
 
@@ -1586,7 +1586,7 @@ mod tests {
     #[test]
     fn a_retained_container_is_named_labelled_and_survives_its_own_exit() {
         let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
-        let handout = Handout::for_triage(&state, project).expect("a watched project");
+        let handout = Handout::for_foreman(&state, project).expect("a watched project");
 
         let arguments = retained_arguments("stageman-job-abc", Agent::Claude, &variables(&handout));
         let line = arguments.join(" ");
@@ -1686,14 +1686,14 @@ mod tests {
                 Project {
                     name: "probe".to_owned(),
                     repository: "https://example.invalid/repo".to_owned(),
-                    orchestrator_agent: Agent::Claude,
+                    foreman_agent: Agent::Claude,
                     job_agents: only_claude(),
                     credentials: BTreeMap::new(),
                     channels: BTreeMap::new(),
                     jobs: BTreeMap::new(),
                 },
             );
-            let handout = Handout::for_triage(&state, project).expect("a watched project");
+            let handout = Handout::for_foreman(&state, project).expect("a watched project");
             (state, handout)
         }
 

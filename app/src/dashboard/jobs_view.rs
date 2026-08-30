@@ -5,7 +5,7 @@
 //! is one agent in one container doing work on one repository until it is done.
 //!
 //! **What an operator types is the work, never the instruction.** The agent's
-//! instruction is composed by the orchestrator from the work and the
+//! instruction is composed by the foreman from the work and the
 //! repository, and carries three things that are not negotiable — nothing is
 //! checked out, the tools are already authenticated, and work ends at a
 //! proposal. `docs/architecture.md` §1 puts every place an instruction is
@@ -25,7 +25,7 @@ use crate::ui::{Badge, BadgeTone, Button, Card, EmptyState, Modal};
 /// Why a job started, when a person started it.
 ///
 /// Filled in rather than asked for. The vocabulary in `docs/conventions.md` §2
-/// calls a reason "why the orchestrator decided to" — and an orchestrator has
+/// calls a reason "why the foreman decided to" — and an foreman has
 /// a reason distinct from the work because it is judging a signal. A person
 /// pressing a button has no separate judgement to record: the provenance *is*
 /// that a person asked, and asking them to phrase that as well as the work
@@ -86,7 +86,7 @@ pub struct Job {
     pub reason: String,
     /// What its agent was told to do.
     ///
-    /// The whole instruction, including the parts the orchestrator composed
+    /// The whole instruction, including the parts the foreman composed
     /// rather than the part somebody typed. Shown because it is the only
     /// record of what the agent was actually asked, and a job that went wrong
     /// is usually a job that was asked badly.
@@ -521,7 +521,7 @@ mod server_tests {
         stageman_core::Project {
             name: "aviary".to_owned(),
             repository: "https://example.invalid/aviary".to_owned(),
-            orchestrator_agent: Agent::Claude,
+            foreman_agent: Agent::Claude,
             job_agents: agents,
             credentials: BTreeMap::new(),
             channels: BTreeMap::new(),

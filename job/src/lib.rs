@@ -73,7 +73,7 @@ pub enum JobError {
 /// unanswered in `docs/open-questions.md` until there is a finished job to
 /// retire.
 ///
-/// `kickoff` is composed by the orchestrator and never here. A job executes
+/// `kickoff` is composed by the foreman and never here. A job executes
 /// instructions it did not write, which is what keeps every prompt in this
 /// system reviewable in one place — see `docs/architecture.md` §1.
 ///
@@ -96,7 +96,7 @@ pub async fn start(
 /// Takes no handout: what a container was given at creation is part of it, so
 /// a restart is already authenticated. `notice` is what the agent is told about
 /// having been interrupted, and like every other instruction it is composed by
-/// the orchestrator rather than invented here.
+/// the foreman rather than invented here.
 ///
 /// # Errors
 ///

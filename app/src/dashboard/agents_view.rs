@@ -1,7 +1,7 @@
 //! The agents an instance can run, and what they authenticate with.
 //!
 //! First of the configuring screens, because nothing else can be configured
-//! until one agent exists: a project names one agent for its orchestrator and
+//! until one agent exists: a project names one agent for its foreman and
 //! a non-empty set its jobs may use, per
 //! `docs/decisions/0021-an-instance-starts-empty.md`. An instance with no
 //! agents is not broken, it is new — and this is the screen that ends that.

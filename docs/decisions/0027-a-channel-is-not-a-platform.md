@@ -53,7 +53,7 @@ combinations are real.
 
 Two maps on a project, two on its sealed form, two in a handout and two loops in
 the adapter that delivers one. That duplication is the price, it is visible, and
-it is what keeps `for_triage` able to state what it means.
+it is what keeps `for_foreman` able to state what it means.
 
 Reversing this is small today and stops being small quickly: merging the maps
 means a snapshot migration, since both are serialised, plus re-deciding what the

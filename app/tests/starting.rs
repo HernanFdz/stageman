@@ -301,7 +301,7 @@ fn watching(name: &str, repository: &str) -> State {
             Project {
                 name: name.to_owned(),
                 repository: repository.to_owned(),
-                orchestrator_agent: Agent::Claude,
+                foreman_agent: Agent::Claude,
                 job_agents: BTreeSet::from([Agent::Claude]),
                 credentials: BTreeMap::new(),
                 channels: BTreeMap::from([(

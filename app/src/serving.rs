@@ -88,7 +88,7 @@ enum StartupError {
     /// of it is the list of places that were looked in.
     #[error(
         "no container runtime found.\n  Every agent runs in a container, including the \
-         one triage thinks with,\n  so nothing here can run without one. Install Docker \
+         one a foreman thinks with,\n  so nothing here can run without one. Install Docker \
          or Podman.\n  Looked in:\n{0}"
     )]
     NoRuntime(String),
@@ -361,7 +361,7 @@ mod listening_tests {
         Project {
             name: name.to_owned(),
             repository: "https://example.invalid/repo".to_owned(),
-            orchestrator_agent: Agent::Claude,
+            foreman_agent: Agent::Claude,
             job_agents: BTreeSet::from([Agent::Claude]),
             credentials: BTreeMap::new(),
             channels: BTreeMap::from([(

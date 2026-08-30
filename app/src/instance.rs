@@ -321,7 +321,7 @@ impl Started {
 /// it can only answer with the job if the job already exists.
 ///
 /// The instruction the agent begins from is composed here, from the work, by
-/// the orchestrator. Nothing else composes one: `docs/architecture.md` §1 puts
+/// the foreman. Nothing else composes one: `docs/architecture.md` §1 puts
 /// every place an instruction is authored in that one crate, which is what
 /// makes the snapshot-testing rule in `docs/conventions.md` §4 mean anything.
 ///
@@ -356,13 +356,13 @@ pub fn begin(
     // disagree, and the way that shows up is a job told to run a tool whose
     // credential it was not given.
     let voice = if handout.channels().next().is_some() {
-        stageman_orchestrator::Voice::Channel
+        stageman_foreman::Voice::Channel
     } else {
-        stageman_orchestrator::Voice::Silent
+        stageman_foreman::Voice::Silent
     };
-    let kickoff = stageman_orchestrator::kickoff(&repository, work, voice);
+    let kickoff = stageman_foreman::kickoff(&repository, work, voice);
     let job = JobId::from_uuid(uuid::Uuid::new_v4());
-    let announcement = stageman_orchestrator::announcement(&repository, reason, job);
+    let announcement = stageman_foreman::announcement(&repository, reason, job);
 
     {
         let mut state = store.update();
@@ -487,7 +487,7 @@ pub async fn supervise(
     // it could; this says the one thing the agent cannot, which is that it has
     // stopped and a reply now reaches it — and it is the only thing said at all
     // when the agent was what failed.
-    notice(store, job, stageman_orchestrator::attention_notice()).await;
+    notice(store, job, stageman_foreman::attention_notice()).await;
     (job, progress)
 }
 
@@ -588,7 +588,7 @@ pub async fn deliver(
     match taken {
         Accepted::Unknown => return Progress::Failed("no such job".to_owned()),
         Accepted::Busy => {
-            notice(store, job, stageman_orchestrator::busy_notice()).await;
+            notice(store, job, stageman_foreman::busy_notice()).await;
             return Progress::Running;
         }
         Accepted::Taken => {}
@@ -602,14 +602,14 @@ pub async fn deliver(
         tracing::warn!(%job, %why, "the reply did not reach the job");
     }
     record(store, job, progress.clone());
-    notice(store, job, stageman_orchestrator::attention_notice()).await;
+    notice(store, job, stageman_foreman::attention_notice()).await;
     progress
 }
 
 /// Creates a job on a project and runs it to completion.
 ///
 /// The whole of the doing, in the one crate allowed to name both the store and
-/// the job — `docs/architecture.md` §1. What the orchestrator will eventually
+/// the job — `docs/architecture.md` §1. What the foreman will eventually
 /// decide (which project, which agent, why, and what work) arrives here as
 /// arguments, because nothing decides it yet.
 ///
@@ -688,7 +688,7 @@ pub struct Swept {
 ///
 /// It resumes each job in turn and waits for it, which is right while nothing
 /// else is running and wrong the moment there is a dashboard to serve.
-/// `docs/conventions.md` §3 says orchestrator work never happens on the
+/// `docs/conventions.md` §3 says foreman work never happens on the
 /// request path; this is not on one yet, but a startup that waits for several
 /// agents to finish is a dashboard that does not appear for minutes. Whoever
 /// adds the server moves this onto its own task, and the shape of it will want
@@ -746,9 +746,7 @@ pub async fn reconcile(
         }
 
         let progress =
-            match stageman_job::resume(runtime, job, stageman_orchestrator::resumption_notice())
-                .await
-            {
+            match stageman_job::resume(runtime, job, stageman_foreman::resumption_notice()).await {
                 Ok(answer) => outcome(&answer),
                 Err(error) => Progress::Failed(because(&error)),
             };
@@ -923,7 +921,7 @@ mod tests {
             Project {
                 name: "example".to_owned(),
                 repository: "https://example.invalid/repo".to_owned(),
-                orchestrator_agent: Agent::Claude,
+                foreman_agent: Agent::Claude,
                 job_agents: only_claude(),
                 credentials: BTreeMap::new(),
                 channels: BTreeMap::new(),
@@ -1096,7 +1094,7 @@ mod tests {
                 Project {
                     name: "example".to_owned(),
                     repository: "https://example.invalid/repo".to_owned(),
-                    orchestrator_agent: Agent::Claude,
+                    foreman_agent: Agent::Claude,
                     job_agents: only_claude(),
                     credentials: BTreeMap::new(),
                     channels: BTreeMap::new(),
@@ -1180,7 +1178,7 @@ mod tests {
             Project {
                 name: "example".to_owned(),
                 repository: "https://example.invalid/repo".to_owned(),
-                orchestrator_agent: Agent::Claude,
+                foreman_agent: Agent::Claude,
                 job_agents: only_claude(),
                 credentials: BTreeMap::new(),
                 channels: BTreeMap::new(),
@@ -1417,7 +1415,7 @@ mod tests {
                 Project {
                     name: "hello".to_owned(),
                     repository: repository.to_owned(),
-                    orchestrator_agent: Agent::Claude,
+                    foreman_agent: Agent::Claude,
                     job_agents: only_claude(),
                     // No platform credential: the repository is public, so this
                     // also checks that a job with nothing to authenticate with

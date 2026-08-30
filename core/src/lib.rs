@@ -163,7 +163,7 @@ impl Agent {
 
     /// What this agent is good for, in prose.
     ///
-    /// Not decoration and not operator-editable: the orchestrator chooses which
+    /// Not decoration and not operator-editable: the foreman chooses which
     /// agent runs a job, and this is what it reasons over — see
     /// `docs/decisions/0006-agents-are-pluggable.md`. It lives in code because
     /// it describes the agent rather than the installation.
@@ -188,7 +188,7 @@ impl Agent {
 pub struct AgentConfig {
     /// What the agent authenticates with.
     ///
-    /// One credential per agent, never one per role — the orchestrator and a
+    /// One credential per agent, never one per role — the foreman and a
     /// job running the same agent use the same one. See
     /// `docs/decisions/0008-one-credential-per-agent.md`.
     pub auth_token: Secret,
@@ -207,13 +207,13 @@ pub enum Platform {
     GitHub,
 }
 
-/// Somewhere the orchestrator watches and a job can speak into.
+/// Somewhere the foreman watches and a job can speak into.
 ///
 /// Two-directional by definition, which is the whole reason this is not a
 /// variant of [`Platform`] — see
 /// `docs/decisions/0027-a-channel-is-not-a-platform.md`. A platform is
 /// something a job *acts on*; a channel is where a conversation happens, and
-/// the orchestrator is on it as much as a job is.
+/// the foreman is on it as much as a job is.
 ///
 /// A closed set for the same reason [`Agent`] is: reaching one needs code, and
 /// code is not something an operator supplies.
@@ -243,12 +243,12 @@ pub struct ChannelConfig {
     ///
     /// Called an address rather than a *destination* because
     /// `docs/conventions.md` §2 rejects one-directional words for this concept:
-    /// the orchestrator watches this exact place, and a job posts to it.
+    /// the foreman watches this exact place, and a job posts to it.
     pub address: String,
     /// What the channel is reached with.
     ///
     /// Belongs to the project rather than the instance, for the reason
-    /// `docs/decisions/0020-the-orchestrator-belongs-to-a-project.md` gives:
+    /// `docs/decisions/0020-the-foreman-belongs-to-a-project.md` gives:
     /// watching a project's channels needs that project's credentials, and one
     /// holder of every project's at once is the shape being avoided.
     pub credential: Secret,
@@ -317,7 +317,7 @@ pub struct Job {
     /// agent's configuration. Recorded at all because once more than one agent
     /// can run a job, "why did this go badly?" has no answer without it.
     pub agent: Agent,
-    /// Why the orchestrator started it, in prose.
+    /// Why the foreman started it, in prose.
     ///
     /// The whole of a job's provenance, deliberately — see
     /// `docs/architecture.md` §2 on why the structured version is absent.
@@ -405,13 +405,13 @@ pub struct Project {
     ///
     /// Every kickoff embeds this, because an agent has no other way to find it.
     pub repository: String,
-    /// The agent this project's orchestrator thinks with.
+    /// The agent this project's foreman thinks with.
     ///
     /// Per project rather than per instance, because watching a project's
-    /// channels needs that project's credentials and a shared orchestrator
+    /// channels needs that project's credentials and a shared foreman
     /// would hold every project's at once — see
-    /// `docs/decisions/0020-the-orchestrator-belongs-to-a-project.md`.
-    pub orchestrator_agent: Agent,
+    /// `docs/decisions/0020-the-foreman-belongs-to-a-project.md`.
+    pub foreman_agent: Agent,
     /// The agents this project's jobs may run on.
     ///
     /// Never empty in a valid instance, and checked rather than made
@@ -495,7 +495,7 @@ impl State {
     /// both sides of this condition are true for every project. Inverting the
     /// comparison or replacing the `or` with an `and` changes nothing any test
     /// could observe. **Delete this attribute in the commit that adds a second
-    /// agent** — a project naming one agent for triage and another for its jobs
+    /// agent** — a project naming one agent for its foreman and another for its jobs
     /// is what makes this falsifiable, and it is the first thing that will
     /// exist once there are two.
     #[mutants::skip]
@@ -503,7 +503,7 @@ impl State {
         self.projects
             .iter()
             .filter(move |(_, project)| {
-                project.orchestrator_agent == agent || project.job_agents.contains(&agent)
+                project.foreman_agent == agent || project.job_agents.contains(&agent)
             })
             .map(|(id, _)| *id)
     }
@@ -512,7 +512,7 @@ impl State {
     ///
     /// The invariant `docs/decisions/0021-an-instance-starts-empty.md` moved
     /// down from the instance to the project: a project names one agent for its
-    /// orchestrator and at least one its jobs may run on, and every one of them
+    /// foreman and at least one its jobs may run on, and every one of them
     /// is configured.
     ///
     /// Checked rather than made unrepresentable. A type that could not hold an
@@ -536,8 +536,8 @@ impl State {
             if project.job_agents.is_empty() {
                 return Err(Inconsistent::NoJobAgents(*id));
             }
-            for named in std::iter::once(project.orchestrator_agent)
-                .chain(project.job_agents.iter().copied())
+            for named in
+                std::iter::once(project.foreman_agent).chain(project.job_agents.iter().copied())
             {
                 if !self.agents.contains_key(&named) {
                     return Err(Inconsistent::UnconfiguredProjectAgent {
@@ -606,7 +606,7 @@ impl State {
     ///
     /// The rule in `docs/decisions/0029-a-reply-is-routed-by-its-thread.md`,
     /// and the whole of it: **a message in a thread belonging to a job is for
-    /// that job; anything else is for the orchestrator, and only when it
+    /// that job; anything else is for the foreman, and only when it
     /// mentions the bot.** Nothing else is read.
     ///
     /// The mention is required outside a thread and not inside one, which looks
@@ -646,7 +646,7 @@ impl State {
         }
 
         // Either at the root, or in a thread belonging to no job. Both are the
-        // orchestrator's, and both need the mention.
+        // foreman's, and both need the mention.
         if !arriving.mentions {
             return Recipient::Nobody;
         }
@@ -658,7 +658,7 @@ impl State {
                     .get(&channel)
                     .is_some_and(|bound| bound.address == arriving.address)
             })
-            .map_or(Recipient::Nobody, |(id, _)| Recipient::Orchestrator(*id))
+            .map_or(Recipient::Nobody, |(id, _)| Recipient::Foreman(*id))
     }
 
     /// Converts to the form that goes on disk, sealing every credential.
@@ -729,7 +729,7 @@ impl State {
                     SealedProject {
                         name: project.name.clone(),
                         repository: project.repository.clone(),
-                        orchestrator_agent: project.orchestrator_agent,
+                        foreman_agent: project.foreman_agent,
                         job_agents: project.job_agents.clone(),
                         credentials,
                         channels,
@@ -947,8 +947,8 @@ pub struct SealedProject {
     pub name: String,
     /// Where the repository lives.
     pub repository: String,
-    /// The agent its orchestrator thinks with.
-    pub orchestrator_agent: Agent,
+    /// The agent its foreman thinks with.
+    pub foreman_agent: Agent,
     /// The agents its jobs may run on.
     pub job_agents: BTreeSet<Agent>,
     /// Its sealed credentials.
@@ -995,7 +995,7 @@ impl Snapshot {
     ///
     /// Fails if any credential cannot be recovered, or if the snapshot is
     /// internally inconsistent — currently, if the agent it names as the
-    /// orchestrator's has no configuration. That check is what lets every
+    /// foreman's has no configuration. That check is what lets every
     /// later caller look that agent up without handling an absence.
     pub fn open(self, key: &Key) -> Result<State, OpenError> {
         let Self { agents, projects } = self;
@@ -1042,7 +1042,7 @@ impl Snapshot {
                     Project {
                         name: project.name,
                         repository: project.repository,
-                        orchestrator_agent: project.orchestrator_agent,
+                        foreman_agent: project.foreman_agent,
                         job_agents: project.job_agents,
                         credentials,
                         channels,
@@ -1116,8 +1116,8 @@ pub struct Arriving<'a> {
 pub enum Recipient {
     /// The job whose thread it arrived in.
     Job(JobId),
-    /// The orchestrator of the project that binds the channel.
-    Orchestrator(ProjectId),
+    /// The foreman of the project that binds the channel.
+    Foreman(ProjectId),
     /// Nobody, and this is the ordinary answer rather than a failure. Most
     /// traffic in a project's channel is people talking to each other.
     Nobody,
@@ -1158,30 +1158,30 @@ pub struct Handout {
 }
 
 impl Handout {
-    /// What the agent a project's orchestrator thinks with is handed.
+    /// What the agent a project's foreman thinks with is handed.
     ///
-    /// Its own credential, and no platform credential at all: triage judges
+    /// Its own credential, and no platform credential at all: a foreman judges
     /// signals rather than acting on them, so it has no repository to reach and
     /// nothing to authenticate against — see
     /// `docs/decisions/0012-agents-run-in-containers.md`.
     ///
     /// It does get the project's channel bindings, and that asymmetry is the
     /// point rather than an inconsistency. Watching a project's channels is the
-    /// whole of what an orchestrator does — `docs/architecture.md` §1 — and
-    /// answering on one is a reaction it is allowed to take, so an orchestrator
+    /// whole of what an foreman does — `docs/architecture.md` §1 — and
+    /// answering on one is a reaction it is allowed to take, so an foreman
     /// that cannot reach a channel cannot do its job. A single map for both
     /// kinds could not express this, which is the argument
     /// `docs/decisions/0027-a-channel-is-not-a-platform.md` turns on.
     ///
     /// Per project rather than per instance, because the channels it watches
-    /// belong to a project and a shared orchestrator would hold every
+    /// belong to a project and a shared foreman would hold every
     /// project's credentials at once —
-    /// `docs/decisions/0020-the-orchestrator-belongs-to-a-project.md`.
+    /// `docs/decisions/0020-the-foreman-belongs-to-a-project.md`.
     ///
     /// # Errors
     ///
     /// Fails if the project is not one this instance watches, or if its
-    /// orchestrator's agent has no configuration — which the invariant in
+    /// foreman's agent has no configuration — which the invariant in
     /// `docs/decisions/0021-an-instance-starts-empty.md` says cannot happen,
     /// since it holds at construction and is checked again on the way in and
     /// out of a snapshot.
@@ -1190,12 +1190,12 @@ impl Handout {
     /// total function substituting an empty credential for a missing one, which
     /// turns a state that cannot occur into an authentication failure somewhere
     /// else entirely. `.quality/gate-reference.md` forbids exactly that trade.
-    pub fn for_triage(state: &State, project: ProjectId) -> Result<Self, HandoutError> {
+    pub fn for_foreman(state: &State, project: ProjectId) -> Result<Self, HandoutError> {
         let watching = state
             .projects
             .get(&project)
             .ok_or(HandoutError::UnknownProject(project))?;
-        let agent = watching.orchestrator_agent;
+        let agent = watching.foreman_agent;
         let config = state
             .agents
             .get(&agent)
@@ -1205,7 +1205,7 @@ impl Handout {
             agent_credential: config.auth_token.clone(),
             platforms: BTreeMap::new(),
             channels: speaking(watching),
-            // The orchestrator speaks at the root of the channel, which is
+            // The foreman speaks at the root of the channel, which is
             // what makes a reply there addressed to it. See
             // `docs/decisions/0029-a-reply-is-routed-by-its-thread.md`.
             thread: None,
@@ -1293,7 +1293,7 @@ impl Handout {
     /// two steps, and this is the second.
     ///
     /// Its absence is meaningful and not a default: a handout with no thread
-    /// speaks at the root of the channel, which is where the orchestrator
+    /// speaks at the root of the channel, which is where the foreman
     /// belongs and where a job does not.
     #[must_use]
     pub fn speaking_in(mut self, thread: Thread) -> Self {
@@ -1412,7 +1412,7 @@ mod tests {
         Project {
             name: "example".to_owned(),
             repository: "https://example.invalid/repo".to_owned(),
-            orchestrator_agent: Agent::Claude,
+            foreman_agent: Agent::Claude,
             job_agents: only_claude(),
             credentials,
             channels,
@@ -1470,11 +1470,11 @@ mod tests {
     }
 
     #[test]
-    fn a_project_names_the_agent_its_orchestrator_thinks_with() {
+    fn a_project_names_the_agent_its_foreman_thinks_with() {
         let state = populated();
         let project = state.projects.values().next().expect("one project");
 
-        assert!(state.agents.contains_key(&project.orchestrator_agent));
+        assert!(state.agents.contains_key(&project.foreman_agent));
         assert!(project.job_agents.contains(&Agent::Claude));
     }
 
@@ -1598,9 +1598,9 @@ mod tests {
         );
     }
 
-    /// A message at the root is the orchestrator's, when it asks to be.
+    /// A message at the root is the foreman's, when it asks to be.
     #[test]
-    fn a_mention_at_the_root_is_for_the_orchestrator() {
+    fn a_mention_at_the_root_is_for_the_foreman() {
         let (state, project, _, _) = listening();
         let at_root = |mentions| Arriving {
             address: CHANNEL_ADDRESS,
@@ -1611,7 +1611,7 @@ mod tests {
 
         assert_eq!(
             state.recipient(Channel::Slack, &at_root(true)),
-            Recipient::Orchestrator(project)
+            Recipient::Foreman(project)
         );
         // Two people talking in a project's channel are not addressing this.
         assert_eq!(
@@ -1620,15 +1620,15 @@ mod tests {
         );
     }
 
-    /// A thread belonging to no job is the orchestrator's, not nobody's.
+    /// A thread belonging to no job is the foreman's, not nobody's.
     ///
     /// The hole this rule exists to close: replying inside a thread is how a
     /// person answers a specific message, so somebody answering the
-    /// orchestrator will thread their reply under it. A rule that sent every
+    /// foreman will thread their reply under it. A rule that sent every
     /// unrecognised thread to nobody would drop the message most clearly meant
-    /// for the orchestrator.
+    /// for the foreman.
     #[test]
-    fn a_mention_in_a_thread_belonging_to_nothing_is_for_the_orchestrator() {
+    fn a_mention_in_a_thread_belonging_to_nothing_is_for_the_foreman() {
         let (state, project, _, _) = listening();
 
         assert_eq!(
@@ -1641,7 +1641,7 @@ mod tests {
                     from_us: false,
                 }
             ),
-            Recipient::Orchestrator(project)
+            Recipient::Foreman(project)
         );
     }
 
@@ -1936,7 +1936,7 @@ mod tests {
                 "00000000-0000-0000-0000-000000000003": {{
                   "name": "example",
                   "repository": "https://example.invalid/repo",
-                  "orchestrator_agent": "Claude",
+                  "foreman_agent": "Claude",
                   "job_agents": ["Claude"],
                   "credentials": {{}},
                   "channels": {{}},
@@ -2000,7 +2000,7 @@ mod tests {
                 "00000000-0000-0000-0000-000000000003": {{
                   "name": "example",
                   "repository": "https://example.invalid/repo",
-                  "orchestrator_agent": "Claude",
+                  "foreman_agent": "Claude",
                   "job_agents": ["Claude"],
                   "credentials": {{}},
                   "jobs": {{}}
@@ -2084,7 +2084,7 @@ mod tests {
 
     #[test]
     fn every_agent_says_what_it_is_good_for() {
-        // The orchestrator picks an agent by reading this, so an empty one is
+        // The foreman picks an agent by reading this, so an empty one is
         // a silent failure rather than a cosmetic one.
         assert!(!Agent::Claude.description().is_empty());
     }
@@ -2120,9 +2120,9 @@ mod tests {
     }
 
     #[test]
-    fn triage_is_handed_its_credential_and_no_platform_at_all() {
+    fn a_foreman_is_handed_its_credential_and_no_platform_at_all() {
         let (state, mine, _) = two_projects();
-        let handout = Handout::for_triage(&state, mine).expect("a watched project");
+        let handout = Handout::for_foreman(&state, mine).expect("a watched project");
 
         assert_eq!(handout.agent(), Agent::Claude);
         assert_eq!(handout.agent_credential().expose(), "agent-token");
@@ -2133,13 +2133,13 @@ mod tests {
     /// The asymmetry `docs/decisions/0027-a-channel-is-not-a-platform.md` is
     /// built on, asserted beside the test that establishes the other half.
     ///
-    /// An orchestrator watches its project's channels — that is the whole of
+    /// An foreman watches its project's channels — that is the whole of
     /// its remit — so a handout that withheld them the way it withholds
     /// platform credentials would leave it unable to work.
     #[test]
-    fn triage_is_handed_the_channels_it_has_to_watch() {
+    fn a_foreman_is_handed_the_channels_it_has_to_watch() {
         let (state, mine, _) = two_projects();
-        let handout = Handout::for_triage(&state, mine).expect("a watched project");
+        let handout = Handout::for_foreman(&state, mine).expect("a watched project");
 
         let watching = handout
             .channel(Channel::Slack)
@@ -2210,7 +2210,7 @@ mod tests {
 
     /// A handout speaks at the root until it is narrowed to a thread.
     ///
-    /// The absence is what makes the orchestrator's handout mean "the root of
+    /// The absence is what makes the foreman's handout mean "the root of
     /// the channel", so it is asserted rather than assumed.
     #[test]
     fn a_handout_speaks_at_the_root_until_it_is_given_a_thread() {
@@ -2219,11 +2219,11 @@ mod tests {
         let job = Handout::for_job(&state, Agent::Claude, mine).expect("a watched project");
         assert!(job.thread().is_none());
         assert!(
-            Handout::for_triage(&state, mine)
+            Handout::for_foreman(&state, mine)
                 .expect("a watched project")
                 .thread()
                 .is_none(),
-            "triage speaks at the root, which is what a reply there addresses"
+            "a foreman speaks at the root, which is what a reply there addresses"
         );
 
         let narrowed = job.speaking_in(Thread {
@@ -2255,7 +2255,7 @@ mod tests {
 
         for handout in [
             Handout::for_job(&state, Agent::Claude, mine).expect("a watched project"),
-            Handout::for_triage(&state, mine).expect("a watched project"),
+            Handout::for_foreman(&state, mine).expect("a watched project"),
         ] {
             let bound = handout.channel(Channel::Slack).expect("a binding");
             assert_eq!(bound.credential.expose(), CHANNEL_TOKEN);
@@ -2308,7 +2308,7 @@ mod tests {
             refused,
             Err(HandoutError::UnconfiguredAgent(Agent::Claude))
         ));
-        assert!(Handout::for_triage(&state, mine).is_err());
+        assert!(Handout::for_foreman(&state, mine).is_err());
     }
 
     #[test]
