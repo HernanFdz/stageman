@@ -219,7 +219,7 @@ fn AgentRow(agent: Agent, onchanged: EventHandler<DashboardResult<Vec<Agent>>>) 
             div { class: "flex items-baseline gap-3",
                 span { class: "text-sm font-medium", "{agent.name}" }
                 if agent.configured {
-                    Badge { tone: BadgeTone::Completed, "configured" }
+                    Badge { tone: BadgeTone::Idle, "configured" }
                 } else {
                     Badge { "no credential" }
                 }

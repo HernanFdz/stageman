@@ -368,6 +368,15 @@ it lands.
   every field, so the input that breaks can only come from before the change.
   Write the older file out as literal text and open it.
 
+  **A renamed variant is the other half of that sentence, and it is not free
+  at all.** A default cannot help: the old spelling is already on disk and
+  parsing it is the only thing that opens the file. So a renamed value that is
+  serialised keeps its old name as a `serde` alias, read-only, and a test
+  parses the old spelling literally. Writing uses the new name, so a snapshot
+  upgrades itself the first time anything changes rather than carrying both
+  for ever. This was learned by renaming a job's states and watching the test
+  above go red, which is the cheapest place it could have happened.
+
   This is not the substituted default `.quality/gate-reference.md` forbids.
   That rule is about replacing a failure with a guess; here the default is the
   true answer, because a file written before the field existed described

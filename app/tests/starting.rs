@@ -580,13 +580,13 @@ fn a_build_says_whether_it_has_a_browser_half() {
 /// the discriminating case is two finished jobs — nought of two — and
 /// inverting the comparison says two of two.
 #[test]
-fn the_dashboard_counts_running_jobs_rather_than_all_of_them() {
+fn the_dashboard_counts_working_jobs_rather_than_all_of_them() {
     let (_kept, snapshot) = scratch();
     let mut state = watching("aviary", "https://example.invalid/aviary");
     let project = state.projects.values_mut().next().expect("the project");
     project.jobs.insert(
         JobId::from_uuid(uuid::Uuid::from_u128(1)),
-        job(Progress::Completed),
+        job(Progress::Idle),
     );
     project.jobs.insert(
         JobId::from_uuid(uuid::Uuid::from_u128(2)),
@@ -597,7 +597,7 @@ fn the_dashboard_counts_running_jobs_rather_than_all_of_them() {
     let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
     let answer = running.get("/api/instance");
 
-    assert!(answer.contains(r#""running":0"#), "{answer}");
+    assert!(answer.contains(r#""working":0"#), "{answer}");
     assert!(answer.contains(r#""jobs":2"#), "{answer}");
 }
 

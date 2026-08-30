@@ -296,10 +296,10 @@ fn projected(id: stageman_core::ProjectId, project: &stageman_core::Project) -> 
             .keys()
             .map(|channel| wire_channel(*channel).to_owned())
             .collect(),
-        running: project
+        working: project
             .jobs
             .values()
-            .filter(|job| job.progress == stageman_core::Progress::Running)
+            .filter(|job| job.progress == stageman_core::Progress::Working)
             .count(),
         jobs: project.jobs.len(),
     }

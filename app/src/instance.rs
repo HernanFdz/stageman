@@ -374,7 +374,7 @@ pub fn begin(
                     reason: reason.to_owned(),
                     kickoff: kickoff.clone(),
                     created_at: Timestamp::now(),
-                    progress: Progress::Running,
+                    progress: Progress::Working,
                     thread: None,
                 },
             );
@@ -543,10 +543,10 @@ fn accepting(state: &mut State, job: JobId) -> Accepted {
     let Some(recorded) = state.job_mut(job) else {
         return Accepted::Unknown;
     };
-    if recorded.progress == Progress::Running {
+    if recorded.progress == Progress::Working {
         return Accepted::Busy;
     }
-    recorded.progress = Progress::Running;
+    recorded.progress = Progress::Working;
     Accepted::Taken
 }
 
@@ -589,7 +589,7 @@ pub async fn deliver(
         Accepted::Unknown => return Progress::Failed("no such job".to_owned()),
         Accepted::Busy => {
             notice(store, job, stageman_foreman::busy_notice()).await;
-            return Progress::Running;
+            return Progress::Working;
         }
         Accepted::Taken => {}
     }
@@ -726,10 +726,10 @@ pub async fn reconcile(
     // arithmetic that can overflow, and the escape hatches that quiet it are
     // exactly the ones `.quality/gate-reference.md` warns produce silent wrong
     // values — a counter is not worth either.
-    let believed_running: Vec<JobId> = store.read().running().collect();
+    let believed_working: Vec<JobId> = store.read().working().collect();
     let mut attended: Vec<Attended> = Vec::new();
 
-    for job in believed_running {
+    for job in believed_working {
         if !has_container(&left, job) {
             // Believed running with nothing to run in. Not resumable and not
             // removable, because there is nothing there — so it is recorded as
@@ -780,8 +780,8 @@ impl From<&Progress> for Attended {
     /// opposite of what happened, and nothing noticed.
     fn from(progress: &Progress) -> Self {
         match progress {
-            Progress::Completed => Self::Resumed,
-            Progress::Running | Progress::Failed(_) => Self::Failed,
+            Progress::Idle => Self::Resumed,
+            Progress::Working | Progress::Failed(_) => Self::Failed,
         }
     }
 }
@@ -861,7 +861,7 @@ fn unplaceable<'a>(left: &'a [stageman_job::Abandoned], state: &State) -> Vec<Un
 /// does something different about each.
 fn outcome(answer: &Answer) -> Progress {
     if answer.stop_reason == StopReason::EndTurn {
-        Progress::Completed
+        Progress::Idle
     } else {
         Progress::Failed(format!("the agent stopped: {:?}", answer.stop_reason))
     }
@@ -932,7 +932,7 @@ mod tests {
                         reason: "started by hand".to_owned(),
                         kickoff: "do the thing".to_owned(),
                         created_at: Timestamp::UNIX_EPOCH,
-                        progress: Progress::Running,
+                        progress: Progress::Working,
                         thread: None,
                     },
                 )]),
@@ -1169,7 +1169,7 @@ mod tests {
                 reason: "an issue was opened".to_owned(),
                 kickoff: "work on it".to_owned(),
                 created_at: Timestamp::UNIX_EPOCH,
-                progress: Progress::Running,
+                progress: Progress::Working,
                 thread: None,
             },
         );
@@ -1202,14 +1202,14 @@ mod tests {
         assert_eq!(super::accepting(&mut state, job), super::Accepted::Busy);
         assert_eq!(
             state.job(job).expect("the job").progress,
-            Progress::Running,
+            Progress::Working,
             "a refused reply must not move the job"
         );
 
         // Finished, so the reply is taken and the job goes back to work.
-        state.job_mut(job).expect("the job").progress = Progress::Completed;
+        state.job_mut(job).expect("the job").progress = Progress::Idle;
         assert_eq!(super::accepting(&mut state, job), super::Accepted::Taken);
-        assert_eq!(state.job(job).expect("the job").progress, Progress::Running);
+        assert_eq!(state.job(job).expect("the job").progress, Progress::Working);
 
         // And taking it once is what stops a second taking it as well, which
         // is the collision this exists to prevent.
@@ -1458,13 +1458,13 @@ mod tests {
             .await
             .expect("the job is created");
 
-            assert_eq!(progress, Progress::Completed, "the job did not finish");
+            assert_eq!(progress, Progress::Idle, "the job did not finish");
             assert_eq!(
                 store
                     .read()
                     .job(job)
                     .map(|recorded| recorded.progress.clone()),
-                Some(Progress::Completed),
+                Some(Progress::Idle),
                 "and the instance should have recorded that"
             );
 
@@ -1516,7 +1516,7 @@ mod tests {
     /// only thing that counts as having finished.
     #[test]
     fn only_a_finished_turn_counts_as_a_completed_job() {
-        assert_eq!(outcome(&answered(StopReason::EndTurn)), Progress::Completed);
+        assert_eq!(outcome(&answered(StopReason::EndTurn)), Progress::Idle);
     }
 
     /// Every other way a turn can end is a failure, and each is checked rather
@@ -1552,14 +1552,14 @@ mod tests {
     /// sweep report the opposite of what happened.
     #[test]
     fn only_a_completed_job_counts_as_resumed() {
-        assert_eq!(Attended::from(&Progress::Completed), Attended::Resumed);
+        assert_eq!(Attended::from(&Progress::Idle), Attended::Resumed);
         assert_eq!(
             Attended::from(&Progress::Failed("anything".to_owned())),
             Attended::Failed
         );
         // Still running when the sweep looked is not success either: it means
         // the resume did not reach an ending.
-        assert_eq!(Attended::from(&Progress::Running), Attended::Failed);
+        assert_eq!(Attended::from(&Progress::Working), Attended::Failed);
     }
 
     #[test]

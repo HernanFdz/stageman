@@ -47,7 +47,7 @@ pub struct Project {
     /// `docs/decisions/0005-conversation-happens-on-channels.md`.
     pub channels: Vec<String>,
     /// How many of its jobs are still running.
-    pub running: usize,
+    pub working: usize,
     /// How many jobs it has had, running or finished.
     pub jobs: usize,
 }
@@ -60,7 +60,7 @@ impl Project {
     /// be lying, and this is the only thing keeping the two answers the same.
     #[must_use]
     pub const fn idle(&self) -> bool {
-        self.running == 0
+        self.working == 0
     }
 }
 
@@ -258,10 +258,10 @@ pub async fn forget(project: String) -> DashboardResult<Watching> {
         drop(state);
         return Err(DashboardError::UnknownProject { id: project });
     };
-    if let Some(running) = busy(watched) {
+    if let Some(working) = busy(watched) {
         let name = watched.name.clone();
         drop(state);
-        return Err(DashboardError::ProjectBusy { name, running });
+        return Err(DashboardError::ProjectBusy { name, working });
     }
 
     state.projects.remove(&identifier);
@@ -284,7 +284,7 @@ fn busy(project: &stageman_core::Project) -> Option<usize> {
     let running = project
         .jobs
         .values()
-        .filter(|job| job.progress == stageman_core::Progress::Running)
+        .filter(|job| job.progress == stageman_core::Progress::Working)
         .count();
 
     (running > 0).then_some(running)
@@ -556,8 +556,8 @@ fn WatchedProject(project: Project) -> Element {
                     "{project.repository}"
                 }
                 span { class: "ml-auto shrink-0",
-                    if project.running > 0 {
-                        Badge { tone: BadgeTone::Running, "{project.running} of {project.jobs} running" }
+                    if project.working > 0 {
+                        Badge { tone: BadgeTone::Working, "{project.working} of {project.jobs} working" }
                     } else {
                         Badge { "{project.jobs} job(s)" }
                     }
@@ -899,7 +899,7 @@ mod server_tests {
         assert_eq!(busy(&holding(&[])), None);
         assert_eq!(
             busy(&holding(&[
-                Progress::Completed,
+                Progress::Idle,
                 Progress::Failed("it did not work".to_owned())
             ])),
             None
@@ -1069,12 +1069,12 @@ mod server_tests {
     /// able to name.
     #[test]
     fn a_project_is_busy_for_exactly_its_running_jobs() {
-        assert_eq!(busy(&holding(&[Progress::Running])), Some(1));
+        assert_eq!(busy(&holding(&[Progress::Working])), Some(1));
         assert_eq!(
             busy(&holding(&[
-                Progress::Running,
-                Progress::Completed,
-                Progress::Running,
+                Progress::Working,
+                Progress::Idle,
+                Progress::Working,
             ])),
             Some(2)
         );
@@ -1086,7 +1086,7 @@ mod tests {
     use super::{ChannelDraft, Draft, Project};
 
     /// One project, with however many jobs running.
-    fn watched(running: usize, jobs: usize) -> Project {
+    fn watched(working: usize, jobs: usize) -> Project {
         Project {
             id: "an-identifier".to_owned(),
             name: "aviary".to_owned(),
@@ -1095,7 +1095,7 @@ mod tests {
             job_agents: vec!["Claude".to_owned()],
             platforms: Vec::new(),
             channels: Vec::new(),
-            running,
+            working,
             jobs,
         }
     }

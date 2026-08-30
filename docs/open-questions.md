@@ -394,7 +394,7 @@ and wrong within a day.
   stopped being able to say so.
 
   Note what this does not fix. A job's answer still reaches nobody but the
-  channel: `Progress::Completed` carries no text, so the dashboard shows that a
+  channel: `Progress::Idle` carries no text, so the dashboard shows that a
   job ended and never what it said. That is a separate gap and probably wants
   the answer recorded on the job.
 

@@ -374,19 +374,43 @@ pub struct Job {
 /// reads as fact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Progress {
-    /// Started, and nothing has said it is over.
+    /// Its agent has been given something and has not stopped.
     ///
-    /// What a sweep looks for: a running job whose container is stopped is one
-    /// to restart, and a container whose job is not running is not.
-    Running,
-    /// The agent finished its turn.
+    /// What a sweep looks for: a working job whose container is stopped is one
+    /// to restart, and a container whose job is not working is not.
     ///
-    /// Says the work ended, not that it succeeded — nothing here can see
-    /// whether a proposal was any good, and
-    /// `docs/decisions/0002-never-merge-never-deploy.md` means a human reads it
-    /// before it counts for anything. Claiming more would be a claim this
-    /// system is not in a position to make.
-    Completed,
+    /// Believed rather than observed, which is why it is not called *running*:
+    /// a job is in this state while the daemon that was supervising it is
+    /// dead and no process is running anywhere — see
+    /// `docs/decisions/0015-a-job-survives-the-daemon-dying.md`. The word is
+    /// about the work, not about a process.
+    ///
+    /// The alias is what lets a snapshot written before the rename still open.
+    /// `docs/decisions/0011-state-is-a-snapshot-not-a-database.md` says a
+    /// rename makes an existing file fail to load, and this is a rename of a
+    /// value that goes on disk — so the old spelling has to keep parsing. It
+    /// is read-only: writing uses the new name, so a snapshot upgrades itself
+    /// the first time anything changes.
+    #[serde(alias = "Running")]
+    Working,
+    /// Its agent stopped, and nothing has been given to it since.
+    ///
+    /// **Says nothing about how it went, deliberately.** This used to be
+    /// called *completed*, which claimed the work had ended — and that is a
+    /// claim this system cannot make. An agent stops when it is finished, and
+    /// equally when it has asked a question, when it wants a decision, and
+    /// when it is waiting on something outside the repository altogether.
+    /// Nothing here can tell those apart, so the state names the only fact
+    /// available: it is not working, and it can be given something.
+    ///
+    /// The tell that the old name was wrong is that the notice this project
+    /// already sends says *the agent has stopped* rather than *finished* —
+    /// the message was honest and the state was not.
+    ///
+    /// Aliased for the same reason `Working` is: every job already on disk
+    /// says `Completed`.
+    #[serde(alias = "Completed")]
+    Idle,
     /// It could not be finished, and this is what went wrong.
     ///
     /// Prose for a person reading the dashboard, like `reason` — not a code to
@@ -557,12 +581,12 @@ impl State {
     /// whether a container is actually up is a question for the runtime — see
     /// `docs/decisions/0015-a-job-survives-the-daemon-dying.md`, where
     /// reconciling the two is startup's job rather than a state of its own.
-    pub fn running(&self) -> impl Iterator<Item = JobId> + '_ {
+    pub fn working(&self) -> impl Iterator<Item = JobId> + '_ {
         self.projects.values().flat_map(|project| {
             project
                 .jobs
                 .iter()
-                .filter(|(_, job)| job.progress == Progress::Running)
+                .filter(|(_, job)| job.progress == Progress::Working)
                 .map(|(id, _)| *id)
         })
     }
@@ -948,6 +972,13 @@ pub struct SealedProject {
     /// Where the repository lives.
     pub repository: String,
     /// The agent its foreman thinks with.
+    ///
+    /// Aliased because this field is on disk under its old name in every
+    /// snapshot written before
+    /// `docs/decisions/0030-the-orchestrator-is-a-foreman.md`. A rename of a
+    /// serialised name is never free — see `docs/conventions.md` §4, which
+    /// gained that rule from this exact field failing to open a real instance.
+    #[serde(alias = "orchestrator_agent")]
     pub foreman_agent: Agent,
     /// The agents its jobs may run on.
     pub job_agents: BTreeSet<Agent>,
@@ -1405,7 +1436,7 @@ mod tests {
                 reason: "an issue was opened".to_owned(),
                 kickoff: "work on it".to_owned(),
                 created_at: Timestamp::UNIX_EPOCH,
-                progress: Progress::Running,
+                progress: Progress::Working,
                 thread: None,
             },
         );
@@ -1728,7 +1759,7 @@ mod tests {
     #[test]
     fn a_finished_jobs_thread_still_routes_to_it() {
         let (mut state, _, job, thread) = listening();
-        state.job_mut(job).expect("the job").progress = Progress::Completed;
+        state.job_mut(job).expect("the job").progress = Progress::Idle;
 
         assert_eq!(
             state.recipient(
@@ -1921,6 +1952,42 @@ mod tests {
         assert_eq!(thread.id, "1728312345.678901");
     }
 
+    /// A job recorded before the states were renamed still opens.
+    ///
+    /// The other half of the sentence in
+    /// `docs/decisions/0011-state-is-a-snapshot-not-a-database.md`: an added
+    /// field is free with a default, and **a rename is not free at all** — the
+    /// old spelling is on disk and stays there until something rewrites it.
+    /// Caught by a test that already existed, which is the only reason the
+    /// rename did not make every instance unopenable.
+    #[test]
+    fn a_job_recorded_under_the_old_state_names_still_opens() {
+        for (written, expected) in [
+            ("Running", Progress::Working),
+            ("Completed", Progress::Idle),
+        ] {
+            let older = format!(
+                r#"{{
+                  "agent": "Claude",
+                  "reason": "an issue was opened",
+                  "kickoff": "work on it",
+                  "created_at": "1970-01-01T00:00:00Z",
+                  "progress": "{written}"
+                }}"#
+            );
+
+            let job: Job = serde_json::from_str(&older)
+                .unwrap_or_else(|why| panic!("{written} must still parse: {why}"));
+            assert_eq!(job.progress, expected);
+        }
+
+        // And what is written back is the new spelling, so a file upgrades
+        // itself the first time anything changes rather than carrying both
+        // forever.
+        let written = serde_json::to_string(&Progress::Working).expect("it serialises");
+        assert_eq!(written, r#""Working""#);
+    }
+
     /// A job recorded before threads existed still opens, with none.
     ///
     /// The same rule as the channel map below, and the reason
@@ -1936,7 +2003,7 @@ mod tests {
                 "00000000-0000-0000-0000-000000000003": {{
                   "name": "example",
                   "repository": "https://example.invalid/repo",
-                  "foreman_agent": "Claude",
+                  "orchestrator_agent": "Claude",
                   "job_agents": ["Claude"],
                   "credentials": {{}},
                   "channels": {{}},
@@ -1989,6 +2056,12 @@ mod tests {
     /// The current writer always emits every field, so a round trip cannot
     /// produce the input that breaks — only a file from before the change can,
     /// and this is one.
+    ///
+    /// **Nothing in here may be renamed to match the source.** These are the
+    /// names an old file carries, not the names the types use, and a
+    /// search-and-replace across the crate will silently update them and leave
+    /// a test that proves nothing. That happened: a rename swept through this
+    /// fixture, the suite stayed green, and a real instance would not open.
     #[test]
     fn a_snapshot_written_before_channels_existed_still_opens() {
         let older = format!(
@@ -2000,7 +2073,7 @@ mod tests {
                 "00000000-0000-0000-0000-000000000003": {{
                   "name": "example",
                   "repository": "https://example.invalid/repo",
-                  "foreman_agent": "Claude",
+                  "orchestrator_agent": "Claude",
                   "job_agents": ["Claude"],
                   "credentials": {{}},
                   "jobs": {{}}
@@ -2363,9 +2436,9 @@ mod tests {
     }
 
     #[test]
-    fn running_finds_a_job_wherever_its_project_is() {
+    fn working_finds_a_job_wherever_its_project_is() {
         let state = populated();
-        let found: Vec<JobId> = state.running().collect();
+        let found: Vec<JobId> = state.working().collect();
 
         assert_eq!(found.len(), 1, "{found:?}");
         assert!(state.job(found[0]).is_some());
@@ -2374,11 +2447,11 @@ mod tests {
     #[test]
     fn a_job_that_has_finished_is_not_running() {
         let mut state = populated();
-        let id = state.running().next().expect("one to start with");
+        let id = state.working().next().expect("one to start with");
 
-        state.job_mut(id).expect("it is there").progress = Progress::Completed;
+        state.job_mut(id).expect("it is there").progress = Progress::Idle;
 
-        assert_eq!(state.running().count(), 0);
+        assert_eq!(state.working().count(), 0);
         assert!(
             state.job(id).is_some(),
             "finishing is not forgetting: the record stays"

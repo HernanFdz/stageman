@@ -161,12 +161,12 @@ pub enum DashboardError {
     /// instance being able to name every container it started — forget the
     /// project and those containers become exactly the leak that record
     /// exists to prevent.
-    #[error("{name} still has {running} job(s) running")]
+    #[error("{name} still has {working} job(s) working")]
     ProjectBusy {
         /// The project, as the screen names it.
         name: String,
         /// How many jobs are still going.
-        running: usize,
+        working: usize,
     },
 
     /// Something went wrong that the operator cannot act on from here.
@@ -288,11 +288,11 @@ mod tests {
     fn a_busy_project_is_a_refusal_rather_than_a_fault() {
         let refused = DashboardError::ProjectBusy {
             name: "aviary".to_owned(),
-            running: 2,
+            working: 2,
         };
 
         assert_eq!(refused.status(), StatusCode::CONFLICT);
-        assert_eq!(refused.to_string(), "aviary still has 2 job(s) running");
+        assert_eq!(refused.to_string(), "aviary still has 2 job(s) working");
     }
 
     /// Something the operator can retype is not a not-found.
