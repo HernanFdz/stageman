@@ -53,8 +53,23 @@ async function say() {
   // It stays a string the whole way. It looks like a number and is not one —
   // parsed as a float it loses the microseconds and addresses no message, and
   // the failure reads like a permissions problem rather than a rounding one.
+  //
+  // **Read from a file rather than the environment, and that is the whole
+  // reason this file exists.** A container's environment is fixed when it is
+  // created and no runtime can change it on restart, so a variable can only
+  // carry a value constant for the container's whole life. A job's thread is;
+  // a foreman's is not, because one long-lived container answers a different
+  // thread every turn. The daemon writes this before each start.
+  //
+  // No file means speak at the root of the channel, which is a real answer
+  // rather than a missing one.
   const payload = { channel, text: message };
-  const thread = process.env.STAGEMAN_SLACK_THREAD;
+  let thread = null;
+  try {
+    thread = require("node:fs").readFileSync("/tmp/stageman-thread", "utf8").trim();
+  } catch {
+    thread = null;
+  }
   if (thread) {
     payload.thread_ts = thread;
   }

@@ -597,7 +597,18 @@ pub async fn deliver(
         Accepted::Taken => {}
     }
 
-    let progress = match stageman_job::resume(runtime, job, said).await {
+    // A job's thread never changes, but it still has to be written in before
+    // each start: an environment is fixed at creation, so nothing the container
+    // was given at birth can be counted on to still be there in the shape a
+    // long-lived one needs. Read from the record rather than remembered.
+    let speaking = {
+        let state = store.read();
+        let thread = state.job(job).and_then(|recorded| recorded.thread.clone());
+        drop(state);
+        thread
+    };
+
+    let progress = match stageman_job::resume(runtime, job, speaking.as_ref(), said).await {
         Ok(answer) => outcome(&answer),
         Err(error) => Progress::Failed(because(&error)),
     };
@@ -748,11 +759,23 @@ pub async fn reconcile(
             continue;
         }
 
-        let progress =
-            match stageman_job::resume(runtime, job, stageman_foreman::resumption_notice()).await {
-                Ok(answer) => outcome(&answer),
-                Err(error) => Progress::Failed(because(&error)),
-            };
+        let speaking = {
+            let state = store.read();
+            let thread = state.job(job).and_then(|recorded| recorded.thread.clone());
+            drop(state);
+            thread
+        };
+        let progress = match stageman_job::resume(
+            runtime,
+            job,
+            speaking.as_ref(),
+            stageman_foreman::resumption_notice(),
+        )
+        .await
+        {
+            Ok(answer) => outcome(&answer),
+            Err(error) => Progress::Failed(because(&error)),
+        };
         if let Progress::Failed(ref why) = progress {
             tracing::warn!(%job, %why, "could not be put back to work");
         }

@@ -152,7 +152,9 @@ pub async fn attend(
         .map_err(ForemanError::Agent)?;
 
     if continuing(&existing, &name) {
-        stageman_agent::resume(runtime, &name, &asked(said))
+        // The thread comes from the handout every turn, which is the whole
+        // point: one container, a different thread each time.
+        stageman_agent::resume(runtime, &name, handout.thread(), &asked(said))
             .await
             .map_err(ForemanError::Agent)
     } else {

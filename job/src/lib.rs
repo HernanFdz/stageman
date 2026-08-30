@@ -94,7 +94,9 @@ pub async fn start(
 /// Puts a job back to work after its container stopped.
 ///
 /// Takes no handout: what a container was given at creation is part of it, so
-/// a restart is already authenticated. `notice` is what the agent is told about
+/// a restart is already authenticated. It does take the thread, because that
+/// is the one thing a container cannot keep — an environment is fixed at
+/// creation and a job's thread is written in before each start. `notice` is what the agent is told about
 /// having been interrupted, and like every other instruction it is composed by
 /// the foreman rather than invented here.
 ///
@@ -107,9 +109,10 @@ pub async fn start(
 pub async fn resume(
     runtime: &ContainerRuntime,
     job: JobId,
+    thread: Option<&stageman_core::Thread>,
     notice: &str,
 ) -> Result<Answer, JobError> {
-    stageman_agent::resume(runtime, &container(job), notice)
+    stageman_agent::resume(runtime, &container(job), thread, notice)
         .await
         .map_err(JobError::Agent)
 }
