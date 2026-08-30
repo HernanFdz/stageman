@@ -207,9 +207,15 @@ pub fn opening(repository: &str) -> String {
 You are the foreman for {repository}.
 
 People talk to you on a channel. Each message they send you arrives as its own \
-turn, and you answer with stageman-say, which takes what you want to say as \
-its one argument. What you say lands in the thread of the message you are \
-answering, so a person can always see which of their messages you meant.
+turn, and the only way to answer is to **run the command-line program \
+`stageman-say`**, which is installed in this container. It is not a tool you \
+can call — run it in a shell, the way you would run `git`:
+
+    stageman-say 'what you want to say'
+
+Nothing you write as ordinary output is seen by anybody. What you pass to \
+`stageman-say` lands in the thread of the message you are answering, so a \
+person can always see which of their messages you meant.
 
 **Decide rather than ask.** You may say anything you like, but nothing you say \
 comes back to you in this turn, and a person answering you starts a *new* turn \
@@ -236,8 +242,9 @@ A person said this to you on the channel:
 
 {said}
 
-Do what it asks, or answer it, or both. Say what you did with stageman-say \
-before you finish — a turn that says nothing is a turn nobody can see."
+Do what it asks, or answer it, or both. Then run `stageman-say` with your \
+answer before you finish: a turn that ends without running it has told nobody \
+anything, however much you wrote."
     )
 }
 
@@ -771,9 +778,14 @@ when you finish."
             super::opening("https://example.invalid/repo"),
             "You are the foreman for https://example.invalid/repo.
 
-People talk to you on a channel. Each message they send you arrives as its own turn, and you \
-answer with stageman-say, which takes what you want to say as its one argument. What you say \
-lands in the thread of the message you are answering, so a person can always see which of their \
+People talk to you on a channel. Each message they send you arrives as its own turn, and the \
+only way to answer is to **run the command-line program `stageman-say`**, which is installed in \
+this container. It is not a tool you can call — run it in a shell, the way you would run `git`:
+
+    stageman-say 'what you want to say'
+
+Nothing you write as ordinary output is seen by anybody. What you pass to `stageman-say` lands \
+in the thread of the message you are answering, so a person can always see which of their \
 messages you meant.
 
 **Decide rather than ask.** You may say anything you like, but nothing you say comes back to you \
@@ -796,8 +808,34 @@ told."
 
 look at the parser
 
-Do what it asks, or answer it, or both. Say what you did with stageman-say before you finish — \
-a turn that says nothing is a turn nobody can see."
+Do what it asks, or answer it, or both. Then run `stageman-say` with your answer before you \
+finish: a turn that ends without running it has told nobody anything, however much you wrote."
+        );
+    }
+
+    /// The instruction has to say `stageman-say` is a program, not a tool.
+    ///
+    /// **Found by running it.** The first version said "you answer with
+    /// stageman-say", which reads perfectly and behaved wrong: the agent
+    /// searched for a tool by that name, found none, and answered in ordinary
+    /// output that nobody sees. The job kickoff never had this problem because
+    /// it lists the program beside `git` and `gh`, which an agent already
+    /// knows are commands.
+    #[test]
+    fn a_foreman_is_told_that_saying_something_means_running_a_command() {
+        let told = super::opening("https://example.invalid/repo");
+
+        assert!(told.contains("command-line program"), "{told}");
+        assert!(told.contains("run it in a shell"), "{told}");
+        assert!(
+            told.contains("not a tool you can call"),
+            "the mistake it made was looking for a tool: {told}"
+        );
+        // And that ordinary output reaches nobody, which is why the agent
+        // believed it had answered when it had not.
+        assert!(
+            told.contains("Nothing you write as ordinary output"),
+            "{told}"
         );
     }
 
