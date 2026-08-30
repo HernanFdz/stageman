@@ -96,11 +96,13 @@ async fn propose() -> Result<(), String> {
         Project {
             name: "stageman".to_owned(),
             repository: repository.clone(),
-            orchestrator_agent: Agent::Claude,
+            foreman_agent: Agent::Claude,
             job_agents: std::collections::BTreeSet::from([Agent::Claude]),
             credentials,
             channels: std::collections::BTreeMap::new(),
             jobs: std::collections::BTreeMap::new(),
+            warrant: None,
+            attending: stageman_core::Attending::default(),
         },
     );
 

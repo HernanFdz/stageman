@@ -73,7 +73,7 @@ pub enum JobError {
 /// unanswered in `docs/open-questions.md` until there is a finished job to
 /// retire.
 ///
-/// `kickoff` is composed by the orchestrator and never here. A job executes
+/// `kickoff` is composed by the foreman and never here. A job executes
 /// instructions it did not write, which is what keeps every prompt in this
 /// system reviewable in one place — see `docs/architecture.md` §1.
 ///
@@ -94,9 +94,11 @@ pub async fn start(
 /// Puts a job back to work after its container stopped.
 ///
 /// Takes no handout: what a container was given at creation is part of it, so
-/// a restart is already authenticated. `notice` is what the agent is told about
+/// a restart is already authenticated. It does take the thread, because that
+/// is the one thing a container cannot keep — an environment is fixed at
+/// creation and a job's thread is written in before each start. `notice` is what the agent is told about
 /// having been interrupted, and like every other instruction it is composed by
-/// the orchestrator rather than invented here.
+/// the foreman rather than invented here.
 ///
 /// # Errors
 ///
@@ -107,9 +109,10 @@ pub async fn start(
 pub async fn resume(
     runtime: &ContainerRuntime,
     job: JobId,
+    thread: Option<&stageman_core::Thread>,
     notice: &str,
 ) -> Result<Answer, JobError> {
-    stageman_agent::resume(runtime, &container(job), notice)
+    stageman_agent::resume(runtime, &container(job), thread, notice)
         .await
         .map_err(JobError::Agent)
 }

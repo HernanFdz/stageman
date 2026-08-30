@@ -13,9 +13,10 @@ use tw_merge::tw_merge;
 #[non_exhaustive]
 pub enum BadgeTone {
     /// Something is happening now.
-    Running,
-    /// Something finished. Not that it succeeded — nothing here can see that.
-    Completed,
+    Working,
+    /// Something has stopped and can be given more. Not that it finished —
+    /// nothing here can see that, which is why the word is not *completed*.
+    Idle,
     /// Something went wrong and a person will want to know why.
     Failed,
     /// Everything else: a count, a name, a label carrying no verdict.
@@ -27,8 +28,8 @@ impl BadgeTone {
     /// The classes this tone renders with.
     const fn class(self) -> &'static str {
         match self {
-            Self::Running => "bg-running/10 text-running",
-            Self::Completed => "bg-completed/10 text-completed",
+            Self::Working => "bg-working/10 text-working",
+            Self::Idle => "bg-idle/10 text-idle",
             Self::Failed => "bg-failed/10 text-failed",
             Self::Neutral => "bg-surface-muted text-muted-foreground",
         }
@@ -78,8 +79,8 @@ mod tests {
     /// Listed by hand, which is the weakness of this test and worth knowing:
     /// a variant added without a line here is a variant nothing below checks.
     const EVERY: &[BadgeTone] = &[
-        BadgeTone::Running,
-        BadgeTone::Completed,
+        BadgeTone::Working,
+        BadgeTone::Idle,
         BadgeTone::Failed,
         BadgeTone::Neutral,
     ];

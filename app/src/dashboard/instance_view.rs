@@ -180,9 +180,9 @@ fn Summary(instance: Instance) -> Element {
                                     "{project.repository}"
                                 }
                                 span { class: "ml-auto shrink-0",
-                                    if project.running > 0 {
-                                        Badge { tone: BadgeTone::Running,
-                                            "{project.running} of {project.jobs} running"
+                                    if project.working > 0 {
+                                        Badge { tone: BadgeTone::Working,
+                                            "{project.working} of {project.jobs} working"
                                         }
                                     } else {
                                         Badge { "{project.jobs} job(s)" }

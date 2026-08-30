@@ -27,12 +27,53 @@
 // is a job that cannot speak. Nothing about this needs module scope.
 const ENDPOINT = "https://slack.com/api/chat.postMessage";
 
-async function say() {
-  const message = process.argv[2];
-  if (process.argv.length !== 3 || message.trim() === "") {
-    console.error("usage: stageman-say '<what to say>'");
-    console.error("Speaks once, on the channel bound to this project.");
+// **Read by an agent, so it is instruction rather than reference.** Agents
+// reach for `--help` before using an unfamiliar command, which is how this
+// came to exist: without it the flag was taken as the message and "--help"
+// was posted to the channel, twice, before anybody noticed.
+const USAGE = `usage: stageman-say '<what to say>'
+
+Says one thing on the channel this project is bound to, in the thread of
+whatever is being answered. Takes exactly one argument, which is the whole
+message — there are no other options.
+
+  stageman-say 'I have opened a pull request for the parser fix.'
+
+Use -- first if the message itself begins with a dash:
+
+  stageman-say -- '-- and then the second point'`;
+
+// The single argument a tool here takes, or `null` when it has already said
+// what it needed to and the caller should stop.
+//
+// Shared shape between both tools in this image: help on request, a refusal
+// for anything else that looks like an option, and `--` to say that what
+// follows is the message however it begins. Without the refusal, a mistyped
+// flag is silently published to a channel, which is the failure this exists
+// to prevent rather than a tidiness.
+function only(args, usage) {
+  if (args.length === 1 && (args[0] === "--help" || args[0] === "-h")) {
+    console.log(usage);
+    process.exit(0);
+  }
+
+  const given = args[0] === "--" ? args.slice(1) : args;
+  if (args[0] !== "--" && typeof args[0] === "string" && args[0].startsWith("-")) {
+    console.error(`stageman-say: ${args[0]} is not an option.\n`);
+    console.error(usage);
     process.exit(2);
+  }
+  if (given.length !== 1 || given[0].trim() === "") {
+    console.error(usage);
+    process.exit(2);
+  }
+  return given[0];
+}
+
+async function say() {
+  const message = only(process.argv.slice(2), USAGE);
+  if (message === null) {
+    return;
   }
 
   const token = process.env.STAGEMAN_SLACK_TOKEN;
@@ -53,8 +94,23 @@ async function say() {
   // It stays a string the whole way. It looks like a number and is not one —
   // parsed as a float it loses the microseconds and addresses no message, and
   // the failure reads like a permissions problem rather than a rounding one.
+  //
+  // **Read from a file rather than the environment, and that is the whole
+  // reason this file exists.** A container's environment is fixed when it is
+  // created and no runtime can change it on restart, so a variable can only
+  // carry a value constant for the container's whole life. A job's thread is;
+  // a foreman's is not, because one long-lived container answers a different
+  // thread every turn. The daemon writes this before each start.
+  //
+  // No file means speak at the root of the channel, which is a real answer
+  // rather than a missing one.
   const payload = { channel, text: message };
-  const thread = process.env.STAGEMAN_SLACK_THREAD;
+  let thread = null;
+  try {
+    thread = require("node:fs").readFileSync("/tmp/stageman-thread", "utf8").trim();
+  } catch {
+    thread = null;
+  }
   if (thread) {
     payload.thread_ts = thread;
   }

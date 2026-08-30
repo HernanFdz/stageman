@@ -40,7 +40,7 @@
     /* One colour per job state, and no more. `docs/conventions.md` §2 says a
        job has three, so this has three — a fourth token would be an invitation
        to invent a fourth state in the view rather than in the domain. */
-    --color-running: #2f6f4e;
-    --color-completed: #4a6d8c;
+    --color-working: #2f6f4e;
+    --color-idle: #4a6d8c;
     --color-failed: #a33a2c;
 }

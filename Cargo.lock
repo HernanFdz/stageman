@@ -3695,8 +3695,8 @@ dependencies = [
  "serde_json",
  "stageman-agent",
  "stageman-core",
+ "stageman-foreman",
  "stageman-job",
- "stageman-orchestrator",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -3713,6 +3713,7 @@ version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
  "futures",
+ "mutants",
  "parking_lot",
  "stageman-core",
  "thiserror 2.0.20",
@@ -3735,6 +3736,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "stageman-foreman"
+version = "0.1.0"
+dependencies = [
+ "stageman-agent",
+ "stageman-core",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "stageman-job"
 version = "0.1.0"
 dependencies = [
@@ -3742,14 +3752,6 @@ dependencies = [
  "stageman-core",
  "thiserror 2.0.20",
  "tokio",
-]
-
-[[package]]
-name = "stageman-orchestrator"
-version = "0.1.0"
-dependencies = [
- "stageman-agent",
- "stageman-core",
 ]
 
 [[package]]

@@ -1,7 +1,7 @@
 //! The projects an instance watches, and what each one needs in order to work.
 //!
 //! The screen that makes an instance able to *do* something. It comes after
-//! agents because a project names one agent for its orchestrator and a
+//! agents because a project names one agent for its foreman and a
 //! non-empty set its jobs may use, and both have to be configured before a
 //! project may name them — `docs/decisions/0021-an-instance-starts-empty.md`.
 //!
@@ -36,8 +36,8 @@ pub struct Project {
     pub name: String,
     /// Where its jobs work.
     pub repository: String,
-    /// The agent its orchestrator thinks with.
-    pub orchestrator: String,
+    /// The agent its foreman thinks with.
+    pub foreman: String,
     /// The agents its jobs may run on. Never empty in a valid instance.
     pub job_agents: Vec<String>,
     /// The platforms it has a credential for.
@@ -47,7 +47,7 @@ pub struct Project {
     /// `docs/decisions/0005-conversation-happens-on-channels.md`.
     pub channels: Vec<String>,
     /// How many of its jobs are still running.
-    pub running: usize,
+    pub working: usize,
     /// How many jobs it has had, running or finished.
     pub jobs: usize,
 }
@@ -60,7 +60,7 @@ impl Project {
     /// be lying, and this is the only thing keeping the two answers the same.
     #[must_use]
     pub const fn idle(&self) -> bool {
-        self.running == 0
+        self.working == 0
     }
 }
 
@@ -121,14 +121,14 @@ pub async fn projects() -> DashboardResult<Watching> {
 pub async fn create(
     name: String,
     repository: String,
-    orchestrator: String,
+    foreman: String,
     job_agents: Vec<String>,
     credential: String,
     channel: ChannelDraft,
 ) -> DashboardResult<Watching> {
     let name = required("name", &name)?;
     let repository = required("repository", &repository)?;
-    let orchestrator_agent = super::named(&orchestrator)?;
+    let foreman_agent = super::named(&foreman)?;
     let credential = required("credential", &credential)?;
     if job_agents.is_empty() {
         return Err(DashboardError::JobAgentsMissing);
@@ -165,7 +165,7 @@ pub async fn create(
         stageman_core::Project {
             name,
             repository,
-            orchestrator_agent,
+            foreman_agent,
             job_agents,
             // One platform, so one field. A second would make this a list
             // here and on the form, and the closed set in the domain is what
@@ -176,6 +176,8 @@ pub async fn create(
             )]),
             channels,
             jobs: std::collections::BTreeMap::new(),
+            warrant: None,
+            attending: stageman_core::Attending::default(),
         },
     );
     candidate
@@ -258,10 +260,10 @@ pub async fn forget(project: String) -> DashboardResult<Watching> {
         drop(state);
         return Err(DashboardError::UnknownProject { id: project });
     };
-    if let Some(running) = busy(watched) {
+    if let Some(working) = busy(watched) {
         let name = watched.name.clone();
         drop(state);
-        return Err(DashboardError::ProjectBusy { name, running });
+        return Err(DashboardError::ProjectBusy { name, working });
     }
 
     state.projects.remove(&identifier);
@@ -284,7 +286,7 @@ fn busy(project: &stageman_core::Project) -> Option<usize> {
     let running = project
         .jobs
         .values()
-        .filter(|job| job.progress == stageman_core::Progress::Running)
+        .filter(|job| job.progress == stageman_core::Progress::Working)
         .count();
 
     (running > 0).then_some(running)
@@ -428,7 +430,7 @@ pub fn ProjectsView() -> Element {
                                         // abandoned half-filled does not
                                         // reopen holding what was abandoned.
                                         draft.set(Draft {
-                                            orchestrator: first.clone().unwrap_or_default(),
+                                            foreman: first.clone().unwrap_or_default(),
                                             job_agents: first.clone().into_iter().collect(),
                                             ..Draft::default()
                                         });
@@ -478,7 +480,7 @@ pub fn ProjectsView() -> Element {
                                         match create(
                                                 asked.name,
                                                 asked.repository,
-                                                asked.orchestrator,
+                                                asked.foreman,
                                                 asked.job_agents,
                                                 asked.credential,
                                                 asked.channel,
@@ -556,15 +558,15 @@ fn WatchedProject(project: Project) -> Element {
                     "{project.repository}"
                 }
                 span { class: "ml-auto shrink-0",
-                    if project.running > 0 {
-                        Badge { tone: BadgeTone::Running, "{project.running} of {project.jobs} running" }
+                    if project.working > 0 {
+                        Badge { tone: BadgeTone::Working, "{project.working} of {project.jobs} working" }
                     } else {
                         Badge { "{project.jobs} job(s)" }
                     }
                 }
             }
             p { class: "text-xs text-muted-foreground",
-                "thinks with {project.orchestrator} · runs jobs on {project.job_agents.join(\", \")}"
+                "thinks with {project.foreman} · runs jobs on {project.job_agents.join(\", \")}"
                 if project.platforms.is_empty() {
                     " · no credential"
                 }
@@ -632,8 +634,8 @@ pub struct Draft {
     pub name: String,
     /// Where its jobs work.
     pub repository: String,
-    /// The agent its orchestrator thinks with.
-    pub orchestrator: String,
+    /// The agent its foreman thinks with.
+    pub foreman: String,
     /// The agents its jobs may run on.
     pub job_agents: Vec<String>,
     /// What reaches the repository.
@@ -655,7 +657,7 @@ impl fmt::Debug for Draft {
         f.debug_struct("Draft")
             .field("name", &self.name)
             .field("repository", &self.repository)
-            .field("orchestrator", &self.orchestrator)
+            .field("foreman", &self.foreman)
             .field("job_agents", &self.job_agents)
             .field("credential", &"<redacted>")
             .field("channel", &self.channel)
@@ -686,7 +688,7 @@ impl Draft {
     pub fn is_complete(&self) -> bool {
         !self.name.trim().is_empty()
             && !self.repository.trim().is_empty()
-            && !self.orchestrator.is_empty()
+            && !self.foreman.is_empty()
             && !self.job_agents.is_empty()
             && !self.credential.trim().is_empty()
             && self.channel.address.trim().is_empty() == self.channel.credential.trim().is_empty()
@@ -731,9 +733,9 @@ fn ProjectForm(draft: Signal<Draft>, available: Vec<Agent>) -> Element {
             Field { label: "Thinks with",
                 select {
                     class: FIELD,
-                    value: "{draft().orchestrator}",
+                    value: "{draft().foreman}",
                     onchange: move |event| {
-                        draft.with_mut(|draft| draft.orchestrator = event.value());
+                        draft.with_mut(|draft| draft.foreman = event.value());
                     },
                     for agent in available.iter() {
                         option { key: "{agent.id}", value: "{agent.id}", "{agent.name}" }
@@ -873,10 +875,12 @@ mod server_tests {
         Project {
             name: "aviary".to_owned(),
             repository: "https://example.invalid/aviary".to_owned(),
-            orchestrator_agent: Agent::Claude,
+            foreman_agent: Agent::Claude,
             job_agents: BTreeSet::from([Agent::Claude]),
             credentials: BTreeMap::new(),
             channels: BTreeMap::new(),
+            warrant: None,
+            attending: stageman_core::Attending::default(),
             // Freshly minted rather than derived from a position, which would
             // need a conversion that can fail — and the gate is right that
             // defaulting such a conversion would silently give two jobs the
@@ -899,7 +903,7 @@ mod server_tests {
         assert_eq!(busy(&holding(&[])), None);
         assert_eq!(
             busy(&holding(&[
-                Progress::Completed,
+                Progress::Idle,
                 Progress::Failed("it did not work".to_owned())
             ])),
             None
@@ -940,7 +944,7 @@ mod server_tests {
     /// Two projects on one channel is refused, and the holder is named.
     ///
     /// The invariant inbound rests on. A message at the root would otherwise
-    /// belong to whichever orchestrator the search reached first — an ordering
+    /// belong to whichever foreman the search reached first — an ordering
     /// rather than an answer — and if both listened, both would hear every
     /// message and one job's reply would be delivered twice.
     #[test]
@@ -951,7 +955,7 @@ mod server_tests {
             Project {
                 name: "aviary".to_owned(),
                 repository: "https://example.invalid/aviary".to_owned(),
-                orchestrator_agent: Agent::Claude,
+                foreman_agent: Agent::Claude,
                 job_agents: BTreeSet::from([Agent::Claude]),
                 credentials: BTreeMap::new(),
                 channels: BTreeMap::from([(
@@ -963,6 +967,8 @@ mod server_tests {
                     },
                 )]),
                 jobs: BTreeMap::new(),
+                warrant: None,
+                attending: stageman_core::Attending::default(),
             },
         );
 
@@ -1069,12 +1075,12 @@ mod server_tests {
     /// able to name.
     #[test]
     fn a_project_is_busy_for_exactly_its_running_jobs() {
-        assert_eq!(busy(&holding(&[Progress::Running])), Some(1));
+        assert_eq!(busy(&holding(&[Progress::Working])), Some(1));
         assert_eq!(
             busy(&holding(&[
-                Progress::Running,
-                Progress::Completed,
-                Progress::Running,
+                Progress::Working,
+                Progress::Idle,
+                Progress::Working,
             ])),
             Some(2)
         );
@@ -1086,16 +1092,16 @@ mod tests {
     use super::{ChannelDraft, Draft, Project};
 
     /// One project, with however many jobs running.
-    fn watched(running: usize, jobs: usize) -> Project {
+    fn watched(working: usize, jobs: usize) -> Project {
         Project {
             id: "an-identifier".to_owned(),
             name: "aviary".to_owned(),
             repository: "https://example.invalid/aviary".to_owned(),
-            orchestrator: "Claude".to_owned(),
+            foreman: "Claude".to_owned(),
             job_agents: vec!["Claude".to_owned()],
             platforms: Vec::new(),
             channels: Vec::new(),
-            running,
+            working,
             jobs,
         }
     }
@@ -1106,7 +1112,7 @@ mod tests {
         Draft {
             name: "aviary".to_owned(),
             repository: "https://example.invalid/aviary".to_owned(),
-            orchestrator: "claude".to_owned(),
+            foreman: "claude".to_owned(),
             job_agents: vec!["claude".to_owned()],
             credential: "ghp-not-a-real-token".to_owned(),
             channel: ChannelDraft {
@@ -1137,7 +1143,7 @@ mod tests {
     fn a_draft_missing_any_answer_is_not() {
         assert!(!without(|draft| draft.name.clear()).is_complete());
         assert!(!without(|draft| draft.repository.clear()).is_complete());
-        assert!(!without(|draft| draft.orchestrator.clear()).is_complete());
+        assert!(!without(|draft| draft.foreman.clear()).is_complete());
         assert!(!without(|draft| draft.job_agents.clear()).is_complete());
         assert!(!without(|draft| draft.credential.clear()).is_complete());
     }

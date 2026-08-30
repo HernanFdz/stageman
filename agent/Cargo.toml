@@ -16,6 +16,10 @@ agent-client-protocol = "2.0.0"
 futures = "0.3.34"
 parking_lot = "0.12.5"
 stageman-core.workspace = true
+# An attribute and nothing else — it compiles to nothing unless cargo-mutants
+# is the one building. Needed because the container-driving functions here are
+# covered only by tests the gate cannot run.
+mutants = "0.0.4"
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["process", "io-util"] }
 tokio-util = { version = "0.7.19", features = ["compat"] }

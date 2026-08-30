@@ -48,10 +48,10 @@ first.
   adapters that implement it. Two shapes and one contract: a one-shot
   structured query, and a session bound to a workspace. Nothing outside an
   adapter may be specific to one agent.
-- **orchestrator** — the deciding, for one project. Watches that project's
+- **foreman** — the deciding, for one project. Watches that project's
   channels and judges what each signal deserves. One per project rather than
   one per instance, because watching needs the project's own credentials and a
-  shared orchestrator would hold every project's at once — see
+  shared foreman would hold every project's at once — see
   `docs/decisions/0020-the-orchestrator-belongs-to-a-project.md`. A job is one possible reaction and not the only one — doing
   nothing, and answering on the channel, are reactions too. That is worth
   stating because "creates jobs" is the shape this crate drifts into the moment
@@ -72,7 +72,7 @@ first.
   `docs/decisions/0009-jobs-hold-their-own-platform-credentials.md`. Which agent
   ran it is recorded on the job.
 - **app** — the Dioxus fullstack binary. Serves the dashboard and runs the
-  orchestrators — one per project — in the same process; running this is what
+  foremen — one per project — in the same process; running this is what
   running stageman means.
   It operates the instance — projects, credentials, logs, stopping a job — and
   never talks to one. Conversation with a running job belongs to a channel, so
@@ -88,7 +88,7 @@ first.
   from cargo.
 
 Dependencies point inward. **core** names nothing. **agent** may name **core**.
-**orchestrator** and **job** may name **core** and **agent** — both run agents,
+**foreman** and **job** may name **core** and **agent** — both run agents,
 for different shapes of work — and may never name each other; everything they
 share is a type in **core**, which is what keeps the deciding and the doing from
 growing into one another. **app** may name all four; nothing may name **app**.
@@ -98,10 +98,10 @@ crates: **nothing served to a browser may name any of the four.** The rule
 looks like the same one and is not — the others are about what a crate is
 allowed to know, and this one is about what leaves the machine.
 
-So the orchestrator does not start a job, despite being the thing that decides
+So the foreman does not start a job, despite being the thing that decides
 one should exist. It emits a request as a **core** type, and **app** — the only
 crate allowed to name both sides — hands that request to **job**. This is worth
-a sentence of its own because "the orchestrator creates jobs" is the natural
+a sentence of its own because "the foreman creates jobs" is the natural
 reading of the bullet above, and acting on that reading is the first thing that
 breaks the rule.
 
@@ -111,7 +111,7 @@ mismatch is deliberate and one half of it is load-bearing; the reason is in
 `docs/conventions.md` §3.
 
 The asymmetry worth noticing: instructions only ever flow one way. The
-orchestrator composes the prompt a job starts from, and a job never writes its
+foreman composes the prompt a job starts from, and a job never writes its
 own. Every place in the system where an instruction is *authored* is therefore
 in one crate, which is what makes §4 of `docs/conventions.md` enforceable at
 all.
@@ -209,7 +209,7 @@ a proposal is what lets a job run unattended at all, and is the reason no part
 of this system needs a credential that can merge — see
 `docs/decisions/0002-never-merge-never-deploy.md`.
 
-A project's orchestrator runs inside **app** rather than beside it because the
+A project's foreman runs inside **app** rather than beside it because the
 constraint in `docs/vision.md` §3 is that one operator runs this on their own
 machine: a second daemon is a second thing to install, supervise and restart,
 and buys nothing while both halves live and die together anyway. The cost is
@@ -237,7 +237,7 @@ usefully, the evidence — most of which stays true whichever way the choice had
 gone.
 
 The reason the **job** crate hosts nothing, despite an earlier design in which
-the orchestrator hosted the tools an agent used to reach the world, is
+the foreman hosted the tools an agent used to reach the world, is
 `docs/decisions/0009-jobs-hold-their-own-platform-credentials.md` — the most
 consequential reversal taken so far, and the one most worth reading before
 changing anything here.

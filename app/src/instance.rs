@@ -16,8 +16,8 @@ use rand::rngs::{StdRng, SysRng};
 use rand::{Rng as _, SeedableRng as _};
 use stageman_agent::{Answer, ContainerRuntime, StopReason};
 use stageman_core::{
-    Agent, Handout, Inconsistent, Job, JobId, Key, NONCE_LEN, Nonce, OpenError, Progress,
-    ProjectId, SealError, Snapshot, Speaking, State, Thread, Timestamp,
+    Agent, Errand, Handout, Inconsistent, Job, JobId, Key, NONCE_LEN, Nonce, OpenError, Progress,
+    ProjectId, SealError, Snapshot, Speaking, State, Taken, Thread, Timestamp,
 };
 
 /// An instance could not be opened.
@@ -248,6 +248,9 @@ impl Drop for StateGuard<'_> {
 /// A job could not be created.
 #[derive(Debug, thiserror::Error)]
 pub enum RunError {
+    /// A foreman's turn could not be taken.
+    #[error("the foreman could not take a turn: {0}")]
+    Foreman(String),
     /// The project is not one this instance watches.
     #[error("no project {0} in this instance")]
     UnknownProject(ProjectId),
@@ -321,7 +324,7 @@ impl Started {
 /// it can only answer with the job if the job already exists.
 ///
 /// The instruction the agent begins from is composed here, from the work, by
-/// the orchestrator. Nothing else composes one: `docs/architecture.md` §1 puts
+/// the foreman. Nothing else composes one: `docs/architecture.md` §1 puts
 /// every place an instruction is authored in that one crate, which is what
 /// makes the snapshot-testing rule in `docs/conventions.md` §4 mean anything.
 ///
@@ -356,13 +359,13 @@ pub fn begin(
     // disagree, and the way that shows up is a job told to run a tool whose
     // credential it was not given.
     let voice = if handout.channels().next().is_some() {
-        stageman_orchestrator::Voice::Channel
+        stageman_foreman::Voice::Channel
     } else {
-        stageman_orchestrator::Voice::Silent
+        stageman_foreman::Voice::Silent
     };
-    let kickoff = stageman_orchestrator::kickoff(&repository, work, voice);
+    let kickoff = stageman_foreman::kickoff(&repository, work, voice);
     let job = JobId::from_uuid(uuid::Uuid::new_v4());
-    let announcement = stageman_orchestrator::announcement(&repository, reason, job);
+    let announcement = stageman_foreman::announcement(&repository, reason, job);
 
     {
         let mut state = store.update();
@@ -374,7 +377,7 @@ pub fn begin(
                     reason: reason.to_owned(),
                     kickoff: kickoff.clone(),
                     created_at: Timestamp::now(),
-                    progress: Progress::Running,
+                    progress: Progress::Working,
                     thread: None,
                 },
             );
@@ -487,7 +490,7 @@ pub async fn supervise(
     // it could; this says the one thing the agent cannot, which is that it has
     // stopped and a reply now reaches it — and it is the only thing said at all
     // when the agent was what failed.
-    notice(store, job, stageman_orchestrator::attention_notice()).await;
+    notice(store, job, stageman_foreman::attention_notice()).await;
     (job, progress)
 }
 
@@ -543,10 +546,10 @@ fn accepting(state: &mut State, job: JobId) -> Accepted {
     let Some(recorded) = state.job_mut(job) else {
         return Accepted::Unknown;
     };
-    if recorded.progress == Progress::Running {
+    if recorded.progress == Progress::Working {
         return Accepted::Busy;
     }
-    recorded.progress = Progress::Running;
+    recorded.progress = Progress::Working;
     Accepted::Taken
 }
 
@@ -588,13 +591,24 @@ pub async fn deliver(
     match taken {
         Accepted::Unknown => return Progress::Failed("no such job".to_owned()),
         Accepted::Busy => {
-            notice(store, job, stageman_orchestrator::busy_notice()).await;
-            return Progress::Running;
+            notice(store, job, stageman_foreman::busy_notice()).await;
+            return Progress::Working;
         }
         Accepted::Taken => {}
     }
 
-    let progress = match stageman_job::resume(runtime, job, said).await {
+    // A job's thread never changes, but it still has to be written in before
+    // each start: an environment is fixed at creation, so nothing the container
+    // was given at birth can be counted on to still be there in the shape a
+    // long-lived one needs. Read from the record rather than remembered.
+    let speaking = {
+        let state = store.read();
+        let thread = state.job(job).and_then(|recorded| recorded.thread.clone());
+        drop(state);
+        thread
+    };
+
+    let progress = match stageman_job::resume(runtime, job, speaking.as_ref(), said).await {
         Ok(answer) => outcome(&answer),
         Err(error) => Progress::Failed(because(&error)),
     };
@@ -602,14 +616,14 @@ pub async fn deliver(
         tracing::warn!(%job, %why, "the reply did not reach the job");
     }
     record(store, job, progress.clone());
-    notice(store, job, stageman_orchestrator::attention_notice()).await;
+    notice(store, job, stageman_foreman::attention_notice()).await;
     progress
 }
 
 /// Creates a job on a project and runs it to completion.
 ///
 /// The whole of the doing, in the one crate allowed to name both the store and
-/// the job — `docs/architecture.md` §1. What the orchestrator will eventually
+/// the job — `docs/architecture.md` §1. What the foreman will eventually
 /// decide (which project, which agent, why, and what work) arrives here as
 /// arguments, because nothing decides it yet.
 ///
@@ -688,7 +702,7 @@ pub struct Swept {
 ///
 /// It resumes each job in turn and waits for it, which is right while nothing
 /// else is running and wrong the moment there is a dashboard to serve.
-/// `docs/conventions.md` §3 says orchestrator work never happens on the
+/// `docs/conventions.md` §3 says foreman work never happens on the
 /// request path; this is not on one yet, but a startup that waits for several
 /// agents to finish is a dashboard that does not appear for minutes. Whoever
 /// adds the server moves this onto its own task, and the shape of it will want
@@ -726,10 +740,10 @@ pub async fn reconcile(
     // arithmetic that can overflow, and the escape hatches that quiet it are
     // exactly the ones `.quality/gate-reference.md` warns produce silent wrong
     // values — a counter is not worth either.
-    let believed_running: Vec<JobId> = store.read().running().collect();
+    let believed_working: Vec<JobId> = store.read().working().collect();
     let mut attended: Vec<Attended> = Vec::new();
 
-    for job in believed_running {
+    for job in believed_working {
         if !has_container(&left, job) {
             // Believed running with nothing to run in. Not resumable and not
             // removable, because there is nothing there — so it is recorded as
@@ -745,13 +759,23 @@ pub async fn reconcile(
             continue;
         }
 
-        let progress =
-            match stageman_job::resume(runtime, job, stageman_orchestrator::resumption_notice())
-                .await
-            {
-                Ok(answer) => outcome(&answer),
-                Err(error) => Progress::Failed(because(&error)),
-            };
+        let speaking = {
+            let state = store.read();
+            let thread = state.job(job).and_then(|recorded| recorded.thread.clone());
+            drop(state);
+            thread
+        };
+        let progress = match stageman_job::resume(
+            runtime,
+            job,
+            speaking.as_ref(),
+            stageman_foreman::resumption_notice(),
+        )
+        .await
+        {
+            Ok(answer) => outcome(&answer),
+            Err(error) => Progress::Failed(because(&error)),
+        };
         if let Progress::Failed(ref why) = progress {
             tracing::warn!(%job, %why, "could not be put back to work");
         }
@@ -782,8 +806,8 @@ impl From<&Progress> for Attended {
     /// opposite of what happened, and nothing noticed.
     fn from(progress: &Progress) -> Self {
         match progress {
-            Progress::Completed => Self::Resumed,
-            Progress::Running | Progress::Failed(_) => Self::Failed,
+            Progress::Idle => Self::Resumed,
+            Progress::Working | Progress::Failed(_) => Self::Failed,
         }
     }
 }
@@ -839,7 +863,19 @@ fn has_container(left: &[stageman_job::Abandoned], job: JobId) -> bool {
 fn unplaceable<'a>(left: &'a [stageman_job::Abandoned], state: &State) -> Vec<Unplaceable<'a>> {
     left.iter()
         .filter_map(|abandoned| match abandoned.job {
-            None => Some(Unplaceable::Unidentified(&abandoned.container)),
+            // A name no *job* claims may still be a foreman's, and a foreman's
+            // is placed rather than reported: it belongs to a project this
+            // instance watches and is exactly where that foreman's session
+            // lives. Without this it would be counted as a name this version
+            // cannot read — which `Swept::unidentified` describes as odd and
+            // benign, and a foreman's container is neither.
+            None => match stageman_foreman::project_of(&abandoned.container) {
+                Some(project) if state.projects.contains_key(&project) => None,
+                // A foreman's container for a project that is gone is the
+                // same loss as a forgotten job's: the name parsed, and what it
+                // names is not here.
+                Some(_) | None => Some(Unplaceable::Unidentified(&abandoned.container)),
+            },
             Some(job) if state.job(job).is_none() => {
                 Some(Unplaceable::Forgotten(&abandoned.container, job))
             }
@@ -863,7 +899,7 @@ fn unplaceable<'a>(left: &'a [stageman_job::Abandoned], state: &State) -> Vec<Un
 /// does something different about each.
 fn outcome(answer: &Answer) -> Progress {
     if answer.stop_reason == StopReason::EndTurn {
-        Progress::Completed
+        Progress::Idle
     } else {
         Progress::Failed(format!("the agent stopped: {:?}", answer.stop_reason))
     }
@@ -881,6 +917,251 @@ fn record(store: &Store, job: JobId, progress: Progress) {
     }
 }
 
+/// Hands a message to a project's foreman, and keeps it working until its
+/// inbox is empty.
+///
+/// Skipped by mutation testing because it decides nothing: whether this call
+/// drives the loop, what to work on next, and what happens when a turn ends
+/// are three functions beside it, all tested without a runtime. What is left
+/// here is a loop and two awaits.
+///
+/// **One turn is not the unit; draining is.** A foreman that took a message,
+/// answered it and stopped would leave whatever arrived meanwhile waiting for
+/// the next arrival to wake it — so the loop here is what
+/// `Attending::finish` exists for, and running until it answers `None` is the
+/// only thing that returns a foreman to idle.
+///
+/// Returns without doing anything when the foreman is already working: the
+/// message has been put in its inbox by then, and whichever call is running
+/// the loop will reach it. That is the same one-operation rule the inbox is
+/// built on — two messages arriving together cannot both start a loop, because
+/// only one of them finds it idle.
+#[mutants::skip]
+pub async fn attend(store: &Store, runtime: &ContainerRuntime, project: ProjectId, said: Errand) {
+    // Kept before the message is moved into the inbox, because the answer to
+    // it belongs under the message that asked.
+    let thread = said.thread.clone();
+    let (started, ahead) = {
+        let mut state = store.update();
+        let attending = state
+            .projects
+            .get_mut(&project)
+            .map(|watched| &mut watched.attending);
+        let outcome = attending.map(|attending| {
+            let taken = attending.take(said);
+            // Counting the one in hand: from outside, everything not yet
+            // answered is ahead of this.
+            let ahead = match taken {
+                Taken::Started => 0,
+                Taken::Waiting => attending.waiting(),
+            };
+            (taken, ahead)
+        });
+        drop(state);
+        match outcome {
+            Some((taken, ahead)) => (Some(taken), ahead),
+            None => (None, 0),
+        }
+    };
+
+    // Said at once, before any work. A foreman three messages behind is silent
+    // for a while, and somebody who hears nothing cannot tell queued from
+    // ignored.
+    if started.is_some() {
+        notice_in(
+            store,
+            project,
+            &thread,
+            &stageman_foreman::received_notice(ahead),
+        )
+        .await;
+    }
+
+    if !drives(started) {
+        return;
+    }
+
+    loop {
+        // Read and released before the turn, never held across it. Kept in the
+        // `while let` scrutinee this lock lived until the end of the body —
+        // which is an await and a write — so the first turn would have waited
+        // on a lock it was itself holding. The compiler's lint about a
+        // temporary with a significant drop is what caught it.
+        let waiting = {
+            let state = store.read();
+            let waiting = waiting_on(&state, project);
+            drop(state);
+            waiting
+        };
+        let Some(errand) = waiting else {
+            break;
+        };
+        let outcome = turn(store, runtime, project, &errand).await;
+        if let Err(why) = outcome {
+            // Logged and moved past rather than retried. A message that cannot
+            // be handled must not become a message that is handled for ever,
+            // and the person who sent it is told on their own thread.
+            tracing::warn!(%project, %why, "the foreman's turn did not finish");
+            notice_in(
+                store,
+                project,
+                &errand.thread,
+                stageman_foreman::stuck_notice(),
+            )
+            .await;
+        }
+        let done = {
+            let mut state = store.update();
+            let done = state
+                .projects
+                .get_mut(&project)
+                .is_none_or(|watched| watched.attending.finish().is_none());
+            drop(state);
+            done
+        };
+        if done {
+            break;
+        }
+    }
+}
+
+/// Whether this call is the one that drives the foreman's loop.
+///
+/// Only the message that found it idle does. Extracted because it is a
+/// comparison, and mutation testing inverted it without a test noticing —
+/// which would have every message either run a second loop over the same
+/// container or return having done nothing at all.
+const fn drives(taken: Option<Taken>) -> bool {
+    matches!(taken, Some(Taken::Started))
+}
+
+/// What the foreman should be working on now, if anything.
+///
+/// Over a state rather than a store, so the answer can be asked for without
+/// one — the same split the rest of this crate uses wherever a decision would
+/// otherwise be reachable only through I/O.
+fn waiting_on(state: &State, project: ProjectId) -> Option<Errand> {
+    state
+        .projects
+        .get(&project)
+        .and_then(|watched| watched.attending.on().cloned())
+}
+
+/// Runs one of a foreman's turns.
+///
+/// The handout is narrowed to the thread the message arrived in, so everything
+/// the foreman says while answering lands under what it is answering. That is
+/// the whole of why an `Errand` carries a thread.
+#[mutants::skip]
+async fn turn(
+    store: &Store,
+    runtime: &ContainerRuntime,
+    project: ProjectId,
+    errand: &Errand,
+) -> Result<(), RunError> {
+    // Minted here rather than in the domain, which takes no randomness by
+    // design, and lazily rather than at project creation: a project whose
+    // foreman never runs never needs one, and every project that already
+    // exists has none.
+    {
+        let mut state = store.update();
+        if let Some(watched) = state.projects.get_mut(&project)
+            && watched.warrant.is_none()
+        {
+            watched.warrant = Some(minted_warrant());
+        }
+        drop(state);
+    }
+
+    let (repository, handout) = {
+        let state = store.read();
+        let repository = state
+            .projects
+            .get(&project)
+            .ok_or(RunError::UnknownProject(project))?
+            .repository
+            .clone();
+        let handout = Handout::for_foreman(&state, project)
+            .map_err(RunError::Handout)?
+            .speaking_in(errand.thread.clone());
+        drop(state);
+        (repository, handout)
+    };
+
+    // Read now rather than at the start of the session, because a project's
+    // set of job agents is edited from the dashboard and a session outlives
+    // those edits.
+    let agents: Vec<(&'static str, &'static str)> = {
+        let state = store.read();
+        let named = state
+            .projects
+            .get(&project)
+            .map_or_else(Vec::new, |watched| {
+                watched
+                    .job_agents
+                    .iter()
+                    .map(|agent| (crate::dashboard::wire_name(*agent).0, agent.description()))
+                    .collect()
+            });
+        drop(state);
+        named
+    };
+
+    stageman_foreman::attend(
+        runtime,
+        &handout,
+        project,
+        &repository,
+        &crate::asking::endpoint(*crate::asking::PORT),
+        &agents,
+        &errand.said,
+    )
+    .await
+    .map(drop)
+    .map_err(|why| RunError::Foreman(why.to_string()))
+}
+
+/// A fresh warrant.
+///
+/// Two version-four identifiers, which is what this crate already mints
+/// anything unguessable from — a job's identifier and a project's are both
+/// this. Using the same source keeps one answer to "where does an unguessable
+/// value here come from" rather than introducing an encoding and a second
+/// generator for one field.
+///
+/// Two rather than one for margin: one is already past brute force at 122
+/// bits, and a warrant is the single thing standing between any container on
+/// the machine and a foreman's authority. Measured, not assumed: an unrelated
+/// container reaches this daemon as easily as a foreman's does.
+fn minted_warrant() -> stageman_core::Secret {
+    stageman_core::Secret::new(format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4()))
+}
+
+/// Says something in a thread on the instance's own behalf.
+///
+/// Skipped by mutation testing for the reason the other speaking functions
+/// are: it decides nothing. Where to speak is `speaking_for` above, and what
+/// to say is authored in the foreman crate and asserted there.
+#[mutants::skip]
+async fn notice_in(store: &Store, project: ProjectId, thread: &Thread, text: &str) {
+    let speaking = {
+        let state = store.read();
+        let bound = state
+            .projects
+            .get(&project)
+            .and_then(|watched| watched.channels.get(&thread.channel))
+            .map(stageman_core::ChannelConfig::speaking);
+        drop(state);
+        bound
+    };
+    let Some(bound) = speaking else {
+        return;
+    };
+    if let Err(why) = crate::channel::say_in(&bound, thread, text).await {
+        tracing::warn!(%project, %why, "the thread could not be answered");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -889,8 +1170,8 @@ mod tests {
     };
     use stageman_agent::{Answer, ContainerRuntime, StopReason};
     use stageman_core::{
-        Agent, AgentConfig, Job, JobId, Key, Progress, Project, ProjectId, Secret, State, Thread,
-        Timestamp, Uuid,
+        Agent, AgentConfig, Job, JobId, Key, Progress, Project, ProjectId, Secret, State, Taken,
+        Thread, Timestamp, Uuid,
     };
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::{Path, PathBuf};
@@ -923,10 +1204,12 @@ mod tests {
             Project {
                 name: "example".to_owned(),
                 repository: "https://example.invalid/repo".to_owned(),
-                orchestrator_agent: Agent::Claude,
+                foreman_agent: Agent::Claude,
                 job_agents: only_claude(),
                 credentials: BTreeMap::new(),
                 channels: BTreeMap::new(),
+                warrant: None,
+                attending: stageman_core::Attending::default(),
                 jobs: BTreeMap::from([(
                     job,
                     Job {
@@ -934,7 +1217,7 @@ mod tests {
                         reason: "started by hand".to_owned(),
                         kickoff: "do the thing".to_owned(),
                         created_at: Timestamp::UNIX_EPOCH,
-                        progress: Progress::Running,
+                        progress: Progress::Working,
                         thread: None,
                     },
                 )]),
@@ -1096,11 +1379,13 @@ mod tests {
                 Project {
                     name: "example".to_owned(),
                     repository: "https://example.invalid/repo".to_owned(),
-                    orchestrator_agent: Agent::Claude,
+                    foreman_agent: Agent::Claude,
                     job_agents: only_claude(),
                     credentials: BTreeMap::new(),
                     channels: BTreeMap::new(),
                     jobs: BTreeMap::new(),
+                    warrant: None,
+                    attending: stageman_core::Attending::default(),
                 },
             );
         }
@@ -1171,7 +1456,7 @@ mod tests {
                 reason: "an issue was opened".to_owned(),
                 kickoff: "work on it".to_owned(),
                 created_at: Timestamp::UNIX_EPOCH,
-                progress: Progress::Running,
+                progress: Progress::Working,
                 thread: None,
             },
         );
@@ -1180,11 +1465,13 @@ mod tests {
             Project {
                 name: "example".to_owned(),
                 repository: "https://example.invalid/repo".to_owned(),
-                orchestrator_agent: Agent::Claude,
+                foreman_agent: Agent::Claude,
                 job_agents: only_claude(),
                 credentials: BTreeMap::new(),
                 channels: BTreeMap::new(),
                 jobs,
+                warrant: None,
+                attending: stageman_core::Attending::default(),
             },
         );
         (state, job)
@@ -1204,14 +1491,14 @@ mod tests {
         assert_eq!(super::accepting(&mut state, job), super::Accepted::Busy);
         assert_eq!(
             state.job(job).expect("the job").progress,
-            Progress::Running,
+            Progress::Working,
             "a refused reply must not move the job"
         );
 
         // Finished, so the reply is taken and the job goes back to work.
-        state.job_mut(job).expect("the job").progress = Progress::Completed;
+        state.job_mut(job).expect("the job").progress = Progress::Idle;
         assert_eq!(super::accepting(&mut state, job), super::Accepted::Taken);
-        assert_eq!(state.job(job).expect("the job").progress, Progress::Running);
+        assert_eq!(state.job(job).expect("the job").progress, Progress::Working);
 
         // And taking it once is what stops a second taking it as well, which
         // is the collision this exists to prevent.
@@ -1361,6 +1648,117 @@ mod tests {
         );
     }
 
+    /// A warrant is long, unguessable, and different every time.
+    ///
+    /// Anything that can reach the daemon may try to guess one — measured:
+    /// an unrelated container reaches the host as easily as a foreman's does
+    /// — so the only thing standing between a job's agent and a foreman's
+    /// authority is that this is not worth attacking.
+    #[test]
+    fn a_minted_warrant_is_long_and_never_the_same_twice() {
+        let first = super::minted_warrant();
+        let second = super::minted_warrant();
+
+        assert_eq!(first.expose().len(), 72, "two identifiers, hyphens and all");
+        assert!(
+            first
+                .expose()
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() || c == '-')
+        );
+        assert_ne!(
+            first.expose(),
+            second.expose(),
+            "a warrant reused across projects would be one warrant"
+        );
+    }
+
+    /// Only the message that found the foreman idle drives its loop.
+    ///
+    /// Inverting this comparison would have every other message start a second
+    /// loop over the same container, and the one that should have started do
+    /// nothing at all. Mutation testing found it untested.
+    #[test]
+    fn only_the_message_that_started_a_turn_drives_the_loop() {
+        assert!(super::drives(Some(Taken::Started)));
+        assert!(!super::drives(Some(Taken::Waiting)));
+        // No project, so nothing was taken and there is nothing to drive.
+        assert!(!super::drives(None));
+    }
+
+    /// What a foreman is working on is what its inbox says.
+    #[test]
+    fn what_a_foreman_is_working_on_comes_from_its_inbox() {
+        let (mut state, _) = with_a_running_job();
+        let project = *state.projects.keys().next().expect("a project");
+
+        assert_eq!(
+            super::waiting_on(&state, project),
+            None,
+            "idle holds nothing"
+        );
+
+        let errand = stageman_core::Errand {
+            said: "look at the parser".to_owned(),
+            thread: Thread {
+                channel: stageman_core::Channel::Slack,
+                id: "1788000000.000000".to_owned(),
+            },
+        };
+        state
+            .projects
+            .get_mut(&project)
+            .expect("the project")
+            .attending
+            .take(errand.clone());
+
+        assert_eq!(super::waiting_on(&state, project), Some(errand));
+        assert_eq!(
+            super::waiting_on(&state, ProjectId::from_uuid(Uuid::from_u128(404))),
+            None,
+            "a project this instance does not watch has no inbox"
+        );
+    }
+
+    /// A foreman's container is placed, not reported.
+    ///
+    /// It carries this project's label and names no job, which is exactly the
+    /// shape `Swept::unidentified` describes as *a container from an older
+    /// version: odd, and benign*. A foreman's is neither, and it is where that
+    /// foreman's whole session lives — so reporting it would teach an operator
+    /// to distrust a count that was right.
+    #[test]
+    fn a_foremans_container_is_placed_rather_than_reported() {
+        let (mut state, _) = with_a_running_job();
+        let watched = *state.projects.keys().next().expect("a project");
+        let containers = [left(&stageman_foreman::container(watched), None)];
+
+        assert_eq!(
+            unplaceable(&containers, &state),
+            vec![],
+            "a foreman's container belongs to a project this instance watches"
+        );
+
+        // And one whose project is gone is a loss, like a forgotten job's:
+        // the name parsed and what it names is not here.
+        let forgotten = stageman_foreman::container(ProjectId::from_uuid(Uuid::from_u128(404)));
+        let containers = [left(&forgotten, None)];
+        assert_eq!(
+            unplaceable(&containers, &state),
+            vec![Unplaceable::Unidentified(&forgotten)]
+        );
+
+        // Removing the project it belongs to turns the first case into the
+        // second, which is what makes this about the record rather than the
+        // name.
+        state.projects.clear();
+        let named = stageman_foreman::container(watched);
+        assert_eq!(
+            unplaceable(&[left(&named, None)], &state),
+            vec![Unplaceable::Unidentified(&named)]
+        );
+    }
+
     /// The serious case has to carry the identifier, because it is the only
     /// thing an operator can search their backups for.
     #[test]
@@ -1417,7 +1815,7 @@ mod tests {
                 Project {
                     name: "hello".to_owned(),
                     repository: repository.to_owned(),
-                    orchestrator_agent: Agent::Claude,
+                    foreman_agent: Agent::Claude,
                     job_agents: only_claude(),
                     // No platform credential: the repository is public, so this
                     // also checks that a job with nothing to authenticate with
@@ -1425,6 +1823,8 @@ mod tests {
                     credentials: BTreeMap::new(),
                     channels: BTreeMap::new(),
                     jobs: BTreeMap::new(),
+                    warrant: None,
+                    attending: stageman_core::Attending::default(),
                 },
             );
             (state, project)
@@ -1460,13 +1860,13 @@ mod tests {
             .await
             .expect("the job is created");
 
-            assert_eq!(progress, Progress::Completed, "the job did not finish");
+            assert_eq!(progress, Progress::Idle, "the job did not finish");
             assert_eq!(
                 store
                     .read()
                     .job(job)
                     .map(|recorded| recorded.progress.clone()),
-                Some(Progress::Completed),
+                Some(Progress::Idle),
                 "and the instance should have recorded that"
             );
 
@@ -1518,7 +1918,7 @@ mod tests {
     /// only thing that counts as having finished.
     #[test]
     fn only_a_finished_turn_counts_as_a_completed_job() {
-        assert_eq!(outcome(&answered(StopReason::EndTurn)), Progress::Completed);
+        assert_eq!(outcome(&answered(StopReason::EndTurn)), Progress::Idle);
     }
 
     /// Every other way a turn can end is a failure, and each is checked rather
@@ -1554,14 +1954,14 @@ mod tests {
     /// sweep report the opposite of what happened.
     #[test]
     fn only_a_completed_job_counts_as_resumed() {
-        assert_eq!(Attended::from(&Progress::Completed), Attended::Resumed);
+        assert_eq!(Attended::from(&Progress::Idle), Attended::Resumed);
         assert_eq!(
             Attended::from(&Progress::Failed("anything".to_owned())),
             Attended::Failed
         );
         // Still running when the sweep looked is not success either: it means
         // the resume did not reach an ending.
-        assert_eq!(Attended::from(&Progress::Running), Attended::Failed);
+        assert_eq!(Attended::from(&Progress::Working), Attended::Failed);
     }
 
     #[test]

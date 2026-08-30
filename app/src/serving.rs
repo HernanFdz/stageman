@@ -88,7 +88,7 @@ enum StartupError {
     /// of it is the list of places that were looked in.
     #[error(
         "no container runtime found.\n  Every agent runs in a container, including the \
-         one triage thinks with,\n  so nothing here can run without one. Install Docker \
+         one a foreman thinks with,\n  so nothing here can run without one. Install Docker \
          or Podman.\n  Looked in:\n{0}"
     )]
     NoRuntime(String),
@@ -325,7 +325,45 @@ async fn start() -> Result<(), StartupError> {
     // and awaiting one would mean the dashboard never starts.
     crate::listen(&store, runtime);
 
-    announce(runtime, &store, &swept, serving, bundle.as_deref(), &path)?;
+    // Where a foreman asks for a job. Its own listener, on its own port and
+    // every interface — the dashboard stays on loopback, and this cannot,
+    // because a container reaches nothing else on every platform. See
+    // `docs/decisions/0033-the-job-endpoint-listens-beyond-loopback.md`.
+    //
+    // Spawned rather than awaited, for the reason everything else here is: it
+    // runs for as long as the process does.
+    // Bound before anything is announced, so that a port already taken is
+    // reported on the startup block rather than logged into a scrolling
+    // terminal. That failure leaves a foreman able to talk and unable to work,
+    // which reads exactly like a foreman that decided not to — and it is not
+    // hypothetical: a leaked test process held this port and a real instance
+    // quietly could not have it.
+    let asking = crate::asking::bind().await;
+
+    announce(
+        runtime,
+        &store,
+        &swept,
+        serving,
+        bundle.as_deref(),
+        &path,
+        asking
+            .as_ref()
+            .ok()
+            .and_then(|bound| bound.local_addr().ok()),
+    )?;
+
+    match asking {
+        Ok(listening) => {
+            let store = Arc::clone(&store);
+            tokio::spawn(async move {
+                if let Err(why) = crate::asking::serve(listening, store).await {
+                    tracing::error!(%why, "the job endpoint stopped");
+                }
+            });
+        }
+        Err(why) => tracing::error!(%why, "no foreman can ask for a job"),
+    }
 
     axum::serve(listener, router)
         .await
@@ -361,7 +399,7 @@ mod listening_tests {
         Project {
             name: name.to_owned(),
             repository: "https://example.invalid/repo".to_owned(),
-            orchestrator_agent: Agent::Claude,
+            foreman_agent: Agent::Claude,
             job_agents: BTreeSet::from([Agent::Claude]),
             credentials: BTreeMap::new(),
             channels: BTreeMap::from([(
@@ -373,6 +411,8 @@ mod listening_tests {
                 },
             )]),
             jobs: BTreeMap::new(),
+            warrant: None,
+            attending: stageman_core::Attending::default(),
         }
     }
 
@@ -419,6 +459,7 @@ fn announce(
     serving: SocketAddr,
     bundle: Option<&Path>,
     instance: &Path,
+    asking: Option<SocketAddr>,
 ) -> Result<(), StartupError> {
     println!();
     println!("stageman is running.");
@@ -431,6 +472,17 @@ fn announce(
     // no warning, and is indistinguishable from a platform sending nothing.
     // The count is the cheapest thing that tells them apart.
     println!("  listening  {} channel(s)", listening(&store.read()));
+    // Printed because it is a port open on every interface, and because it
+    // can fail to open at all — a port already taken leaves a foreman able to
+    // talk and unable to work, and that has to be visible here rather than in
+    // a log line nobody was watching.
+    match asking {
+        Some(bound) => println!("  jobs asked {bound}"),
+        None => println!(
+            "  jobs asked NOT LISTENING — port {} is taken, so no foreman can create jobs",
+            *crate::asking::PORT
+        ),
+    }
     println!(
         "  swept      {} resumed, {} failed, {} stranded",
         swept.resumed, swept.failed, swept.stranded

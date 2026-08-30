@@ -48,6 +48,13 @@ RUN apt-get update \
 COPY stageman-say /usr/local/bin/stageman-say
 RUN chmod 0755 /usr/local/bin/stageman-say
 
+# How a foreman asks for work to be done. Present in every container and
+# usable only by a foreman: it needs a warrant, which a job's container is
+# never given — see
+# docs/decisions/0032-a-foreman-asks-the-instance-by-warrant.md.
+COPY stageman-job /usr/local/bin/stageman-job
+RUN chmod 0755 /usr/local/bin/stageman-job
+
 # A job's workspace arrives here at run time. The orchestrator's own agent has
 # none, because it has no repository to work on.
 WORKDIR /workspace

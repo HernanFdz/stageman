@@ -181,6 +181,13 @@ fn started(variables: &[(&str, String)]) -> Serving {
         .env_clear()
         .env("IP", "127.0.0.1")
         .env("PORT", "0")
+        // Whichever port is free, for the job endpoint too. Every test here
+        // runs a real binary, and a fixed port would have them contending with
+        // each other and with whatever instance the operator is running — and
+        // any one of them that leaks would hold it. That is not hypothetical:
+        // a leaked mutation-testing process held this port and a real daemon
+        // quietly could not bind it, so a foreman talked to a zombie.
+        .env("STAGEMAN_JOB_PORT", "0")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     for (name, value) in variables {
@@ -301,7 +308,7 @@ fn watching(name: &str, repository: &str) -> State {
             Project {
                 name: name.to_owned(),
                 repository: repository.to_owned(),
-                orchestrator_agent: Agent::Claude,
+                foreman_agent: Agent::Claude,
                 job_agents: BTreeSet::from([Agent::Claude]),
                 credentials: BTreeMap::new(),
                 channels: BTreeMap::from([(
@@ -313,6 +320,8 @@ fn watching(name: &str, repository: &str) -> State {
                     },
                 )]),
                 jobs: BTreeMap::new(),
+                warrant: None,
+                attending: stageman_core::Attending::default(),
             },
         )]),
     }
@@ -580,13 +589,13 @@ fn a_build_says_whether_it_has_a_browser_half() {
 /// the discriminating case is two finished jobs — nought of two — and
 /// inverting the comparison says two of two.
 #[test]
-fn the_dashboard_counts_running_jobs_rather_than_all_of_them() {
+fn the_dashboard_counts_working_jobs_rather_than_all_of_them() {
     let (_kept, snapshot) = scratch();
     let mut state = watching("aviary", "https://example.invalid/aviary");
     let project = state.projects.values_mut().next().expect("the project");
     project.jobs.insert(
         JobId::from_uuid(uuid::Uuid::from_u128(1)),
-        job(Progress::Completed),
+        job(Progress::Idle),
     );
     project.jobs.insert(
         JobId::from_uuid(uuid::Uuid::from_u128(2)),
@@ -597,7 +606,7 @@ fn the_dashboard_counts_running_jobs_rather_than_all_of_them() {
     let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
     let answer = running.get("/api/instance");
 
-    assert!(answer.contains(r#""running":0"#), "{answer}");
+    assert!(answer.contains(r#""working":0"#), "{answer}");
     assert!(answer.contains(r#""jobs":2"#), "{answer}");
 }
 

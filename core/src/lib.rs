@@ -163,7 +163,7 @@ impl Agent {
 
     /// What this agent is good for, in prose.
     ///
-    /// Not decoration and not operator-editable: the orchestrator chooses which
+    /// Not decoration and not operator-editable: the foreman chooses which
     /// agent runs a job, and this is what it reasons over — see
     /// `docs/decisions/0006-agents-are-pluggable.md`. It lives in code because
     /// it describes the agent rather than the installation.
@@ -188,7 +188,7 @@ impl Agent {
 pub struct AgentConfig {
     /// What the agent authenticates with.
     ///
-    /// One credential per agent, never one per role — the orchestrator and a
+    /// One credential per agent, never one per role — the foreman and a
     /// job running the same agent use the same one. See
     /// `docs/decisions/0008-one-credential-per-agent.md`.
     pub auth_token: Secret,
@@ -207,13 +207,13 @@ pub enum Platform {
     GitHub,
 }
 
-/// Somewhere the orchestrator watches and a job can speak into.
+/// Somewhere the foreman watches and a job can speak into.
 ///
 /// Two-directional by definition, which is the whole reason this is not a
 /// variant of [`Platform`] — see
 /// `docs/decisions/0027-a-channel-is-not-a-platform.md`. A platform is
 /// something a job *acts on*; a channel is where a conversation happens, and
-/// the orchestrator is on it as much as a job is.
+/// the foreman is on it as much as a job is.
 ///
 /// A closed set for the same reason [`Agent`] is: reaching one needs code, and
 /// code is not something an operator supplies.
@@ -243,12 +243,12 @@ pub struct ChannelConfig {
     ///
     /// Called an address rather than a *destination* because
     /// `docs/conventions.md` §2 rejects one-directional words for this concept:
-    /// the orchestrator watches this exact place, and a job posts to it.
+    /// the foreman watches this exact place, and a job posts to it.
     pub address: String,
     /// What the channel is reached with.
     ///
     /// Belongs to the project rather than the instance, for the reason
-    /// `docs/decisions/0020-the-orchestrator-belongs-to-a-project.md` gives:
+    /// `docs/decisions/0020-the-foreman-belongs-to-a-project.md` gives:
     /// watching a project's channels needs that project's credentials, and one
     /// holder of every project's at once is the shape being avoided.
     pub credential: Secret,
@@ -317,7 +317,7 @@ pub struct Job {
     /// agent's configuration. Recorded at all because once more than one agent
     /// can run a job, "why did this go badly?" has no answer without it.
     pub agent: Agent,
-    /// Why the orchestrator started it, in prose.
+    /// Why the foreman started it, in prose.
     ///
     /// The whole of a job's provenance, deliberately — see
     /// `docs/architecture.md` §2 on why the structured version is absent.
@@ -374,19 +374,43 @@ pub struct Job {
 /// reads as fact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Progress {
-    /// Started, and nothing has said it is over.
+    /// Its agent has been given something and has not stopped.
     ///
-    /// What a sweep looks for: a running job whose container is stopped is one
-    /// to restart, and a container whose job is not running is not.
-    Running,
-    /// The agent finished its turn.
+    /// What a sweep looks for: a working job whose container is stopped is one
+    /// to restart, and a container whose job is not working is not.
     ///
-    /// Says the work ended, not that it succeeded — nothing here can see
-    /// whether a proposal was any good, and
-    /// `docs/decisions/0002-never-merge-never-deploy.md` means a human reads it
-    /// before it counts for anything. Claiming more would be a claim this
-    /// system is not in a position to make.
-    Completed,
+    /// Believed rather than observed, which is why it is not called *running*:
+    /// a job is in this state while the daemon that was supervising it is
+    /// dead and no process is running anywhere — see
+    /// `docs/decisions/0015-a-job-survives-the-daemon-dying.md`. The word is
+    /// about the work, not about a process.
+    ///
+    /// The alias is what lets a snapshot written before the rename still open.
+    /// `docs/decisions/0011-state-is-a-snapshot-not-a-database.md` says a
+    /// rename makes an existing file fail to load, and this is a rename of a
+    /// value that goes on disk — so the old spelling has to keep parsing. It
+    /// is read-only: writing uses the new name, so a snapshot upgrades itself
+    /// the first time anything changes.
+    #[serde(alias = "Running")]
+    Working,
+    /// Its agent stopped, and nothing has been given to it since.
+    ///
+    /// **Says nothing about how it went, deliberately.** This used to be
+    /// called *completed*, which claimed the work had ended — and that is a
+    /// claim this system cannot make. An agent stops when it is finished, and
+    /// equally when it has asked a question, when it wants a decision, and
+    /// when it is waiting on something outside the repository altogether.
+    /// Nothing here can tell those apart, so the state names the only fact
+    /// available: it is not working, and it can be given something.
+    ///
+    /// The tell that the old name was wrong is that the notice this project
+    /// already sends says *the agent has stopped* rather than *finished* —
+    /// the message was honest and the state was not.
+    ///
+    /// Aliased for the same reason `Working` is: every job already on disk
+    /// says `Completed`.
+    #[serde(alias = "Completed")]
+    Idle,
     /// It could not be finished, and this is what went wrong.
     ///
     /// Prose for a person reading the dashboard, like `reason` — not a code to
@@ -394,6 +418,118 @@ pub enum Progress {
     /// `docs/open-questions.md`'s question about credentials expiring, wearing
     /// a different hat.
     Failed(String),
+}
+
+/// One message waiting for, or held by, a project's foreman.
+///
+/// Carries where to answer as well as what was said, because a foreman answers
+/// in the thread its message arrived under — see
+/// `docs/decisions/0029-a-reply-is-routed-by-its-thread.md`. Working that out
+/// when the turn starts rather than when the message arrives would mean
+/// looking it up from a message that may be hours old by then.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Errand {
+    /// What was said, as the person wrote it.
+    pub said: String,
+    /// Where an answer belongs.
+    pub thread: Thread,
+}
+
+/// What a project's foreman is doing, and what is waiting behind it.
+///
+/// **The shape is the invariant.** A foreman that is idle while messages wait
+/// is a state nothing should ever produce, and the way to be sure is for it to
+/// have no way of being written down: the queue exists only inside [`Working`],
+/// so "idle with something waiting" is not a bug to avoid but a sentence that
+/// cannot be said.
+///
+/// It also removes the case that would otherwise have to be handled and could
+/// not occur — taking from a queue that is known to be non-empty, and answering
+/// a `None` the compiler can see and a reader cannot.
+///
+/// [`Working`]: Attending::Working
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Attending {
+    /// Nothing in hand and nothing waiting.
+    #[default]
+    Idle,
+    /// One message in hand, and the rest in the order they arrived.
+    Working {
+        /// What its agent was given.
+        on: Errand,
+        /// What it will be given next, front first.
+        ///
+        /// Deliberately not a set and not keyed: two identical messages from a
+        /// person are two messages, and the order they arrived in is the only
+        /// order that makes sense to answer them in.
+        waiting: std::collections::VecDeque<Errand>,
+    },
+}
+
+impl Attending {
+    /// Takes a message, either to start on or to leave waiting.
+    ///
+    /// The whole of the arrival rule, and **one operation rather than a check
+    /// followed by an act** — which is what makes two messages arriving
+    /// together unable to both start a turn. Whichever reaches this first
+    /// finds `Idle`; the second cannot, because the first already changed it.
+    pub fn take(&mut self, errand: Errand) -> Taken {
+        match self {
+            Self::Idle => {
+                *self = Self::Working {
+                    on: errand,
+                    waiting: std::collections::VecDeque::new(),
+                };
+                Taken::Started
+            }
+            Self::Working { waiting, .. } => {
+                waiting.push_back(errand);
+                Taken::Waiting
+            }
+        }
+    }
+
+    /// Puts down the message in hand and picks up the next, if there is one.
+    ///
+    /// Answers with what to start next, and `None` only when nothing is left —
+    /// which is the one way this becomes [`Attending::Idle`]. A foreman
+    /// therefore cannot go idle while anything waits, without anybody having to
+    /// remember that.
+    pub fn finish(&mut self) -> Option<&Errand> {
+        if let Self::Working { mut waiting, .. } = std::mem::take(self)
+            && let Some(on) = waiting.pop_front()
+        {
+            *self = Self::Working { on, waiting };
+        }
+        self.on()
+    }
+
+    /// What its agent is working on, if anything.
+    #[must_use]
+    pub const fn on(&self) -> Option<&Errand> {
+        match self {
+            Self::Working { on, .. } => Some(on),
+            Self::Idle => None,
+        }
+    }
+
+    /// How many messages are waiting behind the one in hand.
+    #[must_use]
+    pub fn waiting(&self) -> usize {
+        match self {
+            Self::Working { waiting, .. } => waiting.len(),
+            Self::Idle => 0,
+        }
+    }
+}
+
+/// What became of a message handed to a foreman.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Taken {
+    /// The foreman was idle, and this message is now in hand.
+    Started,
+    /// It was already working, so this is waiting behind what it has.
+    Waiting,
 }
 
 /// A repository this instance watches, and everything belonging to it.
@@ -405,13 +541,13 @@ pub struct Project {
     ///
     /// Every kickoff embeds this, because an agent has no other way to find it.
     pub repository: String,
-    /// The agent this project's orchestrator thinks with.
+    /// The agent this project's foreman thinks with.
     ///
     /// Per project rather than per instance, because watching a project's
-    /// channels needs that project's credentials and a shared orchestrator
+    /// channels needs that project's credentials and a shared foreman
     /// would hold every project's at once — see
-    /// `docs/decisions/0020-the-orchestrator-belongs-to-a-project.md`.
-    pub orchestrator_agent: Agent,
+    /// `docs/decisions/0020-the-foreman-belongs-to-a-project.md`.
+    pub foreman_agent: Agent,
     /// The agents this project's jobs may run on.
     ///
     /// Never empty in a valid instance, and checked rather than made
@@ -443,6 +579,32 @@ pub struct Project {
     /// Nested rather than held globally so that "a job belongs to exactly one
     /// project" is structural instead of a field somebody has to keep true.
     pub jobs: BTreeMap<JobId, Job>,
+    /// What its foreman presents when it asks this instance to do something.
+    ///
+    /// **Not a fourth kind of token.** This codebase already uses that word
+    /// for what an agent authenticates with, what a job reaches a platform
+    /// with, and what a channel is posted on — three different things. A
+    /// warrant is none of them: it authorises one bearer to ask *this
+    /// instance* for one act, and it never leaves the machine.
+    ///
+    /// It exists because a container that can reach the daemon is not
+    /// necessarily a foreman's. Measured rather than assumed: an unrelated
+    /// `alpine` container reaches the host exactly as easily as a foreman's
+    /// image does, so without this every job's agent could create jobs with a
+    /// foreman's authority. See
+    /// `docs/decisions/0032-a-foreman-asks-the-instance-by-warrant.md`.
+    ///
+    /// Optional, because every project that already exists has none and one is
+    /// minted when a foreman first needs it. A project with no foreman running
+    /// needs no warrant.
+    pub warrant: Option<Secret>,
+    /// What its foreman is doing, and what is waiting behind it.
+    ///
+    /// Per project because a foreman is, and persisted because a message
+    /// somebody sent must not be lost to a restart — the same reasoning
+    /// `docs/decisions/0015-a-job-survives-the-daemon-dying.md` applies to
+    /// work already begun.
+    pub attending: Attending,
 }
 
 /// Everything one instance knows.
@@ -495,7 +657,7 @@ impl State {
     /// both sides of this condition are true for every project. Inverting the
     /// comparison or replacing the `or` with an `and` changes nothing any test
     /// could observe. **Delete this attribute in the commit that adds a second
-    /// agent** — a project naming one agent for triage and another for its jobs
+    /// agent** — a project naming one agent for its foreman and another for its jobs
     /// is what makes this falsifiable, and it is the first thing that will
     /// exist once there are two.
     #[mutants::skip]
@@ -503,7 +665,7 @@ impl State {
         self.projects
             .iter()
             .filter(move |(_, project)| {
-                project.orchestrator_agent == agent || project.job_agents.contains(&agent)
+                project.foreman_agent == agent || project.job_agents.contains(&agent)
             })
             .map(|(id, _)| *id)
     }
@@ -512,7 +674,7 @@ impl State {
     ///
     /// The invariant `docs/decisions/0021-an-instance-starts-empty.md` moved
     /// down from the instance to the project: a project names one agent for its
-    /// orchestrator and at least one its jobs may run on, and every one of them
+    /// foreman and at least one its jobs may run on, and every one of them
     /// is configured.
     ///
     /// Checked rather than made unrepresentable. A type that could not hold an
@@ -536,8 +698,8 @@ impl State {
             if project.job_agents.is_empty() {
                 return Err(Inconsistent::NoJobAgents(*id));
             }
-            for named in std::iter::once(project.orchestrator_agent)
-                .chain(project.job_agents.iter().copied())
+            for named in
+                std::iter::once(project.foreman_agent).chain(project.job_agents.iter().copied())
             {
                 if !self.agents.contains_key(&named) {
                     return Err(Inconsistent::UnconfiguredProjectAgent {
@@ -557,12 +719,12 @@ impl State {
     /// whether a container is actually up is a question for the runtime — see
     /// `docs/decisions/0015-a-job-survives-the-daemon-dying.md`, where
     /// reconciling the two is startup's job rather than a state of its own.
-    pub fn running(&self) -> impl Iterator<Item = JobId> + '_ {
+    pub fn working(&self) -> impl Iterator<Item = JobId> + '_ {
         self.projects.values().flat_map(|project| {
             project
                 .jobs
                 .iter()
-                .filter(|(_, job)| job.progress == Progress::Running)
+                .filter(|(_, job)| job.progress == Progress::Working)
                 .map(|(id, _)| *id)
         })
     }
@@ -578,6 +740,31 @@ impl State {
         self.projects
             .values()
             .find_map(|project| project.jobs.get(&job))
+    }
+
+    /// Which project a warrant belongs to, if any does.
+    ///
+    /// The warrant both authorises and identifies: a foreman presenting one is
+    /// saying which project it speaks for by the fact of holding that value.
+    /// Nothing else has to be sent, and nothing sent could contradict it —
+    /// a request naming a project it has no warrant for is a request with the
+    /// wrong warrant.
+    ///
+    /// Compared in full and never by prefix. A warrant is the only thing
+    /// standing between any container on the machine and a foreman's
+    /// authority, per
+    /// `docs/decisions/0032-a-foreman-asks-the-instance-by-warrant.md`.
+    #[must_use]
+    pub fn warranted(&self, presented: &str) -> Option<ProjectId> {
+        self.projects
+            .iter()
+            .find(|(_, project)| {
+                project
+                    .warrant
+                    .as_ref()
+                    .is_some_and(|held| held.expose() == presented)
+            })
+            .map(|(id, _)| *id)
     }
 
     /// Which project a job belongs to.
@@ -604,16 +791,17 @@ impl State {
 
     /// Who a message arriving on a channel is for.
     ///
-    /// The rule in `docs/decisions/0029-a-reply-is-routed-by-its-thread.md`,
-    /// and the whole of it: **a message in a thread belonging to a job is for
-    /// that job; anything else is for the orchestrator, and only when it
-    /// mentions the bot.** Nothing else is read.
+    /// The rule in `docs/decisions/0031-a-mention-is-what-makes-it-ours.md`,
+    /// and the whole of it: **nothing without a mention is read at all.** What
+    /// mentions this instance goes to the job whose thread it is in, or to the
+    /// foreman if it is at the root, or is answered as belonging to no job.
     ///
-    /// The mention is required outside a thread and not inside one, which looks
-    /// inconsistent and is not. Inside a job's thread there is no ambiguity
-    /// about who is being addressed — the thread names them. Outside it, a
-    /// project's channel is a room people talk in, and answering everything
-    /// said there would make this the most tiresome member of it.
+    /// The mention is required *everywhere*, including inside a job's own
+    /// thread, and that reverses what 0029 decided. The reason is a use it
+    /// missed: people need to talk under a job — about the change it proposed,
+    /// most obviously — without waking its agent and paying for a turn. A
+    /// thread stageman opened is still a room, and the mention is how somebody
+    /// says they mean the machine rather than each other.
     ///
     /// A thread is matched on its channel as well as its identifier, because an
     /// identifier is only unique within one channel.
@@ -625,40 +813,38 @@ impl State {
     /// a question for whoever delivers it, not for this.
     #[must_use]
     pub fn recipient(&self, channel: Channel, arriving: &Arriving<'_>) -> Recipient {
-        // First, and before anything else can match.
-        if arriving.from_us {
+        // Nothing this instance said, and nothing that did not address it.
+        // Both before anything else can match, so that a job's own thread is
+        // no exception to either.
+        if arriving.from_us || !arriving.mentions {
             return Recipient::Nobody;
         }
 
-        if let Some(thread) = arriving.thread {
-            let found = self
-                .projects
-                .values()
-                .flat_map(|project| &project.jobs)
-                .find(|(_, job)| {
-                    job.thread.as_ref().is_some_and(|speaking| {
-                        speaking.channel == channel && speaking.id == thread
-                    })
-                });
-            if let Some((job, _)) = found {
-                return Recipient::Job(*job);
-            }
-        }
-
-        // Either at the root, or in a thread belonging to no job. Both are the
-        // orchestrator's, and both need the mention.
-        if !arriving.mentions {
+        let watching = self.projects.iter().find(|(_, project)| {
+            project
+                .channels
+                .get(&channel)
+                .is_some_and(|bound| bound.address == arriving.address)
+        });
+        let Some((project, _)) = watching else {
             return Recipient::Nobody;
-        }
+        };
+
+        let Some(thread) = arriving.thread else {
+            return Recipient::Foreman(*project);
+        };
+
         self.projects
-            .iter()
-            .find(|(_, project)| {
-                project
-                    .channels
-                    .get(&channel)
-                    .is_some_and(|bound| bound.address == arriving.address)
+            .values()
+            .flat_map(|watched| &watched.jobs)
+            .find(|(_, job)| {
+                job.thread
+                    .as_ref()
+                    .is_some_and(|speaking| speaking.channel == channel && speaking.id == thread)
             })
-            .map_or(Recipient::Nobody, |(id, _)| Recipient::Orchestrator(*id))
+            .map_or(Recipient::NoSuchJob(*project), |(job, _)| {
+                Recipient::Job(*job)
+            })
     }
 
     /// Converts to the form that goes on disk, sealing every credential.
@@ -729,11 +915,17 @@ impl State {
                     SealedProject {
                         name: project.name.clone(),
                         repository: project.repository.clone(),
-                        orchestrator_agent: project.orchestrator_agent,
+                        foreman_agent: project.foreman_agent,
                         job_agents: project.job_agents.clone(),
                         credentials,
                         channels,
                         jobs: project.jobs.clone(),
+                        attending: project.attending.clone(),
+                        warrant: project
+                            .warrant
+                            .as_ref()
+                            .map(|secret| secret.seal(key, nonces()))
+                            .transpose()?,
                     },
                 ))
             })
@@ -947,8 +1139,15 @@ pub struct SealedProject {
     pub name: String,
     /// Where the repository lives.
     pub repository: String,
-    /// The agent its orchestrator thinks with.
-    pub orchestrator_agent: Agent,
+    /// The agent its foreman thinks with.
+    ///
+    /// Aliased because this field is on disk under its old name in every
+    /// snapshot written before
+    /// `docs/decisions/0030-the-orchestrator-is-a-foreman.md`. A rename of a
+    /// serialised name is never free — see `docs/conventions.md` §4, which
+    /// gained that rule from this exact field failing to open a real instance.
+    #[serde(alias = "orchestrator_agent")]
+    pub foreman_agent: Agent,
     /// The agents its jobs may run on.
     pub job_agents: BTreeSet<Agent>,
     /// Its sealed credentials.
@@ -970,6 +1169,18 @@ pub struct SealedProject {
     pub channels: BTreeMap<Channel, SealedChannelConfig>,
     /// Its jobs, which hold nothing needing sealing.
     pub jobs: BTreeMap<JobId, Job>,
+    /// Its foreman's warrant, sealed like every other credential.
+    ///
+    /// Defaulted, because projects exist that predate foremen having one.
+    #[serde(default)]
+    pub warrant: Option<SealedSecret>,
+    /// What its foreman was doing, which holds nothing needing sealing either:
+    /// a message from a person is not a credential.
+    ///
+    /// Defaulted, because every snapshot written before foremen had an inbox
+    /// has no such field — `docs/conventions.md` §4.
+    #[serde(default)]
+    pub attending: Attending,
 }
 
 /// Everything one instance knows, as it appears on disk.
@@ -995,7 +1206,7 @@ impl Snapshot {
     ///
     /// Fails if any credential cannot be recovered, or if the snapshot is
     /// internally inconsistent — currently, if the agent it names as the
-    /// orchestrator's has no configuration. That check is what lets every
+    /// foreman's has no configuration. That check is what lets every
     /// later caller look that agent up without handling an absence.
     pub fn open(self, key: &Key) -> Result<State, OpenError> {
         let Self { agents, projects } = self;
@@ -1042,11 +1253,13 @@ impl Snapshot {
                     Project {
                         name: project.name,
                         repository: project.repository,
-                        orchestrator_agent: project.orchestrator_agent,
+                        foreman_agent: project.foreman_agent,
                         job_agents: project.job_agents,
                         credentials,
                         channels,
                         jobs: project.jobs,
+                        attending: project.attending,
+                        warrant: project.warrant.map(|secret| secret.open(key)).transpose()?,
                     },
                 ))
             })
@@ -1096,6 +1309,13 @@ impl ChannelConfig {
 pub struct Arriving<'a> {
     /// Where it arrived, as the platform names that place.
     pub address: &'a str,
+    /// What identifies this message itself.
+    ///
+    /// Needed because a message at the root *is* the parent of the thread a
+    /// foreman answers in — there is nothing to create. A job's thread had to
+    /// be opened by posting a message for it to hang from; a foreman's arrives
+    /// already made, and this is its identifier.
+    pub id: &'a str,
     /// The thread it was in, if it was in one at all.
     pub thread: Option<&'a str>,
     /// Whether it named this project's bot.
@@ -1116,11 +1336,21 @@ pub struct Arriving<'a> {
 pub enum Recipient {
     /// The job whose thread it arrived in.
     Job(JobId),
-    /// The orchestrator of the project that binds the channel.
-    Orchestrator(ProjectId),
-    /// Nobody, and this is the ordinary answer rather than a failure. Most
-    /// traffic in a project's channel is people talking to each other.
+    /// The foreman of the project that binds the channel.
+    Foreman(ProjectId),
+    /// Nobody at all, and this is the ordinary answer rather than a failure.
+    /// Most of what is said in a project's channel is people talking to each
+    /// other, and none of it is addressed here.
     Nobody,
+    /// Somebody addressed this instance in a thread that belongs to no job.
+    ///
+    /// Distinct from [`Recipient::Nobody`] because it needs an *answer* rather
+    /// than silence: they asked, so saying that nothing here owns this thread
+    /// — and where to go instead — is the difference between a system that is
+    /// quiet and one that looks broken. It is what somebody reaches by
+    /// replying to a foreman's own message, which is the natural thing to try
+    /// and the thing that cannot work.
+    NoSuchJob(ProjectId),
 }
 
 /// Exactly what one agent process is allowed to see, and nothing more.
@@ -1155,33 +1385,34 @@ pub struct Handout {
     platforms: BTreeMap<Platform, Secret>,
     channels: BTreeMap<Channel, Speaking>,
     thread: Option<Thread>,
+    warrant: Option<Secret>,
 }
 
 impl Handout {
-    /// What the agent a project's orchestrator thinks with is handed.
+    /// What the agent a project's foreman thinks with is handed.
     ///
-    /// Its own credential, and no platform credential at all: triage judges
+    /// Its own credential, and no platform credential at all: a foreman judges
     /// signals rather than acting on them, so it has no repository to reach and
     /// nothing to authenticate against — see
     /// `docs/decisions/0012-agents-run-in-containers.md`.
     ///
     /// It does get the project's channel bindings, and that asymmetry is the
     /// point rather than an inconsistency. Watching a project's channels is the
-    /// whole of what an orchestrator does — `docs/architecture.md` §1 — and
-    /// answering on one is a reaction it is allowed to take, so an orchestrator
+    /// whole of what a foreman does — `docs/architecture.md` §1 — and
+    /// answering on one is a reaction it is allowed to take, so a foreman
     /// that cannot reach a channel cannot do its job. A single map for both
     /// kinds could not express this, which is the argument
     /// `docs/decisions/0027-a-channel-is-not-a-platform.md` turns on.
     ///
     /// Per project rather than per instance, because the channels it watches
-    /// belong to a project and a shared orchestrator would hold every
+    /// belong to a project and a shared foreman would hold every
     /// project's credentials at once —
-    /// `docs/decisions/0020-the-orchestrator-belongs-to-a-project.md`.
+    /// `docs/decisions/0020-the-foreman-belongs-to-a-project.md`.
     ///
     /// # Errors
     ///
     /// Fails if the project is not one this instance watches, or if its
-    /// orchestrator's agent has no configuration — which the invariant in
+    /// foreman's agent has no configuration — which the invariant in
     /// `docs/decisions/0021-an-instance-starts-empty.md` says cannot happen,
     /// since it holds at construction and is checked again on the way in and
     /// out of a snapshot.
@@ -1190,12 +1421,12 @@ impl Handout {
     /// total function substituting an empty credential for a missing one, which
     /// turns a state that cannot occur into an authentication failure somewhere
     /// else entirely. `.quality/gate-reference.md` forbids exactly that trade.
-    pub fn for_triage(state: &State, project: ProjectId) -> Result<Self, HandoutError> {
+    pub fn for_foreman(state: &State, project: ProjectId) -> Result<Self, HandoutError> {
         let watching = state
             .projects
             .get(&project)
             .ok_or(HandoutError::UnknownProject(project))?;
-        let agent = watching.orchestrator_agent;
+        let agent = watching.foreman_agent;
         let config = state
             .agents
             .get(&agent)
@@ -1205,7 +1436,10 @@ impl Handout {
             agent_credential: config.auth_token.clone(),
             platforms: BTreeMap::new(),
             channels: speaking(watching),
-            // The orchestrator speaks at the root of the channel, which is
+            // Only a foreman may ask this instance for anything, so only a
+            // foreman's handout carries what proves the asking.
+            warrant: watching.warrant.clone(),
+            // The foreman speaks at the root of the channel, which is
             // what makes a reply there addressed to it. See
             // `docs/decisions/0029-a-reply-is-routed-by-its-thread.md`.
             thread: None,
@@ -1240,6 +1474,10 @@ impl Handout {
             agent_credential: config.auth_token.clone(),
             platforms: project.credentials.clone(),
             channels: speaking(project),
+            // Never for a job. A job that could create jobs would have a
+            // foreman's authority, which is the whole thing the warrant exists
+            // to withhold.
+            warrant: None,
             // Narrowed by [`Handout::speaking_in`] once the job has a thread.
             thread: None,
         })
@@ -1293,7 +1531,7 @@ impl Handout {
     /// two steps, and this is the second.
     ///
     /// Its absence is meaningful and not a default: a handout with no thread
-    /// speaks at the root of the channel, which is where the orchestrator
+    /// speaks at the root of the channel, which is where the foreman
     /// belongs and where a job does not.
     #[must_use]
     pub fn speaking_in(mut self, thread: Thread) -> Self {
@@ -1305,6 +1543,15 @@ impl Handout {
     #[must_use]
     pub const fn thread(&self) -> Option<&Thread> {
         self.thread.as_ref()
+    }
+
+    /// What this process presents when it asks the instance for something.
+    ///
+    /// Present for a foreman and absent for a job, which is not a detail: it
+    /// is the whole of what stops a job creating jobs.
+    #[must_use]
+    pub const fn warrant(&self) -> Option<&Secret> {
+        self.warrant.as_ref()
     }
 }
 
@@ -1323,6 +1570,7 @@ impl fmt::Debug for Handout {
             .field("platforms", &self.platforms.keys().collect::<Vec<_>>())
             .field("channels", &self.channels.keys().collect::<Vec<_>>())
             .field("thread", &self.thread)
+            .field("warrant", &self.warrant.as_ref().map(|_| "<redacted>"))
             .finish()
     }
 }
@@ -1353,9 +1601,9 @@ pub enum HandoutError {
 #[cfg(test)]
 mod tests {
     use super::{
-        Agent, AgentConfig, Arriving, BASE64, Channel, ChannelConfig, Handout, HandoutError,
-        Inconsistent, Job, JobId, Key, NONCE_LEN, Nonce, OpenError, Platform, Progress, Project,
-        ProjectId, Recipient, Secret, Snapshot, State, Thread,
+        Agent, AgentConfig, Arriving, Attending, BASE64, Channel, ChannelConfig, Errand, Handout,
+        HandoutError, Inconsistent, Job, JobId, Key, NONCE_LEN, Nonce, OpenError, Platform,
+        Progress, Project, ProjectId, Recipient, Secret, Snapshot, State, Taken, Thread,
     };
     use base64::Engine as _;
     use jiff::Timestamp;
@@ -1374,6 +1622,9 @@ mod tests {
     /// The second credential, which opens an event stream rather than posting.
     /// Distinct again, so a handout carrying it is detectable.
     const LISTEN_TOKEN: &str = "xapp-not-a-real-token";
+    /// What a foreman presents to this instance. Distinct again, so a handout
+    /// carrying it where it should not is detectable rather than merely full.
+    const WARRANT: &str = "warrant-not-a-real-secret";
 
     /// An instance with an agent configured and nothing else.
     fn configured() -> State {
@@ -1405,18 +1656,20 @@ mod tests {
                 reason: "an issue was opened".to_owned(),
                 kickoff: "work on it".to_owned(),
                 created_at: Timestamp::UNIX_EPOCH,
-                progress: Progress::Running,
+                progress: Progress::Working,
                 thread: None,
             },
         );
         Project {
             name: "example".to_owned(),
             repository: "https://example.invalid/repo".to_owned(),
-            orchestrator_agent: Agent::Claude,
+            foreman_agent: Agent::Claude,
             job_agents: only_claude(),
             credentials,
             channels,
             jobs,
+            warrant: None,
+            attending: Attending::default(),
         }
     }
 
@@ -1470,11 +1723,11 @@ mod tests {
     }
 
     #[test]
-    fn a_project_names_the_agent_its_orchestrator_thinks_with() {
+    fn a_project_names_the_agent_its_foreman_thinks_with() {
         let state = populated();
         let project = state.projects.values().next().expect("one project");
 
-        assert!(state.agents.contains_key(&project.orchestrator_agent));
+        assert!(state.agents.contains_key(&project.foreman_agent));
         assert!(project.job_agents.contains(&Agent::Claude));
     }
 
@@ -1576,12 +1829,9 @@ mod tests {
         (state, project, job, thread)
     }
 
-    /// The plain case: a reply in a job's thread is that job's.
-    ///
-    /// No mention needed, and that asymmetry is the rule rather than an
-    /// oversight — the thread already names who is being addressed.
+    /// A mention in a job's thread is that job's.
     #[test]
-    fn a_reply_in_a_jobs_thread_is_for_that_job() {
+    fn a_mention_in_a_jobs_thread_is_for_that_job() {
         let (state, _, job, thread) = listening();
 
         assert_eq!(
@@ -1589,8 +1839,9 @@ mod tests {
                 Channel::Slack,
                 &Arriving {
                     address: CHANNEL_ADDRESS,
+                    id: "1788000000.000000",
                     thread: Some(&thread),
-                    mentions: false,
+                    mentions: true,
                     from_us: false,
                 }
             ),
@@ -1598,12 +1849,40 @@ mod tests {
         );
     }
 
-    /// A message at the root is the orchestrator's, when it asks to be.
+    /// **The rule the whole change is for.** People must be able to talk under
+    /// a job — about the change it proposed, most obviously — without waking
+    /// its agent and paying for a turn.
+    ///
+    /// This reverses `docs/decisions/0029-a-reply-is-routed-by-its-thread.md`,
+    /// where a thread was enough on its own. A thread stageman opened is still
+    /// a room, and the mention is how somebody says they mean the machine
+    /// rather than each other.
     #[test]
-    fn a_mention_at_the_root_is_for_the_orchestrator() {
+    fn a_job_thread_without_a_mention_is_people_talking() {
+        let (state, _, _, thread) = listening();
+
+        assert_eq!(
+            state.recipient(
+                Channel::Slack,
+                &Arriving {
+                    address: CHANNEL_ADDRESS,
+                    id: "1788000000.000000",
+                    thread: Some(&thread),
+                    mentions: false,
+                    from_us: false,
+                }
+            ),
+            Recipient::Nobody
+        );
+    }
+
+    /// A message at the root is the foreman's, when it asks to be.
+    #[test]
+    fn a_mention_at_the_root_is_for_the_foreman() {
         let (state, project, _, _) = listening();
         let at_root = |mentions| Arriving {
             address: CHANNEL_ADDRESS,
+            id: "1788000000.000000",
             thread: None,
             mentions,
             from_us: false,
@@ -1611,7 +1890,7 @@ mod tests {
 
         assert_eq!(
             state.recipient(Channel::Slack, &at_root(true)),
-            Recipient::Orchestrator(project)
+            Recipient::Foreman(project)
         );
         // Two people talking in a project's channel are not addressing this.
         assert_eq!(
@@ -1620,15 +1899,13 @@ mod tests {
         );
     }
 
-    /// A thread belonging to no job is the orchestrator's, not nobody's.
+    /// A mention in a thread owning no job is answered, not dropped.
     ///
-    /// The hole this rule exists to close: replying inside a thread is how a
-    /// person answers a specific message, so somebody answering the
-    /// orchestrator will thread their reply under it. A rule that sent every
-    /// unrecognised thread to nobody would drop the message most clearly meant
-    /// for the orchestrator.
+    /// Somebody asked, so silence would read as broken — and this is exactly
+    /// where a person lands by replying to something a foreman said, which is
+    /// the most natural move available and the one thing that cannot work.
     #[test]
-    fn a_mention_in_a_thread_belonging_to_nothing_is_for_the_orchestrator() {
+    fn a_mention_in_a_thread_belonging_to_nothing_is_answered() {
         let (state, project, _, _) = listening();
 
         assert_eq!(
@@ -1636,12 +1913,13 @@ mod tests {
                 Channel::Slack,
                 &Arriving {
                     address: CHANNEL_ADDRESS,
+                    id: "1788000000.000000",
                     thread: Some("1111111111.000000"),
                     mentions: true,
                     from_us: false,
                 }
             ),
-            Recipient::Orchestrator(project)
+            Recipient::NoSuchJob(project)
         );
     }
 
@@ -1660,6 +1938,7 @@ mod tests {
                     Channel::Slack,
                     &Arriving {
                         address: CHANNEL_ADDRESS,
+                        id: "1788000000.000000",
                         thread: Some(&thread),
                         mentions,
                         from_us: true,
@@ -1688,6 +1967,7 @@ mod tests {
                 Channel::Slack,
                 &Arriving {
                     address: CHANNEL_ADDRESS,
+                    id: "1788000000.000000",
                     thread: Some(&thread),
                     mentions: false,
                     from_us: false,
@@ -1711,6 +1991,7 @@ mod tests {
                 Channel::Slack,
                 &Arriving {
                     address: "C-somewhere-else",
+                    id: "1788000000.000000",
                     thread: None,
                     mentions: true,
                     from_us: false,
@@ -1720,23 +2001,24 @@ mod tests {
         );
     }
 
-    /// A finished job's thread still routes to it.
+    /// An idle job's thread still routes to it.
     ///
     /// Deliberate: the thread is that job's conversation, and somebody
     /// replying in it a day later means that job. Whether it can still take
     /// the message is the deliverer's problem, not this one's.
     #[test]
-    fn a_finished_jobs_thread_still_routes_to_it() {
+    fn an_idle_jobs_thread_still_routes_to_it() {
         let (mut state, _, job, thread) = listening();
-        state.job_mut(job).expect("the job").progress = Progress::Completed;
+        state.job_mut(job).expect("the job").progress = Progress::Idle;
 
         assert_eq!(
             state.recipient(
                 Channel::Slack,
                 &Arriving {
                     address: CHANNEL_ADDRESS,
+                    id: "1788000000.000000",
                     thread: Some(&thread),
-                    mentions: false,
+                    mentions: true,
                     from_us: false,
                 }
             ),
@@ -1921,6 +2203,42 @@ mod tests {
         assert_eq!(thread.id, "1728312345.678901");
     }
 
+    /// A job recorded before the states were renamed still opens.
+    ///
+    /// The other half of the sentence in
+    /// `docs/decisions/0011-state-is-a-snapshot-not-a-database.md`: an added
+    /// field is free with a default, and **a rename is not free at all** — the
+    /// old spelling is on disk and stays there until something rewrites it.
+    /// Caught by a test that already existed, which is the only reason the
+    /// rename did not make every instance unopenable.
+    #[test]
+    fn a_job_recorded_under_the_old_state_names_still_opens() {
+        for (written, expected) in [
+            ("Running", Progress::Working),
+            ("Completed", Progress::Idle),
+        ] {
+            let older = format!(
+                r#"{{
+                  "agent": "Claude",
+                  "reason": "an issue was opened",
+                  "kickoff": "work on it",
+                  "created_at": "1970-01-01T00:00:00Z",
+                  "progress": "{written}"
+                }}"#
+            );
+
+            let job: Job = serde_json::from_str(&older)
+                .unwrap_or_else(|why| panic!("{written} must still parse: {why}"));
+            assert_eq!(job.progress, expected);
+        }
+
+        // And what is written back is the new spelling, so a file upgrades
+        // itself the first time anything changes rather than carrying both
+        // forever.
+        let written = serde_json::to_string(&Progress::Working).expect("it serialises");
+        assert_eq!(written, r#""Working""#);
+    }
+
     /// A job recorded before threads existed still opens, with none.
     ///
     /// The same rule as the channel map below, and the reason
@@ -1989,6 +2307,12 @@ mod tests {
     /// The current writer always emits every field, so a round trip cannot
     /// produce the input that breaks — only a file from before the change can,
     /// and this is one.
+    ///
+    /// **Nothing in here may be renamed to match the source.** These are the
+    /// names an old file carries, not the names the types use, and a
+    /// search-and-replace across the crate will silently update them and leave
+    /// a test that proves nothing. That happened: a rename swept through this
+    /// fixture, the suite stayed green, and a real instance would not open.
     #[test]
     fn a_snapshot_written_before_channels_existed_still_opens() {
         let older = format!(
@@ -2084,7 +2408,7 @@ mod tests {
 
     #[test]
     fn every_agent_says_what_it_is_good_for() {
-        // The orchestrator picks an agent by reading this, so an empty one is
+        // The foreman picks an agent by reading this, so an empty one is
         // a silent failure rather than a cosmetic one.
         assert!(!Agent::Claude.description().is_empty());
     }
@@ -2120,9 +2444,9 @@ mod tests {
     }
 
     #[test]
-    fn triage_is_handed_its_credential_and_no_platform_at_all() {
+    fn a_foreman_is_handed_its_credential_and_no_platform_at_all() {
         let (state, mine, _) = two_projects();
-        let handout = Handout::for_triage(&state, mine).expect("a watched project");
+        let handout = Handout::for_foreman(&state, mine).expect("a watched project");
 
         assert_eq!(handout.agent(), Agent::Claude);
         assert_eq!(handout.agent_credential().expose(), "agent-token");
@@ -2133,13 +2457,13 @@ mod tests {
     /// The asymmetry `docs/decisions/0027-a-channel-is-not-a-platform.md` is
     /// built on, asserted beside the test that establishes the other half.
     ///
-    /// An orchestrator watches its project's channels — that is the whole of
+    /// A foreman watches its project's channels — that is the whole of
     /// its remit — so a handout that withheld them the way it withholds
     /// platform credentials would leave it unable to work.
     #[test]
-    fn triage_is_handed_the_channels_it_has_to_watch() {
+    fn a_foreman_is_handed_the_channels_it_has_to_watch() {
         let (state, mine, _) = two_projects();
-        let handout = Handout::for_triage(&state, mine).expect("a watched project");
+        let handout = Handout::for_foreman(&state, mine).expect("a watched project");
 
         let watching = handout
             .channel(Channel::Slack)
@@ -2210,7 +2534,7 @@ mod tests {
 
     /// A handout speaks at the root until it is narrowed to a thread.
     ///
-    /// The absence is what makes the orchestrator's handout mean "the root of
+    /// The absence is what makes the foreman's handout mean "the root of
     /// the channel", so it is asserted rather than assumed.
     #[test]
     fn a_handout_speaks_at_the_root_until_it_is_given_a_thread() {
@@ -2219,11 +2543,11 @@ mod tests {
         let job = Handout::for_job(&state, Agent::Claude, mine).expect("a watched project");
         assert!(job.thread().is_none());
         assert!(
-            Handout::for_triage(&state, mine)
+            Handout::for_foreman(&state, mine)
                 .expect("a watched project")
                 .thread()
                 .is_none(),
-            "triage speaks at the root, which is what a reply there addresses"
+            "a foreman speaks at the root, which is what a reply there addresses"
         );
 
         let narrowed = job.speaking_in(Thread {
@@ -2236,6 +2560,97 @@ mod tests {
         );
         // Narrowing changes where it speaks and nothing about what it holds.
         assert_eq!(narrowed.channels().count(), 1);
+    }
+
+    /// A warrant reaches a foreman's handout and never a job's.
+    ///
+    /// The whole of what stops a job creating jobs. Measured rather than
+    /// assumed that it is needed: an unrelated container reaches the host as
+    /// easily as a foreman's does, so nothing about being in a container makes
+    /// a process a foreman.
+    #[test]
+    fn only_a_foreman_is_handed_a_warrant() {
+        let (mut state, mine, _) = two_projects();
+        state.projects.get_mut(&mine).expect("the project").warrant =
+            Some(Secret::new(WARRANT.to_owned()));
+
+        assert_eq!(
+            Handout::for_foreman(&state, mine)
+                .expect("a watched project")
+                .warrant()
+                .map(Secret::expose),
+            Some(WARRANT)
+        );
+        assert_eq!(
+            Handout::for_job(&state, Agent::Claude, mine)
+                .expect("a watched project")
+                .warrant(),
+            None,
+            "a job that could ask the instance for anything has a foreman's authority"
+        );
+    }
+
+    /// A warrant names the project that holds it, and nothing else.
+    #[test]
+    fn a_warrant_says_which_project_it_speaks_for() {
+        let (mut state, mine, theirs) = two_projects();
+        state.projects.get_mut(&mine).expect("the project").warrant =
+            Some(Secret::new(WARRANT.to_owned()));
+
+        assert_eq!(state.warranted(WARRANT), Some(mine));
+
+        // A project with no warrant is never matched, however empty the value.
+        assert_eq!(state.warranted(""), None);
+        assert_eq!(state.warranted("warrant-somebody-invented"), None);
+        assert_eq!(
+            state
+                .projects
+                .get(&theirs)
+                .expect("the other project")
+                .warrant,
+            None
+        );
+
+        // Never by prefix, because a shorter guess must not open a longer
+        // secret.
+        // Sliced by characters rather than by byte index, which the gate is
+        // right to call a panic on any string it does not itself control.
+        let shorter: String = WARRANT.chars().take(5).collect();
+        assert_eq!(state.warranted(&shorter), None);
+        assert_eq!(state.warranted(&format!("{WARRANT}extra")), None);
+    }
+
+    /// A warrant is sealed like every other credential, and survives.
+    #[test]
+    fn a_warrant_is_sealed_and_survives_the_snapshot() {
+        let mut state = populated();
+        let project = *state.projects.keys().next().expect("a project");
+        state
+            .projects
+            .get_mut(&project)
+            .expect("the project")
+            .warrant = Some(Secret::new(WARRANT.to_owned()));
+
+        let json = serde_json::to_string(
+            &state
+                .seal(&key(), &mut counting_nonces())
+                .expect("sealing cannot fail"),
+        )
+        .expect("a snapshot serialises");
+        assert!(!json.contains(WARRANT), "{json}");
+
+        let reopened: Snapshot = serde_json::from_str(&json).expect("and parses back");
+        let reopened = reopened.open(&key()).expect("and opens");
+        assert_eq!(
+            reopened
+                .projects
+                .get(&project)
+                .expect("the project survived")
+                .warrant
+                .as_ref()
+                .map(Secret::expose),
+            Some(WARRANT)
+        );
     }
 
     /// The credential that listens never reaches a handout at all.
@@ -2255,7 +2670,7 @@ mod tests {
 
         for handout in [
             Handout::for_job(&state, Agent::Claude, mine).expect("a watched project"),
-            Handout::for_triage(&state, mine).expect("a watched project"),
+            Handout::for_foreman(&state, mine).expect("a watched project"),
         ] {
             let bound = handout.channel(Channel::Slack).expect("a binding");
             assert_eq!(bound.credential.expose(), CHANNEL_TOKEN);
@@ -2308,7 +2723,7 @@ mod tests {
             refused,
             Err(HandoutError::UnconfiguredAgent(Agent::Claude))
         ));
-        assert!(Handout::for_triage(&state, mine).is_err());
+        assert!(Handout::for_foreman(&state, mine).is_err());
     }
 
     #[test]
@@ -2363,9 +2778,9 @@ mod tests {
     }
 
     #[test]
-    fn running_finds_a_job_wherever_its_project_is() {
+    fn working_finds_a_job_wherever_its_project_is() {
         let state = populated();
-        let found: Vec<JobId> = state.running().collect();
+        let found: Vec<JobId> = state.working().collect();
 
         assert_eq!(found.len(), 1, "{found:?}");
         assert!(state.job(found[0]).is_some());
@@ -2374,14 +2789,165 @@ mod tests {
     #[test]
     fn a_job_that_has_finished_is_not_running() {
         let mut state = populated();
-        let id = state.running().next().expect("one to start with");
+        let id = state.working().next().expect("one to start with");
 
-        state.job_mut(id).expect("it is there").progress = Progress::Completed;
+        state.job_mut(id).expect("it is there").progress = Progress::Idle;
 
-        assert_eq!(state.running().count(), 0);
+        assert_eq!(state.working().count(), 0);
         assert!(
             state.job(id).is_some(),
             "finishing is not forgetting: the record stays"
+        );
+    }
+
+    fn errand(said: &str) -> Errand {
+        Errand {
+            said: said.to_owned(),
+            thread: Thread {
+                channel: Channel::Slack,
+                id: format!("{said}.thread"),
+            },
+        }
+    }
+
+    /// An idle foreman starts on what arrives; a working one queues it.
+    #[test]
+    fn the_first_message_starts_a_turn_and_the_rest_wait() {
+        let mut attending = Attending::default();
+        assert_eq!(attending, Attending::Idle);
+
+        assert_eq!(attending.take(errand("first")), Taken::Started);
+        assert_eq!(attending.on().map(|e| e.said.as_str()), Some("first"));
+        assert_eq!(attending.waiting(), 0);
+
+        // Everything after it waits, however many arrive.
+        for said in ["second", "third"] {
+            assert_eq!(attending.take(errand(said)), Taken::Waiting);
+        }
+        assert_eq!(attending.on().map(|e| e.said.as_str()), Some("first"));
+        assert_eq!(attending.waiting(), 2);
+    }
+
+    /// Two messages arriving together cannot both start a turn.
+    ///
+    /// Not a test of locking — that is the caller's — but of the reason
+    /// locking is enough: taking is one operation, so whichever runs first
+    /// leaves a state the second cannot mistake for idle.
+    #[test]
+    fn only_one_message_can_ever_start_a_turn() {
+        let mut attending = Attending::Idle;
+        let started = [errand("a"), errand("b")]
+            .into_iter()
+            .filter(|_| true)
+            .map(|e| attending.take(e))
+            .filter(|taken| *taken == Taken::Started)
+            .count();
+
+        assert_eq!(started, 1, "exactly one of them may begin");
+    }
+
+    /// Finishing picks up the next, in the order they arrived.
+    #[test]
+    fn messages_are_picked_up_in_the_order_they_arrived() {
+        let mut attending = Attending::Idle;
+        for said in ["first", "second", "third"] {
+            attending.take(errand(said));
+        }
+
+        assert_eq!(attending.finish().map(|e| e.said.as_str()), Some("second"));
+        assert_eq!(attending.waiting(), 1);
+        assert_eq!(attending.finish().map(|e| e.said.as_str()), Some("third"));
+        assert_eq!(attending.waiting(), 0);
+    }
+
+    /// A foreman goes idle only when nothing is left.
+    ///
+    /// The invariant the shape exists for: there is no way to reach `Idle`
+    /// while anything waits, because `Idle` has nowhere to keep it. This
+    /// asserts the behaviour; the type is what makes it true.
+    #[test]
+    fn a_foreman_goes_idle_only_with_an_empty_inbox() {
+        let mut attending = Attending::Idle;
+        attending.take(errand("only"));
+
+        assert_eq!(attending.finish(), None);
+        assert_eq!(attending, Attending::Idle);
+        assert_eq!(attending.waiting(), 0);
+
+        // And finishing when there was nothing in hand changes nothing.
+        assert_eq!(attending.finish(), None);
+        assert_eq!(attending, Attending::Idle);
+    }
+
+    /// What is waiting survives the snapshot, because a person sent it.
+    #[test]
+    fn an_inbox_survives_the_snapshot_boundary() {
+        let mut state = populated();
+        let project = *state.projects.keys().next().expect("a project");
+        let attending = &mut state
+            .projects
+            .get_mut(&project)
+            .expect("the project")
+            .attending;
+        attending.take(errand("in hand"));
+        attending.take(errand("waiting"));
+
+        let json = serde_json::to_string(
+            &state
+                .seal(&key(), &mut counting_nonces())
+                .expect("sealing cannot fail"),
+        )
+        .expect("a snapshot serialises");
+        let reopened: Snapshot = serde_json::from_str(&json).expect("and parses back");
+        let reopened = reopened.open(&key()).expect("and opens");
+
+        let attending = &reopened
+            .projects
+            .get(&project)
+            .expect("the project survived")
+            .attending;
+        assert_eq!(attending.on().map(|e| e.said.as_str()), Some("in hand"));
+        assert_eq!(attending.waiting(), 1);
+    }
+
+    /// A project recorded before foremen had an inbox still opens.
+    #[test]
+    fn a_project_recorded_before_the_inbox_existed_still_opens() {
+        let older = format!(
+            r#"{{
+              "agents": {{ "Claude": {{ "auth_token": {} }} }},
+              "projects": {{
+                "00000000-0000-0000-0000-000000000003": {{
+                  "name": "example",
+                  "repository": "https://example.invalid/repo",
+                  "orchestrator_agent": "Claude",
+                  "job_agents": ["Claude"],
+                  "credentials": {{}},
+                  "channels": {{}},
+                  "jobs": {{}}
+                }}
+              }}
+            }}"#,
+            serde_json::to_string(
+                &Secret::new("agent-token".to_owned())
+                    .seal(&key(), [1; NONCE_LEN])
+                    .expect("sealing a well-formed secret")
+            )
+            .expect("a sealed secret serialises")
+        );
+
+        let parsed: Snapshot = serde_json::from_str(&older).expect("an older file still parses");
+        let state = parsed.open(&key()).expect("and still opens");
+
+        assert_eq!(
+            state
+                .projects
+                .values()
+                .next()
+                .expect("the project survived")
+                .attending,
+            Attending::Idle,
+            "a project from before the inbox has nothing waiting"
         );
     }
 

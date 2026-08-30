@@ -39,6 +39,9 @@ pub enum Incoming {
     Said {
         /// What has to be acknowledged, whatever is decided about the message.
         envelope: String,
+        /// What identifies this message, which is the thread a foreman answers
+        /// in when the message is at the root.
+        id: String,
         /// What was said.
         text: String,
         /// Where it was said, and in which thread if any.
@@ -97,10 +100,18 @@ pub fn decode(frame: &str, us: &Identity) -> Incoming {
         return Incoming::Acknowledge(id);
     };
 
+    let Some(spoken) = said.ts else {
+        // Every message has one. Without it there is nothing to answer under,
+        // so it is acknowledged and dropped rather than routed to a thread
+        // that cannot be addressed.
+        return Incoming::Acknowledge(id);
+    };
+
     Incoming::Said {
         envelope: id,
         mentions: said.text.contains(&format!("<@{}>", us.user)),
         from_us: ours || said.user.as_deref() == Some(us.user.as_str()),
+        id: spoken,
         text: said.text,
         address,
         thread: said.thread_ts,
@@ -113,6 +124,7 @@ impl Incoming {
     pub fn arriving(&self) -> Option<Arriving<'_>> {
         match self {
             Self::Said {
+                id,
                 address,
                 thread,
                 mentions,
@@ -120,6 +132,7 @@ impl Incoming {
                 ..
             } => Some(Arriving {
                 address,
+                id,
                 thread: thread.as_deref(),
                 mentions: *mentions,
                 from_us: *from_us,
@@ -161,6 +174,7 @@ struct Said {
     bot_id: Option<String>,
     #[serde(default)]
     text: String,
+    ts: Option<String>,
     thread_ts: Option<String>,
 }
 
@@ -262,8 +276,21 @@ pub async fn attend(
     );
 
     while let Some(frame) = socket.next().await {
-        let frame = frame
-            .map_err(|failure| crate::channel::ChannelError::Unreachable(failure.to_string()))?;
+        let frame = match frame {
+            Ok(frame) => frame,
+            // An ordinary end, which is most of them. The platform closes a
+            // long-lived connection on a schedule of its own and does not
+            // always say goodbye first, so this is the common path rather than
+            // a fault — and reporting it as one is how somebody learns to
+            // ignore what this reports.
+            Err(why) if ordinary_end(&why) => {
+                tracing::info!(%why, "the connection ended; opening another");
+                return Ok(());
+            }
+            Err(why) => {
+                return Err(crate::channel::ChannelError::Unreachable(why.to_string()));
+            }
+        };
         let tokio_tungstenite::tungstenite::Message::Text(text) = frame else {
             continue;
         };
@@ -297,20 +324,59 @@ pub async fn attend(
                 from_us,
                 ..
             } => {
-                tracing::info!(
-                    %address,
-                    thread = thread.as_deref().unwrap_or("(root)"),
-                    mentions,
-                    from_us,
-                    "heard somebody speak"
-                );
+                // Anything this instance said is the loop guard working, and
+                // there is one of these for every message it sends. Said at
+                // debug so that what is left at info is somebody talking to
+                // it.
+                if from_us {
+                    tracing::debug!(%address, "heard itself, and ignored it");
+                } else {
+                    tracing::info!(
+                        %address,
+                        thread = thread.as_deref().unwrap_or("(root)"),
+                        mentions,
+                        "heard somebody speak"
+                    );
+                }
                 let text = text.clone();
-                act(store, runtime, &heard, &text).await;
+                act(store, runtime, listening, &heard, &text).await;
             }
             Incoming::Ready | Incoming::Acknowledge(_) | Incoming::Ignore => {}
         }
     }
     Ok(())
+}
+
+/// Whether a socket ending this way is the ordinary case.
+///
+/// **Most endings are.** A long-lived connection is closed by the platform on
+/// its own schedule, and it does not always complete a closing handshake
+/// first — a reset arrives as a protocol error and means nothing has gone
+/// wrong. Told apart from a real failure so that a warning stays worth
+/// reading: this is logged as the routine thing it is, and anything else is
+/// not.
+fn ordinary_end(why: &tokio_tungstenite::tungstenite::Error) -> bool {
+    use tokio_tungstenite::tungstenite::{Error, error::ProtocolError};
+
+    match why {
+        // A close the platform completed, and one it did not bother to —
+        // the same event, and which arrives depends on timing rather than on
+        // anything worth telling apart.
+        Error::ConnectionClosed
+        | Error::AlreadyClosed
+        | Error::Protocol(ProtocolError::ResetWithoutClosingHandshake) => true,
+        // A peer that vanished mid-read is the same event seen one layer
+        // lower, which is which depending on timing rather than on anything
+        // meaningful.
+        Error::Io(failure) => matches!(
+            failure.kind(),
+            std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::UnexpectedEof
+        ),
+        _ => false,
+    }
 }
 
 /// The envelope a frame has to be answered with, if it has one.
@@ -327,6 +393,7 @@ fn acknowledging(heard: &Incoming) -> Option<&str> {
 async fn act(
     store: &crate::Store,
     runtime: &stageman_agent::ContainerRuntime,
+    listening: &Listening,
     heard: &Incoming,
     said: &str,
 ) {
@@ -343,14 +410,51 @@ async fn act(
     match destination {
         stageman_core::Recipient::Job(job) => {
             tracing::info!(%job, "handing a reply to the job whose thread it is in");
-            let framed = stageman_orchestrator::reply(said);
+            let framed = stageman_foreman::reply(said);
             drop(crate::deliver(store, runtime, job, &framed).await);
         }
-        // Nothing runs one yet. Logged rather than dropped, because the
-        // routing rule already sends messages here and a silent destination is
-        // indistinguishable from a broken one.
-        stageman_core::Recipient::Orchestrator(project) => {
-            tracing::info!(%project, "a message for the orchestrator, which does not run yet");
+        stageman_core::Recipient::Foreman(project) => {
+            // A message at the root is the parent of the thread its answer
+            // belongs under; one in a thread is answered where it was said.
+            // Either way the thread is decided here, when the message arrives,
+            // rather than when its turn starts — by then it may be several
+            // turns back.
+            let thread = stageman_core::Thread {
+                channel: stageman_core::Channel::Slack,
+                id: arriving.thread.unwrap_or(arriving.id).to_owned(),
+            };
+            tracing::info!(%project, "a message for the foreman");
+            crate::attend(
+                store,
+                runtime,
+                project,
+                stageman_core::Errand {
+                    said: said.to_owned(),
+                    thread,
+                },
+            )
+            .await;
+        }
+        // Answered rather than ignored. They addressed this instance, so
+        // silence would read as broken — and this is where somebody lands by
+        // replying to a foreman's own message.
+        stageman_core::Recipient::NoSuchJob(project) => {
+            let Some(thread) = arriving.thread.map(|id| stageman_core::Thread {
+                channel: stageman_core::Channel::Slack,
+                id: id.to_owned(),
+            }) else {
+                return;
+            };
+            tracing::info!(%project, "a message in a thread belonging to no job");
+            if let Err(why) = crate::channel::say_in(
+                &listening.speaking,
+                &thread,
+                stageman_foreman::no_such_job_notice(),
+            )
+            .await
+            {
+                tracing::warn!(%why, "the thread could not be answered");
+            }
         }
         // Ordinary — most of what is said in a project's channel is people
         // talking to each other. Said at debug so that "nothing happened" can
@@ -487,10 +591,11 @@ mod tests {
     fn a_reply_in_a_thread_carries_everything_routing_needs() {
         let frame = r#"{"envelope_id":"e-1","type":"events_api","payload":{"event":{
             "type":"message","channel":"C0123","user":"U0HUMAN",
-            "text":"use postgres","ts":"1.2","thread_ts":"1728312345.678901"}}}"#;
+            "text":"use postgres","ts":"1788000001.000001","thread_ts":"1728312345.678901"}}}"#;
 
         let Incoming::Said {
             envelope,
+            id,
             text,
             address,
             thread,
@@ -502,6 +607,9 @@ mod tests {
         };
 
         assert_eq!(envelope, "e-1");
+        // The message's own identifier, which is what a foreman would answer
+        // under if this had been at the root.
+        assert_eq!(id, "1788000001.000001");
         assert_eq!(text, "use postgres");
         assert_eq!(address, "C0123");
         // A string, never a number: parsed as one it addresses no message.
@@ -519,7 +627,7 @@ mod tests {
         let frame = |text: &str| {
             format!(
                 r#"{{"envelope_id":"e-2","payload":{{"event":{{
-                "type":"message","channel":"C0123","user":"U0HUMAN","text":"{text}"}}}}}}"#
+                "type":"message","channel":"C0123","user":"U0HUMAN","ts":"1788000002.000002","text":"{text}"}}}}}}"#
             )
         };
 
@@ -547,13 +655,13 @@ mod tests {
     fn anything_this_instance_said_is_recognised_as_its_own() {
         let by_bot = said(
             r#"{"envelope_id":"e-3","payload":{"event":{"type":"message","subtype":"bot_message",
-            "channel":"C0123","bot_id":"B0SELF","text":"⚠️ Check this out."}}}"#,
+            "channel":"C0123","bot_id":"B0SELF","ts":"1788000003.000003","text":"⚠️ Check this out."}}}"#,
         );
         assert!(by_bot.arriving().expect("a message").from_us);
 
         let by_user = said(
             r#"{"envelope_id":"e-4","payload":{"event":{"type":"message",
-            "channel":"C0123","user":"U0BOT","text":"hello"}}}"#,
+            "channel":"C0123","user":"U0BOT","ts":"1788000004.000004","text":"hello"}}}"#,
         );
         assert!(by_user.arriving().expect("a message").from_us);
 
@@ -564,7 +672,7 @@ mod tests {
         // loop this exists to close.
         let identifier_only = said(
             r#"{"envelope_id":"e-9","payload":{"event":{"type":"message",
-            "channel":"C0123","bot_id":"B0SELF","text":"posted"}}}"#,
+            "channel":"C0123","bot_id":"B0SELF","ts":"1788000005.000005","text":"posted"}}}"#,
         );
         assert!(
             identifier_only.arriving().expect("a message").from_us,
@@ -573,7 +681,7 @@ mod tests {
 
         let subtype_only = said(
             r#"{"envelope_id":"e-10","payload":{"event":{"type":"message",
-            "subtype":"bot_message","channel":"C0123","text":"rendered"}}}"#,
+            "subtype":"bot_message","channel":"C0123","ts":"1788000006.000006","text":"rendered"}}}"#,
         );
         assert!(
             subtype_only.arriving().expect("a message").from_us,
@@ -593,7 +701,7 @@ mod tests {
 
         let reply = said(
             r#"{"envelope_id":"e-11","payload":{"event":{"type":"message",
-            "channel":"C0123","user":"U0HUMAN","text":"hello"}}}"#,
+            "channel":"C0123","user":"U0HUMAN","ts":"1788000007.000007","text":"hello"}}}"#,
         );
         assert_eq!(acknowledging(&reply), Some("e-11"));
 
@@ -644,7 +752,7 @@ mod tests {
         let bound = |listens: bool| Project {
             name: "aviary".to_owned(),
             repository: "https://example.invalid/aviary".to_owned(),
-            orchestrator_agent: Agent::Claude,
+            foreman_agent: Agent::Claude,
             job_agents: BTreeSet::from([Agent::Claude]),
             credentials: BTreeMap::new(),
             channels: BTreeMap::from([(
@@ -656,6 +764,8 @@ mod tests {
                 },
             )]),
             jobs: BTreeMap::new(),
+            warrant: None,
+            attending: stageman_core::Attending::default(),
         };
         let id = ProjectId::from_uuid(Uuid::from_u128(1));
 
@@ -679,6 +789,38 @@ mod tests {
         // travel with the one that posts.
         assert_eq!(listening.speaking.credential.expose(), "xoxb-token");
         assert_eq!(listening.opening.expose(), "xapp-token");
+    }
+
+    /// A connection ending is usually nothing, and has to be told apart.
+    ///
+    /// **Found by reading a real log.** A reset arrived as a protocol error
+    /// every few minutes, was reported as a warning, and the listener quietly
+    /// reconnected and carried on — so the warning meant nothing, which is how
+    /// somebody learns to skip past the one that does.
+    #[test]
+    fn an_ordinary_disconnection_is_not_a_failure() {
+        use tokio_tungstenite::tungstenite::{Error, error::ProtocolError};
+
+        for ending in [
+            Error::ConnectionClosed,
+            Error::AlreadyClosed,
+            Error::Protocol(ProtocolError::ResetWithoutClosingHandshake),
+            Error::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+            Error::Io(std::io::Error::from(std::io::ErrorKind::UnexpectedEof)),
+        ] {
+            assert!(super::ordinary_end(&ending), "{ending:?} is how they end");
+        }
+
+        for broken in [
+            Error::Protocol(ProtocolError::HandshakeIncomplete),
+            Error::Io(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            Error::AttackAttempt,
+        ] {
+            assert!(
+                !super::ordinary_end(&broken),
+                "{broken:?} is worth somebody reading"
+            );
+        }
     }
 
     /// A frame with nothing to acknowledge is dropped rather than guessed at.

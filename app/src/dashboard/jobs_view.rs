@@ -5,7 +5,7 @@
 //! is one agent in one container doing work on one repository until it is done.
 //!
 //! **What an operator types is the work, never the instruction.** The agent's
-//! instruction is composed by the orchestrator from the work and the
+//! instruction is composed by the foreman from the work and the
 //! repository, and carries three things that are not negotiable — nothing is
 //! checked out, the tools are already authenticated, and work ends at a
 //! proposal. `docs/architecture.md` §1 puts every place an instruction is
@@ -25,7 +25,7 @@ use crate::ui::{Badge, BadgeTone, Button, Card, EmptyState, Modal};
 /// Why a job started, when a person started it.
 ///
 /// Filled in rather than asked for. The vocabulary in `docs/conventions.md` §2
-/// calls a reason "why the orchestrator decided to" — and an orchestrator has
+/// calls a reason "why the foreman decided to" — and a foreman has
 /// a reason distinct from the work because it is judging a signal. A person
 /// pressing a button has no separate judgement to record: the provenance *is*
 /// that a person asked, and asking them to phrase that as well as the work
@@ -35,17 +35,18 @@ const BY_HAND: &str = "started by hand from the dashboard";
 
 /// Where a job has got to, as a page sees it.
 ///
-/// The three in `docs/conventions.md` §2 and no more. `Completed` says the
-/// work ended rather than that it succeeded — nothing here can see whether a
-/// proposal was any good, and `docs/decisions/0002-never-merge-never-deploy.md`
-/// means a person reads it before it counts for anything.
+/// The three in `docs/conventions.md` §2 and no more. `Idle` says its agent
+/// stopped rather than that the work is done — nothing here can tell a job
+/// that finished from one that asked a question, and
+/// `docs/decisions/0002-never-merge-never-deploy.md` means a person reads what
+/// it proposed before any of it counts for anything.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "standing", rename_all = "snake_case")]
 pub enum Standing {
-    /// Started, and nothing has said it is over.
-    Running,
-    /// The agent finished its turn.
-    Completed,
+    /// Its agent has been given something and has not stopped.
+    Working,
+    /// Its agent stopped, and nothing has been given to it since.
+    Idle,
     /// It could not be finished, and this is what went wrong.
     Failed {
         /// Prose for a person, not a code to branch on.
@@ -58,8 +59,8 @@ impl Standing {
     #[must_use]
     pub const fn tone(&self) -> BadgeTone {
         match self {
-            Self::Running => BadgeTone::Running,
-            Self::Completed => BadgeTone::Completed,
+            Self::Working => BadgeTone::Working,
+            Self::Idle => BadgeTone::Idle,
             Self::Failed { .. } => BadgeTone::Failed,
         }
     }
@@ -68,8 +69,8 @@ impl Standing {
     #[must_use]
     pub const fn label(&self) -> &'static str {
         match self {
-            Self::Running => "running",
-            Self::Completed => "completed",
+            Self::Working => "working",
+            Self::Idle => "idle",
             Self::Failed { .. } => "failed",
         }
     }
@@ -86,7 +87,7 @@ pub struct Job {
     pub reason: String,
     /// What its agent was told to do.
     ///
-    /// The whole instruction, including the parts the orchestrator composed
+    /// The whole instruction, including the parts the foreman composed
     /// rather than the part somebody typed. Shown because it is the only
     /// record of what the agent was actually asked, and a job that went wrong
     /// is usually a job that was asked badly.
@@ -282,8 +283,8 @@ fn working(state: &stageman_core::State, project: &str) -> DashboardResult<Worki
 #[cfg(feature = "server")]
 fn standing(progress: &stageman_core::Progress) -> Standing {
     match progress {
-        stageman_core::Progress::Running => Standing::Running,
-        stageman_core::Progress::Completed => Standing::Completed,
+        stageman_core::Progress::Working => Standing::Working,
+        stageman_core::Progress::Idle => Standing::Idle,
         stageman_core::Progress::Failed(why) => Standing::Failed { why: why.clone() },
     }
 }
@@ -521,11 +522,13 @@ mod server_tests {
         stageman_core::Project {
             name: "aviary".to_owned(),
             repository: "https://example.invalid/aviary".to_owned(),
-            orchestrator_agent: Agent::Claude,
+            foreman_agent: Agent::Claude,
             job_agents: agents,
             credentials: BTreeMap::new(),
             channels: BTreeMap::new(),
             jobs: BTreeMap::new(),
+            warrant: None,
+            attending: stageman_core::Attending::default(),
         }
     }
 
@@ -545,8 +548,8 @@ mod server_tests {
 
     #[test]
     fn the_other_two_cross_as_themselves() {
-        assert_eq!(standing(&Progress::Running), Standing::Running);
-        assert_eq!(standing(&Progress::Completed), Standing::Completed);
+        assert_eq!(standing(&Progress::Working), Standing::Working);
+        assert_eq!(standing(&Progress::Idle), Standing::Idle);
     }
 }
 
@@ -561,8 +564,8 @@ mod tests {
     /// below checks.
     fn every() -> Vec<Standing> {
         vec![
-            Standing::Running,
-            Standing::Completed,
+            Standing::Working,
+            Standing::Idle,
             Standing::Failed {
                 why: "it did not work".to_owned(),
             },

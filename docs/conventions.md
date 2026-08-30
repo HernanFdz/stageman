@@ -56,12 +56,44 @@ Record the near-miss too: the term you rejected, and what it would have implied.
 
 - **project** — one repository, together with the channels bound to it, the
   credentials those channels need, and the agents it runs on: one for its
-  orchestrator to think with, and a non-empty set its jobs may use. One
+  foreman to think with, and a non-empty set its jobs may use. One
   instance manages several. Everything else in this list belongs to exactly one
-  project, always — including the orchestrator, which is a project's rather
+  project, always — including the foreman, which is a project's rather
   than an instance's, per
   `docs/decisions/0020-the-orchestrator-belongs-to-a-project.md`.
-- **channel** — somewhere the orchestrator watches and a job can speak into.
+- **foreman** — the one thing per project that reads what a person says and
+  decides what to do about it: answer, do nothing, or start a job. It runs an
+  agent to think with, in one long-lived container of its own, and it is the
+  only thing that composes an instruction — a job never writes its own.
+
+  Called a foreman because the word is a *role* and the job is the work it
+  assigns: "why did the foreman do that?" is a question with an answer, in a
+  way that the word this replaced never managed. It was **orchestrator** until
+  `docs/decisions/0030-the-orchestrator-is-a-foreman.md`, which is why every
+  record numbered below that one says the old word and means this. Not a
+  *supervisor* or a *coordinator*, which describe watching rather than
+  deciding, and not a *dispatcher*, which is only the third of the three
+  things it can do.
+
+- **inbox** — the messages waiting for a project's foreman, in the order they
+  arrived. It exists only while the foreman is working: a foreman with nothing
+  to do has nothing waiting, which is a property of the type rather than a rule
+  anybody keeps. Not a *queue*, which names the structure instead of what is in
+  it, and would invite a second one somewhere else.
+
+- **turn** — one message, handled from being handed to a foreman or a job until
+  its agent stops. The protocol's own word, and the unit everything else is
+  scoped to: a turn is what an inbox entry buys, what a thread collects, and
+  what "idle" means the absence of.
+
+- **mention** — how somebody says they mean stageman rather than each other.
+  It is the whole of what makes a message ours: nothing without one is read,
+  in a thread or at the root — see
+  `docs/decisions/0031-a-mention-is-what-makes-it-ours.md`. Worth a word of its
+  own because it is the only rule an operator has to hold in their head, and
+  the only one whose failure is silence.
+
+- **channel** — somewhere the foreman watches and a job can speak into.
   Two-directional by definition, which is why it is not called a *source* or a
   *feed*: the same Slack that carries a question out carries the answer back.
   Not *integration* or *connector* either — both describe plumbing, and the
@@ -96,7 +128,7 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   `docs/decisions/0016-the-agent-clones-the-repository.md` has the agent clone
   it if the work needs one, so what is inside a workspace is the job's business
   and a job with no repository at all is an ordinary case rather than an empty
-  mount. The orchestrator's agent still has no workspace, and now for a plainer
+  mount. The foreman's agent still has no workspace, and now for a plainer
   reason than having no repository — a workspace belongs to a job, and triage
   is not one.
 - **thread** — where one job's conversation happens on a channel. A channel
@@ -105,7 +137,7 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   routable, since a message arriving names its thread and nothing else. Not a
   *conversation*, which is the thing that happens in one rather than the place
   it happens in, and would leave nothing to call the identifier. The
-  orchestrator has none, deliberately: it speaks at the root of the channel,
+  foreman has none, deliberately: it speaks at the root of the channel,
   and that is what makes a message there addressed to it rather than to any
   job. See `docs/decisions/0029-a-reply-is-routed-by-its-thread.md`.
 
@@ -114,19 +146,19 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   parsed as one it loses the microseconds and addresses no message, and the
   failure reads like a permissions problem.
 
-- **reason** — the free text the orchestrator writes when it creates a job,
+- **reason** — the free text the foreman writes when it creates a job,
   saying why it decided to. Prose meant for a human reading the dashboard, not
   a key pointing at a signal. It is the whole of a job's provenance, which is
   why `docs/architecture.md` §2 records the structured version as deliberately
   absent.
-- **kickoff prompt** — the instruction text the orchestrator composes and the
+- **kickoff prompt** — the instruction text the foreman composes and the
   job's agent begins from. A job never writes its own.
 - **agent** — reserved, always, for a third-party coding agent: the tool that
   gets configured, chosen and run. Never for stageman, never for the
-  orchestrator, never for a job. This one matters more than it looks: "the
+  foreman, never for a job. This one matters more than it looks: "the
   agent decided to…" is ambiguous in exactly the place where being wrong is
   expensive, and the sentence still reads fine either way. Note that an agent
-  is not only something inside a job — the orchestrator runs one too, to think
+  is not only something inside a job — the foreman runs one too, to think
   with. In the code it is a closed set rather than an open list: the agents that
   can be run are the ones compiled in, because each needs an adapter and an
   image and both are code. What an operator supplies per agent is an
@@ -149,7 +181,7 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   a job has no use for one: the handout carries a narrower type with nowhere
   to put it, so that is a property rather than a rule somebody applies. Nothing else, and nothing
   inherited. The two project halves are not interchangeable and a handout can
-  carry one without the other: an orchestrator's gets the channels and no
+  carry one without the other: a foreman's gets the channels and no
   platform credential at all, because watching a channel is its remit and
   acting on a platform is not. See
   `docs/decisions/0027-a-channel-is-not-a-platform.md`. It is *decided* in the domain crate as a
@@ -230,9 +262,9 @@ justify is usually obsolete.
   locked. Those fail the job that needs them, visibly, and leave the instance
   running so an operator can do something about it. The distinction is whether
   the operator could act on it — not how serious it looks.
-- **The app crate is an Axum server, and the orchestrator shares its runtime.**
-  Dioxus fullstack server functions are Axum handlers, and the orchestrator runs
-  in that same process rather than beside it. So orchestrator work must never
+- **The app crate is an Axum server, and the foreman shares its runtime.**
+  Dioxus fullstack server functions are Axum handlers, and the foreman runs
+  in that same process rather than beside it. So foreman work must never
   happen on the request path: watching a channel, judging a signal and
   supervising a job all belong on their own tasks. A dashboard that stops
   painting because a job is thinking is the failure this rule exists to prevent.
@@ -258,7 +290,7 @@ justify is usually obsolete.
   would silently stop covering half the application. The line excludes the four
   internal crates by name; a crate added later fails there until somebody says
   which side of the split it is on, which is the right default.
-- **Typed errors per crate, and no `anyhow` in core, agent, orchestrator or
+- **Typed errors per crate, and no `anyhow` in core, agent, foreman or
   job.** That is the gate's bar restated only where it bites: **app** is a
   binary and may do as it likes internally, but the other four are libraries
   whose errors cross a boundary, and a boxed error at that boundary makes the
@@ -270,7 +302,7 @@ justify is usually obsolete.
   there is that the agent is on somebody else's release cadence.
 - **Packages carry a prefix; directories do not.** The directories are named
   for the concepts in `docs/architecture.md` §1, and the packages inside them
-  are `stageman-core`, `stageman-orchestrator` and `stageman-job`, with the app
+  are `stageman-core`, `stageman-foreman` and `stageman-job`, with the app
   published as `stageman` itself. Exactly one of those prefixes is
   load-bearing: a package whose library target is named `core` **shadows the
   sysroot crate of the same name** in every crate that depends on it, and the
@@ -343,6 +375,15 @@ it lands.
   every field, so the input that breaks can only come from before the change.
   Write the older file out as literal text and open it.
 
+  **A renamed variant is the other half of that sentence, and it is not free
+  at all.** A default cannot help: the old spelling is already on disk and
+  parsing it is the only thing that opens the file. So a renamed value that is
+  serialised keeps its old name as a `serde` alias, read-only, and a test
+  parses the old spelling literally. Writing uses the new name, so a snapshot
+  upgrades itself the first time anything changes rather than carrying both
+  for ever. This was learned by renaming a job's states and watching the test
+  above go red, which is the cheapest place it could have happened.
+
   This is not the substituted default `.quality/gate-reference.md` forbids.
   That rule is about replacing a failure with a guess; here the default is the
   true answer, because a file written before the field existed described
@@ -355,7 +396,7 @@ it lands.
   added without a default, and the first thing anybody did with the build was
   fail to open an instance holding five real projects.
 
-- **Kickoff prompts are snapshot-tested.** The prompt text the orchestrator
+- **Kickoff prompts are snapshot-tested.** The prompt text the foreman
   composes is asserted as literal text, so a change to what a job is told to do
   shows up as a reviewable diff. Prompt text is the highest-leverage code here
   and the only kind that changes behaviour without changing control flow, so it
@@ -368,7 +409,7 @@ Beyond the Rust toolchain and `just` that `AGENTS.md` names for every project
 built from this gate, this one needs:
 
 - **A container runtime** — Docker or Podman. Every agent runs inside a
-  container, including the one the orchestrator thinks with, so nothing here
+  container, including the one the foreman thinks with, so nothing here
   runs an agent without one. See
   `docs/decisions/0012-agents-run-in-containers.md`.
 - **The agent image, built** — `just image`. The container tests skip without

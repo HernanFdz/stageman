@@ -1,0 +1,116 @@
+#!/usr/bin/env node
+// Asks stageman to start a job on this project.
+//
+// The counterpart to `stageman-say`: that one talks to people, this one asks
+// the instance for work to be done. Only a foreman has what it takes — the
+// warrant below is delivered to a foreman's container and to no job's, which
+// is what stops a job creating jobs. See
+// `docs/decisions/0032-a-foreman-asks-the-instance-by-warrant.md`.
+//
+// Two arguments, because a job is two things: why it exists, and what it is
+// for. The first is prose a person reads on the dashboard, the second is what
+// the job's agent is told to do.
+
+// Where to ask. Written into this container before every start rather than set
+// as a variable, for the same reason the thread is: a container's environment
+// is fixed at creation, so a port changed later would leave every existing
+// container asking somewhere nothing is listening.
+const ENDPOINT_PATH = "/tmp/stageman-endpoint";
+
+// **Read by an agent, so it is instruction rather than reference.** Agents
+// reach for `--help` before using an unfamiliar command, and without an
+// answer the flag is taken as an argument — which for the other tool in this
+// image meant posting "--help" to a channel.
+const USAGE = `usage: stageman-job <agent> '<why this job exists>' '<what it should do>'
+
+Starts a job on this project: one agent in a container of its own, holding the
+project's credentials, which can clone the repository, change it and open a
+pull request. It reports in a thread of its own.
+
+  stageman-job claude 'the parser test is flaky' \\
+    'Find and fix the flaky test in the parser, then open a pull request.'
+
+The agent is named rather than defaulted, because choosing it is yours. Which
+ones this project's jobs may run on, and what each is for, is told to you with
+every message — it can change while you are running, so it is not something to
+remember from earlier.
+
+The second argument is prose a person reads on the dashboard. The third is the
+whole instruction the job's agent is given — it cannot see the conversation
+that led here, so say everything it needs.
+
+Use -- first if any argument begins with a dash.`;
+
+// The three arguments this takes, or `null` if it has already answered.
+//
+// Help on request, a refusal for anything else that looks like an option, and
+// `--` to say that what follows is an argument however it begins. Without the
+// refusal a mistyped flag becomes a job's reason or its instructions, and a
+// job started on a typo is a container, a model call and a pull request.
+function three(args) {
+  if (args.length === 1 && (args[0] === "--help" || args[0] === "-h")) {
+    console.log(USAGE);
+    process.exit(0);
+  }
+
+  const given = args[0] === "--" ? args.slice(1) : args;
+  if (args[0] !== "--" && typeof args[0] === "string" && args[0].startsWith("-")) {
+    console.error(`stageman-job: ${args[0]} is not an option.\n`);
+    console.error(USAGE);
+    process.exit(2);
+  }
+  if (given.length !== 3 || given.some((one) => !one?.trim())) {
+    console.error(USAGE);
+    process.exit(2);
+  }
+  return given;
+}
+
+async function ask() {
+  const [agent, reason, work] = three(process.argv.slice(2));
+
+  const warrant = process.env.STAGEMAN_WARRANT;
+  let endpoint = null;
+  try {
+    endpoint = require("node:fs").readFileSync(ENDPOINT_PATH, "utf8").trim();
+  } catch {
+    endpoint = null;
+  }
+  if (!warrant || !endpoint) {
+    // What a *job's* container looks like, and the ordinary answer there
+    // rather than a fault: only a foreman may ask for jobs.
+    console.error("This container cannot ask for jobs — only a project's foreman can.");
+    process.exit(3);
+  }
+
+  let answer;
+  try {
+    answer = await fetch(endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ warrant, agent, reason, work }),
+    });
+  } catch (failure) {
+    console.error(`stageman could not be reached: ${failure.message}`);
+    process.exit(1);
+  }
+
+  if (answer.status === 403) {
+    console.error("stageman refused the warrant this container holds.");
+    process.exit(1);
+  }
+  if (!answer.ok) {
+    // Said back rather than summarised: a refusal names which agents this
+    // project does run on, which is the thing worth reading.
+    const why = await answer.text().catch(() => "");
+    console.error(why.trim() || `stageman answered ${answer.status}.`);
+    process.exit(1);
+  }
+
+  const started = await answer.json();
+  // Said back, because the agent may want to mention it — and because a
+  // command that succeeds silently is one nobody can tell from a no-op.
+  console.log(`Started job ${started.job}.`);
+}
+
+ask();

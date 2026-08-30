@@ -174,7 +174,7 @@ fn named(identifier: &str) -> DashboardResult<stageman_core::Agent> {
 
 /// What the browser calls an agent, and what to show for it.
 #[cfg(feature = "server")]
-const fn wire_name(agent: stageman_core::Agent) -> (&'static str, &'static str) {
+pub(crate) const fn wire_name(agent: stageman_core::Agent) -> (&'static str, &'static str) {
     match agent {
         stageman_core::Agent::Claude => ("claude", "Claude"),
     }
@@ -274,7 +274,7 @@ fn projected(id: stageman_core::ProjectId, project: &stageman_core::Project) -> 
         id: id.to_string(),
         name: project.name.clone(),
         repository: project.repository.clone(),
-        orchestrator: wire_name(project.orchestrator_agent).1.to_owned(),
+        foreman: wire_name(project.foreman_agent).1.to_owned(),
         job_agents: project
             .job_agents
             .iter()
@@ -296,10 +296,10 @@ fn projected(id: stageman_core::ProjectId, project: &stageman_core::Project) -> 
             .keys()
             .map(|channel| wire_channel(*channel).to_owned())
             .collect(),
-        running: project
+        working: project
             .jobs
             .values()
-            .filter(|job| job.progress == stageman_core::Progress::Running)
+            .filter(|job| job.progress == stageman_core::Progress::Working)
             .count(),
         jobs: project.jobs.len(),
     }
@@ -356,11 +356,13 @@ mod tests {
                 Project {
                     name: name.to_owned(),
                     repository: "https://example.invalid/repo".to_owned(),
-                    orchestrator_agent: Agent::Claude,
+                    foreman_agent: Agent::Claude,
                     job_agents: BTreeSet::from([Agent::Claude]),
                     credentials: BTreeMap::new(),
                     channels: BTreeMap::new(),
                     jobs: BTreeMap::new(),
+                    warrant: None,
+                    attending: stageman_core::Attending::default(),
                 },
             )]),
         }

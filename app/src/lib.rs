@@ -2,7 +2,7 @@
 //!
 //! ---
 //!
-//! This crate serves the dashboard and runs the orchestrator in the same
+//! This crate serves the dashboard and runs the foreman in the same
 //! process. It operates the instance and never talks to a job: conversation
 //! belongs to a channel, so no conversational state lives here — see
 //! `docs/decisions/0005-conversation-happens-on-channels.md`.
@@ -13,6 +13,8 @@
 //! code from the compiler and not a dependency from cargo — see
 //! `docs/decisions/0022-the-browser-never-sees-the-domain.md`.
 
+#[cfg(feature = "server")]
+pub(crate) mod asking;
 #[cfg(feature = "server")]
 mod channel;
 #[cfg(feature = "server")]
@@ -29,8 +31,8 @@ pub use dashboard::Dashboard;
 
 #[cfg(feature = "server")]
 pub use instance::{
-    LoadError, RunError, SaveError, Started, StateGuard, StateRef, Store, Swept, begin, deliver,
-    reconcile, run, supervise,
+    LoadError, RunError, SaveError, Started, StateGuard, StateRef, Store, Swept, attend, begin,
+    deliver, reconcile, run, supervise,
 };
 #[cfg(feature = "server")]
 pub use listening::{listen, listen_to, listening_on};

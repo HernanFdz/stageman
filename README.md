@@ -34,7 +34,7 @@ What it does need is a container runtime — Docker or Podman, installed the
 ordinary way, and running. stageman runs agents rather than replacing them, and
 it runs each one inside a container built with that agent already installed —
 so the machine itself needs no coding agent, no repository tooling, and nothing
-particular on its path. That holds for the agent the orchestrator thinks with
+particular on its path. That holds for the agent the foreman thinks with
 just as much as for the ones doing the work.
 
 You do not tell it where that runtime is. It looks in the places each installer
@@ -77,7 +77,7 @@ whether a browser bundle was found beside the binary. A build without one still
 serves the dashboard — the page is rendered on the server and arrives
 complete, it just does not update itself afterwards.
 
-Which agents are configured is yours to decide, the orchestrator picks one per
+Which agents are configured is yours to decide, the foreman picks one per
 job from what you have set up, and the dashboard shows which agent ran each
 job. Where an agent can be paid for by a subscription rather than by the token,
 that is the path stageman prefers.
