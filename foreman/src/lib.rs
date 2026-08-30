@@ -136,6 +136,21 @@ say what you did when you finish."
     )
 }
 
+/// What a thread is told when somebody addresses this instance in one that
+/// belongs to no job.
+///
+/// **Said rather than ignored**, because they asked. Silence here is
+/// indistinguishable from being broken, and this is the case a person reaches
+/// by the most natural move available: replying to something a foreman said.
+///
+/// It names where to go instead, because a rule nobody was told is a rule
+/// nobody can follow.
+#[must_use]
+pub const fn no_such_job_notice() -> &'static str {
+    "No job belongs to this thread — it may have been retired. If you meant the foreman, \
+say so at the root of the channel instead: it does not read replies here."
+}
+
 /// Whether a job has anywhere to speak.
 ///
 /// Decides one paragraph of the kickoff, and it has to be decided rather than
@@ -434,10 +449,29 @@ Whatever it has to say appears in this thread. Job \
             "⚠️ Check this out. The agent has stopped; a reply in this thread will reach it."
         );
         assert_eq!(
+            super::no_such_job_notice(),
+            "No job belongs to this thread — it may have been retired. If you meant the foreman, \
+say so at the root of the channel instead: it does not read replies here."
+        );
+        assert_eq!(
             super::busy_notice(),
             "This job is still working, so that did not reach it. Wait until it stops, then say \
 it again."
         );
+    }
+
+    /// The notice for an unowned thread must say where to go instead.
+    ///
+    /// Its whole reason for existing is that silence reads as broken. A notice
+    /// that said only "nothing here" would leave a person exactly as stuck,
+    /// having been answered — which is worse, because now they know they were
+    /// heard and still cannot get anywhere.
+    #[test]
+    fn the_unowned_thread_notice_names_somewhere_to_go() {
+        let said = super::no_such_job_notice();
+
+        assert!(said.contains("root of the channel"), "{said}");
+        assert!(said.contains("foreman"), "{said}");
     }
 
     /// The attention notice must not claim to know how it went.

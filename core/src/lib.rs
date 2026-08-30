@@ -747,16 +747,17 @@ impl State {
 
     /// Who a message arriving on a channel is for.
     ///
-    /// The rule in `docs/decisions/0029-a-reply-is-routed-by-its-thread.md`,
-    /// and the whole of it: **a message in a thread belonging to a job is for
-    /// that job; anything else is for the foreman, and only when it
-    /// mentions the bot.** Nothing else is read.
+    /// The rule in `docs/decisions/0031-a-mention-is-what-makes-it-ours.md`,
+    /// and the whole of it: **nothing without a mention is read at all.** What
+    /// mentions this instance goes to the job whose thread it is in, or to the
+    /// foreman if it is at the root, or is answered as belonging to no job.
     ///
-    /// The mention is required outside a thread and not inside one, which looks
-    /// inconsistent and is not. Inside a job's thread there is no ambiguity
-    /// about who is being addressed — the thread names them. Outside it, a
-    /// project's channel is a room people talk in, and answering everything
-    /// said there would make this the most tiresome member of it.
+    /// The mention is required *everywhere*, including inside a job's own
+    /// thread, and that reverses what 0029 decided. The reason is a use it
+    /// missed: people need to talk under a job — about the change it proposed,
+    /// most obviously — without waking its agent and paying for a turn. A
+    /// thread stageman opened is still a room, and the mention is how somebody
+    /// says they mean the machine rather than each other.
     ///
     /// A thread is matched on its channel as well as its identifier, because an
     /// identifier is only unique within one channel.
@@ -768,40 +769,38 @@ impl State {
     /// a question for whoever delivers it, not for this.
     #[must_use]
     pub fn recipient(&self, channel: Channel, arriving: &Arriving<'_>) -> Recipient {
-        // First, and before anything else can match.
-        if arriving.from_us {
+        // Nothing this instance said, and nothing that did not address it.
+        // Both before anything else can match, so that a job's own thread is
+        // no exception to either.
+        if arriving.from_us || !arriving.mentions {
             return Recipient::Nobody;
         }
 
-        if let Some(thread) = arriving.thread {
-            let found = self
-                .projects
-                .values()
-                .flat_map(|project| &project.jobs)
-                .find(|(_, job)| {
-                    job.thread.as_ref().is_some_and(|speaking| {
-                        speaking.channel == channel && speaking.id == thread
-                    })
-                });
-            if let Some((job, _)) = found {
-                return Recipient::Job(*job);
-            }
-        }
-
-        // Either at the root, or in a thread belonging to no job. Both are the
-        // foreman's, and both need the mention.
-        if !arriving.mentions {
+        let watching = self.projects.iter().find(|(_, project)| {
+            project
+                .channels
+                .get(&channel)
+                .is_some_and(|bound| bound.address == arriving.address)
+        });
+        let Some((project, _)) = watching else {
             return Recipient::Nobody;
-        }
+        };
+
+        let Some(thread) = arriving.thread else {
+            return Recipient::Foreman(*project);
+        };
+
         self.projects
-            .iter()
-            .find(|(_, project)| {
-                project
-                    .channels
-                    .get(&channel)
-                    .is_some_and(|bound| bound.address == arriving.address)
+            .values()
+            .flat_map(|watched| &watched.jobs)
+            .find(|(_, job)| {
+                job.thread
+                    .as_ref()
+                    .is_some_and(|speaking| speaking.channel == channel && speaking.id == thread)
             })
-            .map_or(Recipient::Nobody, |(id, _)| Recipient::Foreman(*id))
+            .map_or(Recipient::NoSuchJob(*project), |(job, _)| {
+                Recipient::Job(*job)
+            })
     }
 
     /// Converts to the form that goes on disk, sealing every credential.
@@ -1255,6 +1254,13 @@ impl ChannelConfig {
 pub struct Arriving<'a> {
     /// Where it arrived, as the platform names that place.
     pub address: &'a str,
+    /// What identifies this message itself.
+    ///
+    /// Needed because a message at the root *is* the parent of the thread a
+    /// foreman answers in — there is nothing to create. A job's thread had to
+    /// be opened by posting a message for it to hang from; a foreman's arrives
+    /// already made, and this is its identifier.
+    pub id: &'a str,
     /// The thread it was in, if it was in one at all.
     pub thread: Option<&'a str>,
     /// Whether it named this project's bot.
@@ -1277,9 +1283,19 @@ pub enum Recipient {
     Job(JobId),
     /// The foreman of the project that binds the channel.
     Foreman(ProjectId),
-    /// Nobody, and this is the ordinary answer rather than a failure. Most
-    /// traffic in a project's channel is people talking to each other.
+    /// Nobody at all, and this is the ordinary answer rather than a failure.
+    /// Most of what is said in a project's channel is people talking to each
+    /// other, and none of it is addressed here.
     Nobody,
+    /// Somebody addressed this instance in a thread that belongs to no job.
+    ///
+    /// Distinct from [`Recipient::Nobody`] because it needs an *answer* rather
+    /// than silence: they asked, so saying that nothing here owns this thread
+    /// — and where to go instead — is the difference between a system that is
+    /// quiet and one that looks broken. It is what somebody reaches by
+    /// replying to a foreman's own message, which is the natural thing to try
+    /// and the thing that cannot work.
+    NoSuchJob(ProjectId),
 }
 
 /// Exactly what one agent process is allowed to see, and nothing more.
@@ -1736,12 +1752,9 @@ mod tests {
         (state, project, job, thread)
     }
 
-    /// The plain case: a reply in a job's thread is that job's.
-    ///
-    /// No mention needed, and that asymmetry is the rule rather than an
-    /// oversight — the thread already names who is being addressed.
+    /// A mention in a job's thread is that job's.
     #[test]
-    fn a_reply_in_a_jobs_thread_is_for_that_job() {
+    fn a_mention_in_a_jobs_thread_is_for_that_job() {
         let (state, _, job, thread) = listening();
 
         assert_eq!(
@@ -1749,12 +1762,40 @@ mod tests {
                 Channel::Slack,
                 &Arriving {
                     address: CHANNEL_ADDRESS,
+                    id: "1788000000.000000",
+                    thread: Some(&thread),
+                    mentions: true,
+                    from_us: false,
+                }
+            ),
+            Recipient::Job(job)
+        );
+    }
+
+    /// **The rule the whole change is for.** People must be able to talk under
+    /// a job — about the change it proposed, most obviously — without waking
+    /// its agent and paying for a turn.
+    ///
+    /// This reverses `docs/decisions/0029-a-reply-is-routed-by-its-thread.md`,
+    /// where a thread was enough on its own. A thread stageman opened is still
+    /// a room, and the mention is how somebody says they mean the machine
+    /// rather than each other.
+    #[test]
+    fn a_job_thread_without_a_mention_is_people_talking() {
+        let (state, _, _, thread) = listening();
+
+        assert_eq!(
+            state.recipient(
+                Channel::Slack,
+                &Arriving {
+                    address: CHANNEL_ADDRESS,
+                    id: "1788000000.000000",
                     thread: Some(&thread),
                     mentions: false,
                     from_us: false,
                 }
             ),
-            Recipient::Job(job)
+            Recipient::Nobody
         );
     }
 
@@ -1764,6 +1805,7 @@ mod tests {
         let (state, project, _, _) = listening();
         let at_root = |mentions| Arriving {
             address: CHANNEL_ADDRESS,
+            id: "1788000000.000000",
             thread: None,
             mentions,
             from_us: false,
@@ -1780,15 +1822,13 @@ mod tests {
         );
     }
 
-    /// A thread belonging to no job is the foreman's, not nobody's.
+    /// A mention in a thread owning no job is answered, not dropped.
     ///
-    /// The hole this rule exists to close: replying inside a thread is how a
-    /// person answers a specific message, so somebody answering the
-    /// foreman will thread their reply under it. A rule that sent every
-    /// unrecognised thread to nobody would drop the message most clearly meant
-    /// for the foreman.
+    /// Somebody asked, so silence would read as broken — and this is exactly
+    /// where a person lands by replying to something a foreman said, which is
+    /// the most natural move available and the one thing that cannot work.
     #[test]
-    fn a_mention_in_a_thread_belonging_to_nothing_is_for_the_foreman() {
+    fn a_mention_in_a_thread_belonging_to_nothing_is_answered() {
         let (state, project, _, _) = listening();
 
         assert_eq!(
@@ -1796,12 +1836,13 @@ mod tests {
                 Channel::Slack,
                 &Arriving {
                     address: CHANNEL_ADDRESS,
+                    id: "1788000000.000000",
                     thread: Some("1111111111.000000"),
                     mentions: true,
                     from_us: false,
                 }
             ),
-            Recipient::Foreman(project)
+            Recipient::NoSuchJob(project)
         );
     }
 
@@ -1820,6 +1861,7 @@ mod tests {
                     Channel::Slack,
                     &Arriving {
                         address: CHANNEL_ADDRESS,
+                        id: "1788000000.000000",
                         thread: Some(&thread),
                         mentions,
                         from_us: true,
@@ -1848,6 +1890,7 @@ mod tests {
                 Channel::Slack,
                 &Arriving {
                     address: CHANNEL_ADDRESS,
+                    id: "1788000000.000000",
                     thread: Some(&thread),
                     mentions: false,
                     from_us: false,
@@ -1871,6 +1914,7 @@ mod tests {
                 Channel::Slack,
                 &Arriving {
                     address: "C-somewhere-else",
+                    id: "1788000000.000000",
                     thread: None,
                     mentions: true,
                     from_us: false,
@@ -1880,13 +1924,13 @@ mod tests {
         );
     }
 
-    /// A finished job's thread still routes to it.
+    /// An idle job's thread still routes to it.
     ///
     /// Deliberate: the thread is that job's conversation, and somebody
     /// replying in it a day later means that job. Whether it can still take
     /// the message is the deliverer's problem, not this one's.
     #[test]
-    fn a_finished_jobs_thread_still_routes_to_it() {
+    fn an_idle_jobs_thread_still_routes_to_it() {
         let (mut state, _, job, thread) = listening();
         state.job_mut(job).expect("the job").progress = Progress::Idle;
 
@@ -1895,8 +1939,9 @@ mod tests {
                 Channel::Slack,
                 &Arriving {
                     address: CHANNEL_ADDRESS,
+                    id: "1788000000.000000",
                     thread: Some(&thread),
-                    mentions: false,
+                    mentions: true,
                     from_us: false,
                 }
             ),

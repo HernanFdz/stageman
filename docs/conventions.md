@@ -86,6 +86,13 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   scoped to: a turn is what an inbox entry buys, what a thread collects, and
   what "idle" means the absence of.
 
+- **mention** — how somebody says they mean stageman rather than each other.
+  It is the whole of what makes a message ours: nothing without one is read,
+  in a thread or at the root — see
+  `docs/decisions/0031-a-mention-is-what-makes-it-ours.md`. Worth a word of its
+  own because it is the only rule an operator has to hold in their head, and
+  the only one whose failure is silence.
+
 - **channel** — somewhere the foreman watches and a job can speak into.
   Two-directional by definition, which is why it is not called a *source* or a
   *feed*: the same Slack that carries a question out carries the answer back.

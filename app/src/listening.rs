@@ -39,6 +39,9 @@ pub enum Incoming {
     Said {
         /// What has to be acknowledged, whatever is decided about the message.
         envelope: String,
+        /// What identifies this message, which is the thread a foreman answers
+        /// in when the message is at the root.
+        id: String,
         /// What was said.
         text: String,
         /// Where it was said, and in which thread if any.
@@ -97,10 +100,18 @@ pub fn decode(frame: &str, us: &Identity) -> Incoming {
         return Incoming::Acknowledge(id);
     };
 
+    let Some(spoken) = said.ts else {
+        // Every message has one. Without it there is nothing to answer under,
+        // so it is acknowledged and dropped rather than routed to a thread
+        // that cannot be addressed.
+        return Incoming::Acknowledge(id);
+    };
+
     Incoming::Said {
         envelope: id,
         mentions: said.text.contains(&format!("<@{}>", us.user)),
         from_us: ours || said.user.as_deref() == Some(us.user.as_str()),
+        id: spoken,
         text: said.text,
         address,
         thread: said.thread_ts,
@@ -113,6 +124,7 @@ impl Incoming {
     pub fn arriving(&self) -> Option<Arriving<'_>> {
         match self {
             Self::Said {
+                id,
                 address,
                 thread,
                 mentions,
@@ -120,6 +132,7 @@ impl Incoming {
                 ..
             } => Some(Arriving {
                 address,
+                id,
                 thread: thread.as_deref(),
                 mentions: *mentions,
                 from_us: *from_us,
@@ -161,6 +174,7 @@ struct Said {
     bot_id: Option<String>,
     #[serde(default)]
     text: String,
+    ts: Option<String>,
     thread_ts: Option<String>,
 }
 
@@ -305,7 +319,7 @@ pub async fn attend(
                     "heard somebody speak"
                 );
                 let text = text.clone();
-                act(store, runtime, &heard, &text).await;
+                act(store, runtime, listening, &heard, &text).await;
             }
             Incoming::Ready | Incoming::Acknowledge(_) | Incoming::Ignore => {}
         }
@@ -327,6 +341,7 @@ fn acknowledging(heard: &Incoming) -> Option<&str> {
 async fn act(
     store: &crate::Store,
     runtime: &stageman_agent::ContainerRuntime,
+    listening: &Listening,
     heard: &Incoming,
     said: &str,
 ) {
@@ -346,11 +361,34 @@ async fn act(
             let framed = stageman_foreman::reply(said);
             drop(crate::deliver(store, runtime, job, &framed).await);
         }
-        // Nothing runs one yet. Logged rather than dropped, because the
-        // routing rule already sends messages here and a silent destination is
-        // indistinguishable from a broken one.
+        // Nothing runs one yet, so this is logged rather than put in the
+        // inbox. Enqueueing without a consumer would grow a queue nobody
+        // drains, which is worse than not accepting the message: the person
+        // would be told nothing and the messages would arrive all at once
+        // whenever a foreman first ran.
         stageman_core::Recipient::Foreman(project) => {
             tracing::info!(%project, "a message for the foreman, which does not run yet");
+        }
+        // Answered rather than ignored. They addressed this instance, so
+        // silence would read as broken — and this is where somebody lands by
+        // replying to a foreman's own message.
+        stageman_core::Recipient::NoSuchJob(project) => {
+            let Some(thread) = arriving.thread.map(|id| stageman_core::Thread {
+                channel: stageman_core::Channel::Slack,
+                id: id.to_owned(),
+            }) else {
+                return;
+            };
+            tracing::info!(%project, "a message in a thread belonging to no job");
+            if let Err(why) = crate::channel::say_in(
+                &listening.speaking,
+                &thread,
+                stageman_foreman::no_such_job_notice(),
+            )
+            .await
+            {
+                tracing::warn!(%why, "the thread could not be answered");
+            }
         }
         // Ordinary — most of what is said in a project's channel is people
         // talking to each other. Said at debug so that "nothing happened" can
@@ -487,10 +525,11 @@ mod tests {
     fn a_reply_in_a_thread_carries_everything_routing_needs() {
         let frame = r#"{"envelope_id":"e-1","type":"events_api","payload":{"event":{
             "type":"message","channel":"C0123","user":"U0HUMAN",
-            "text":"use postgres","ts":"1.2","thread_ts":"1728312345.678901"}}}"#;
+            "text":"use postgres","ts":"1788000001.000001","thread_ts":"1728312345.678901"}}}"#;
 
         let Incoming::Said {
             envelope,
+            id,
             text,
             address,
             thread,
@@ -502,6 +541,9 @@ mod tests {
         };
 
         assert_eq!(envelope, "e-1");
+        // The message's own identifier, which is what a foreman would answer
+        // under if this had been at the root.
+        assert_eq!(id, "1788000001.000001");
         assert_eq!(text, "use postgres");
         assert_eq!(address, "C0123");
         // A string, never a number: parsed as one it addresses no message.
@@ -519,7 +561,7 @@ mod tests {
         let frame = |text: &str| {
             format!(
                 r#"{{"envelope_id":"e-2","payload":{{"event":{{
-                "type":"message","channel":"C0123","user":"U0HUMAN","text":"{text}"}}}}}}"#
+                "type":"message","channel":"C0123","user":"U0HUMAN","ts":"1788000002.000002","text":"{text}"}}}}}}"#
             )
         };
 
@@ -547,13 +589,13 @@ mod tests {
     fn anything_this_instance_said_is_recognised_as_its_own() {
         let by_bot = said(
             r#"{"envelope_id":"e-3","payload":{"event":{"type":"message","subtype":"bot_message",
-            "channel":"C0123","bot_id":"B0SELF","text":"⚠️ Check this out."}}}"#,
+            "channel":"C0123","bot_id":"B0SELF","ts":"1788000003.000003","text":"⚠️ Check this out."}}}"#,
         );
         assert!(by_bot.arriving().expect("a message").from_us);
 
         let by_user = said(
             r#"{"envelope_id":"e-4","payload":{"event":{"type":"message",
-            "channel":"C0123","user":"U0BOT","text":"hello"}}}"#,
+            "channel":"C0123","user":"U0BOT","ts":"1788000004.000004","text":"hello"}}}"#,
         );
         assert!(by_user.arriving().expect("a message").from_us);
 
@@ -564,7 +606,7 @@ mod tests {
         // loop this exists to close.
         let identifier_only = said(
             r#"{"envelope_id":"e-9","payload":{"event":{"type":"message",
-            "channel":"C0123","bot_id":"B0SELF","text":"posted"}}}"#,
+            "channel":"C0123","bot_id":"B0SELF","ts":"1788000005.000005","text":"posted"}}}"#,
         );
         assert!(
             identifier_only.arriving().expect("a message").from_us,
@@ -573,7 +615,7 @@ mod tests {
 
         let subtype_only = said(
             r#"{"envelope_id":"e-10","payload":{"event":{"type":"message",
-            "subtype":"bot_message","channel":"C0123","text":"rendered"}}}"#,
+            "subtype":"bot_message","channel":"C0123","ts":"1788000006.000006","text":"rendered"}}}"#,
         );
         assert!(
             subtype_only.arriving().expect("a message").from_us,
@@ -593,7 +635,7 @@ mod tests {
 
         let reply = said(
             r#"{"envelope_id":"e-11","payload":{"event":{"type":"message",
-            "channel":"C0123","user":"U0HUMAN","text":"hello"}}}"#,
+            "channel":"C0123","user":"U0HUMAN","ts":"1788000007.000007","text":"hello"}}}"#,
         );
         assert_eq!(acknowledging(&reply), Some("e-11"));
 
