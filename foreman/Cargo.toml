@@ -14,6 +14,9 @@ repository.workspace = true
 
 [dependencies]
 stageman-agent.workspace = true
+# A typed error, because this crate is a library and its failures cross a
+# boundary — `docs/conventions.md` §3.
+thiserror = "2.0.20"
 stageman-core.workspace = true
 
 [lints]

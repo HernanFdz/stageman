@@ -16,8 +16,8 @@ use rand::rngs::{StdRng, SysRng};
 use rand::{Rng as _, SeedableRng as _};
 use stageman_agent::{Answer, ContainerRuntime, StopReason};
 use stageman_core::{
-    Agent, Handout, Inconsistent, Job, JobId, Key, NONCE_LEN, Nonce, OpenError, Progress,
-    ProjectId, SealError, Snapshot, Speaking, State, Thread, Timestamp,
+    Agent, Errand, Handout, Inconsistent, Job, JobId, Key, NONCE_LEN, Nonce, OpenError, Progress,
+    ProjectId, SealError, Snapshot, Speaking, State, Taken, Thread, Timestamp,
 };
 
 /// An instance could not be opened.
@@ -248,6 +248,9 @@ impl Drop for StateGuard<'_> {
 /// A job could not be created.
 #[derive(Debug, thiserror::Error)]
 pub enum RunError {
+    /// A foreman's turn could not be taken.
+    #[error("the foreman could not take a turn: {0}")]
+    Foreman(String),
     /// The project is not one this instance watches.
     #[error("no project {0} in this instance")]
     UnknownProject(ProjectId),
@@ -837,7 +840,19 @@ fn has_container(left: &[stageman_job::Abandoned], job: JobId) -> bool {
 fn unplaceable<'a>(left: &'a [stageman_job::Abandoned], state: &State) -> Vec<Unplaceable<'a>> {
     left.iter()
         .filter_map(|abandoned| match abandoned.job {
-            None => Some(Unplaceable::Unidentified(&abandoned.container)),
+            // A name no *job* claims may still be a foreman's, and a foreman's
+            // is placed rather than reported: it belongs to a project this
+            // instance watches and is exactly where that foreman's session
+            // lives. Without this it would be counted as a name this version
+            // cannot read — which `Swept::unidentified` describes as odd and
+            // benign, and a foreman's container is neither.
+            None => match stageman_foreman::project_of(&abandoned.container) {
+                Some(project) if state.projects.contains_key(&project) => None,
+                // A foreman's container for a project that is gone is the
+                // same loss as a forgotten job's: the name parsed, and what it
+                // names is not here.
+                Some(_) | None => Some(Unplaceable::Unidentified(&abandoned.container)),
+            },
             Some(job) if state.job(job).is_none() => {
                 Some(Unplaceable::Forgotten(&abandoned.container, job))
             }
@@ -879,6 +894,164 @@ fn record(store: &Store, job: JobId, progress: Progress) {
     }
 }
 
+/// Hands a message to a project's foreman, and keeps it working until its
+/// inbox is empty.
+///
+/// Skipped by mutation testing because it decides nothing: whether this call
+/// drives the loop, what to work on next, and what happens when a turn ends
+/// are three functions beside it, all tested without a runtime. What is left
+/// here is a loop and two awaits.
+///
+/// **One turn is not the unit; draining is.** A foreman that took a message,
+/// answered it and stopped would leave whatever arrived meanwhile waiting for
+/// the next arrival to wake it — so the loop here is what
+/// `Attending::finish` exists for, and running until it answers `None` is the
+/// only thing that returns a foreman to idle.
+///
+/// Returns without doing anything when the foreman is already working: the
+/// message has been put in its inbox by then, and whichever call is running
+/// the loop will reach it. That is the same one-operation rule the inbox is
+/// built on — two messages arriving together cannot both start a loop, because
+/// only one of them finds it idle.
+#[mutants::skip]
+pub async fn attend(store: &Store, runtime: &ContainerRuntime, project: ProjectId, said: Errand) {
+    let started = {
+        let mut state = store.update();
+        let taken = state
+            .projects
+            .get_mut(&project)
+            .map(|watched| watched.attending.take(said));
+        drop(state);
+        taken
+    };
+    if !drives(started) {
+        return;
+    }
+
+    loop {
+        // Read and released before the turn, never held across it. Kept in the
+        // `while let` scrutinee this lock lived until the end of the body —
+        // which is an await and a write — so the first turn would have waited
+        // on a lock it was itself holding. The compiler's lint about a
+        // temporary with a significant drop is what caught it.
+        let waiting = {
+            let state = store.read();
+            let waiting = waiting_on(&state, project);
+            drop(state);
+            waiting
+        };
+        let Some(errand) = waiting else {
+            break;
+        };
+        let outcome = turn(store, runtime, project, &errand).await;
+        if let Err(why) = outcome {
+            // Logged and moved past rather than retried. A message that cannot
+            // be handled must not become a message that is handled for ever,
+            // and the person who sent it is told on their own thread.
+            tracing::warn!(%project, %why, "the foreman's turn did not finish");
+            notice_in(
+                store,
+                project,
+                &errand.thread,
+                stageman_foreman::stuck_notice(),
+            )
+            .await;
+        }
+        let done = {
+            let mut state = store.update();
+            let done = state
+                .projects
+                .get_mut(&project)
+                .is_none_or(|watched| watched.attending.finish().is_none());
+            drop(state);
+            done
+        };
+        if done {
+            break;
+        }
+    }
+}
+
+/// Whether this call is the one that drives the foreman's loop.
+///
+/// Only the message that found it idle does. Extracted because it is a
+/// comparison, and mutation testing inverted it without a test noticing —
+/// which would have every message either run a second loop over the same
+/// container or return having done nothing at all.
+const fn drives(taken: Option<Taken>) -> bool {
+    matches!(taken, Some(Taken::Started))
+}
+
+/// What the foreman should be working on now, if anything.
+///
+/// Over a state rather than a store, so the answer can be asked for without
+/// one — the same split the rest of this crate uses wherever a decision would
+/// otherwise be reachable only through I/O.
+fn waiting_on(state: &State, project: ProjectId) -> Option<Errand> {
+    state
+        .projects
+        .get(&project)
+        .and_then(|watched| watched.attending.on().cloned())
+}
+
+/// Runs one of a foreman's turns.
+///
+/// The handout is narrowed to the thread the message arrived in, so everything
+/// the foreman says while answering lands under what it is answering. That is
+/// the whole of why an `Errand` carries a thread.
+#[mutants::skip]
+async fn turn(
+    store: &Store,
+    runtime: &ContainerRuntime,
+    project: ProjectId,
+    errand: &Errand,
+) -> Result<(), RunError> {
+    let (repository, handout) = {
+        let state = store.read();
+        let repository = state
+            .projects
+            .get(&project)
+            .ok_or(RunError::UnknownProject(project))?
+            .repository
+            .clone();
+        let handout = Handout::for_foreman(&state, project)
+            .map_err(RunError::Handout)?
+            .speaking_in(errand.thread.clone());
+        drop(state);
+        (repository, handout)
+    };
+
+    stageman_foreman::attend(runtime, &handout, project, &repository, &errand.said)
+        .await
+        .map(drop)
+        .map_err(|why| RunError::Foreman(why.to_string()))
+}
+
+/// Says something in a thread on the instance's own behalf.
+///
+/// Skipped by mutation testing for the reason the other speaking functions
+/// are: it decides nothing. Where to speak is `speaking_for` above, and what
+/// to say is authored in the foreman crate and asserted there.
+#[mutants::skip]
+async fn notice_in(store: &Store, project: ProjectId, thread: &Thread, text: &str) {
+    let speaking = {
+        let state = store.read();
+        let bound = state
+            .projects
+            .get(&project)
+            .and_then(|watched| watched.channels.get(&thread.channel))
+            .map(stageman_core::ChannelConfig::speaking);
+        drop(state);
+        bound
+    };
+    let Some(bound) = speaking else {
+        return;
+    };
+    if let Err(why) = crate::channel::say_in(&bound, thread, text).await {
+        tracing::warn!(%project, %why, "the thread could not be answered");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -887,8 +1060,8 @@ mod tests {
     };
     use stageman_agent::{Answer, ContainerRuntime, StopReason};
     use stageman_core::{
-        Agent, AgentConfig, Job, JobId, Key, Progress, Project, ProjectId, Secret, State, Thread,
-        Timestamp, Uuid,
+        Agent, AgentConfig, Job, JobId, Key, Progress, Project, ProjectId, Secret, State, Taken,
+        Thread, Timestamp, Uuid,
     };
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::{Path, PathBuf};
@@ -1359,6 +1532,92 @@ mod tests {
                 Unplaceable::Forgotten(&stageman_job::container(lost), lost),
             ],
             "a container for a job the instance still has is placeable"
+        );
+    }
+
+    /// Only the message that found the foreman idle drives its loop.
+    ///
+    /// Inverting this comparison would have every other message start a second
+    /// loop over the same container, and the one that should have started do
+    /// nothing at all. Mutation testing found it untested.
+    #[test]
+    fn only_the_message_that_started_a_turn_drives_the_loop() {
+        assert!(super::drives(Some(Taken::Started)));
+        assert!(!super::drives(Some(Taken::Waiting)));
+        // No project, so nothing was taken and there is nothing to drive.
+        assert!(!super::drives(None));
+    }
+
+    /// What a foreman is working on is what its inbox says.
+    #[test]
+    fn what_a_foreman_is_working_on_comes_from_its_inbox() {
+        let (mut state, _) = with_a_running_job();
+        let project = *state.projects.keys().next().expect("a project");
+
+        assert_eq!(
+            super::waiting_on(&state, project),
+            None,
+            "idle holds nothing"
+        );
+
+        let errand = stageman_core::Errand {
+            said: "look at the parser".to_owned(),
+            thread: Thread {
+                channel: stageman_core::Channel::Slack,
+                id: "1788000000.000000".to_owned(),
+            },
+        };
+        state
+            .projects
+            .get_mut(&project)
+            .expect("the project")
+            .attending
+            .take(errand.clone());
+
+        assert_eq!(super::waiting_on(&state, project), Some(errand));
+        assert_eq!(
+            super::waiting_on(&state, ProjectId::from_uuid(Uuid::from_u128(404))),
+            None,
+            "a project this instance does not watch has no inbox"
+        );
+    }
+
+    /// A foreman's container is placed, not reported.
+    ///
+    /// It carries this project's label and names no job, which is exactly the
+    /// shape `Swept::unidentified` describes as *a container from an older
+    /// version: odd, and benign*. A foreman's is neither, and it is where that
+    /// foreman's whole session lives — so reporting it would teach an operator
+    /// to distrust a count that was right.
+    #[test]
+    fn a_foremans_container_is_placed_rather_than_reported() {
+        let (mut state, _) = with_a_running_job();
+        let watched = *state.projects.keys().next().expect("a project");
+        let containers = [left(&stageman_foreman::container(watched), None)];
+
+        assert_eq!(
+            unplaceable(&containers, &state),
+            vec![],
+            "a foreman's container belongs to a project this instance watches"
+        );
+
+        // And one whose project is gone is a loss, like a forgotten job's:
+        // the name parsed and what it names is not here.
+        let forgotten = stageman_foreman::container(ProjectId::from_uuid(Uuid::from_u128(404)));
+        let containers = [left(&forgotten, None)];
+        assert_eq!(
+            unplaceable(&containers, &state),
+            vec![Unplaceable::Unidentified(&forgotten)]
+        );
+
+        // Removing the project it belongs to turns the first case into the
+        // second, which is what makes this about the record rather than the
+        // name.
+        state.projects.clear();
+        let named = stageman_foreman::container(watched);
+        assert_eq!(
+            unplaceable(&[left(&named, None)], &state),
+            vec![Unplaceable::Unidentified(&named)]
         );
     }
 

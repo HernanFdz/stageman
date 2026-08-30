@@ -361,13 +361,27 @@ async fn act(
             let framed = stageman_foreman::reply(said);
             drop(crate::deliver(store, runtime, job, &framed).await);
         }
-        // Nothing runs one yet, so this is logged rather than put in the
-        // inbox. Enqueueing without a consumer would grow a queue nobody
-        // drains, which is worse than not accepting the message: the person
-        // would be told nothing and the messages would arrive all at once
-        // whenever a foreman first ran.
         stageman_core::Recipient::Foreman(project) => {
-            tracing::info!(%project, "a message for the foreman, which does not run yet");
+            // A message at the root is the parent of the thread its answer
+            // belongs under; one in a thread is answered where it was said.
+            // Either way the thread is decided here, when the message arrives,
+            // rather than when its turn starts — by then it may be several
+            // turns back.
+            let thread = stageman_core::Thread {
+                channel: stageman_core::Channel::Slack,
+                id: arriving.thread.unwrap_or(arriving.id).to_owned(),
+            };
+            tracing::info!(%project, "a message for the foreman");
+            crate::attend(
+                store,
+                runtime,
+                project,
+                stageman_core::Errand {
+                    said: said.to_owned(),
+                    thread,
+                },
+            )
+            .await;
         }
         // Answered rather than ignored. They addressed this instance, so
         // silence would read as broken — and this is where somebody lands by

@@ -23,7 +23,8 @@
 //! the credential invariant and `docs/conventions.md` §4 for why prompts are
 //! held to a test.
 
-use stageman_core::{JobId, ProjectId};
+use stageman_agent::{AgentError, Answer, ContainerRuntime};
+use stageman_core::{Handout, JobId, ProjectId};
 
 /// What every foreman's container is named for.
 ///
@@ -119,6 +120,70 @@ Starting a job on {repository}.
 
 Whatever it has to say appears in this thread. Job {job}."
     )
+}
+
+/// Starts a foreman's session, or continues the one it already has.
+///
+/// **Which of the two is asked of the runtime, never of the instance.** A
+/// container is the truth about whether a session exists —
+/// `docs/decisions/0015-a-job-survives-the-daemon-dying.md` makes that the
+/// rule for jobs and it holds no less here, where the container outlives every
+/// turn and the snapshot it would otherwise be remembered in. A foreman that
+/// believed it had a session and did not would fail every turn until somebody
+/// looked.
+///
+/// The opening is sent only when a session is being made. After that every
+/// turn is a message on the same session, which is what lets a foreman
+/// remember what it was already asked.
+///
+/// # Errors
+///
+/// Fails if the runtime cannot be reached, or the agent cannot be run.
+pub async fn attend(
+    runtime: &ContainerRuntime,
+    handout: &Handout,
+    project: ProjectId,
+    repository: &str,
+    said: &str,
+) -> Result<Answer, ForemanError> {
+    let name = container(project);
+    let existing = stageman_agent::abandoned(runtime)
+        .await
+        .map_err(ForemanError::Agent)?;
+
+    if continuing(&existing, &name) {
+        stageman_agent::resume(runtime, &name, &asked(said))
+            .await
+            .map_err(ForemanError::Agent)
+    } else {
+        // The opening and the first message together, because a session that
+        // was told who it is and then asked nothing would have spent a turn
+        // saying hello.
+        let first = format!("{}\n\n{}", opening(repository), asked(said));
+        stageman_agent::begin(runtime, handout, &name, &first)
+            .await
+            .map_err(ForemanError::Agent)
+    }
+}
+
+/// Whether this foreman already has a session to carry on.
+///
+/// A comparison, and therefore worth extracting: mutation testing inverted it
+/// without a test noticing, and inverting it is the worst available outcome —
+/// every foreman that had a session would be told the opening again as though
+/// it were new, and every foreman that had none would be asked to resume one
+/// that does not exist.
+#[must_use]
+fn continuing(existing: &[String], name: &str) -> bool {
+    existing.iter().any(|found| found == name)
+}
+
+/// A foreman's turn could not be taken.
+#[derive(Debug, thiserror::Error)]
+pub enum ForemanError {
+    /// The agent could not be run, or would not answer.
+    #[error("the foreman's agent could not be run")]
+    Agent(#[source] AgentError),
 }
 
 /// The first thing a project's foreman is ever told.
@@ -225,8 +290,24 @@ say what you did when you finish."
     )
 }
 
+/// What a thread is told when a foreman's turn could not be taken at all.
+///
+/// **Not the same as a foreman deciding it cannot help.** That is something it
+/// says for itself, in its own words, and this is what is said when it never
+/// got to speak — its agent would not run, or the turn ended without
+/// finishing. A person who asked for something and hears nothing has no way to
+/// tell that from being ignored.
+///
+/// The message is not retried. A message that cannot be handled must not
+/// become one that is handled for ever, blocking every message behind it.
+#[must_use]
+pub const fn stuck_notice() -> &'static str {
+    "Something went wrong handling that, so it did not get done. The server log says what. \
+Send it again once that is fixed — it has not been kept."
+}
+
 /// What a thread is told when somebody addresses this instance in one that
-/// belongs to no job.
+/// belongs to no job."""
 ///
 /// **Said rather than ignored**, because they asked. Silence here is
 /// indistinguishable from being broken, and this is the case a person reaches
@@ -538,6 +619,11 @@ Whatever it has to say appears in this thread. Job \
             "⚠️ Check this out. The agent has stopped; a reply in this thread will reach it."
         );
         assert_eq!(
+            super::stuck_notice(),
+            "Something went wrong handling that, so it did not get done. The server log says \
+what. Send it again once that is fixed — it has not been kept."
+        );
+        assert_eq!(
             super::no_such_job_notice(),
             "No job belongs to this thread — it may have been retired. If you meant the foreman, \
 say so at the root of the channel instead: it does not read replies here."
@@ -547,6 +633,20 @@ say so at the root of the channel instead: it does not read replies here."
             "This job is still working, so that did not reach it. Wait until it stops, then say \
 it again."
         );
+    }
+
+    /// The stuck notice must say the message is gone, not that it is queued.
+    ///
+    /// It is deliberately not retried — a message that cannot be handled must
+    /// not become one handled for ever, blocking everything behind it — so a
+    /// person has to be told to send it again. A notice that merely apologised
+    /// would leave them waiting for a turn that is never coming.
+    #[test]
+    fn the_stuck_notice_says_the_message_was_not_kept() {
+        let said = super::stuck_notice();
+
+        assert!(said.contains("Send it again"), "{said}");
+        assert!(said.contains("not been kept"), "{said}");
     }
 
     /// The notice for an unowned thread must say where to go instead.
@@ -603,6 +703,36 @@ when you finish."
 
         assert!(framed.starts_with("A person replied"), "{framed}");
         assert!(framed.contains("propose rather than merge"), "{framed}");
+    }
+
+    /// Whether a session is carried on is decided from what the runtime has.
+    ///
+    /// Inverting this is the worst outcome available: every foreman with a
+    /// session would be greeted as new, and every foreman without one asked to
+    /// resume nothing. Mutation testing found it untested.
+    #[test]
+    fn a_session_is_continued_only_when_its_container_is_there() {
+        let project = ProjectId::from_uuid(stageman_core::Uuid::from_u128(7));
+        let mine = super::container(project);
+        let another = super::container(ProjectId::from_uuid(stageman_core::Uuid::from_u128(8)));
+
+        assert!(super::continuing(std::slice::from_ref(&mine), &mine));
+        assert!(super::continuing(&[another.clone(), mine.clone()], &mine));
+
+        assert!(
+            !super::continuing(&[], &mine),
+            "nothing running is a new session"
+        );
+        assert!(
+            !super::continuing(&[another], &mine),
+            "another project's foreman is not this one's session"
+        );
+        // A job's container is not a session to carry on either, however many
+        // of them are about.
+        assert!(!super::continuing(
+            &["stageman-job-00000000-0000-0000-0000-000000000007".to_owned()],
+            &mine
+        ));
     }
 
     /// A foreman's container is named for its project, both ways.
