@@ -144,19 +144,11 @@ pub async fn attend(
     handout: &Handout,
     project: ProjectId,
     repository: &str,
-    tools_endpoint: &str,
+    tools: &stageman_agent::Tools,
     agents: &[(&str, &str)],
     said: &str,
 ) -> Result<Answer, ForemanError> {
     let name = container(project);
-    // Built from the warrant the handout already carries, so what authorises
-    // this foreman is one value rather than two that could disagree. A project
-    // with no warrant declares no tools at all, which is the same absence that
-    // used to stop a job creating jobs — see
-    // `docs/decisions/0034-tools-are-served-not-shipped.md`.
-    let tools = handout
-        .warrant()
-        .map(|warrant| stageman_agent::Tools::new(tools_endpoint, warrant.clone()));
     let existing = stageman_agent::abandoned(runtime)
         .await
         .map_err(ForemanError::Agent)?;
@@ -172,7 +164,7 @@ pub async fn attend(
             runtime,
             &name,
             handout.thread(),
-            tools.as_ref(),
+            Some(tools),
             &asked(said, agents),
         )
         .await
@@ -182,7 +174,7 @@ pub async fn attend(
         // was told who it is and then asked nothing would have spent a turn
         // saying hello.
         let first = format!("{}\n\n{}", opening(repository), asked(said, agents));
-        stageman_agent::begin(runtime, handout, &name, tools.as_ref(), &first)
+        stageman_agent::begin(runtime, handout, &name, Some(tools), &first)
             .await
             .map_err(ForemanError::Agent)
     }

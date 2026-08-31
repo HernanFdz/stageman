@@ -116,10 +116,12 @@ pub async fn bind() -> std::io::Result<tokio::net::TcpListener> {
 pub async fn serve(
     listening: tokio::net::TcpListener,
     store: std::sync::Arc<crate::Store>,
+    sessions: std::sync::Arc<crate::tooling::Sessions>,
 ) -> std::io::Result<()> {
     let router = axum::Router::new()
         .route("/mcp", crate::tooling::served())
-        .layer(axum::Extension(store));
+        .layer(axum::Extension(store))
+        .layer(axum::Extension(sessions));
 
     axum::serve(
         listening,

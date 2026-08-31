@@ -39,4 +39,4 @@ pub use instance::{
 #[cfg(feature = "server")]
 pub use listening::{listen, listen_to, listening_on};
 #[cfg(feature = "server")]
-pub use serving::{RUNTIME, serve};
+pub use serving::{RUNTIME, SESSIONS, serve};

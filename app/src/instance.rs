@@ -1107,12 +1107,22 @@ async fn turn(
         named
     };
 
+    // Minted per turn, not per project, and this is the turn's thread going
+    // with it: a foreman answers in whichever thread it was spoken to in, so
+    // the credential is what carries that rather than a file written into the
+    // container — see `docs/decisions/0034-tools-are-served-not-shipped.md`.
+    let credential = crate::SESSIONS.mint(crate::tooling::Speaking {
+        project,
+        speaker: crate::tooling::Speaker::Foreman,
+        thread: Some(errand.thread.clone()),
+    });
+
     stageman_foreman::attend(
         runtime,
         &handout,
         project,
         &repository,
-        &crate::tooling::endpoint(*crate::endpoint::PORT),
+        &stageman_agent::Tools::new(crate::tooling::endpoint(*crate::endpoint::PORT), credential),
         &agents,
         &errand.said,
     )

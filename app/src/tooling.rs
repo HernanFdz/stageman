@@ -26,7 +26,7 @@
 // drift.
 use dioxus::server::axum;
 use dioxus::server::axum::response::IntoResponse as _;
-use stageman_core::ProjectId;
+use stageman_core::{JobId, ProjectId, Secret, Thread};
 
 /// The protocol version answered when a caller names none.
 ///
@@ -45,16 +45,85 @@ const PROTOCOL: &str = "2025-06-18";
 /// that record being superseded.
 const SERVER: &str = "stageman";
 
-/// What a presented credential entitles its bearer to be offered.
+/// Who is holding a credential, of the things this instance runs.
 ///
-/// One variant today because one thing holds a credential: a foreman, by its
-/// project's warrant. A job gets one when it has a tool to be offered, and the
-/// point of naming this now is that adding that variant is where the decision
-/// goes, rather than somewhere a reader has to find.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Scope {
-    /// A foreman of this project. May start jobs on it.
-    Foreman(ProjectId),
+/// The whole of the authority question, so it is one small type rather than a
+/// pair of booleans somebody has to keep consistent. A foreman may start jobs;
+/// a job may not, and that is
+/// `docs/decisions/0032-a-foreman-asks-the-instance-by-warrant.md`'s property
+/// surviving the move to a per-session credential.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Speaker {
+    /// A project's foreman.
+    Foreman,
+    /// One job of that project.
+    Job(JobId),
+}
+
+/// What a presented credential entitles its bearer to.
+///
+/// **A session, not a project.** The warrant it replaces was per project and
+/// therefore constant across turns, which is fine for "may this start jobs?"
+/// and useless for "which thread is this answering?" — a job's thread is the
+/// same for its whole life, and a foreman's is different every turn. Minting
+/// per session lets the answer travel with the request instead of being
+/// written into a container that then cannot be told again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Speaking {
+    /// Which project's work this is.
+    pub project: ProjectId,
+    /// Who is doing it.
+    pub speaker: Speaker,
+    /// Where anything said should land, if anywhere.
+    ///
+    /// Absent means the root of the channel, which is what a foreman answering
+    /// nothing in particular does.
+    pub thread: Option<Thread>,
+}
+
+/// Which credential means what, for the sessions running right now.
+///
+/// **Deliberately not persisted.** A credential is minted when a session is
+/// declared and re-minted every time that session is resumed, so the only ones
+/// that matter are the ones this process handed out. Restarting the daemon
+/// invalidates every outstanding credential, which is correct rather than
+/// unfortunate: the containers holding them are re-declared on their next turn
+/// and given current ones.
+///
+/// Bounded by construction. Minting for a speaker forgets whatever that
+/// speaker held before, so the map holds one entry per live session rather
+/// than one per turn ever taken.
+#[derive(Debug, Default)]
+pub struct Sessions(parking_lot::Mutex<std::collections::HashMap<String, Speaking>>);
+
+impl Sessions {
+    /// Mints a credential for one session, forgetting that speaker's last.
+    ///
+    /// Unguessable from the same source the crate already mints identifiers
+    /// from, so there is one answer to "where does an unguessable value come
+    /// from here" rather than two — the same argument
+    /// `docs/decisions/0032-a-foreman-asks-the-instance-by-warrant.md` made for
+    /// the warrant this replaces.
+    pub fn mint(&self, speaking: Speaking) -> Secret {
+        let credential = format!(
+            "{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        );
+        let mut held = self.0.lock();
+        held.retain(|_, known| {
+            known.project != speaking.project || known.speaker != speaking.speaker
+        });
+        held.insert(credential.clone(), speaking);
+        drop(held);
+        Secret::new(credential)
+    }
+
+    /// What a presented credential authorises, if this instance minted it.
+    #[must_use]
+    pub fn holder(&self, presented: &str) -> Option<Speaking> {
+        self.0.lock().get(presented).cloned()
+    }
 }
 
 /// One tool, as an agent is told about it.
@@ -87,8 +156,12 @@ pub struct Tool {
 /// schema no value can satisfy reads to a model as a broken tool, where a
 /// plain string reaches the refusal below and says why.
 #[must_use]
-pub fn tools(scope: Scope, agents: &[&str]) -> Vec<Tool> {
-    let Scope::Foreman(_) = scope;
+pub fn tools(speaking: &Speaking, agents: &[&str]) -> Vec<Tool> {
+    if speaking.speaker != Speaker::Foreman {
+        // A job may not start jobs. Under the warrant this was the absence of
+        // a file; it is now this line, which is why it has a test.
+        return Vec::new();
+    }
 
     let mut agent = serde_json::json!({
         "type": "string",
@@ -293,6 +366,7 @@ async fn closing() -> axum::http::StatusCode {
 async fn called(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     axum::Extension(store): axum::Extension<std::sync::Arc<crate::Store>>,
+    axum::Extension(sessions): axum::Extension<std::sync::Arc<Sessions>>,
     headers: axum::http::HeaderMap,
     axum::Json(incoming): axum::Json<Incoming>,
 ) -> axum::response::Response {
@@ -301,10 +375,8 @@ async fn called(
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
 
-    let scope = presented(&headers)
-        .and_then(|credential| store.read().warranted(credential))
-        .map(Scope::Foreman);
-    let Some(scope) = scope else {
+    let speaking = presented(&headers).and_then(|credential| sessions.holder(credential));
+    let Some(speaking) = speaking else {
         // Deliberately the same answer as a bad peer, and deliberately without
         // detail: anything distinguishing "no such credential" from "not
         // allowed" is something to guess against.
@@ -326,18 +398,17 @@ async fn called(
             }),
         ),
         Call::Listing => {
-            let Scope::Foreman(project) = scope;
-            let agents = allowed_agents(&store.read(), project);
+            let agents = allowed_agents(&store.read(), speaking.project);
             answered(
                 incoming.id,
-                serde_json::json!({"tools": tools(scope, &agents)}),
+                serde_json::json!({"tools": tools(&speaking, &agents)}),
             )
         }
         Call::NoSuchTool(named) => failed(
             incoming.id,
             &format!("this instance serves no tool called {named:?}"),
         ),
-        Call::Starting(starting) => starting_a_job(&store, scope, &starting, incoming.id),
+        Call::Starting(starting) => starting_a_job(&store, &speaking, &starting, incoming.id),
     }
 }
 
@@ -351,11 +422,17 @@ async fn called(
 #[mutants::skip]
 fn starting_a_job(
     store: &std::sync::Arc<crate::Store>,
-    scope: Scope,
+    speaking: &Speaking,
     starting: &Starting,
     id: Option<serde_json::Value>,
 ) -> axum::response::Response {
-    let Scope::Foreman(project) = scope;
+    if speaking.speaker != Speaker::Foreman {
+        // Refused rather than merely unlisted. A tool nobody was offered can
+        // still be called by name, so the check that matters is this one.
+        tracing::warn!(project = %speaking.project, "a job asked to start a job");
+        return failed(id, "this instance serves no tool called \"start_job\"");
+    }
+    let project = speaking.project;
 
     let Some(agent) = named_agent(&store.read(), project, &starting.agent) else {
         let allowed = allowed_agents(&store.read(), project).join(", ");
@@ -479,13 +556,22 @@ pub fn allowed_agents(
 #[cfg(test)]
 mod tests {
     use super::{
-        Call, PROTOCOL, Scope, Starting, allowed_agents, axum, decode, endpoint, named_agent,
-        presented, tools,
+        Call, PROTOCOL, Sessions, Speaker, Speaking, Starting, allowed_agents, axum, decode,
+        endpoint, named_agent, presented, tools,
     };
     use stageman_core::{ProjectId, Uuid};
 
     fn a_project() -> ProjectId {
         ProjectId::from_uuid(Uuid::from_u128(1))
+    }
+
+    /// A foreman of that project, answering nothing in particular.
+    fn a_foreman() -> Speaking {
+        Speaking {
+            project: a_project(),
+            speaker: Speaker::Foreman,
+            thread: None,
+        }
     }
 
     /// A handshake answers in the caller's own version when it named one.
@@ -578,7 +664,7 @@ mod tests {
     /// A foreman is offered the tool that starts jobs, and its agents by name.
     #[test]
     fn what_a_foreman_is_offered_names_the_agents_it_may_choose() {
-        let offered = tools(Scope::Foreman(a_project()), &["claude"]);
+        let offered = tools(&a_foreman(), &["claude"]);
         assert_eq!(offered.len(), 1);
         assert_eq!(offered[0].name, "start_job");
 
@@ -596,13 +682,40 @@ mod tests {
         );
     }
 
+    /// A job is offered nothing, and this is the property 0032 defended.
+    ///
+    /// It used to hold by construction: a job's container was never given a
+    /// warrant, so there was no code to get wrong. It is now a decision this
+    /// module makes, which 0034 records as the real cost of the move — so it
+    /// is asserted here rather than argued, and again against a call below,
+    /// because a tool nobody was offered can still be called by name.
+    #[test]
+    fn a_job_is_offered_no_tool_that_starts_jobs() {
+        let job = Speaking {
+            project: a_project(),
+            speaker: Speaker::Job(stageman_core::JobId::from_uuid(Uuid::from_u128(7))),
+            thread: None,
+        };
+
+        assert!(
+            tools(&job, &["claude"]).is_empty(),
+            "a job was offered a tool, and the only one that exists starts jobs",
+        );
+        assert!(
+            tools(&a_foreman(), &["claude"])
+                .iter()
+                .any(|offered| offered.name == "start_job"),
+            "and a foreman must still be offered it, or this proves nothing",
+        );
+    }
+
     /// A project with no agents gets a plain string, not an empty enumeration.
     ///
     /// An enumeration no value satisfies reads to a model as a broken tool. A
     /// plain string reaches the refusal that can say what is wrong.
     #[test]
     fn no_agents_omits_the_enumeration_rather_than_emitting_an_empty_one() {
-        let offered = tools(Scope::Foreman(a_project()), &[]);
+        let offered = tools(&a_foreman(), &[]);
         let agent = &offered[0].schema["properties"]["agent"];
         assert_eq!(agent["type"], "string");
         assert!(agent.get("enum").is_none(), "no enumeration at all");
@@ -618,14 +731,18 @@ mod tests {
     /// rather than beside it. What it cannot cover is whether a real agent
     /// likes these answers; that needs the session declaration naming this
     /// endpoint, which does not exist yet.
-    #[tokio::test]
-    async fn the_endpoint_answers_a_warrant_it_holds_and_refuses_anything_else() {
-        use stageman_core::{
-            Agent, AgentConfig, Attending, Project, ProjectId, Secret, State, Uuid,
-        };
+    /// One instance, served on a real port, with a foreman credential for it.
+    ///
+    /// Scaffolding for the test below and whatever follows it: the assertions
+    /// are the interesting part and were outnumbered by the setup.
+    fn an_instance_with_a_foreman() -> (
+        std::sync::Arc<crate::Store>,
+        tempfile::TempDir,
+        String,
+        std::sync::Arc<Sessions>,
+    ) {
+        use stageman_core::{Agent, AgentConfig, Attending, Project, Secret, State};
         use std::collections::{BTreeMap, BTreeSet};
-
-        const WARRANT: &str = "a-warrant-that-is-not-a-real-secret";
 
         let mut state = State::default();
         state.agents.insert(
@@ -635,7 +752,7 @@ mod tests {
             },
         );
         state.projects.insert(
-            ProjectId::from_uuid(Uuid::from_u128(11)),
+            a_project(),
             Project {
                 name: "aviary".to_owned(),
                 repository: "https://example.invalid/aviary".to_owned(),
@@ -644,7 +761,9 @@ mod tests {
                 credentials: BTreeMap::new(),
                 channels: BTreeMap::new(),
                 jobs: BTreeMap::new(),
-                warrant: Some(Secret::new(WARRANT.to_owned())),
+                // No warrant: what a credential means is this instance's own
+                // ephemeral business now rather than a project's configuration.
+                warrant: None,
                 attending: Attending::default(),
             },
         );
@@ -658,6 +777,15 @@ mod tests {
             )
             .expect("it can write"),
         );
+        let sessions = std::sync::Arc::new(Sessions::default());
+        let credential = sessions.mint(a_foreman());
+        let warrant = credential.expose().to_owned();
+        (store, directory, warrant, sessions)
+    }
+
+    #[tokio::test]
+    async fn the_endpoint_answers_a_credential_it_minted_and_refuses_anything_else() {
+        let (store, _directory, warrant, sessions) = an_instance_with_a_foreman();
 
         // Port zero, so this never contends with a running instance or with
         // another test — the same reason the endpoint honours it at all.
@@ -668,14 +796,15 @@ mod tests {
         let serving = tokio::spawn(crate::endpoint::serve(
             listening,
             std::sync::Arc::clone(&store),
+            std::sync::Arc::clone(&sessions),
         ));
 
         let url = format!("http://127.0.0.1:{port}/mcp");
         let client = reqwest::Client::new();
-        let ask = async |warrant: &str, body: serde_json::Value| {
+        let ask = async |presenting: &str, body: serde_json::Value| {
             client
                 .post(&url)
-                .header("Authorization", format!("Bearer {warrant}"))
+                .header("Authorization", format!("Bearer {presenting}"))
                 .json(&body)
                 .send()
                 .await
@@ -683,7 +812,7 @@ mod tests {
         };
 
         let greeting = ask(
-            WARRANT,
+            &warrant,
             serde_json::json!({
                 "jsonrpc": "2.0", "id": 1, "method": "initialize",
                 "params": {"protocolVersion": "2025-11-25"},
@@ -697,7 +826,7 @@ mod tests {
         assert_eq!(greeting["id"], 1, "an answer names what it answers");
 
         let listed = ask(
-            WARRANT,
+            &warrant,
             serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
         )
         .await;
@@ -709,11 +838,21 @@ mod tests {
             "the project's own agents reach the schema, not a fixed list",
         );
 
+        // A method in no specification is answered rather than refused, which
+        // is what keeps an observed client's opening question from failing the
+        // handshake.
+        let odd = ask(
+            &warrant,
+            serde_json::json!({"jsonrpc": "2.0", "id": 4, "method": "server/discover"}),
+        )
+        .await;
+        assert!(odd.status().is_success());
+
         // The whole authorisation mechanism, exercised rather than reasoned
-        // about: what is offered follows the credential, so a credential this
-        // instance does not hold is offered nothing at all.
+        // about: what is offered follows the credential, so one this instance
+        // never minted is offered nothing at all.
         let stranger = ask(
-            "not-the-warrant",
+            "not-a-credential-this-instance-minted",
             serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "tools/list"}),
         )
         .await;
@@ -722,16 +861,6 @@ mod tests {
             reqwest::StatusCode::FORBIDDEN,
             "an unknown credential is refused without detail",
         );
-
-        // A method in no specification is answered rather than refused, which
-        // is what keeps an observed client's opening question from failing the
-        // handshake.
-        let odd = ask(
-            WARRANT,
-            serde_json::json!({"jsonrpc": "2.0", "id": 4, "method": "server/discover"}),
-        )
-        .await;
-        assert!(odd.status().is_success());
 
         serving.abort();
     }
@@ -780,8 +909,6 @@ mod tests {
         #[tokio::test]
         #[ignore = "needs a container runtime, a built image, a credential and the network; run `just image-session`"]
         async fn a_real_agent_is_offered_the_tools_this_instance_serves() {
-            const WARRANT: &str = "a-warrant-for-one-test";
-
             let runtime = located_runtime();
             let project = ProjectId::from_uuid(Uuid::from_u128(4242));
             let name = stageman_foreman::container(project);
@@ -807,7 +934,7 @@ mod tests {
                     credentials: BTreeMap::new(),
                     channels: BTreeMap::new(),
                     jobs: BTreeMap::new(),
-                    warrant: Some(Secret::new(WARRANT.to_owned())),
+                    warrant: None,
                     attending: Attending::default(),
                 },
             );
@@ -827,6 +954,13 @@ mod tests {
             // through `host.docker.internal`, which does not resolve to
             // `127.0.0.1` on the host's own stack. Port zero so this never
             // contends with a running instance.
+            let sessions = std::sync::Arc::new(super::super::Sessions::default());
+            let credential = sessions.mint(super::super::Speaking {
+                project,
+                speaker: super::super::Speaker::Foreman,
+                thread: None,
+            });
+
             let listening = tokio::net::TcpListener::bind(("0.0.0.0", 0))
                 .await
                 .expect("a port");
@@ -834,6 +968,7 @@ mod tests {
             let serving = tokio::spawn(crate::endpoint::serve(
                 listening,
                 std::sync::Arc::clone(&store),
+                std::sync::Arc::clone(&sessions),
             ));
 
             let answer = stageman_foreman::attend(
@@ -841,7 +976,7 @@ mod tests {
                 &handout,
                 project,
                 "https://example.invalid/aviary",
-                &super::super::endpoint(port),
+                &stageman_agent::Tools::new(super::super::endpoint(port), credential),
                 &[("claude", "a general-purpose coding agent")],
                 "Do not start anything. List the names of every tool you have whose name \
                  contains 'stageman', exactly as they are spelled. If you have none, reply \
@@ -875,8 +1010,6 @@ mod tests {
         #[tokio::test]
         #[ignore = "needs a container runtime, a built image, a credential and the network; run `just image-session`"]
         async fn a_foreman_starts_a_job_by_calling_the_tool() {
-            const WARRANT: &str = "another-warrant-for-one-test";
-
             let runtime = located_runtime();
             let project = ProjectId::from_uuid(Uuid::from_u128(4243));
             let name = stageman_foreman::container(project);
@@ -899,7 +1032,7 @@ mod tests {
                     credentials: BTreeMap::new(),
                     channels: BTreeMap::new(),
                     jobs: BTreeMap::new(),
-                    warrant: Some(Secret::new(WARRANT.to_owned())),
+                    warrant: None,
                     attending: Attending::default(),
                 },
             );
@@ -915,6 +1048,13 @@ mod tests {
                 .expect("it can write"),
             );
 
+            let sessions = std::sync::Arc::new(super::super::Sessions::default());
+            let credential = sessions.mint(super::super::Speaking {
+                project,
+                speaker: super::super::Speaker::Foreman,
+                thread: None,
+            });
+
             let listening = tokio::net::TcpListener::bind(("0.0.0.0", 0))
                 .await
                 .expect("a port");
@@ -922,6 +1062,7 @@ mod tests {
             let serving = tokio::spawn(crate::endpoint::serve(
                 listening,
                 std::sync::Arc::clone(&store),
+                std::sync::Arc::clone(&sessions),
             ));
 
             let answer = stageman_foreman::attend(
@@ -929,7 +1070,7 @@ mod tests {
                 &handout,
                 project,
                 "https://example.invalid/aviary",
-                &super::super::endpoint(port),
+                &stageman_agent::Tools::new(super::super::endpoint(port), credential),
                 &[("claude", "a general-purpose coding agent")],
                 "The README has a broken link in it. Please get that fixed.",
             )
