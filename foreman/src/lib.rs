@@ -122,26 +122,6 @@ Whatever it has to say appears in this thread. Job {job}."
     )
 }
 
-/// Where this instance answers a foreman, in the two spellings it has.
-///
-/// One concept and two strings, and only until
-/// `docs/decisions/0034-tools-are-served-not-shipped.md` finishes: a foreman
-/// still runs a shipped program that posts to one route, and is also offered
-/// tools served at the other. When the program goes, so does the first field
-/// and this type collapses to the second.
-///
-/// Bundled rather than passed apart because they are derived from one port and
-/// travel together everywhere — and because passing them separately put this
-/// function over the argument limit, which was the right complaint about the
-/// wrong thing.
-#[derive(Debug, Clone, Copy)]
-pub struct Answering<'a> {
-    /// The route the shipped program posts to.
-    pub job: &'a str,
-    /// Where the tools this instance serves are reached.
-    pub tools: &'a str,
-}
-
 /// Starts a foreman's session, or continues the one it already has.
 ///
 /// **Which of the two is asked of the runtime, never of the instance.** A
@@ -164,7 +144,7 @@ pub async fn attend(
     handout: &Handout,
     project: ProjectId,
     repository: &str,
-    answering: Answering<'_>,
+    tools_endpoint: &str,
     agents: &[(&str, &str)],
     said: &str,
 ) -> Result<Answer, ForemanError> {
@@ -176,20 +156,18 @@ pub async fn attend(
     // `docs/decisions/0034-tools-are-served-not-shipped.md`.
     let tools = handout
         .warrant()
-        .map(|warrant| stageman_agent::Tools::new(answering.tools, warrant.clone()));
+        .map(|warrant| stageman_agent::Tools::new(tools_endpoint, warrant.clone()));
     let existing = stageman_agent::abandoned(runtime)
         .await
         .map_err(ForemanError::Agent)?;
 
     if continuing(&existing, &name) {
         // The thread comes from the handout every turn, which is the whole
-        // point: one container, a different thread each time.
-        // Written before every start, not once at creation: the port can be
-        // named by the environment, so an instance restarted with a different
-        // one would otherwise leave this container asking nowhere.
-        stageman_agent::place_endpoint(runtime, &name, Some(answering.job))
-            .await
-            .map_err(ForemanError::Agent)?;
+        // point: one container, a different thread each time. The address this
+        // instance answers at used to be written in beside it; it now travels
+        // on the session declaration `resume` sends, which is what lets a
+        // restarted instance name a different port — see
+        // `docs/decisions/0034-tools-are-served-not-shipped.md`.
         stageman_agent::resume(
             runtime,
             &name,
@@ -204,16 +182,9 @@ pub async fn attend(
         // was told who it is and then asked nothing would have spent a turn
         // saying hello.
         let first = format!("{}\n\n{}", opening(repository), asked(said, agents));
-        stageman_agent::begin_with(
-            runtime,
-            handout,
-            &name,
-            Some(answering.job),
-            tools.as_ref(),
-            &first,
-        )
-        .await
-        .map_err(ForemanError::Agent)
+        stageman_agent::begin(runtime, handout, &name, tools.as_ref(), &first)
+            .await
+            .map_err(ForemanError::Agent)
     }
 }
 
@@ -269,15 +240,15 @@ person can always see which of their messages you meant.
 **You do not do the work yourself.** You have no copy of the repository and no \
 credentials to reach it, and that is deliberate rather than something missing: \
 reaching a repository is a job's business, not yours. When something needs \
-doing, start a job:
-
-    stageman-job 'why this job exists' 'what the job should do'
+doing, **call the `start_job` tool**. That one really is a tool you call, \
+unlike the program above.
 
 A job is one agent in a container of its own, holding this project's \
 credentials, which can clone the repository, change it and open a pull \
-request. It reports in a thread of its own. The first argument is prose a \
-person reads on the dashboard; the second is the whole instruction that job's \
-agent is given — it cannot see this conversation, so say everything it needs.
+request. It reports in a thread of its own. Its `reason` is prose a person \
+reads on the dashboard; its `instructions` are the whole instruction that \
+job's agent is given — it cannot see this conversation, so say everything it \
+needs.
 
 **Decide rather than ask.** You may say anything you like, but nothing you say \
 comes back to you in this turn, and a person answering you starts a *new* turn \
@@ -316,8 +287,8 @@ A person said this to you on the channel:
 
 {said}
 
-Answer it, or start a job for it with `stageman-job`, or both. Then run \
-`stageman-say` before you finish: a turn that ends without running it has told \
+Answer it, or start a job for it with the `start_job` tool, or both. Then \
+run `stageman-say` before you finish: a turn that ends without running it has told \
 nobody anything, however much you wrote.
 
 The agents this project's jobs may run on, and what each is for:
@@ -939,13 +910,12 @@ messages you meant.
 
 **You do not do the work yourself.** You have no copy of the repository and no credentials to \
 reach it, and that is deliberate rather than something missing: reaching a repository is a job's \
-business, not yours. When something needs doing, start a job:
-
-    stageman-job 'why this job exists' 'what the job should do'
+business, not yours. When something needs doing, **call the `start_job` tool**. That one really \
+is a tool you call, unlike the program above.
 
 A job is one agent in a container of its own, holding this project's credentials, which can \
-clone the repository, change it and open a pull request. It reports in a thread of its own. The \
-first argument is prose a person reads on the dashboard; the second is the whole instruction \
+clone the repository, change it and open a pull request. It reports in a thread of its own. Its \
+`reason` is prose a person reads on the dashboard; its `instructions` are the whole instruction \
 that job's agent is given — it cannot see this conversation, so say everything it needs.
 
 **Decide rather than ask.** You may say anything you like, but nothing you say comes back to you \
@@ -968,8 +938,8 @@ told."
 
 look at the parser
 
-Answer it, or start a job for it with `stageman-job`, or both. Then run `stageman-say` before \
-you finish: a turn that ends without running it has told nobody anything, however much you \
+Answer it, or start a job for it with the `start_job` tool, or both. Then run `stageman-say` \
+before you finish: a turn that ends without running it has told nobody anything, however much you \
 wrote.
 
 The agents this project's jobs may run on, and what each is for:
@@ -1067,7 +1037,7 @@ inferred is one a person will act on, and you have no way to check it."
     fn a_foreman_is_told_to_start_jobs_rather_than_do_the_work() {
         let told = super::opening("https://example.invalid/repo");
 
-        assert!(told.contains("stageman-job"), "{told}");
+        assert!(told.contains("start_job"), "{told}");
         assert!(told.contains("do not do the work yourself"), "{told}");
         assert!(
             told.contains("deliberate rather than something missing"),

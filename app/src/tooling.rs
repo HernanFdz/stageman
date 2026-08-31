@@ -233,15 +233,15 @@ fn presented(headers: &axum::http::HeaderMap) -> Option<&str> {
 
 /// Where a container reaches the tools this instance serves.
 ///
-/// The same hostname `asking::endpoint` uses, and for the same measured
-/// reason: `--add-host=host.docker.internal:host-gateway` is honoured by
-/// Docker and by Podman alike, so nothing here has to know which is in use.
+/// One hostname for both runtimes, which is measured rather than assumed:
+/// `--add-host=host.docker.internal:host-gateway` is honoured by Docker and by
+/// Podman alike, so nothing here has to know which one is in use.
 ///
-/// The same port, too. One listener serves both this and the route a foreman's
-/// program still calls, because they stand behind the same two barriers and
-/// binding a second port would mean a second thing to get wrong for no gain —
-/// see `docs/decisions/0033-the-job-endpoint-listens-beyond-loopback.md` for
-/// why binding at all is the awkward part.
+/// The one thing served on that listener, since
+/// `docs/decisions/0034-tools-are-served-not-shipped.md` removed the route a
+/// shipped program used to post to. Where it binds, and why that is the
+/// awkward part, is
+/// `docs/decisions/0033-the-job-endpoint-listens-beyond-loopback.md`.
 #[must_use]
 pub fn endpoint(port: u16) -> String {
     format!("http://host.docker.internal:{port}/mcp")
@@ -327,7 +327,7 @@ async fn called(
         ),
         Call::Listing => {
             let Scope::Foreman(project) = scope;
-            let agents = crate::asking::allowed_agents(&store.read(), project);
+            let agents = allowed_agents(&store.read(), project);
             answered(
                 incoming.id,
                 serde_json::json!({"tools": tools(scope, &agents)}),
@@ -357,8 +357,8 @@ fn starting_a_job(
 ) -> axum::response::Response {
     let Scope::Foreman(project) = scope;
 
-    let Some(agent) = crate::asking::named_agent(&store.read(), project, &starting.agent) else {
-        let allowed = crate::asking::allowed_agents(&store.read(), project).join(", ");
+    let Some(agent) = named_agent(&store.read(), project, &starting.agent) else {
+        let allowed = allowed_agents(&store.read(), project).join(", ");
         tracing::warn!(%project, asked = %starting.agent, "no such agent for this project");
         return failed(
             id,
@@ -436,9 +436,52 @@ fn failed(id: Option<serde_json::Value>, why: &str) -> axum::response::Response 
     )
 }
 
+/// The agent a foreman named, if this project's jobs may run on it.
+///
+/// Answers `None` for an agent this instance does not run *and* for one it
+/// runs but this project does not allow — which is a refusal rather than a
+/// substitution, because silently running a different agent than the one asked
+/// for is a wrong answer that looks like a right one.
+pub fn named_agent(
+    state: &stageman_core::State,
+    project: stageman_core::ProjectId,
+    named: &str,
+) -> Option<stageman_core::Agent> {
+    state
+        .projects
+        .get(&project)?
+        .job_agents
+        .iter()
+        .find(|agent| crate::dashboard::wire_name(**agent).0 == named)
+        .copied()
+}
+
+/// What this project's jobs may run on, as a foreman names them.
+///
+/// Said back with a refusal, so a foreman that guessed wrong is told what it
+/// could have said rather than only that it was wrong.
+pub fn allowed_agents(
+    state: &stageman_core::State,
+    project: stageman_core::ProjectId,
+) -> Vec<&'static str> {
+    state
+        .projects
+        .get(&project)
+        .map_or_else(Vec::new, |watched| {
+            watched
+                .job_agents
+                .iter()
+                .map(|agent| crate::dashboard::wire_name(*agent).0)
+                .collect()
+        })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Call, PROTOCOL, Scope, Starting, axum, decode, endpoint, presented, tools};
+    use super::{
+        Call, PROTOCOL, Scope, Starting, allowed_agents, axum, decode, endpoint, named_agent,
+        presented, tools,
+    };
     use stageman_core::{ProjectId, Uuid};
 
     fn a_project() -> ProjectId {
@@ -798,10 +841,7 @@ mod tests {
                 &handout,
                 project,
                 "https://example.invalid/aviary",
-                stageman_foreman::Answering {
-                    job: &crate::asking::endpoint(port),
-                    tools: &super::super::endpoint(port),
-                },
+                &super::super::endpoint(port),
                 &[("claude", "a general-purpose coding agent")],
                 "Do not start anything. List the names of every tool you have whose name \
                  contains 'stageman', exactly as they are spelled. If you have none, reply \
@@ -819,6 +859,176 @@ mod tests {
                  cannot reach looks like — it said: {:?}",
                 answer.text,
             );
+        }
+
+        /// A foreman asked for work starts a job by calling the tool.
+        ///
+        /// The test for the half of 0034 that changed the prompt rather than
+        /// the transport. Listing a tool proves it arrived; this proves a
+        /// foreman told to use it does, and that what it chose reaches the
+        /// instance as typed values rather than a shell command somebody
+        /// parses back out.
+        ///
+        /// Deliberately asserts the *record*, not the answer. What a foreman
+        /// says about what it did is a claim; a job in the instance is the
+        /// thing that happened.
+        #[tokio::test]
+        #[ignore = "needs a container runtime, a built image, a credential and the network; run `just image-session`"]
+        async fn a_foreman_starts_a_job_by_calling_the_tool() {
+            const WARRANT: &str = "another-warrant-for-one-test";
+
+            let runtime = located_runtime();
+            let project = ProjectId::from_uuid(Uuid::from_u128(4243));
+            let name = stageman_foreman::container(project);
+            drop(stageman_agent::discard(&runtime, &name).await);
+
+            let mut state = State::default();
+            state.agents.insert(
+                Agent::Claude,
+                AgentConfig {
+                    auth_token: credential(),
+                },
+            );
+            state.projects.insert(
+                project,
+                Project {
+                    name: "aviary".to_owned(),
+                    repository: "https://example.invalid/aviary".to_owned(),
+                    foreman_agent: Agent::Claude,
+                    job_agents: BTreeSet::from([Agent::Claude]),
+                    credentials: BTreeMap::new(),
+                    channels: BTreeMap::new(),
+                    jobs: BTreeMap::new(),
+                    warrant: Some(Secret::new(WARRANT.to_owned())),
+                    attending: Attending::default(),
+                },
+            );
+            let handout = Handout::for_foreman(&state, project).expect("a foreman's handout");
+
+            let directory = tempfile::tempdir().expect("a temporary directory");
+            let store = std::sync::Arc::new(
+                crate::Store::create(
+                    directory.path().join("state.json"),
+                    stageman_core::Key::new([3; 32]),
+                    state,
+                )
+                .expect("it can write"),
+            );
+
+            let listening = tokio::net::TcpListener::bind(("0.0.0.0", 0))
+                .await
+                .expect("a port");
+            let port = listening.local_addr().expect("a bound address").port();
+            let serving = tokio::spawn(crate::asking::serve(
+                listening,
+                std::sync::Arc::clone(&store),
+            ));
+
+            let answer = stageman_foreman::attend(
+                &runtime,
+                &handout,
+                project,
+                "https://example.invalid/aviary",
+                &super::super::endpoint(port),
+                &[("claude", "a general-purpose coding agent")],
+                "The README has a broken link in it. Please get that fixed.",
+            )
+            .await;
+
+            let started: Vec<_> = store
+                .read()
+                .projects
+                .get(&project)
+                .expect("the project")
+                .jobs
+                .values()
+                .map(|job| (job.reason.clone(), job.kickoff.clone()))
+                .collect();
+
+            // Both containers, whatever happened: the foreman's, and whichever
+            // job it started. A test that leaks one leaks it on every run.
+            drop(stageman_agent::discard(&runtime, &name).await);
+            for left in stageman_agent::abandoned(&runtime)
+                .await
+                .unwrap_or_default()
+            {
+                drop(stageman_agent::discard(&runtime, &left).await);
+            }
+            serving.abort();
+
+            let answer = answer.expect("the foreman answers");
+            assert_eq!(
+                started.len(),
+                1,
+                "a foreman asked for work started no job; it said: {:?}",
+                answer.text,
+            );
+            let (reason, kickoff) = started.first().expect("the one job");
+            assert!(
+                !reason.trim().is_empty(),
+                "the reason a person reads on the dashboard is empty",
+            );
+            assert!(
+                kickoff.to_lowercase().contains("readme")
+                    || kickoff.to_lowercase().contains("link"),
+                "the instruction does not carry what the foreman was asked for: {kickoff:?}",
+            );
+        }
+    }
+
+    /// An agent a project's jobs may not run on is refused, not substituted.
+    ///
+    /// Silently running a different agent than the one asked for is a wrong
+    /// answer that looks like a right one — the job would run, report success,
+    /// and have been done by something the foreman did not choose.
+    /// `docs/decisions/0006-agents-are-pluggable.md` makes the choice the
+    /// foreman's, so overriding it here would take back a decision that record
+    /// gave away.
+    #[test]
+    fn an_agent_must_be_named_and_allowed_or_it_is_refused() {
+        use stageman_core::{Agent, ProjectId, State, Uuid};
+
+        let mut state = State::default();
+        let project = ProjectId::from_uuid(Uuid::from_u128(1));
+        state.projects.insert(project, watched_by([Agent::Claude]));
+
+        assert_eq!(named_agent(&state, project, "claude"), Some(Agent::Claude));
+        assert_eq!(
+            named_agent(&state, project, "gpt"),
+            None,
+            "an agent this instance does not run is a refusal, not a substitution"
+        );
+        assert_eq!(
+            named_agent(&state, project, ""),
+            None,
+            "and naming nothing is not naming the first"
+        );
+        assert_eq!(
+            named_agent(&state, ProjectId::from_uuid(Uuid::from_u128(9)), "claude"),
+            None,
+            "a project this instance does not watch has no agents"
+        );
+
+        // A refusal says what could have been said instead, so a foreman that
+        // guessed wrong learns the set rather than only that it was wrong.
+        assert_eq!(allowed_agents(&state, project), vec!["claude"]);
+        assert!(allowed_agents(&state, ProjectId::from_uuid(Uuid::from_u128(9))).is_empty());
+    }
+
+    /// A project running jobs on exactly these agents.
+    fn watched_by<const N: usize>(agents: [stageman_core::Agent; N]) -> stageman_core::Project {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        stageman_core::Project {
+            name: "aviary".to_owned(),
+            repository: "https://example.invalid/aviary".to_owned(),
+            foreman_agent: stageman_core::Agent::Claude,
+            job_agents: BTreeSet::from(agents),
+            credentials: BTreeMap::new(),
+            channels: BTreeMap::new(),
+            warrant: None,
+            attending: stageman_core::Attending::default(),
+            jobs: BTreeMap::new(),
         }
     }
 

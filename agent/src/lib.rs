@@ -750,13 +750,6 @@ const TOOLS_SERVER: &str = "stageman";
 /// path for another".
 const THREAD_PATH: &str = "/tmp/stageman-thread";
 
-/// Where a container reads the address it asks this instance at.
-///
-/// A file for the same reason the thread is one: the port can be named by the
-/// environment, so an instance restarted with a different one would otherwise
-/// leave every existing container asking somewhere nothing is listening.
-const ENDPOINT_PATH: &str = "/tmp/stageman-endpoint";
-
 /// Puts the thread a container should speak in where it will read it.
 ///
 /// Copied in while the container is stopped, which is every moment between
@@ -788,23 +781,6 @@ async fn place_thread(
         return Ok(());
     };
     place(runtime, name, THREAD_PATH, &thread.id).await
-}
-
-/// Puts the address this instance answers at where a container will read it.
-///
-/// # Errors
-///
-/// Fails if it cannot be written or the runtime refuses the copy.
-#[mutants::skip]
-pub async fn place_endpoint(
-    runtime: &ContainerRuntime,
-    name: &str,
-    endpoint: Option<&str>,
-) -> Result<(), AgentError> {
-    let Some(endpoint) = endpoint else {
-        return Ok(());
-    };
-    place(runtime, name, ENDPOINT_PATH, endpoint).await
 }
 
 /// Copies one short value into a stopped container.
@@ -907,11 +883,10 @@ fn retained_arguments(
 /// stopped containers too, so a clash is a loud message naming the container in
 /// the way rather than a silent reuse of somebody else's.
 #[mutants::skip]
-pub async fn begin_with(
+pub async fn begin(
     runtime: &ContainerRuntime,
     handout: &Handout,
     name: &str,
-    endpoint: Option<&str>,
     tools: Option<&Tools>,
     question: &str,
 ) -> Result<Answer, AgentError> {
@@ -941,27 +916,8 @@ pub async fn begin_with(
     }
 
     place_thread(runtime, name, handout.thread()).await?;
-    place_endpoint(runtime, name, endpoint).await?;
     let container = spawn(runtime, &started_arguments(name), &delivering)?;
     converse(container, Opening::Fresh, tools, question).await
-}
-
-/// Starts a retained container and puts the first question to it.
-///
-/// The shape [`begin_with`] takes when nothing needs an endpoint, which is
-/// every job: only a foreman asks this instance for anything.
-///
-/// # Errors
-///
-/// Fails as [`begin_with`] does.
-pub async fn begin(
-    runtime: &ContainerRuntime,
-    handout: &Handout,
-    name: &str,
-    tools: Option<&Tools>,
-    question: &str,
-) -> Result<Answer, AgentError> {
-    begin_with(runtime, handout, name, None, tools, question).await
 }
 
 /// What starts a container that already exists, attached.
@@ -1701,14 +1657,15 @@ mod tests {
     /// as the message — so "--help" was posted to a real channel. Nothing
     /// failed; the tool did exactly what it was told.
     ///
-    /// Both tools, because the same reflex reaches both, and the second one
-    /// starts containers rather than posting messages.
+    /// One program now: `docs/decisions/0034-tools-are-served-not-shipped.md`
+    /// removed the one that asked for work, because a served tool takes typed
+    /// arguments and has nothing to ask `--help` about.
     #[tokio::test]
     #[ignore = "needs a container runtime and a built image; run `just image-handshake`"]
     async fn a_tool_asked_for_help_answers_rather_than_acting() {
         let runtime = located_runtime();
 
-        for tool in ["stageman-say", "stageman-job"] {
+        for tool in ["stageman-say"] {
             let helped = tokio::process::Command::new(runtime.path())
                 .args([
                     "run",
