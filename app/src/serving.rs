@@ -338,7 +338,7 @@ async fn start() -> Result<(), StartupError> {
     // which reads exactly like a foreman that decided not to — and it is not
     // hypothetical: a leaked test process held this port and a real instance
     // quietly could not have it.
-    let asking = crate::asking::bind().await;
+    let tools = crate::endpoint::bind().await;
 
     announce(
         runtime,
@@ -347,17 +347,17 @@ async fn start() -> Result<(), StartupError> {
         serving,
         bundle.as_deref(),
         &path,
-        asking
+        tools
             .as_ref()
             .ok()
             .and_then(|bound| bound.local_addr().ok()),
     )?;
 
-    match asking {
+    match tools {
         Ok(listening) => {
             let store = Arc::clone(&store);
             tokio::spawn(async move {
-                if let Err(why) = crate::asking::serve(listening, store).await {
+                if let Err(why) = crate::endpoint::serve(listening, store).await {
                     tracing::error!(%why, "the job endpoint stopped");
                 }
             });
@@ -459,7 +459,7 @@ fn announce(
     serving: SocketAddr,
     bundle: Option<&Path>,
     instance: &Path,
-    asking: Option<SocketAddr>,
+    tools: Option<SocketAddr>,
 ) -> Result<(), StartupError> {
     println!();
     println!("stageman is running.");
@@ -476,11 +476,12 @@ fn announce(
     // can fail to open at all — a port already taken leaves a foreman able to
     // talk and unable to work, and that has to be visible here rather than in
     // a log line nobody was watching.
-    match asking {
-        Some(bound) => println!("  jobs asked {bound}"),
+    match tools {
+        Some(bound) => println!("  tools      {bound}"),
         None => println!(
-            "  jobs asked NOT LISTENING — port {} is taken, so no foreman can create jobs",
-            *crate::asking::PORT
+            "  tools      NOT SERVED — port {} is taken, so no agent can reach a tool and \
+             none will say so",
+            *crate::endpoint::PORT
         ),
     }
     println!(

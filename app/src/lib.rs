@@ -14,9 +14,9 @@
 //! `docs/decisions/0022-the-browser-never-sees-the-domain.md`.
 
 #[cfg(feature = "server")]
-pub(crate) mod asking;
-#[cfg(feature = "server")]
 mod channel;
+#[cfg(feature = "server")]
+pub(crate) mod endpoint;
 #[cfg(feature = "server")]
 mod instance;
 #[cfg(feature = "server")]

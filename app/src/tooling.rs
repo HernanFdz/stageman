@@ -3,7 +3,7 @@
 //! `docs/decisions/0034-tools-are-served-not-shipped.md` moves everything an
 //! agent does outside its container from a program shipped in the image to a
 //! tool served from here. This is that endpoint: MCP over HTTP, on the
-//! listener `asking` already binds, reached through the one hostname a
+//! listener `endpoint` already binds, reached through the one hostname a
 //! container has on either runtime.
 //!
 //! **Deciding is split from serving, as everywhere else here.** [`decode`]
@@ -21,7 +21,7 @@
 //! with a test rather than an absence.
 
 // Through the framework's re-export rather than a direct dependency, for the
-// reason `asking` and `serving` do the same: the version that matters is
+// reason `endpoint` and `serving` do the same: the version that matters is
 // whichever one the framework serves with, and naming it twice is how the two
 // drift.
 use dioxus::server::axum;
@@ -260,7 +260,7 @@ pub struct Incoming {
     params: serde_json::Value,
 }
 
-/// The tools endpoint, for the listener `asking` binds.
+/// The tools endpoint, for the listener `endpoint` binds.
 ///
 /// A method router rather than a whole one, so the extension carrying the
 /// instance is applied once where the listener is assembled instead of twice.
@@ -296,7 +296,7 @@ async fn called(
     headers: axum::http::HeaderMap,
     axum::Json(incoming): axum::Json<Incoming>,
 ) -> axum::response::Response {
-    if !crate::asking::from_nearby(peer.ip()) {
+    if !crate::endpoint::from_nearby(peer.ip()) {
         tracing::warn!(%peer, "the tools were reached from beyond this machine");
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
@@ -665,7 +665,7 @@ mod tests {
             .await
             .expect("a port");
         let port = listening.local_addr().expect("a bound address").port();
-        let serving = tokio::spawn(crate::asking::serve(
+        let serving = tokio::spawn(crate::endpoint::serve(
             listening,
             std::sync::Arc::clone(&store),
         ));
@@ -831,7 +831,7 @@ mod tests {
                 .await
                 .expect("a port");
             let port = listening.local_addr().expect("a bound address").port();
-            let serving = tokio::spawn(crate::asking::serve(
+            let serving = tokio::spawn(crate::endpoint::serve(
                 listening,
                 std::sync::Arc::clone(&store),
             ));
@@ -919,7 +919,7 @@ mod tests {
                 .await
                 .expect("a port");
             let port = listening.local_addr().expect("a bound address").port();
-            let serving = tokio::spawn(crate::asking::serve(
+            let serving = tokio::spawn(crate::endpoint::serve(
                 listening,
                 std::sync::Arc::clone(&store),
             ));
