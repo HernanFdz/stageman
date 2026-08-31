@@ -3,7 +3,10 @@
 ## Status
 Accepted. Completes `docs/decisions/0032-a-foreman-asks-the-instance-by-warrant.md`,
 which decided how a foreman is authorised and deliberately left where it is
-heard undecided.
+heard undecided. Where it listens is unchanged by
+`docs/decisions/0034-tools-are-served-not-shipped.md`; *what it serves* is not —
+see that record for why "one route is served there and nothing else" below no
+longer holds.
 
 ## Context
 
