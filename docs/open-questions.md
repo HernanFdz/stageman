@@ -221,38 +221,6 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   — a gate that did not need a runtime would not need any of this, and that is
   the cheapest available answer if the rest turns out to be expensive.
 
-- **Is the environment the right place for the encryption key?** It is where
-  `STAGEMAN_KEY` arrives today, for the reason
-  `docs/decisions/0017-the-runtimes-path-is-recorded-in-the-instance.md` gives
-  in passing: storing it beside the file it encrypts would defeat the
-  encryption. That says where it must *not* be and settles nothing about where
-  it should be.
-
-  Get the threat model right before designing for it, because the obvious
-  statement of it is wrong. A process environment is not world-readable: on
-  Linux `/proc/<pid>/environ` is readable only by the same user and by root,
-  and macOS has no equivalent at all for another user's processes. So the
-  exposure is to **anything already running as the same user** — which on a
-  developer's own machine is a large set, and is exactly the machine
-  `docs/vision.md` §3 has this running on. It is also inherited by children:
-  the container runtime client is spawned with the daemon's environment, so
-  the key is in that process too. Not in the *container* — what crosses that
-  boundary is only what `--env` names, which is the mechanism
-  `docs/conventions.md` §3 relies on — but the client is one more process
-  holding it.
-
-  The candidates are per-platform and none is portable, which is the hard
-  part. A service manager is the leading shape: a systemd unit's
-  `LoadCredential=` passes a secret through a file descriptor rather than the
-  environment, which is strictly better than `EnvironmentFile=` and better
-  than what happens today. The analogues are launchd with the Keychain, and a
-  Windows service with the credential manager. All three arrive with
-  installation rather than with the program.
-
-  Settled by distribution, and deliberately not before: what installs this
-  decides what can hold a secret for it, and building a keychain integration
-  against a guess about packaging is how that gets built twice.
-
 - **Does the dashboard need authentication before it leaves `127.0.0.1`?**
   Nothing authenticates a request today, and the default address makes that
   survivable rather than correct: anything that can reach the port can read

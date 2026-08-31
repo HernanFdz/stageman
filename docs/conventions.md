@@ -472,6 +472,14 @@ nothing asks you for it: `just dashboard` generates one on first use, to
 encrypt the development instance it serves. Losing it costs a file with nothing
 in it, and an instance that will not open is repaired by deleting both.
 
+That recipe generates its own rather than letting the binary do it, and the
+difference is the point: since
+`docs/decisions/0037-the-instance-key-is-generated-on-first-run.md` a binary
+with no key generates one under the platform's configuration directory, and a
+development instance served out of a checkout must no more write there than it
+may write to the real instance file. Both overrides are set for the same
+reason, in the same place.
+
 All of these live in the gitignored `.local` directory, and the credentials are
 named here without it on purpose. `just drift` resolves every backticked path in this directory
 against the repository, so citing one that exists on the machine writing the

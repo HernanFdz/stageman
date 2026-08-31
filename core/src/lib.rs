@@ -917,6 +917,25 @@ impl Key {
         Ok(Self(material))
     }
 
+    /// The key as base64, which is the one form anything outside this crate
+    /// ever writes down.
+    ///
+    /// The exact inverse of [`Key::from_base64`], and here rather than beside
+    /// whoever stores one for the same reason: what a key looks like is this
+    /// type's business, and a second encoder somewhere else is a second thing
+    /// that could disagree about padding or alphabet.
+    ///
+    /// It hands back the material in the clear, which is why this is a named
+    /// method and not a [`fmt::Display`] — that one redacts, and must, since
+    /// `docs/conventions.md` §4 makes formatting the place secrets escape.
+    /// Writing a key down is a deliberate act with exactly one caller: the
+    /// startup that generated it, per
+    /// `docs/decisions/0037-the-instance-key-is-generated-on-first-run.md`.
+    #[must_use]
+    pub fn to_base64(&self) -> String {
+        BASE64.encode(self.0)
+    }
+
     fn cipher(&self) -> Aes256Gcm {
         Aes256Gcm::new(&CipherKey::<Aes256Gcm>::from(self.0))
     }

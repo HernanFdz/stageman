@@ -12,6 +12,7 @@
 //! instance unusable has to fail at startup, with an exit code and a reason,
 //! and that is not available inside a function that cannot return.
 
+use std::fmt;
 use std::fs;
 use std::io::{self, Write as _};
 use std::net::SocketAddr;
@@ -22,6 +23,8 @@ use std::sync::{Arc, LazyLock};
 use dioxus::prelude::{DioxusRouterExt as _, ServeConfig};
 use dioxus::server::axum;
 use etcetera::BaseStrategy as _;
+use rand::rngs::{StdRng, SysRng};
+use rand::{Rng as _, SeedableRng as _};
 use stageman_agent::{AgentError, ContainerRuntime};
 use stageman_core::{Key, KeyError, State};
 
@@ -30,10 +33,38 @@ use crate::{LoadError, Store};
 
 /// The variable the snapshot's encryption key arrives in, as base64.
 ///
-/// From the environment because keeping it beside the file it protects would
-/// defeat the encryption — which is the whole of why the file is portable and
-/// useless on its own.
+/// An override rather than a requirement since
+/// `docs/decisions/0037-the-instance-key-is-generated-on-first-run.md`, and
+/// still what a deliberate deployment sets — a service manager passing a
+/// secret in has somewhere to put it, and nothing about that changed.
+///
+/// What it is *not* is the only way of saying. Requiring it made a downloaded
+/// binary refuse to start until somebody generated thirty-two bytes by hand,
+/// which is the last thing between "put this somewhere and run it" and the
+/// truth.
 const KEY_VARIABLE: &str = "STAGEMAN_KEY";
+
+/// What the generated key is called, in the platform's configuration
+/// directory.
+///
+/// A different directory from the instance, not merely a different name. The
+/// rule it answers is that a key beside the file it protects protects nothing,
+/// and 0037 records exactly how much of that survives per platform: two
+/// directories on Linux and macOS, one on Windows, where the platform defines
+/// its configuration directory as its data directory. The property `README.md`
+/// actually claims is about the *file*, and a separate file keeps it
+/// everywhere.
+const KEY_FILE: &str = "key";
+
+/// How a generated key file is created, where the platform has an opinion.
+///
+/// Owner read and write and nothing else. It does not make the key private
+/// from anything running as this user — 0037 is explicit that nothing can,
+/// and that a variable is no better — but a key file readable by every account
+/// on a shared machine would be worse than what it replaced, and that is worth
+/// one constant.
+#[cfg(unix)]
+const KEY_PERMISSIONS: u32 = 0o600;
 
 /// The variable naming the file the instance is kept in.
 ///
@@ -66,12 +97,23 @@ const VERBOSITY_VARIABLE: &str = "STAGEMAN_LOG";
 /// An instance could not be started.
 #[derive(Debug, thiserror::Error)]
 enum StartupError {
-    /// A variable this needs is not set.
-    #[error("{0} is not set")]
-    Missing(&'static str),
     /// The key is set but is not key material.
-    #[error("{KEY_VARIABLE} is not usable")]
+    #[error("the instance key is not usable")]
     Key(#[source] KeyError),
+    /// The key could not be read from, or written to, where it is kept.
+    ///
+    /// The same class as an instance file that cannot be opened: an instance
+    /// cannot run without one, so `docs/conventions.md` §3 puts it at startup
+    /// rather than in the dashboard. It says the path, because the repair is
+    /// almost always a permission on that directory.
+    #[error("the instance key at {path} could not be read or written")]
+    KeyFile {
+        /// Where it is kept.
+        path: PathBuf,
+        /// Why it could not be.
+        #[source]
+        source: io::Error,
+    },
     /// The instance could not be opened or created.
     #[error("the instance at {path} could not be opened")]
     Instance {
@@ -110,6 +152,12 @@ enum StartupError {
     /// Serving stopped on something other than being asked to.
     #[error("serving the dashboard stopped")]
     Serving(#[source] io::Error),
+    /// There is no randomness to generate a key from.
+    ///
+    /// Refused rather than substituted. A predictable key is worse than no
+    /// key, because it encrypts and looks like it worked.
+    #[error("no source of randomness, so an instance key cannot be generated")]
+    NoRandomness,
     /// There is no home directory to put an instance under.
     #[error("no home directory, so there is nowhere to keep an instance — set {STATE_VARIABLE}")]
     NoHome(#[source] etcetera::HomeDirError),
@@ -253,7 +301,7 @@ async fn start() -> Result<(), StartupError> {
         ));
     }
 
-    let key = Key::from_base64(&required(KEY_VARIABLE)?).map_err(StartupError::Key)?;
+    let (key, source) = instance_key()?;
     let path = instance_path()?;
 
     let existing =
@@ -354,13 +402,17 @@ async fn start() -> Result<(), StartupError> {
     // quietly could not have it.
     let tools = crate::endpoint::bind().await;
 
+    let kept = Kept {
+        file: path,
+        key: source,
+    };
     announce(
         runtime,
         &store,
         &swept,
         serving,
         bundle.as_deref(),
-        &path,
+        &kept,
         tools
             .as_ref()
             .ok()
@@ -473,12 +525,16 @@ fn announce(
     swept: &crate::Swept,
     serving: SocketAddr,
     bundle: Option<&Path>,
-    instance: &Path,
+    kept: &Kept,
     tools: Option<SocketAddr>,
 ) -> Result<(), StartupError> {
     println!();
     println!("stageman is running.");
-    println!("  instance   {}", instance.display());
+    println!("  instance   {}", kept.file.display());
+    // Printed for the reason the instance path is: an instance opened under a
+    // key nobody meant to use looks exactly like an instance that lost its
+    // projects, and this is the one line that tells those apart.
+    println!("  key        {}", kept.key);
     println!("  runtime    {}", runtime.path().display());
     println!("  agents     {}", store.read().agents.len());
     println!("  projects   {}", store.read().projects.len());
@@ -528,12 +584,155 @@ fn announce(
     io::stdout().flush().map_err(StartupError::Serving)
 }
 
+/// Where this instance is kept, and what opens it.
+///
+/// One value rather than two arguments, and the grouping is the honest one: a
+/// file opened at the right path under the wrong key is indistinguishable from
+/// an instance that lost its projects, so the summary names both or the line
+/// naming one of them is a trap.
+struct Kept {
+    /// The file this instance lives in.
+    file: PathBuf,
+    /// Where the key that opens it came from.
+    key: KeySource,
+}
+
+/// Where the instance key came from, for the line that says so at startup.
+///
+/// Worth reporting rather than assuming, and the reason is the failure it
+/// prevents: an operator who believes they set the variable, and did not,
+/// otherwise sees an instance that opens perfectly and holds none of their
+/// projects — because it was opened under a different key and created afresh.
+/// Naming the source makes that one line of output instead of an evening.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum KeySource {
+    /// Supplied in the environment, which is what a service manager does.
+    Environment,
+    /// Read from where a previous start generated it.
+    Kept(PathBuf),
+    /// Generated by this start, because there was none.
+    Generated(PathBuf),
+}
+
+impl fmt::Display for KeySource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Environment => write!(f, "{KEY_VARIABLE}"),
+            Self::Kept(path) => write!(f, "{}", path.display()),
+            Self::Generated(path) => write!(f, "{} (generated just now)", path.display()),
+        }
+    }
+}
+
+/// The key this instance's file is encrypted under, and where it came from.
+///
+/// The environment first, because an operator who said so meant it and because
+/// that is the path a service manager takes. Otherwise the platform's
+/// configuration directory, where a previous start left one or where this
+/// start puts one — see
+/// `docs/decisions/0037-the-instance-key-is-generated-on-first-run.md` for what
+/// that buys and what it gives up.
+///
+/// Generating is not a fallback hiding a failure, which is the distinction
+/// `.quality/gate-reference.md` cares about. A first run genuinely has no key,
+/// and thirty-two fresh bytes are the true answer rather than a substituted
+/// default: what would be wrong is generating a *second* one over an instance
+/// that already has a file, and that cannot happen here because a key is only
+/// ever created when the file holding it does not exist.
+///
+/// # Errors
+///
+/// Fails if the variable is set to something that is not key material, if
+/// there is no home directory to keep one under, or if the file cannot be read
+/// or written. A key that cannot be established is an instance that cannot
+/// open, so all three stop the start.
+fn instance_key() -> Result<(Key, KeySource), StartupError> {
+    if let Some(said) = optional(KEY_VARIABLE) {
+        return Ok((
+            Key::from_base64(&said).map_err(StartupError::Key)?,
+            KeySource::Environment,
+        ));
+    }
+
+    let path = configuration_directory()?.join(KEY_FILE);
+    match fs::read_to_string(&path) {
+        Ok(kept) => Ok((
+            Key::from_base64(kept.trim()).map_err(StartupError::Key)?,
+            KeySource::Kept(path),
+        )),
+        Err(why) if why.kind() == io::ErrorKind::NotFound => {
+            let key = minted()?;
+            write_key(&path, &key)?;
+            Ok((key, KeySource::Generated(path)))
+        }
+        Err(source) => Err(StartupError::KeyFile { path, source }),
+    }
+}
+
+/// Thirty-two bytes from the operating system.
+///
+/// The randomness is supplied here rather than inside the domain crate, which
+/// is the same split `State::seal` already makes for nonces: what a key is
+/// belongs to the type, and where entropy comes from is a property of the
+/// machine this happens to run on.
+fn minted() -> Result<Key, StartupError> {
+    let mut rng = StdRng::try_from_rng(&mut SysRng).map_err(|_| StartupError::NoRandomness)?;
+    let mut material = [0_u8; 32];
+    rng.fill_bytes(&mut material);
+    Ok(Key::new(material))
+}
+
+/// Writes a generated key where it will be looked for next time.
+///
+/// Created with an explicit mode where the platform has one, rather than
+/// written and then adjusted: a file that is briefly world-readable and then
+/// tightened is readable for as long as it takes, and the window is the whole
+/// of what this is guarding.
+fn write_key(path: &Path, key: &Key) -> Result<(), StartupError> {
+    let failed = |source| StartupError::KeyFile {
+        path: path.to_owned(),
+        source,
+    };
+    let mut opening = fs::OpenOptions::new();
+    opening.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opening, KEY_PERMISSIONS);
+    let mut file = opening.open(path).map_err(failed)?;
+    file.write_all(key.to_base64().as_bytes()).map_err(failed)?;
+    file.write_all(b"\n").map_err(failed)?;
+    file.sync_all().map_err(failed)
+}
+
+/// The platform's configuration directory for this instance, created if absent.
+///
+/// Separate from the data directory, which is where the instance file goes.
+/// On Windows the platform defines those as the same place and this returns
+/// it, which 0037 records as a documented consequence rather than something to
+/// work around.
+fn configuration_directory() -> Result<PathBuf, StartupError> {
+    let directory = etcetera::choose_base_strategy()
+        .map_err(StartupError::NoHome)?
+        .config_dir()
+        .join(INSTANCE_DIRECTORY);
+    fs::create_dir_all(&directory).map_err(|source| StartupError::Directory {
+        path: directory.clone(),
+        source,
+    })?;
+    Ok(directory)
+}
+
 /// Where this instance is kept.
 ///
 /// The platform's own data directory unless [`STATE_VARIABLE`] says otherwise
-/// — the XDG data directory under a home on Linux, Application Support on
-/// macOS, the roaming application data directory on Windows — according to the
-/// machine rather than to a list maintained here.
+/// — the XDG data directory under a home on Linux *and on macOS*, the roaming
+/// application data directory on Windows — according to the machine rather
+/// than to a list maintained here.
+///
+/// macOS is named explicitly because the obvious guess is wrong and this said
+/// it for a while: `choose_base_strategy` is the CLI convention and returns
+/// XDG everywhere except Windows, so an instance lands beside the Linux one
+/// rather than under Application Support. The sibling function that returns
+/// Apple's own directories is the one this deliberately does not call.
 ///
 /// Written without the literal Linux path on purpose: this repository has a
 /// gitignored scratch directory whose name is a prefix of it, and `just drift`
@@ -576,11 +775,6 @@ fn bundle() -> Option<PathBuf> {
         .ok()?
         .parent()
         .map(|beside| beside.join("public"))
-}
-
-/// The value of a required variable.
-fn required(name: &'static str) -> Result<String, StartupError> {
-    optional(name).ok_or(StartupError::Missing(name))
 }
 
 /// The value of a variable, when it is set to something.

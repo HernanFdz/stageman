@@ -53,9 +53,17 @@ projects, and that is a perfectly good instance — it simply has nothing to do
 yet. You give it those in the dashboard, in that order, because a project needs
 an agent to think with and at least one its jobs can run on.
 
-Starting it needs one thing named in the environment: `STAGEMAN_KEY`, the
-base64 key its file is encrypted under. That cannot have a default and cannot
-live in the file it protects, which is the whole of why it is asked for at all.
+**It needs nothing named in the environment either.** Its file is encrypted
+under a key, and a key cannot live in the file it protects — so on a first run
+stageman generates one, keeps it in the ordinary place for configuration on
+your platform, and says at startup where it came from. Set `STAGEMAN_KEY` to
+the base64 key yourself and that wins instead, which is what a service manager
+passing a secret in should do.
+
+What the encryption buys is worth being exact about: the instance file is
+useless to anybody who has it and not the key. It is not a defence against
+somebody already running programs as you, and nothing kept on your own machine
+could be.
 
 Where that file goes is not your problem. It lands in the ordinary place for
 application data on your platform, the directory is created if it is not there,
@@ -88,9 +96,9 @@ single instance manages several projects, and a job belongs to exactly one of
 them: it cannot see another project's repository, credentials or channels.
 
 All state lives in one human-readable file, rewritten whenever anything changes,
-with credentials encrypted under a key supplied by the environment at startup.
-Back up that file and you have backed up the instance; take it to another
-machine without the key and it tells you nothing.
+with credentials encrypted under the key described above. Back up that file and
+you have backed up the instance; take it to another machine without the key and
+it tells you nothing.
 
 ## Documentation
 
