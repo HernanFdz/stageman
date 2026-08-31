@@ -32,39 +32,16 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   The symptom is "cannot message a running agent" and the cause is further
   down. The protocol delivers a prompt to a session and the agent works until
   its turn ends, so a mid-turn message needs the connection held open — the
-  question two entries below — *and* an agent that will read something while
-  working. The second half is not this project's to decide: it is a property
-  of whichever agent is running, and neither adapter examined has been checked
-  for it.
+  question below about holding a foreman's container open — *and* an agent that
+  will read something while working. The second half is not this project's to
+  decide: it is a property of whichever agent is running, and neither adapter
+  examined has been checked for it.
 
   Settled by finding out what an agent does with a second prompt mid-turn.
   Until then the daemon refuses such a message and says so on the thread, which
   is the honest version of not supporting it. Note what that refusal is worth
   keeping even afterwards: it is also what stops two replies resuming one
   container at once.
-
-- **Should the tools be delivered rather than baked into the image?**
-  `stageman-say` and `stageman-job` are copied in when the image is built, so
-  a container holds whatever version of them existed then — and a foreman's
-  container is long-lived by design. The first time the endpoint's contract
-  changed, an existing foreman kept sending the old shape and was refused,
-  which is a drift between two halves of this project that ship separately.
-
-  It is answerable with machinery that already exists: the thread and the
-  endpoint are copied into a stopped container before every start, and the
-  tools could be too — embedded in the binary and written in the same way, so
-  the tools always match the instance driving them. The image would then carry
-  only what it cannot: the agent, the runtime, `git` and `gh`.
-
-  What it costs is that the image stops being self-contained. `just
-  image-check` drives a container with no daemon in front of it, and a tool
-  delivered at start would not be there. Settled by deciding whether the image
-  is a thing that runs on its own or a thing this project drives — and it has
-  been both so far without anybody choosing.
-
-  Until then, a contract change means recreating every foreman's container,
-  and the endpoint says so rather than answering with a status nothing can act
-  on.
 
 - **Should a job's environment have an egress allowlist?** Since
   `docs/decisions/0009-jobs-hold-their-own-platform-credentials.md`, a job holds
@@ -325,100 +302,39 @@ Intended next steps, in order, each with its reason. Written as intentions, not
 progress: "next X, because Y" — never "X is 60% done", which is both derivable
 and wrong within a day.
 
-- Next, Slack, and it is two pieces rather than one. The difference is the
-  thing to understand before starting: **a job can speak now, and cannot be
-  spoken to yet.**
+- Next, implement `docs/decisions/0034-tools-are-served-not-shipped.md`,
+  because everything queued behind it inherits the shape and one of those
+  things is how a job speaks. The instance serves its own tools over the
+  listener it already has; the two programs, the endpoint file, the thread
+  file and the mechanism that copies them into a stopped container all go; and
+  the warrant becomes per session rather than per container, delivered on the
+  session declaration and re-supplied on every resume.
 
-  *Outbound needs nothing new.* A job's agent reaches Slack the way it reaches
-  GitHub — a command-line tool in its container, reading what it needs from
-  what the handout delivers. `docs/decisions/0009-jobs-hold-their-own-platform-credentials.md`
-  chose that shape and gave the reason: neither agent adapter examined serves
-  tools over the protocol connection, both want HTTP, and a containerised agent
-  reaching an endpoint means opening a path into an environment whose whole
-  purpose is not having one. A tool taking one argument — the message — and
-  reading the destination from its environment adds no new mechanism at all.
+  **The one thing worth building carefully is the failure.** An endpoint the
+  container cannot reach does not error — session creation succeeds and the
+  agent simply has no tools, which reads exactly like an agent that chose not
+  to use them. That is the shape this record was written to avoid inheriting,
+  so it wants a test that asserts the tools are *there*, not merely that a
+  session started.
 
-  *Inbound needs the session to stay open.* A reply reaching the agent means
-  the connection outliving the turn that started it, which is the question two
-  entries above wearing different clothes. Jobs are its second consumer, which
-  is the argument for solving it properly rather than twice.
+- Next, cover Slack against regression, because it works and nothing in the
+  repository would notice if it stopped. Both directions have been driven end
+  to end against a real workspace — a job speaks on its project's channel, and
+  a reply reaches it through the thread it was said in. So the open item is
+  not whether it works. It is that the only evidence lives outside the
+  repository, and a clone cannot re-run it.
 
-  **A channel per project, and a thread per job.** A channel per job routes
-  more simply — the channel names the job — and costs a channel per job for
-  ever, which is the container-retention question again in a workspace nobody
-  can garbage-collect. It also needs a token that can create channels, where
-  posting into one does not, and widening that token cuts directly against the
-  question above about making a job's credentials narrower. A thread is the
-  unit a person already uses to scope a conversation, and the mapping from
-  thread to job is a lookup rather than a mechanism.
+  Every automated test of either half stops at a blocked network, which proves
+  both names were found and says nothing about whether Slack accepts them —
+  the half that fails in front of a person. There is no `slack-token` in
+  `.local` and no test that spends one, which is the same shape as
+  `just image-session` and `just propose` and probably wants the same answer.
 
-  **A channel is not a platform**, and the vocabulary in `docs/conventions.md`
-  §2 separates them deliberately: a platform is something a project's jobs
-  *act on*, and a channel is somewhere a conversation happens. Slack
-  credentials therefore do not belong in a project's platform credentials, and
-  `docs/decisions/0027-a-channel-is-not-a-platform.md` records where they do:
-  a second map on a project, carrying an address as well as a credential.
-
-  Outbound is done, and it cost more than the sentence above it expected: a
-  handout carries the binding, the adapter delivers both halves, the image
-  ships `stageman-say`, and a job whose project has a channel is told about it.
-  The expectation that this was one match arm assumed a Slack CLI to conform to
-  the way `GH_TOKEN` conforms to `gh`, and there is none —
-  `docs/decisions/0028-stageman-ships-the-tool-that-speaks.md` records what
-  followed from having to write the tool instead.
-
-  **What is unverified is that a real message arrives.** Every test stops at a
-  blocked network, because posting needs a credential the gate cannot have.
-  There is no `slack-token` in `.local` and no paid test using one, which is
-  the same shape as `just image-session` and `just propose` and probably wants
-  the same answer.
-
-  Outbound now happens in a thread per job, and the daemon opens that thread
-  itself — a thread has no existence before the message it hangs from, and the
-  instance rather than the job has to know its identifier.
-
-  So what is left is inbound. Its shape is settled by
-  `docs/decisions/0029-a-reply-is-routed-by-its-thread.md` — Socket Mode, one
-  Slack app per project, and a reply routed by the thread it arrives in — and
-  none of it is built. Two things stand in the way, and only one is work:
-
-  **Only the transport is left.** A binding holds the credential that listens,
-  the rule deciding who a message is for is a pure function with a test for
-  every branch, and delivery hands a reply to a job by resuming it. What is
-  missing is the thing that makes a real message arrive: opening the socket,
-  reading envelopes, and acknowledging each one — a platform redelivers what
-  is not acknowledged, so an unacknowledged envelope is the same message
-  arriving repeatedly rather than a message lost.
-
-  The loop is closed and was watched closing: a reply in a job's thread reached
-  its agent, and the agent's own two messages came back on the same socket and
-  were refused as this instance's own, which is the guard
-  `docs/decisions/0029-a-reply-is-routed-by-its-thread.md` calls load-bearing
-  doing its work where it could be seen.
-
-  What is left is the foreman's half: nothing runs one, so a message routed to
-  `Recipient::Foreman` is logged rather than put in its inbox — enqueueing
-  without a consumer would grow a queue nobody drains and deliver it all at
-  once whenever a foreman first ran.
-
-  The state, the naming and the text are built. What remains is the turn, and
-  three things to get right that nothing has yet:
-
-  - **The startup sweep does not know a foreman's container.** It places one by
-    parsing its name as a job's, so a foreman's would count as a name this
-    version cannot read — reported as *odd, and benign*, which it is not.
-    `project_of` is the reverse it needs.
-  - **Beginning and resuming are different calls**, and which applies depends
-    on whether that project's container already holds a session. The instance
-    must not answer that from memory: a container is the truth, per
-    `docs/decisions/0015-a-job-survives-the-daemon-dying.md`, and
-    `stageman_agent::abandoned` reports what the runtime actually has.
-  - **A turn ending is what advances the inbox.** `Attending::finish` decides
-    what happens next and nothing calls it, so a foreman that finished would
-    stop rather than pick up what is waiting.
-
-  The kickoff prompt still says to speak and stop, and stays that way until it
-  can honestly say otherwise.
+  Note the interaction with
+  `docs/decisions/0034-tools-are-served-not-shipped.md`: the speaking half
+  moves from a program in the image to a tool the instance serves, so a test
+  written against the program would be written twice. Worth doing after that
+  lands rather than before.
 
 - Then have the daemon post into a job's thread when the **agent or its
   container fails**, which is the one case the agent cannot report on: a

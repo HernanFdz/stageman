@@ -38,23 +38,6 @@ RUN apt-get update \
     && rm -rf /tmp/gh.tar.gz "/tmp/gh_${GH_VERSION}_linux_${arch}" \
     && rm -rf /var/lib/apt/lists/*
 
-# How a job speaks to a person. One argument, the message; the channel and the
-# credential arrive as environment variables the adapter sets, so nothing here
-# is configured at build time and an image is the same for every project.
-#
-# It lives beside this file because the build context is this directory. A
-# second agent image would need its own copy or a shared context, and the copy
-# is the wrong answer — say so here rather than discovering it twice.
-COPY stageman-say /usr/local/bin/stageman-say
-RUN chmod 0755 /usr/local/bin/stageman-say
-
-# How a foreman asks for work to be done. Present in every container and
-# usable only by a foreman: it needs a warrant, which a job's container is
-# never given — see
-# docs/decisions/0032-a-foreman-asks-the-instance-by-warrant.md.
-COPY stageman-job /usr/local/bin/stageman-job
-RUN chmod 0755 /usr/local/bin/stageman-job
-
 # A job's workspace arrives here at run time. The orchestrator's own agent has
 # none, because it has no repository to work on.
 WORKDIR /workspace

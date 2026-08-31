@@ -149,6 +149,20 @@ pub static RUNTIME: LazyLock<ContainerRuntime> = LazyLock::new(|| {
         .unwrap_or_else(|| ContainerRuntime::new(PathBuf::new()))
 });
 
+/// Which credential means what, for the sessions running right now.
+///
+/// A process-wide value like [`RUNTIME`] above, and for a plainer reason: it
+/// is written where a session is declared and read where a tool is called, and
+/// those are on opposite sides of the daemon with nothing but the request
+/// between them. Threading it through every caller would put an argument in a
+/// dozen signatures to reach two of them.
+///
+/// Ephemeral by design — see `crate::tooling::Sessions`. Nothing here is
+/// persisted, so restarting invalidates every credential outstanding, and each
+/// container is handed a current one on its next turn.
+pub static SESSIONS: LazyLock<Arc<crate::tooling::Sessions>> =
+    LazyLock::new(|| Arc::new(crate::tooling::Sessions::default()));
+
 /// Whether discovery came back with nothing.
 ///
 /// The empty path is a sentinel, and this is the only place that knows it. A
@@ -338,7 +352,7 @@ async fn start() -> Result<(), StartupError> {
     // which reads exactly like a foreman that decided not to — and it is not
     // hypothetical: a leaked test process held this port and a real instance
     // quietly could not have it.
-    let asking = crate::asking::bind().await;
+    let tools = crate::endpoint::bind().await;
 
     announce(
         runtime,
@@ -347,17 +361,19 @@ async fn start() -> Result<(), StartupError> {
         serving,
         bundle.as_deref(),
         &path,
-        asking
+        tools
             .as_ref()
             .ok()
             .and_then(|bound| bound.local_addr().ok()),
     )?;
 
-    match asking {
+    match tools {
         Ok(listening) => {
             let store = Arc::clone(&store);
             tokio::spawn(async move {
-                if let Err(why) = crate::asking::serve(listening, store).await {
+                if let Err(why) =
+                    crate::endpoint::serve(listening, store, Arc::clone(&SESSIONS)).await
+                {
                     tracing::error!(%why, "the job endpoint stopped");
                 }
             });
@@ -411,7 +427,6 @@ mod listening_tests {
                 },
             )]),
             jobs: BTreeMap::new(),
-            warrant: None,
             attending: stageman_core::Attending::default(),
         }
     }
@@ -459,7 +474,7 @@ fn announce(
     serving: SocketAddr,
     bundle: Option<&Path>,
     instance: &Path,
-    asking: Option<SocketAddr>,
+    tools: Option<SocketAddr>,
 ) -> Result<(), StartupError> {
     println!();
     println!("stageman is running.");
@@ -476,11 +491,12 @@ fn announce(
     // can fail to open at all — a port already taken leaves a foreman able to
     // talk and unable to work, and that has to be visible here rather than in
     // a log line nobody was watching.
-    match asking {
-        Some(bound) => println!("  jobs asked {bound}"),
+    match tools {
+        Some(bound) => println!("  tools      {bound}"),
         None => println!(
-            "  jobs asked NOT LISTENING — port {} is taken, so no foreman can create jobs",
-            *crate::asking::PORT
+            "  tools      NOT SERVED — port {} is taken, so no agent can reach a tool and \
+             none will say so",
+            *crate::endpoint::PORT
         ),
     }
     println!(

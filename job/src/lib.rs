@@ -84,9 +84,10 @@ pub async fn start(
     runtime: &ContainerRuntime,
     handout: &Handout,
     job: JobId,
+    tools: Option<&stageman_agent::Tools>,
     kickoff: &str,
 ) -> Result<Answer, JobError> {
-    stageman_agent::begin(runtime, handout, &container(job), kickoff)
+    stageman_agent::begin(runtime, handout, &container(job), tools, kickoff)
         .await
         .map_err(JobError::Agent)
 }
@@ -109,10 +110,10 @@ pub async fn start(
 pub async fn resume(
     runtime: &ContainerRuntime,
     job: JobId,
-    thread: Option<&stageman_core::Thread>,
+    tools: Option<&stageman_agent::Tools>,
     notice: &str,
 ) -> Result<Answer, JobError> {
-    stageman_agent::resume(runtime, &container(job), thread, notice)
+    stageman_agent::resume(runtime, &container(job), tools, notice)
         .await
         .map_err(JobError::Agent)
 }

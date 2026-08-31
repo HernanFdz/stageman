@@ -1,7 +1,11 @@
 # 0028 — stageman ships the tool that speaks, and owns its contract
 
 ## Status
-Accepted.
+Superseded by `docs/decisions/0034-tools-are-served-not-shipped.md`, which stops
+shipping the tool at all: the instance serves it instead, so there is no name in
+an image to keep in step. What survives is the naming reasoning — a tool is
+named for the act rather than the vendor — which 0034 keeps and applies to a
+served tool.
 
 ## Context
 

@@ -34,14 +34,16 @@ use std::process::Stdio;
 use std::sync::Arc;
 
 use agent_client_protocol::schema::v1::{
-    ContentBlock, InitializeRequest, InitializeResponse, ListSessionsRequest, LoadSessionRequest,
-    NewSessionRequest, PromptRequest, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SelectedPermissionOutcome, SessionId, SessionNotification,
-    SessionUpdate, TextContent,
+    ContentBlock, HttpHeader, InitializeRequest, InitializeResponse, ListSessionsRequest,
+    LoadSessionRequest, McpServer, McpServerHttp, NewSessionRequest, PromptRequest,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    SelectedPermissionOutcome, SessionId, SessionNotification, SessionUpdate, TextContent,
 };
 use agent_client_protocol::{ByteStreams, Client, ConnectionTo};
 use parking_lot::Mutex;
-use stageman_core::{Agent, Channel, Handout, Platform, Secret, Thread};
+#[cfg(test)]
+use stageman_core::Channel;
+use stageman_core::{Agent, Handout, Platform, Secret};
 use tokio::io::AsyncReadExt as _;
 use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
 
@@ -518,30 +520,15 @@ fn variables(handout: &Handout) -> Vec<(&'static str, Secret)> {
         ));
     }
 
-    // Two per channel rather than one, because a binding is an address as well
-    // as a credential and `stageman-say` needs both to say anything.
-    //
-    // Namespaced, where `GH_TOKEN` above is not, and the asymmetry is the
-    // whole point: that name is `gh`'s contract and this project conforms to
-    // it, while these are this project's contract with a tool it ships itself.
-    // See `docs/decisions/0028-stageman-ships-the-tool-that-speaks.md`.
-    // What a foreman presents when it asks this instance for something. A job's
-    // handout has none, so a job's container is never given one — which is what
-    // stops a job creating jobs.
-    if let Some(warrant) = handout.warrant() {
-        set.push(("STAGEMAN_WARRANT", warrant.clone()));
-    }
-
-    for (channel, bound) in handout.channels() {
-        let (address, credential) = match channel {
-            Channel::Slack => ("STAGEMAN_SLACK_CHANNEL", "STAGEMAN_SLACK_TOKEN"),
-        };
-        // The address is not a secret and travels as one anyway, because this
-        // list is what the container is started with and a second mechanism
-        // for the non-secret half would be two things to keep in step.
-        set.push((address, Secret::new(bound.address.clone())));
-        set.push((credential, bound.credential.clone()));
-    }
+    // A channel's credential is deliberately absent. It used to travel here,
+    // because a program in the container posted with it;
+    // `docs/decisions/0034-tools-are-served-not-shipped.md` moved speaking to
+    // a tool the instance serves, so the daemon posts and the container has no
+    // use for one. That is worth more than tidiness: a job's agent can be
+    // talked into sending what it holds somewhere, and the narrowest version
+    // of that risk is holding less — which is the mitigation
+    // `docs/open-questions.md` is still weighing for the credentials a job
+    // does need.
 
     set
 }
@@ -653,6 +640,7 @@ pub struct Answer {
 pub async fn ask(
     runtime: &ContainerRuntime,
     handout: &Handout,
+    tools: Option<&Tools>,
     question: &str,
 ) -> Result<Answer, AgentError> {
     let delivering = variables(handout);
@@ -661,120 +649,81 @@ pub async fn ask(
         &session_arguments(handout.agent(), &delivering),
         &delivering,
     )?;
-    converse(container, Opening::Fresh, question).await
+    converse(container, Opening::Fresh, tools, question).await
 }
 
-/// Where a container reads the thread it should speak in.
+/// Where an agent reaches the tools this instance serves, and what it presents.
 ///
-/// **A file rather than a variable, and that is not a preference.** A
-/// container's environment is fixed when it is created and no runtime can
-/// change it on restart — so a variable can only ever carry a value that is
-/// constant for the container's whole life. A job's thread is; a foreman's is
-/// not, because one long-lived container answers a different thread every
-/// turn. `docs/conventions.md` §2 anticipated this in the vocabulary before
-/// the code needed it: delivery is "a variable for one, a file at an expected
-/// path for another".
-const THREAD_PATH: &str = "/tmp/stageman-thread";
-
-/// Where a container reads the address it asks this instance at.
+/// `docs/decisions/0034-tools-are-served-not-shipped.md` has the instance
+/// serve its own tools rather than ship programs that call it, and this is
+/// what one agent is told about them. Both halves are needed together: an
+/// address nothing may use is no more useful than a credential with nowhere
+/// to present it, so they are one value rather than two parameters that could
+/// be passed apart.
 ///
-/// A file for the same reason the thread is one: the port can be named by the
-/// environment, so an instance restarted with a different one would otherwise
-/// leave every existing container asking somewhere nothing is listening.
-const ENDPOINT_PATH: &str = "/tmp/stageman-endpoint";
-
-/// Puts the thread a container should speak in where it will read it.
-///
-/// Copied in while the container is stopped, which is every moment between
-/// turns. Measured on both runtimes: copying into a stopped container works,
-/// overwrites an earlier value, and leaves the writable layer — and therefore
-/// the agent's session — untouched.
-///
-/// Absent thread, absent file: nothing is copied, and the tool speaks at the
-/// root of the channel. That is what makes the absence meaningful rather than
-/// a default.
-///
-/// Skipped by mutation testing, and the reason is worth stating rather than
-/// assumed: it is covered by a container test, and container tests are
-/// `#[ignore]` so that `just check` needs no built image — which means the
-/// gate cannot run them and a mutant cannot be killed by them. The decision it
-/// contains is the early return on an absent thread, and that is asserted by
-/// the tool's own behaviour with no file present.
-///
-/// # Errors
-///
-/// Fails if the thread cannot be written or the runtime refuses the copy.
-#[mutants::skip]
-async fn place_thread(
-    runtime: &ContainerRuntime,
-    name: &str,
-    thread: Option<&Thread>,
-) -> Result<(), AgentError> {
-    let Some(thread) = thread else {
-        return Ok(());
-    };
-    place(runtime, name, THREAD_PATH, &thread.id).await
+/// **Named on every session and again on every resume**, which is what makes
+/// this an address rather than a file. A container told a port once could not
+/// be told a different one later, which is why an endpoint was written into
+/// it; a session declaration is supplied afresh each time a session is created
+/// or loaded, so an instance restarted on another port simply says so again.
+#[derive(Clone)]
+pub struct Tools {
+    /// Where the tools are served.
+    endpoint: String,
+    /// What authorises this agent to use them, and decides which it is offered.
+    credential: Secret,
 }
 
-/// Puts the address this instance answers at where a container will read it.
-///
-/// # Errors
-///
-/// Fails if it cannot be written or the runtime refuses the copy.
-#[mutants::skip]
-pub async fn place_endpoint(
-    runtime: &ContainerRuntime,
-    name: &str,
-    endpoint: Option<&str>,
-) -> Result<(), AgentError> {
-    let Some(endpoint) = endpoint else {
-        return Ok(());
-    };
-    place(runtime, name, ENDPOINT_PATH, endpoint).await
-}
-
-/// Copies one short value into a stopped container.
-#[mutants::skip]
-async fn place(
-    runtime: &ContainerRuntime,
-    name: &str,
-    path: &str,
-    value: &str,
-) -> Result<(), AgentError> {
-    // Neither of the values placed this way is a credential — a thread
-    // identifier and an address — so a file under the system's temporary
-    // directory is the right place to stage one, unlike anything in
-    // `variables`, which never touches a filesystem at all.
-    let staged = std::env::temp_dir().join(format!("stageman-place-{name}"));
-    std::fs::write(&staged, value).map_err(|source| AgentError::Container {
-        status: "writing what a container reads".to_owned(),
-        message: source.to_string(),
-    })?;
-
-    let copied = tokio::process::Command::new(runtime.path())
-        .args([
-            "cp".as_ref(),
-            staged.as_os_str(),
-            format!("{name}:{path}").as_ref(),
-        ])
-        .kill_on_drop(true)
-        .output()
-        .await;
-    let removed = std::fs::remove_file(&staged);
-    drop(removed);
-
-    let copied = copied.map_err(|source| AgentError::Container {
-        status: "copying the thread".to_owned(),
-        message: source.to_string(),
-    })?;
-    if copied.status.success() {
-        return Ok(());
+impl Tools {
+    /// What to tell an agent about the tools it may use.
+    #[must_use]
+    pub fn new(endpoint: impl Into<String>, credential: Secret) -> Self {
+        Self {
+            endpoint: endpoint.into(),
+            credential,
+        }
     }
-    Err(AgentError::Container {
-        status: copied.status.to_string(),
-        message: String::from_utf8_lossy(&copied.stderr).trim().to_owned(),
-    })
 }
+
+/// Redacting, because this carries a credential.
+///
+/// `docs/conventions.md` §4 requires it of anything that can hold one, and the
+/// derived version would print whatever `Secret` prints — which is safe today
+/// and would stop being so the moment somebody changed that, silently and
+/// somewhere else. Written out here so this type's own test pins it.
+impl std::fmt::Debug for Tools {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Tools")
+            .field("endpoint", &self.endpoint)
+            .field("credential", &"<redacted>")
+            .finish()
+    }
+}
+
+/// What the tools look like on a session request.
+///
+/// Pure and separate from sending one, so the shape actually put on the wire
+/// is asserted in the gate rather than inferred from a container that ran.
+/// The transport is HTTP because that is what the adapters advertise: 0034
+/// measured the alternative — a server offered over the protocol connection
+/// itself — being accepted and silently dropped.
+fn declaration(tools: &Tools) -> McpServer {
+    McpServer::Http(
+        McpServerHttp::new(TOOLS_SERVER, tools.endpoint.clone()).headers(vec![HttpHeader::new(
+            "Authorization",
+            format!("Bearer {}", tools.credential.expose()),
+        )]),
+    )
+}
+
+/// What this instance calls itself when it serves tools.
+///
+/// It prefixes every tool name the model sees, so it has to be the same string
+/// the endpoint reports about itself. Asserted against that one in the app's
+/// own tests rather than shared as a constant, because the two crates are on
+/// opposite sides of a boundary that exists to keep the agent's business out
+/// of the domain.
+const TOOLS_SERVER: &str = "stageman";
 
 /// The label every container this project starts carries.
 ///
@@ -833,11 +782,11 @@ fn retained_arguments(
 /// stopped containers too, so a clash is a loud message naming the container in
 /// the way rather than a silent reuse of somebody else's.
 #[mutants::skip]
-pub async fn begin_with(
+pub async fn begin(
     runtime: &ContainerRuntime,
     handout: &Handout,
     name: &str,
-    endpoint: Option<&str>,
+    tools: Option<&Tools>,
     question: &str,
 ) -> Result<Answer, AgentError> {
     let delivering = variables(handout);
@@ -865,27 +814,8 @@ pub async fn begin_with(
         });
     }
 
-    place_thread(runtime, name, handout.thread()).await?;
-    place_endpoint(runtime, name, endpoint).await?;
     let container = spawn(runtime, &started_arguments(name), &delivering)?;
-    converse(container, Opening::Fresh, question).await
-}
-
-/// Starts a retained container and puts the first question to it.
-///
-/// The shape [`begin_with`] takes when nothing needs an endpoint, which is
-/// every job: only a foreman asks this instance for anything.
-///
-/// # Errors
-///
-/// Fails as [`begin_with`] does.
-pub async fn begin(
-    runtime: &ContainerRuntime,
-    handout: &Handout,
-    name: &str,
-    question: &str,
-) -> Result<Answer, AgentError> {
-    begin_with(runtime, handout, name, None, question).await
+    converse(container, Opening::Fresh, tools, question).await
 }
 
 /// What starts a container that already exists, attached.
@@ -923,16 +853,17 @@ fn started_arguments(name: &str) -> Vec<String> {
 pub async fn resume(
     runtime: &ContainerRuntime,
     name: &str,
-    thread: Option<&Thread>,
+    tools: Option<&Tools>,
     question: &str,
 ) -> Result<Answer, AgentError> {
     settle(runtime, name).await?;
-    // Before starting, because a stopped container is the only time this can
-    // be written — and it is why a foreman can answer a different thread every
-    // turn from one container whose environment never changes.
-    place_thread(runtime, name, thread).await?;
+    // Nothing is written into the container before it starts any more. The
+    // thread this turn belongs in travels on `tools`, which is the whole of
+    // why a container can be told a different one every turn without its
+    // environment changing — see
+    // `docs/decisions/0034-tools-are-served-not-shipped.md`.
     let container = spawn(runtime, &started_arguments(name), &[])?;
-    converse(container, Opening::Resumed, question).await
+    converse(container, Opening::Resumed, tools, question).await
 }
 
 /// Makes sure a container is stopped before anything tries to start it.
@@ -1070,21 +1001,35 @@ fn spawn(
 
 /// Makes a session, or picks up the one this container already holds.
 ///
+/// Skipped by mutation testing, and the reason is worth stating rather than
+/// assumed: every path through this needs a container answering the protocol,
+/// so it is covered only by tests the gate cannot run. What it decides that
+/// *can* be checked cheaply — the declaration a session carries — is
+/// `declaration`, which is pure and has its own test.
+///
 /// `None` means there was nothing to pick up, which is a container stopped
 /// before its agent said anything: sessions are written when something is
 /// said, not when one is created.
+#[mutants::skip]
 async fn open_session(
     connection: &ConnectionTo<AgentRole>,
     opening: Opening,
+    tools: Option<&Tools>,
 ) -> Result<Option<SessionId>, agent_client_protocol::Error> {
     match opening {
-        Opening::Fresh => Ok(Some(
-            connection
-                .send_request(NewSessionRequest::new(PathBuf::from(WORKSPACE)))
-                .block_task()
-                .await?
-                .session_id,
-        )),
+        Opening::Fresh => {
+            let mut request = NewSessionRequest::new(PathBuf::from(WORKSPACE));
+            if let Some(tools) = tools {
+                request.mcp_servers.push(declaration(tools));
+            }
+            Ok(Some(
+                connection
+                    .send_request(request)
+                    .block_task()
+                    .await?
+                    .session_id,
+            ))
+        }
         Opening::Resumed => {
             let known = connection
                 .send_request(ListSessionsRequest::new())
@@ -1096,13 +1041,17 @@ async fn open_session(
             let Some(found) = known.sessions.into_iter().next() else {
                 return Ok(None);
             };
-            connection
-                .send_request(LoadSessionRequest::new(
-                    found.session_id.clone(),
-                    PathBuf::from(WORKSPACE),
-                ))
-                .block_task()
-                .await?;
+            // Declared again here, and this is the half that makes the
+            // endpoint file unnecessary: a resumed container is told where to
+            // reach the instance *now*, so a port that changed between turns
+            // is simply named again rather than baked in when the container
+            // was created.
+            let mut request =
+                LoadSessionRequest::new(found.session_id.clone(), PathBuf::from(WORKSPACE));
+            if let Some(tools) = tools {
+                request.mcp_servers.push(declaration(tools));
+            }
+            connection.send_request(request).block_task().await?;
             Ok(Some(found.session_id))
         }
     }
@@ -1112,6 +1061,7 @@ async fn open_session(
 async fn converse(
     mut container: tokio::process::Child,
     opening: Opening,
+    tools: Option<&Tools>,
     question: &str,
 ) -> Result<Answer, AgentError> {
     let (Some(to_agent), Some(from_agent), Some(complaints)) = (
@@ -1177,7 +1127,7 @@ async fn converse(
                         .block_task()
                         .await?;
 
-                    let Some(session_id) = open_session(&connection, opening).await? else {
+                    let Some(session_id) = open_session(&connection, opening, tools).await? else {
                         return Ok(None);
                     };
                     let reply = connection
@@ -1215,6 +1165,65 @@ async fn converse(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What an agent is told about the tools, field by field.
+    ///
+    /// Asserted on the typed value rather than on serialised JSON, because the
+    /// wire format belongs to the protocol library and re-encoding it here
+    /// would test that library rather than this decision. What is this crate's
+    /// to get right is *which* transport and *what* headers, and both are here.
+    ///
+    /// The transport is the whole of what
+    /// `docs/decisions/0034-tools-are-served-not-shipped.md` measured: a server
+    /// offered over the protocol connection is accepted by the pinned adapter
+    /// and silently dropped, so this has to be the HTTP one.
+    #[test]
+    fn the_tools_are_declared_over_http_with_the_credential_in_a_header() {
+        let tools = Tools::new(
+            "http://host.docker.internal:47113/mcp",
+            Secret::new("a-warrant".to_owned()),
+        );
+
+        let McpServer::Http(declared) = declaration(&tools) else {
+            panic!("the tools must be offered over HTTP, which is what adapters accept");
+        };
+        assert_eq!(declared.name, TOOLS_SERVER);
+        assert_eq!(declared.url, "http://host.docker.internal:47113/mcp");
+
+        let [header] = declared.headers.as_slice() else {
+            panic!("exactly one header, carrying the credential");
+        };
+        assert_eq!(header.name, "Authorization");
+        assert_eq!(
+            header.value, "Bearer a-warrant",
+            "presented as a bearer, which is what the endpoint reads",
+        );
+    }
+
+    /// The declaration carries a credential, so formatting it must not.
+    ///
+    /// `docs/conventions.md` §4 requires this of anything able to hold one.
+    /// The endpoint is deliberately still printed: it is an address, it is
+    /// already reported at startup, and a redacted one would make a container
+    /// that cannot reach the instance much harder to diagnose.
+    #[test]
+    fn the_tools_do_not_print_the_credential_they_carry() {
+        let tools = Tools::new(
+            "http://host.docker.internal:47113/mcp",
+            Secret::new("a-warrant-nobody-should-see".to_owned()),
+        );
+
+        let printed = format!("{tools:?}");
+        assert!(
+            !printed.contains("a-warrant-nobody-should-see"),
+            "the credential reached a formatted string: {printed}",
+        );
+        assert!(printed.contains("redacted"), "{printed}");
+        assert!(
+            printed.contains("47113"),
+            "the address is not a secret and is what a failure to reach it needs: {printed}",
+        );
+    }
 
     /// The tag the image is built under, read from the recipe that builds it.
     ///
@@ -1408,237 +1417,6 @@ mod tests {
         );
     }
 
-    /// The tool in the image reads exactly what this crate delivers.
-    ///
-    /// **The only test that closes this loop.** Two contracts are chosen twice
-    /// — the variable names, and the path the thread is written to — and only
-    /// one side of each is Rust. A typo on either produces a job that is told
-    /// it can speak and finds nothing, with every unit test on both sides
-    /// still passing.
-    ///
-    /// Created, copied into, then started, which is the real path a foreman
-    /// takes rather than an approximation of it. The network is off, so this
-    /// reaches the *request* and never Slack — getting that far means both the
-    /// variables and the file were found, which is the whole of what is under
-    /// test. Actually posting needs a credential the gate cannot have.
-    #[tokio::test]
-    #[ignore = "needs a container runtime and a built image; run `just image-handshake`"]
-    async fn the_tool_in_the_image_reads_what_this_crate_delivers() {
-        let runtime = located_runtime();
-        let name = "stageman-delivery-probe";
-        drop(discard(&runtime, name).await);
-
-        let (state, project) = instance_with_a_channel("sk-ant-oat01-xyz");
-        let handout = Handout::for_job(&state, Agent::Claude, project)
-            .expect("a watched project")
-            .speaking_in(stageman_core::Thread {
-                channel: Channel::Slack,
-                id: "1728312345.678901".to_owned(),
-            });
-        let delivered = variables(&handout);
-        assert_eq!(delivered.len(), 4, "no thread among them: {delivered:?}");
-
-        let mut command = tokio::process::Command::new(runtime.path());
-        command.args(["create", "--name", name, "--network", "none"]);
-        for (named, value) in &delivered {
-            command.arg("--env").arg(named);
-            command.env(named, value.expose());
-        }
-        command
-            .args(["--entrypoint", "stageman-say"])
-            .arg(image(Agent::Claude))
-            .arg("does this reach anybody?");
-        let created = command.output().await.expect("the runtime creates it");
-        assert!(created.status.success(), "{created:?}");
-
-        place_thread(&runtime, name, handout.thread())
-            .await
-            .expect("the thread can be placed");
-
-        let ran = tokio::process::Command::new(runtime.path())
-            .args(["start", "--attach", name])
-            .output()
-            .await
-            .expect("the runtime starts it");
-        let said = String::from_utf8_lossy(&ran.stderr);
-
-        assert!(
-            !said.contains("No channel is bound"),
-            "the tool did not find what this crate delivered: {said}"
-        );
-        assert!(
-            said.contains("could not be reached"),
-            "expected a blocked request, got: {said}"
-        );
-        assert!(!said.contains("xoxb-not-a-real-token"), "{said}");
-
-        drop(discard(&runtime, name).await);
-    }
-
-    /// The thread can change between turns of one container.
-    ///
-    /// **The test that would have caught what nearly shipped.** The thread
-    /// used to travel as an environment variable, which a container fixes at
-    /// creation — so a foreman answering its second message would have
-    /// answered it in the first message's thread, silently and for ever.
-    ///
-    /// Measured rather than reasoned: copying into a stopped container works
-    /// on both runtimes, overwrites an earlier value, and leaves the writable
-    /// layer — and so the agent's session — untouched.
-    #[tokio::test]
-    #[ignore = "needs a container runtime and a built image; run `just image-handshake`"]
-    async fn a_second_turn_can_speak_in_a_different_thread() {
-        let runtime = located_runtime();
-        let name = "stageman-thread-probe";
-        drop(discard(&runtime, name).await);
-
-        let created = tokio::process::Command::new(runtime.path())
-            .args([
-                "create",
-                "--name",
-                name,
-                "--interactive",
-                "--entrypoint",
-                "sh",
-                image(Agent::Claude),
-                "-c",
-                "cat /tmp/stageman-thread",
-            ])
-            .output()
-            .await
-            .expect("the runtime creates a container");
-        assert!(created.status.success(), "{created:?}");
-
-        let first = stageman_core::Thread {
-            channel: Channel::Slack,
-            id: "1111111111.111111".to_owned(),
-        };
-        place_thread(&runtime, name, Some(&first))
-            .await
-            .expect("a thread can be placed before the first start");
-        let said = tokio::process::Command::new(runtime.path())
-            .args(["start", "--attach", name])
-            .output()
-            .await
-            .expect("the runtime starts it");
-        assert_eq!(String::from_utf8_lossy(&said.stdout).trim(), first.id);
-
-        // It has now run and stopped, which is every moment between a
-        // foreman's turns.
-        let second = stageman_core::Thread {
-            channel: Channel::Slack,
-            id: "2222222222.222222".to_owned(),
-        };
-        place_thread(&runtime, name, Some(&second))
-            .await
-            .expect("and again once it has stopped");
-        let said = tokio::process::Command::new(runtime.path())
-            .args(["start", "--attach", name])
-            .output()
-            .await
-            .expect("the runtime starts it again");
-        assert_eq!(
-            String::from_utf8_lossy(&said.stdout).trim(),
-            second.id,
-            "the same container has to be able to answer a different thread"
-        );
-
-        drop(discard(&runtime, name).await);
-    }
-
-    /// Asking a tool for help is answered, never published.
-    ///
-    /// **Found by watching an agent use it.** Agents reach for `--help` before
-    /// using an unfamiliar command, and `stageman-say` took its one argument
-    /// as the message — so "--help" was posted to a real channel. Nothing
-    /// failed; the tool did exactly what it was told.
-    ///
-    /// Both tools, because the same reflex reaches both, and the second one
-    /// starts containers rather than posting messages.
-    #[tokio::test]
-    #[ignore = "needs a container runtime and a built image; run `just image-handshake`"]
-    async fn a_tool_asked_for_help_answers_rather_than_acting() {
-        let runtime = located_runtime();
-
-        for tool in ["stageman-say", "stageman-job"] {
-            let helped = tokio::process::Command::new(runtime.path())
-                .args([
-                    "run",
-                    "--rm",
-                    "--network",
-                    "none",
-                    "--entrypoint",
-                    tool,
-                    image(Agent::Claude),
-                    "--help",
-                ])
-                .output()
-                .await
-                .expect("the runtime runs a container");
-
-            assert!(helped.status.success(), "{tool} --help: {helped:?}");
-            let told = String::from_utf8_lossy(&helped.stdout);
-            assert!(told.contains(&format!("usage: {tool}")), "{told}");
-
-            // And anything else that looks like an option is refused rather
-            // than taken as content — a mistyped flag must not become a
-            // message on a channel or the reason for a job.
-            let refused = tokio::process::Command::new(runtime.path())
-                .args([
-                    "run",
-                    "--rm",
-                    "--network",
-                    "none",
-                    "--entrypoint",
-                    tool,
-                    image(Agent::Claude),
-                    "--nonsense",
-                ])
-                .output()
-                .await
-                .expect("the runtime runs a container");
-
-            assert_eq!(refused.status.code(), Some(2), "{tool}: {refused:?}");
-            assert!(
-                String::from_utf8_lossy(&refused.stderr).contains("is not an option"),
-                "{refused:?}"
-            );
-        }
-    }
-
-    /// A project with nothing bound gets a tool that says so and stops.
-    ///
-    /// The other half of the pair, and the one an operator meets: the agent is
-    /// not told about the tool at all in that case, so anything reaching it is
-    /// an agent that found it anyway — and the answer has to be a refusal
-    /// rather than a crash.
-    #[tokio::test]
-    #[ignore = "needs a container runtime and a built image; run `just image-handshake`"]
-    async fn the_tool_refuses_cleanly_when_no_channel_is_bound() {
-        let runtime = located_runtime();
-
-        let output = tokio::process::Command::new(runtime.path())
-            .args([
-                "run",
-                "--rm",
-                "--network",
-                "none",
-                "--entrypoint",
-                "stageman-say",
-                image(Agent::Claude),
-                "is anybody there?",
-            ])
-            .output()
-            .await
-            .expect("the runtime runs a container");
-
-        assert_eq!(output.status.code(), Some(3), "{output:?}");
-        assert!(
-            String::from_utf8_lossy(&output.stderr).contains("No channel is bound"),
-            "{output:?}"
-        );
-    }
-
     /// An image nobody ever built must not read as an agent that cannot speak.
     ///
     /// Both fail as silence on the connection, and the error an operator gets
@@ -1710,7 +1488,6 @@ mod tests {
                 credentials,
                 channels: BTreeMap::new(),
                 jobs: BTreeMap::<_, Job>::new(),
-                warrant: None,
                 attending: stageman_core::Attending::default(),
             },
         );
@@ -1741,25 +1518,6 @@ mod tests {
         (state, id)
     }
 
-    /// Both halves reach the container, under the names the tool this project
-    /// ships reads them from.
-    #[test]
-    fn a_job_is_delivered_both_halves_of_a_binding() {
-        let (state, project) = instance_with_a_channel("sk-ant-oat01-xyz");
-        let handout = Handout::for_job(&state, Agent::Claude, project).expect("a watched project");
-
-        let delivered = variables(&handout);
-        let named = |wanted: &str| {
-            delivered
-                .iter()
-                .find(|(name, _)| *name == wanted)
-                .map(|(_, value)| value.expose())
-        };
-
-        assert_eq!(named("STAGEMAN_SLACK_CHANNEL"), Some("C0123456789"));
-        assert_eq!(named("STAGEMAN_SLACK_TOKEN"), Some("xoxb-not-a-real-token"));
-    }
-
     /// A thread never travels as a variable, however narrowed the handout is.
     ///
     /// It used to, and that was a bug waiting for a second turn: a container's
@@ -1788,23 +1546,41 @@ mod tests {
         for (_, value) in &delivered {
             assert_ne!(value.expose(), "1728312345.678901");
         }
-        // What it does still deliver is everything constant for the container.
-        assert!(named.contains(&"STAGEMAN_SLACK_CHANNEL"), "{named:?}");
-        assert!(named.contains(&"STAGEMAN_SLACK_TOKEN"), "{named:?}");
+        // Nor the channel's credential, since 0034: the daemon posts, so a
+        // container has no use for one and holding less is the whole
+        // mitigation.
+        assert!(!named.contains(&"STAGEMAN_SLACK_CHANNEL"), "{named:?}");
+        assert!(!named.contains(&"STAGEMAN_SLACK_TOKEN"), "{named:?}");
     }
 
-    /// The asymmetry `docs/decisions/0027-a-channel-is-not-a-platform.md` turns
-    /// on, followed all the way to delivery: a foreman gets the channel it watches
-    /// and still no platform credential.
+    /// A container is given its agent's credential and nothing else it does
+    /// not use.
+    ///
+    /// `docs/decisions/0027-a-channel-is-not-a-platform.md` kept a platform
+    /// credential out of a foreman's hands, and that still holds. What changed
+    /// is the other half: the channel's credential used to be delivered too,
+    /// because a program in the container posted with it. Since
+    /// `docs/decisions/0034-tools-are-served-not-shipped.md` the daemon posts,
+    /// so neither a foreman nor a job is given one — and a credential a
+    /// process never receives is one it cannot be talked into sending
+    /// anywhere.
     #[test]
-    fn a_foreman_is_delivered_the_channel_it_watches_and_still_no_platform() {
+    fn a_container_is_given_no_credential_it_has_no_use_for() {
         let (state, project) = instance_with_a_channel("sk-ant-oat01-xyz");
-        let handout = Handout::for_foreman(&state, project).expect("a watched project");
 
-        let named: Vec<&str> = variables(&handout).iter().map(|(name, _)| *name).collect();
+        for handout in [
+            Handout::for_foreman(&state, project).expect("a watched project"),
+            Handout::for_job(&state, Agent::Claude, project).expect("a watched project"),
+        ] {
+            let named: Vec<&str> = variables(&handout).iter().map(|(name, _)| *name).collect();
+            assert!(!named.contains(&"STAGEMAN_SLACK_TOKEN"), "{named:?}");
+            assert!(!named.contains(&"STAGEMAN_SLACK_CHANNEL"), "{named:?}");
+        }
 
-        assert!(named.contains(&"STAGEMAN_SLACK_TOKEN"), "{named:?}");
-        assert!(named.contains(&"STAGEMAN_SLACK_CHANNEL"), "{named:?}");
+        // And the asymmetry 0027 turns on is unchanged: a foreman watches a
+        // channel and still acts on no platform.
+        let foreman = Handout::for_foreman(&state, project).expect("a watched project");
+        let named: Vec<&str> = variables(&foreman).iter().map(|(name, _)| *name).collect();
         assert!(!named.contains(&"GH_TOKEN"), "{named:?}");
     }
 
@@ -1879,7 +1655,9 @@ mod tests {
         assert!(!line.contains("xoxb-not-a-real-token"), "{line}");
         assert!(line.contains("--env CLAUDE_CODE_OAUTH_TOKEN"), "{line}");
         assert!(line.contains("--env GH_TOKEN"), "{line}");
-        assert!(line.contains("--env STAGEMAN_SLACK_TOKEN"), "{line}");
+        // No channel credential is named at all since 0034, because none is
+        // delivered: the daemon posts, so a container has no use for one.
+        assert!(!line.contains("STAGEMAN_SLACK"), "{line}");
     }
 
     #[test]
@@ -2033,7 +1811,6 @@ mod tests {
                     credentials: BTreeMap::new(),
                     channels: BTreeMap::new(),
                     jobs: BTreeMap::new(),
-                    warrant: None,
                     attending: stageman_core::Attending::default(),
                 },
             );
@@ -2050,6 +1827,7 @@ mod tests {
             let answer = ask(
                 &runtime,
                 &handout,
+                None,
                 "Reply with exactly one word, lowercase, no punctuation: pong",
             )
             .await
@@ -2079,6 +1857,7 @@ mod tests {
                 &runtime,
                 &handout,
                 name,
+                None,
                 "Remember this word and reply with it, alone: marmalade",
             )
             .await
@@ -2128,6 +1907,7 @@ mod tests {
                     &runtime,
                     &handout,
                     name,
+                    None,
                     "Count from 1 to 40, one number per line, pausing two seconds between each.",
                 ),
             )

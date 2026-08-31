@@ -1,9 +1,14 @@
 # 0032 — A foreman asks the instance by warrant
 
 ## Status
-Accepted. Decides how a foreman is *authorised* to create jobs; where the
-endpoint listens is deliberately not decided here and is open in
-`docs/open-questions.md`.
+Accepted, and rescoped by
+`docs/decisions/0034-tools-are-served-not-shipped.md`. Decides how a foreman is
+*authorised* to create jobs; where the endpoint listens is deliberately not
+decided here, and was settled by
+`docs/decisions/0033-the-job-endpoint-listens-beyond-loopback.md`. The warrant
+survives as the idea and changes delivery: 0034 makes it per session rather than
+per container, which is the "warrant, scoped" this record's own revisit trigger
+predicted.
 
 ## Context
 

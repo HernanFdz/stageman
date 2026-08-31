@@ -308,6 +308,28 @@ impl Started {
     }
 }
 
+/// What a job is told about the tools it may use.
+///
+/// Minted fresh on every start and every resume, carrying the thread that job
+/// speaks in. A job is offered only the tool that speaks — starting jobs is a
+/// foreman's, and `crate::tooling::tools` is where that is decided.
+/// `None` for a job this instance cannot place, which is honest rather than
+/// tidy: a credential naming the wrong project would let one project's job
+/// speak on another's channel, and a substituted default is exactly what
+/// `.quality/gate-reference.md` forbids. A job with no tools reports having
+/// none, which is a visible failure rather than a silent misattribution.
+fn tools_for(store: &Store, job: JobId, thread: Option<Thread>) -> Option<stageman_agent::Tools> {
+    let project = store.read().project_of(job)?;
+    Some(stageman_agent::Tools::new(
+        crate::tooling::endpoint(*crate::endpoint::PORT),
+        crate::SESSIONS.mint(crate::tooling::Warranted {
+            project,
+            speaker: crate::tooling::Speaker::Job(job),
+            thread,
+        }),
+    ))
+}
+
 /// Records a job on a project, ready to be run.
 ///
 /// **The record is written before the container exists, and the order is not
@@ -474,7 +496,13 @@ pub async fn supervise(
         }
     };
 
-    let progress = match stageman_job::start(runtime, &handout, job, &kickoff).await {
+    let thread = store
+        .read()
+        .job(job)
+        .and_then(|recorded| recorded.thread.clone());
+    let tools = tools_for(store, job, thread);
+    let progress = match stageman_job::start(runtime, &handout, job, tools.as_ref(), &kickoff).await
+    {
         Ok(answer) => outcome(&answer),
         Err(error) => Progress::Failed(because(&error)),
     };
@@ -608,7 +636,8 @@ pub async fn deliver(
         thread
     };
 
-    let progress = match stageman_job::resume(runtime, job, speaking.as_ref(), said).await {
+    let tools = tools_for(store, job, speaking.clone());
+    let progress = match stageman_job::resume(runtime, job, tools.as_ref(), said).await {
         Ok(answer) => outcome(&answer),
         Err(error) => Progress::Failed(because(&error)),
     };
@@ -765,10 +794,11 @@ pub async fn reconcile(
             drop(state);
             thread
         };
+        let tools = tools_for(store, job, speaking.clone());
         let progress = match stageman_job::resume(
             runtime,
             job,
-            speaking.as_ref(),
+            tools.as_ref(),
             stageman_foreman::resumption_notice(),
         )
         .await
@@ -1059,20 +1089,6 @@ async fn turn(
     project: ProjectId,
     errand: &Errand,
 ) -> Result<(), RunError> {
-    // Minted here rather than in the domain, which takes no randomness by
-    // design, and lazily rather than at project creation: a project whose
-    // foreman never runs never needs one, and every project that already
-    // exists has none.
-    {
-        let mut state = store.update();
-        if let Some(watched) = state.projects.get_mut(&project)
-            && watched.warrant.is_none()
-        {
-            watched.warrant = Some(minted_warrant());
-        }
-        drop(state);
-    }
-
     let (repository, handout) = {
         let state = store.read();
         let repository = state
@@ -1107,34 +1123,28 @@ async fn turn(
         named
     };
 
+    // Minted per turn, not per project, and this is the turn's thread going
+    // with it: a foreman answers in whichever thread it was spoken to in, so
+    // the credential is what carries that rather than a file written into the
+    // container — see `docs/decisions/0034-tools-are-served-not-shipped.md`.
+    let credential = crate::SESSIONS.mint(crate::tooling::Warranted {
+        project,
+        speaker: crate::tooling::Speaker::Foreman,
+        thread: Some(errand.thread.clone()),
+    });
+
     stageman_foreman::attend(
         runtime,
         &handout,
         project,
         &repository,
-        &crate::asking::endpoint(*crate::asking::PORT),
+        &stageman_agent::Tools::new(crate::tooling::endpoint(*crate::endpoint::PORT), credential),
         &agents,
         &errand.said,
     )
     .await
     .map(drop)
     .map_err(|why| RunError::Foreman(why.to_string()))
-}
-
-/// A fresh warrant.
-///
-/// Two version-four identifiers, which is what this crate already mints
-/// anything unguessable from — a job's identifier and a project's are both
-/// this. Using the same source keeps one answer to "where does an unguessable
-/// value here come from" rather than introducing an encoding and a second
-/// generator for one field.
-///
-/// Two rather than one for margin: one is already past brute force at 122
-/// bits, and a warrant is the single thing standing between any container on
-/// the machine and a foreman's authority. Measured, not assumed: an unrelated
-/// container reaches this daemon as easily as a foreman's does.
-fn minted_warrant() -> stageman_core::Secret {
-    stageman_core::Secret::new(format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4()))
 }
 
 /// Says something in a thread on the instance's own behalf.
@@ -1208,7 +1218,6 @@ mod tests {
                 job_agents: only_claude(),
                 credentials: BTreeMap::new(),
                 channels: BTreeMap::new(),
-                warrant: None,
                 attending: stageman_core::Attending::default(),
                 jobs: BTreeMap::from([(
                     job,
@@ -1384,7 +1393,6 @@ mod tests {
                     credentials: BTreeMap::new(),
                     channels: BTreeMap::new(),
                     jobs: BTreeMap::new(),
-                    warrant: None,
                     attending: stageman_core::Attending::default(),
                 },
             );
@@ -1393,6 +1401,63 @@ mod tests {
             .expect("it reads back")
             .expect("and there is something there");
         assert!(reopened.read().projects.contains_key(&id));
+    }
+
+    /// A job this instance cannot place is given no tools at all.
+    ///
+    /// The refusal that stands where `unwrap_or_default` nearly went. A
+    /// credential naming the wrong project would let one project's job speak
+    /// on another's channel — a silent misattribution rather than a visible
+    /// failure — so the absence has to travel rather than be filled in.
+    /// Mutation testing found nothing checking it, which is exactly the shape
+    /// `.quality/gate-reference.md` warns a substituted default takes.
+    #[test]
+    fn a_job_this_instance_cannot_place_is_given_no_tools() {
+        use stageman_core::{Progress, Timestamp};
+
+        let directory = TempDir::new().expect("a temporary directory");
+        let mut state = configured();
+        let project = ProjectId::from_uuid(Uuid::from_u128(3));
+        let job = JobId::from_uuid(Uuid::from_u128(7));
+        state.projects.insert(
+            project,
+            stageman_core::Project {
+                name: "aviary".to_owned(),
+                repository: "https://example.invalid/aviary".to_owned(),
+                foreman_agent: Agent::Claude,
+                job_agents: std::collections::BTreeSet::from([Agent::Claude]),
+                credentials: std::collections::BTreeMap::new(),
+                channels: std::collections::BTreeMap::new(),
+                jobs: std::collections::BTreeMap::new(),
+                attending: stageman_core::Attending::default(),
+            },
+        );
+        state
+            .projects
+            .get_mut(&project)
+            .expect("the project")
+            .jobs
+            .insert(
+                job,
+                stageman_core::Job {
+                    agent: Agent::Claude,
+                    reason: "because".to_owned(),
+                    kickoff: "do the thing".to_owned(),
+                    created_at: Timestamp::now(),
+                    progress: Progress::Idle,
+                    thread: None,
+                },
+            );
+        let store = Store::create(snapshot_path(&directory), key(), state).expect("it can write");
+
+        assert!(
+            super::tools_for(&store, job, None).is_some(),
+            "a job this instance holds must be given the tools it speaks with",
+        );
+        assert!(
+            super::tools_for(&store, JobId::from_uuid(Uuid::from_u128(99)), None).is_none(),
+            "a job this instance cannot place must be given none, not somebody else's",
+        );
     }
 
     #[test]
@@ -1470,7 +1535,6 @@ mod tests {
                 credentials: BTreeMap::new(),
                 channels: BTreeMap::new(),
                 jobs,
-                warrant: None,
                 attending: stageman_core::Attending::default(),
             },
         );
@@ -1648,31 +1712,6 @@ mod tests {
         );
     }
 
-    /// A warrant is long, unguessable, and different every time.
-    ///
-    /// Anything that can reach the daemon may try to guess one — measured:
-    /// an unrelated container reaches the host as easily as a foreman's does
-    /// — so the only thing standing between a job's agent and a foreman's
-    /// authority is that this is not worth attacking.
-    #[test]
-    fn a_minted_warrant_is_long_and_never_the_same_twice() {
-        let first = super::minted_warrant();
-        let second = super::minted_warrant();
-
-        assert_eq!(first.expose().len(), 72, "two identifiers, hyphens and all");
-        assert!(
-            first
-                .expose()
-                .chars()
-                .all(|c| c.is_ascii_hexdigit() || c == '-')
-        );
-        assert_ne!(
-            first.expose(),
-            second.expose(),
-            "a warrant reused across projects would be one warrant"
-        );
-    }
-
     /// Only the message that found the foreman idle drives its loop.
     ///
     /// Inverting this comparison would have every other message start a second
@@ -1823,7 +1862,6 @@ mod tests {
                     credentials: BTreeMap::new(),
                     channels: BTreeMap::new(),
                     jobs: BTreeMap::new(),
-                    warrant: None,
                     attending: stageman_core::Attending::default(),
                 },
             );

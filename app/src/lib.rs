@@ -14,15 +14,17 @@
 //! `docs/decisions/0022-the-browser-never-sees-the-domain.md`.
 
 #[cfg(feature = "server")]
-pub(crate) mod asking;
-#[cfg(feature = "server")]
 mod channel;
+#[cfg(feature = "server")]
+pub(crate) mod endpoint;
 #[cfg(feature = "server")]
 mod instance;
 #[cfg(feature = "server")]
 mod listening;
 #[cfg(feature = "server")]
 mod serving;
+#[cfg(feature = "server")]
+pub(crate) mod tooling;
 
 pub mod dashboard;
 pub mod ui;
@@ -37,4 +39,4 @@ pub use instance::{
 #[cfg(feature = "server")]
 pub use listening::{listen, listen_to, listening_on};
 #[cfg(feature = "server")]
-pub use serving::{RUNTIME, serve};
+pub use serving::{RUNTIME, SESSIONS, serve};
