@@ -41,7 +41,9 @@ use agent_client_protocol::schema::v1::{
 };
 use agent_client_protocol::{ByteStreams, Client, ConnectionTo};
 use parking_lot::Mutex;
-use stageman_core::{Agent, Channel, Handout, Platform, Secret};
+#[cfg(test)]
+use stageman_core::Channel;
+use stageman_core::{Agent, Handout, Platform, Secret};
 use tokio::io::AsyncReadExt as _;
 use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
 
@@ -518,23 +520,15 @@ fn variables(handout: &Handout) -> Vec<(&'static str, Secret)> {
         ));
     }
 
-    // Two per channel rather than one, because a binding is an address as well
-    // as a credential and `stageman-say` needs both to say anything.
-    //
-    // Namespaced, where `GH_TOKEN` above is not, and the asymmetry is the
-    // whole point: that name is `gh`'s contract and this project conforms to
-    // it, while these are this project's contract with a tool it ships itself.
-    // See `docs/decisions/0028-stageman-ships-the-tool-that-speaks.md`.
-    for (channel, bound) in handout.channels() {
-        let (address, credential) = match channel {
-            Channel::Slack => ("STAGEMAN_SLACK_CHANNEL", "STAGEMAN_SLACK_TOKEN"),
-        };
-        // The address is not a secret and travels as one anyway, because this
-        // list is what the container is started with and a second mechanism
-        // for the non-secret half would be two things to keep in step.
-        set.push((address, Secret::new(bound.address.clone())));
-        set.push((credential, bound.credential.clone()));
-    }
+    // A channel's credential is deliberately absent. It used to travel here,
+    // because a program in the container posted with it;
+    // `docs/decisions/0034-tools-are-served-not-shipped.md` moved speaking to
+    // a tool the instance serves, so the daemon posts and the container has no
+    // use for one. That is worth more than tidiness: a job's agent can be
+    // talked into sending what it holds somewhere, and the narrowest version
+    // of that risk is holding less — which is the mitigation
+    // `docs/open-questions.md` is still weighing for the credentials a job
+    // does need.
 
     set
 }
@@ -1517,25 +1511,6 @@ mod tests {
         (state, id)
     }
 
-    /// Both halves reach the container, under the names the tool this project
-    /// ships reads them from.
-    #[test]
-    fn a_job_is_delivered_both_halves_of_a_binding() {
-        let (state, project) = instance_with_a_channel("sk-ant-oat01-xyz");
-        let handout = Handout::for_job(&state, Agent::Claude, project).expect("a watched project");
-
-        let delivered = variables(&handout);
-        let named = |wanted: &str| {
-            delivered
-                .iter()
-                .find(|(name, _)| *name == wanted)
-                .map(|(_, value)| value.expose())
-        };
-
-        assert_eq!(named("STAGEMAN_SLACK_CHANNEL"), Some("C0123456789"));
-        assert_eq!(named("STAGEMAN_SLACK_TOKEN"), Some("xoxb-not-a-real-token"));
-    }
-
     /// A thread never travels as a variable, however narrowed the handout is.
     ///
     /// It used to, and that was a bug waiting for a second turn: a container's
@@ -1564,23 +1539,41 @@ mod tests {
         for (_, value) in &delivered {
             assert_ne!(value.expose(), "1728312345.678901");
         }
-        // What it does still deliver is everything constant for the container.
-        assert!(named.contains(&"STAGEMAN_SLACK_CHANNEL"), "{named:?}");
-        assert!(named.contains(&"STAGEMAN_SLACK_TOKEN"), "{named:?}");
+        // Nor the channel's credential, since 0034: the daemon posts, so a
+        // container has no use for one and holding less is the whole
+        // mitigation.
+        assert!(!named.contains(&"STAGEMAN_SLACK_CHANNEL"), "{named:?}");
+        assert!(!named.contains(&"STAGEMAN_SLACK_TOKEN"), "{named:?}");
     }
 
-    /// The asymmetry `docs/decisions/0027-a-channel-is-not-a-platform.md` turns
-    /// on, followed all the way to delivery: a foreman gets the channel it watches
-    /// and still no platform credential.
+    /// A container is given its agent's credential and nothing else it does
+    /// not use.
+    ///
+    /// `docs/decisions/0027-a-channel-is-not-a-platform.md` kept a platform
+    /// credential out of a foreman's hands, and that still holds. What changed
+    /// is the other half: the channel's credential used to be delivered too,
+    /// because a program in the container posted with it. Since
+    /// `docs/decisions/0034-tools-are-served-not-shipped.md` the daemon posts,
+    /// so neither a foreman nor a job is given one — and a credential a
+    /// process never receives is one it cannot be talked into sending
+    /// anywhere.
     #[test]
-    fn a_foreman_is_delivered_the_channel_it_watches_and_still_no_platform() {
+    fn a_container_is_given_no_credential_it_has_no_use_for() {
         let (state, project) = instance_with_a_channel("sk-ant-oat01-xyz");
-        let handout = Handout::for_foreman(&state, project).expect("a watched project");
 
-        let named: Vec<&str> = variables(&handout).iter().map(|(name, _)| *name).collect();
+        for handout in [
+            Handout::for_foreman(&state, project).expect("a watched project"),
+            Handout::for_job(&state, Agent::Claude, project).expect("a watched project"),
+        ] {
+            let named: Vec<&str> = variables(&handout).iter().map(|(name, _)| *name).collect();
+            assert!(!named.contains(&"STAGEMAN_SLACK_TOKEN"), "{named:?}");
+            assert!(!named.contains(&"STAGEMAN_SLACK_CHANNEL"), "{named:?}");
+        }
 
-        assert!(named.contains(&"STAGEMAN_SLACK_TOKEN"), "{named:?}");
-        assert!(named.contains(&"STAGEMAN_SLACK_CHANNEL"), "{named:?}");
+        // And the asymmetry 0027 turns on is unchanged: a foreman watches a
+        // channel and still acts on no platform.
+        let foreman = Handout::for_foreman(&state, project).expect("a watched project");
+        let named: Vec<&str> = variables(&foreman).iter().map(|(name, _)| *name).collect();
         assert!(!named.contains(&"GH_TOKEN"), "{named:?}");
     }
 
@@ -1655,7 +1648,9 @@ mod tests {
         assert!(!line.contains("xoxb-not-a-real-token"), "{line}");
         assert!(line.contains("--env CLAUDE_CODE_OAUTH_TOKEN"), "{line}");
         assert!(line.contains("--env GH_TOKEN"), "{line}");
-        assert!(line.contains("--env STAGEMAN_SLACK_TOKEN"), "{line}");
+        // No channel credential is named at all since 0034, because none is
+        // delivered: the daemon posts, so a container has no use for one.
+        assert!(!line.contains("STAGEMAN_SLACK"), "{line}");
     }
 
     #[test]
