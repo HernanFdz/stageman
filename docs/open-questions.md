@@ -21,6 +21,66 @@ Questions blocking or shaping work, each with enough context to answer without
 re-deriving it. If you cannot state what would settle it, it is not a question
 yet — it is unease, and belongs in your own notes until it sharpens.
 
+- **Can the daemon serve tools over the protocol connection it already has?**
+  Everything an agent does outside its own container goes through a
+  command-line program this project writes, ships in the image, and delivers
+  configuration to: `stageman-say` posts on a channel, `stageman-job` asks for
+  work. Behind them sit a warrant, an HTTP listener on every interface, a
+  hostname that works on two runtimes, and two files copied into a stopped
+  container before every start. That is a large amount of machinery, and the
+  question is whether any of it is necessary.
+
+  **The claim it rests on is narrower than it looks.**
+  `docs/decisions/0009-jobs-hold-their-own-platform-credentials.md` says
+  *neither agent adapter examined* supports tools served over the protocol
+  connection, and both want them over HTTP. That was true of two adapters at
+  one moment. It was never a statement about the protocol, and 0009's revisit
+  trigger does not cover the protocol acquiring the ability.
+
+  It has. The version of `agent-client-protocol` this workspace already depends
+  on carries an mcp_server module whose own documentation says servers can be
+  *attached to ACP session setup requests* through with_mcp_server builders,
+  behind a feature flag named for being unstable. Those names are unbackticked
+  deliberately: they belong to a dependency, and `just drift` resolves every
+  backticked identifier here against *this* source. So the client — this
+  daemon — can
+  in principle offer MCP tools over the connection it is already holding, with
+  handlers running natively in the process that owns the state.
+
+  What that would remove, if it works: the listener and its exposure
+  (`docs/decisions/0033-the-job-endpoint-listens-beyond-loopback.md`), the
+  warrant and its minting and sealing
+  (`docs/decisions/0032-a-foreman-asks-the-instance-by-warrant.md`), both
+  programs and their argument handling, the endpoint file, the host-gateway
+  flag, and the image-drift question below — because a tool served from the
+  daemon is never stale. It would also make a job's reason and instructions
+  typed values rather than strings parsed out of a shell command.
+
+  What it would not remove: the platform credentials a job holds. Those are
+  0009's real subject, and reaching GitHub through `gh` is still the right
+  answer whatever happens here. This question is about *stageman's own* tools,
+  not about the platforms'.
+
+  **Three things decide it, in order.**
+
+  Whether the agent side accepts it at all. The client offering an MCP server
+  is half a handshake; the adapter in the image — `claude-agent-acp`, pinned in
+  `images/claude/Dockerfile` — has to consume it. That is one probe: offer a
+  trivial tool, ask the agent to call it, see whether it can.
+
+  Whether an unstable feature is one to build on. It is named `unstable` and
+  the API may move under a version bump, against machinery that currently works
+  and is tested. That is a judgement about appetite, not a fact to discover.
+
+  And whether a tool call can carry what a warrant proves. The current design
+  authorises by *what a container was given*: a job's has no warrant, so a job
+  cannot create jobs. If tools are served per connection, the daemon knows
+  which session it is talking to and the property may come for free — or may
+  need something new. Worth answering before anything is removed, because it is
+  the one property that would be silently lost.
+
+  Settled by the probe, and nothing should be deleted before it passes.
+
 - **Should a message reach a job that is already running?** Today it cannot,
   and that is a limitation accepted deliberately rather than a gap nobody
   noticed. A reply is delivered by resuming a stopped container, so it lands
