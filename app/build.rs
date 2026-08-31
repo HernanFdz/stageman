@@ -36,7 +36,7 @@ fn main() {
     let _ = fs::create_dir_all("assets");
     let _ = fs::write(
         stylesheet,
-        "/* No stylesheet was built. `just dashboard` compiles the real one;\n   \
+        "/* No stylesheet was built. `just dev` compiles the real one;\n   \
          a build without it serves a complete, unstyled page. */\n",
     );
 }

@@ -420,9 +420,10 @@ built from this gate, this one needs:
   network — so a green gate on a machine that has never built one is not
   evidence the containers work; `just image-handshake` is.
 - **`dx`, the Dioxus CLI** — `cargo install dioxus-cli`, needed to build the
-  browser half into a bundle. `just dashboard` serves both halves with
-  reloading; `just check` needs neither it nor a bundle, because the wasm pass
-  is `cargo` against a target and that is a toolchain fact.
+  browser half into a bundle. `just dev` serves both halves with reloading and
+  `just build` produces the bundle that ships; `just check` needs neither them
+  nor a bundle, because the wasm pass is `cargo` against a target and that is a
+  toolchain fact.
 
   **It has to be the same version as the `dioxus` dependency**, which is in
   `Cargo.toml` and is deliberately not repeated here. `dx` generates the glue
@@ -468,7 +469,7 @@ ignores rather than from the environment, so nothing inherits them by accident:
   nothing else.
 
 A third file, `instance-key`, sits beside them and is not in that list because
-nothing asks you for it: `just dashboard` generates one on first use, to
+nothing asks you for it: `just dev` generates one on first use, to
 encrypt the development instance it serves. Losing it costs a file with nothing
 in it, and an instance that will not open is repaired by deleting both.
 
