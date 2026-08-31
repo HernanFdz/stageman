@@ -13,3 +13,8 @@
 
 # Compiled by `dx` from `app/tailwind.css` — see .quality/generated-paths.
 app/assets/styles.css
+
+# What `just build` copies out of `dx`'s output tree, one directory per target.
+# Derived twice over — a build artifact of a build artifact — and the thing it
+# holds is a release binary, which has no business in git either way.
+/dist

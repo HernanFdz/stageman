@@ -1,5 +1,5 @@
 /* The dashboard's stylesheet, compiled by `dx` and served as a static file.
-   Never linked into the binary: `just dashboard` produces it, `just check`
+   Never linked into the binary: `just dev` produces it, `just check`
    does not need it, and a build without it renders unstyled rather than
    failing — see
    `docs/decisions/0025-the-stylesheet-is-fetched-not-linked-into-the-binary.md`. */

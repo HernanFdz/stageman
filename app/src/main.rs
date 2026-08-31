@@ -34,7 +34,7 @@ fn main() -> std::process::ExitCode {
 /// runs under default features, which select the daemon, so this function is
 /// not compiled at all while it runs. Every mutation of it therefore survives
 /// for the same uninformative reason. Proving it needs a browser, and what
-/// stands in for one today is `just dashboard`.
+/// stands in for one today is `just dev`.
 #[mutants::skip]
 #[cfg(not(feature = "server"))]
 fn main() {

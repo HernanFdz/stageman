@@ -103,8 +103,8 @@ propose repository:
 # come alive rather than merely arrive.
 # Arguments go before `@client`, and that position is the whole of why this
 # takes them at all: `dx` reads everything after `@server` as an argument to the
-# server build, so `just dashboard --port 8123` appended at the end is a `dx`
-# error rather than a port.
+# server build, so `just dev --port 8123` appended at the end is a `dx` error
+# rather than a port.
 #
 # The two variables the daemon requires are supplied here, and that is not a
 # softening of the rule that it defaults neither. That rule is about a daemon a
@@ -120,8 +120,8 @@ propose repository:
 # which is deliberate and is the case that variable exists for: serving this
 # out of a checkout must not touch the real instance on the machine, and
 # noticing that it had would take a while.
-[doc("Serve the dashboard, both halves, with reloading — needs `dx`")]
-dashboard *arguments:
+[doc("Serve both halves with reloading — the development loop. Needs `dx`")]
+dev *arguments:
     #!/usr/bin/env bash
     set -euo pipefail
     scratch="{{ justfile_directory() }}/.local"
@@ -143,11 +143,79 @@ dashboard *arguments:
         @client --no-default-features --features web \
         @server --features server
 
-# The same two halves, built rather than served. What this produces is what
-# would ship: a server binary with the browser's bundle in `public/` beside it,
-# which is the layout the server looks for and reports at startup.
-[doc("Build both halves into a bundle — needs `dx`")]
-dashboard-build:
-    dx build --fullstack --package stageman \
+# The same two halves, built rather than served: a server binary with the
+# browser's bundle in `public/` beside it, which is the layout the server looks
+# for and reports at startup. Copy that directory anywhere and run it.
+#
+# **Always `--release`, and there is no way to ask for anything else.** A debug
+# bundle is not merely a larger one: `dioxus-web` gates its hot-reload client on
+# `debug_assertions`, so it carries a websocket client that retries against a
+# dev server that is not there, for ever, on every open tab. That client cannot
+# be switched off by feature selection — `dioxus`'s `fullstack` feature enables
+# it explicitly, and cargo features are additive. The profile is the only lever,
+# so this recipe holds it rather than offering it. The wasm being far smaller
+# is the lesser half of the reason.
+#
+# Targets are named `<os>-<arch>` rather than by triple, because this is the
+# layer where commands are spelled and nobody should have to type
+# `x86_64-unknown-linux-gnu`. The list is deliberately short: a name appears
+# here once somebody has a linker for it and has run what it produced, so an
+# unlisted name is an honest "nobody has tried this" rather than a build that
+# fails at the link step.
+#
+# `host` is a word rather than this machine's triple, and that is the same
+# distinction `check_matrix` in the main justfile draws for the same reason:
+# passing `--target <your own triple>` makes cargo build into `target/<triple>/`
+# and share no cache with `cargo run`, `cargo test` or rust-analyzer. Omitting
+# it is not a shorthand for naming it, so building for this machine has to mean
+# passing no target at all.
+#
+# **Deliberately no bare-OS aliases.** `linux` meaning x64 would be a guess
+# about an architecture, and when such a guess is wrong the failure is
+# `Exec format error` on the machine you copied to — found after deploying
+# rather than at build time. Naming the architecture costs four characters and
+# cannot be wrong.
+#
+# The cross-compilation linker is NOT configured in this repository, and that
+# is also deliberate. `[target.<triple>].linker` is read whenever cargo builds
+# for that triple, host or not — so a tracked entry for `x86_64-unknown-linux-gnu`
+# breaks an ordinary native build on any x86_64 Linux machine, continuous
+# integration included. It belongs in `~/.cargo/config.toml`, per machine.
+#
+# What it produces is copied out of `dx`'s nested output tree into a directory
+# named for the target, which answers in one path the two questions a built
+# bundle raises: where is it, and which machine is it for. `dx` writes every
+# target to the same place, so without this the only thing telling two bundles
+# apart would be which was written last — and that is a difference nothing
+# reports, whose symptom is `Exec format error` at the far end.
+[doc("Build the deployable bundle into dist/<target>: host, macos-arm64, linux-x64")]
+build target="host":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Expanded unquoted below, which is deliberate: a triple contains no
+    # whitespace and no glob, so word-splitting is exactly the behaviour
+    # wanted — two arguments when there is a target, and none when there is
+    # not.
+    case "{{ target }}" in
+      host)        targeting="" ;;
+      macos-arm64) targeting="--target aarch64-apple-darwin" ;;
+      linux-x64)   targeting="--target x86_64-unknown-linux-gnu" ;;
+      *)
+        echo "unknown build target '{{ target }}'" >&2
+        echo "known: host, macos-arm64, linux-x64" >&2
+        exit 1
+        ;;
+    esac
+    dx build --release --fullstack --package stageman \
         @client --no-default-features --features web \
-        @server --features server
+        @server --features server $targeting
+    # Emptied rather than copied over. An asset's filename carries a hash of
+    # its contents, so a stale `public/` survives a rebuild under a name the
+    # new `index.html` does not mention — a bundle that grows one dead file per
+    # build and never says so. The destination can only be one of the three
+    # names above, because anything else left through the `exit 1`.
+    built="{{ justfile_directory() }}/target/dx/stageman/release/web"
+    shipping="{{ justfile_directory() }}/dist/{{ target }}"
+    rm -rf "$shipping"
+    mkdir -p "$shipping"
+    cp -R "$built/server" "$built/public" "$shipping/"
