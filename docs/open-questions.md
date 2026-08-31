@@ -221,38 +221,6 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   — a gate that did not need a runtime would not need any of this, and that is
   the cheapest available answer if the rest turns out to be expensive.
 
-- **Is the environment the right place for the encryption key?** It is where
-  `STAGEMAN_KEY` arrives today, for the reason
-  `docs/decisions/0017-the-runtimes-path-is-recorded-in-the-instance.md` gives
-  in passing: storing it beside the file it encrypts would defeat the
-  encryption. That says where it must *not* be and settles nothing about where
-  it should be.
-
-  Get the threat model right before designing for it, because the obvious
-  statement of it is wrong. A process environment is not world-readable: on
-  Linux `/proc/<pid>/environ` is readable only by the same user and by root,
-  and macOS has no equivalent at all for another user's processes. So the
-  exposure is to **anything already running as the same user** — which on a
-  developer's own machine is a large set, and is exactly the machine
-  `docs/vision.md` §3 has this running on. It is also inherited by children:
-  the container runtime client is spawned with the daemon's environment, so
-  the key is in that process too. Not in the *container* — what crosses that
-  boundary is only what `--env` names, which is the mechanism
-  `docs/conventions.md` §3 relies on — but the client is one more process
-  holding it.
-
-  The candidates are per-platform and none is portable, which is the hard
-  part. A service manager is the leading shape: a systemd unit's
-  `LoadCredential=` passes a secret through a file descriptor rather than the
-  environment, which is strictly better than `EnvironmentFile=` and better
-  than what happens today. The analogues are launchd with the Keychain, and a
-  Windows service with the credential manager. All three arrive with
-  installation rather than with the program.
-
-  Settled by distribution, and deliberately not before: what installs this
-  decides what can hold a secret for it, and building a keychain integration
-  against a guess about packaging is how that gets built twice.
-
 - **Does the dashboard need authentication before it leaves `127.0.0.1`?**
   Nothing authenticates a request today, and the default address makes that
   survivable rather than correct: anything that can reach the port can read
@@ -295,6 +263,26 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   is exactly where this failure would otherwise sit until morning. Settled by
   deciding what a job that cannot start should look like in general — the same
   question wearing a different hat, and worth answering once.
+
+- **Should the browser's bundle live inside the binary?** What ships is a
+  server executable and a `public/` directory of static assets beside it, which
+  is two things where the rest of the deployment story is now one:
+  `docs/decisions/0035-an-image-is-built-never-named.md` puts the agent's
+  recipe in the binary, and nothing else is carried alongside. Embedding the
+  bundle the same way would make the artifact a single file somebody can copy
+  anywhere.
+
+  What makes it a question rather than an obvious next step is who owns that
+  directory. The framework decides its layout and reads it from disk, and the
+  function that finds it already restates a private rule of the framework's
+  and says in its own comment that restating somebody else's rule is drift
+  waiting to happen. Embedding means owning that rule outright, and serving the
+  files ourselves rather than letting the framework do it.
+
+  Settled by finding out how much of the framework's serving has to be
+  reimplemented to do it — if the answer is a route that reads from a compiled-in
+  map instead of a directory, it is cheap; if it is the asset pipeline, it is
+  not.
 
 ## Next
 

@@ -86,6 +86,16 @@ impl Serving {
         PathBuf::from(line.trim())
     }
 
+    /// What it said about where its key came from.
+    fn key_source(&self) -> String {
+        self.said
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("key        "))
+            .expect("it says where the key came from")
+            .trim()
+            .to_owned()
+    }
+
     /// The whole of the response to one `POST` of JSON, headers included.
     fn post(&self, path: &str, body: &str) -> String {
         self.request(&format!(
@@ -387,18 +397,122 @@ fn starting_again_changes_nothing() {
 // in the agent crate, against the mechanism rather than through the binary,
 // which is where it could always have been.
 
+/// A start with no key generates one, and the next start reuses it.
+///
+/// Both halves in one test on purpose: generating is only correct if it
+/// happens exactly once, and a test that only checked the first start would
+/// pass just as happily on an instance that minted a fresh key every time and
+/// therefore lost everything on every restart. See
+/// `docs/decisions/0037-the-instance-key-is-generated-on-first-run.md`.
+///
+/// `HOME` is pointed at a scratch directory for the reason
+/// `an_instance_goes_somewhere_sensible_when_nobody_says_where` does it: this
+/// is a path derived from the machine, and a test that derived the real one
+/// would write a key into the home of whoever ran it.
 #[test]
-fn a_start_without_a_key_says_which_variable_is_missing() {
+fn a_start_with_no_key_generates_one_and_the_next_start_keeps_it() {
+    let (_kept, snapshot) = scratch();
+    let home = tempfile::tempdir().expect("a temporary directory");
+    let elsewhere = &[
+        ("HOME", home.path().to_string_lossy().into_owned()),
+        // Honoured ahead of `HOME` where it applies, so a machine that has one
+        // set would otherwise send this test to the real directory.
+        (
+            "XDG_CONFIG_HOME",
+            home.path().join("config").to_string_lossy().into_owned(),
+        ),
+        ("STAGEMAN_STATE", snapshot.to_string_lossy().into_owned()),
+    ];
+
+    let first = started(elsewhere);
+    let generated = first.key_source();
+    assert!(
+        generated.contains("generated"),
+        "the first start should have minted one: {generated}"
+    );
+    let path = PathBuf::from(
+        generated
+            .split(" (generated")
+            .next()
+            .expect("the line names a path"),
+    );
+    assert!(
+        path.starts_with(home.path()),
+        "the key should be under the home it was given: {}",
+        path.display()
+    );
+    assert!(
+        path.exists(),
+        "it should have written one: {}",
+        path.display()
+    );
+    let written = std::fs::read_to_string(&path).expect("the key is readable");
+    drop(first);
+
+    let second = started(elsewhere);
+    let kept = second.key_source();
+    assert!(
+        !kept.contains("generated"),
+        "the second start should have reused it: {kept}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("the key is still readable"),
+        written,
+        "the second start rewrote the key, which would strand the instance"
+    );
+}
+
+/// A key file readable by anybody but its owner is worse than the variable it
+/// replaced.
+///
+/// Nothing can keep a key from another process running as this user — 0037 is
+/// explicit about that — but a mode is the difference between that and every
+/// account on a shared machine.
+#[cfg(unix)]
+#[test]
+fn a_generated_key_is_not_readable_by_anybody_else() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let (_kept, snapshot) = scratch();
+    let home = tempfile::tempdir().expect("a temporary directory");
+
+    let running = started(&[
+        ("HOME", home.path().to_string_lossy().into_owned()),
+        (
+            "XDG_CONFIG_HOME",
+            home.path().join("config").to_string_lossy().into_owned(),
+        ),
+        ("STAGEMAN_STATE", snapshot.to_string_lossy().into_owned()),
+    ]);
+
+    let path = PathBuf::from(
+        running
+            .key_source()
+            .split(" (generated")
+            .next()
+            .expect("the line names a path"),
+    );
+    let mode = std::fs::metadata(&path)
+        .expect("the key is there")
+        .permissions()
+        .mode();
+
+    assert_eq!(
+        mode & 0o077,
+        0,
+        "the key is readable beyond its owner: {mode:o}"
+    );
+}
+
+/// The variable still wins, because a service manager passing a secret in is
+/// the case it exists for.
+#[test]
+fn saying_what_the_key_is_still_wins() {
     let (_kept, snapshot) = scratch();
 
-    let finished = run(&snapshot, &[]);
+    let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
 
-    assert!(!finished.status.success());
-    assert!(
-        String::from_utf8_lossy(&finished.stderr).contains("STAGEMAN_KEY"),
-        "{}",
-        String::from_utf8_lossy(&finished.stderr)
-    );
+    assert_eq!(running.key_source(), "STAGEMAN_KEY");
 }
 
 /// A wrong key must be refused rather than half-read, and the message must not
@@ -411,7 +525,7 @@ fn a_key_that_is_not_key_material_is_refused_without_echoing_it() {
 
     assert!(!finished.status.success());
     let said = String::from_utf8_lossy(&finished.stderr);
-    assert!(said.contains("STAGEMAN_KEY"), "{said}");
+    assert!(said.contains("key"), "{said}");
     assert!(!said.contains("far-too-short"), "it echoed the key: {said}");
 }
 

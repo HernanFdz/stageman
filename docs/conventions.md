@@ -412,9 +412,13 @@ built from this gate, this one needs:
   container, including the one the foreman thinks with, so nothing here
   runs an agent without one. See
   `docs/decisions/0012-agents-run-in-containers.md`.
-- **The agent image, built** — `just image`. The container tests skip without
-  it rather than failing, so a green `just check` on a machine that has never
-  built it is not evidence the containers work; `just image-handshake` is.
+  There is deliberately nothing here about building an image. The recipe is
+  compiled into the binary and built on demand, per
+  `docs/decisions/0035-an-image-is-built-never-named.md`, so the only thing to
+  install is the runtime that builds it. The container tests still skip under
+  `just check` rather than failing — the first of them costs minutes and a
+  network — so a green gate on a machine that has never built one is not
+  evidence the containers work; `just image-handshake` is.
 - **`dx`, the Dioxus CLI** — `cargo install dioxus-cli`, needed to build the
   browser half into a bundle. `just dashboard` serves both halves with
   reloading; `just check` needs neither it nor a bundle, because the wasm pass
@@ -434,8 +438,8 @@ built from this gate, this one needs:
   afterwards. Which one you have is printed at startup, so this is never a
   guess.
 
-**The runtime is needed for `just check`; the image and `dx` are not.** That
-split used to be simpler — nothing beyond a toolchain — and
+**The runtime is needed for `just check`; `dx` is not.** That split used to be
+simpler — nothing beyond a toolchain — and
 `docs/decisions/0023-the-container-runtime-is-discovered-once.md` gave up the
 runtime half deliberately, on the grounds that something required in production
 and optional in the tests is a difference that gets discovered late. Seven
@@ -443,10 +447,13 @@ integration tests run the binary, and the binary refuses to start without a
 runtime, so there is no version of this where the gate passes on a machine that
 could not run the program.
 
-Building the image stays out, because a present runtime is not a built image: it
-is a container build costing minutes and a network, so it belongs to
-`just verify` — the bar for pushing — rather than to the gate you run
-constantly.
+Building an image stays out of the gate, because a present runtime is not a
+built image: the first build costs minutes and a network, so the tests that
+need one belong to `just verify` — the bar for pushing — rather than to the
+gate you run constantly. What changed with 0035 is only who builds it. Nobody
+runs a recipe by hand any more; the tests build what they need from the recipe
+compiled into the crate they are testing, which is the same code the daemon
+runs.
 
 **Two credentials, if you want to run the tests that cost money.**
 `just image-session` drives a real agent against a real model, and
@@ -464,6 +471,14 @@ A third file, `instance-key`, sits beside them and is not in that list because
 nothing asks you for it: `just dashboard` generates one on first use, to
 encrypt the development instance it serves. Losing it costs a file with nothing
 in it, and an instance that will not open is repaired by deleting both.
+
+That recipe generates its own rather than letting the binary do it, and the
+difference is the point: since
+`docs/decisions/0037-the-instance-key-is-generated-on-first-run.md` a binary
+with no key generates one under the platform's configuration directory, and a
+development instance served out of a checkout must no more write there than it
+may write to the real instance file. Both overrides are set for the same
+reason, in the same place.
 
 All of these live in the gitignored `.local` directory, and the credentials are
 named here without it on purpose. `just drift` resolves every backticked path in this directory

@@ -16,25 +16,30 @@
 #   demo:
 #       cargo run -- --fixtures tests/data
 
-# The image tag is a fact two places need to agree on — this recipe and
-# whatever spawns containers. The second place now exists and is a Rust
-# constant, which `just` cannot read and which cannot be generated without
-# putting a build step in front of every check. So the two literals stay, and a
-# test in the agent crate asserts they are the same string; it parses the line
-# below, so keep the `name := "value"` shape.
-image_tag := "stageman/claude:dev"
+# The recipe is compiled into the binary and built on demand, so there is no
+# tag here and no recipe that builds one — see
+# `docs/decisions/0035-an-image-is-built-never-named.md`. The two stages are
+# the only strings this file and the source both name, and the agent crate has
+# a test asserting that every stage it asks for is declared in the recipe.
 
-[doc("Build the agent image that jobs and foremen run inside")]
-image:
-    docker build -t {{ image_tag }} images/claude
-
-[doc("Check a built image still answers the protocol handshake")]
+[doc("Check the image still answers the protocol handshake, without compiling anything")]
 image-check:
-    # Needs no credential and no network: `initialize` is answered before any
-    # authentication happens, so this is the cheapest possible proof that the
-    # image, the adapter and the stdio channel are all intact. Worth reaching
-    # for before anything that needs a token.
-    docker run -i --rm --network none {{ image_tag }} < images/claude/handshake.json
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Needs no credential: `initialize` is answered before any authentication
+    # happens, so this is the cheapest possible proof that the image, the
+    # adapter and the stdio channel are all intact. Worth reaching for before
+    # anything that needs a token.
+    #
+    # Shell rather than Rust on purpose, and that is the whole point of keeping
+    # it: this holds when the repository does not compile, which is exactly
+    # when you most want to know whether the container half still works. It
+    # therefore builds the recipe itself rather than asking the binary to.
+    #
+    # A foreman's stage, because it is the smaller of the two and the adapter
+    # it proves is in both.
+    image="$(docker build --quiet --target thinking - < agent/images/claude/Dockerfile)"
+    docker run -i --rm --network none "$image" < agent/images/claude/handshake.json
 
 # Both of these greet the image, and the difference is what is on trial. The
 # recipe above tests the image with a redirect and a file, so it holds when this
@@ -49,18 +54,21 @@ image-check:
 # ignored and run by hand; a runtime is now a prerequisite, and the only thing
 # still separating these from the rest is the image build.
 #
-# The build stays out of `check` rather than out of the bar: it costs minutes
-# and a network, and `check` is the command you run constantly.
-[doc("Build the image and run every container test — what `verify` adds")]
-containers: image image-handshake
+# That build has no recipe of its own any more: the tests build what they need,
+# from the recipe compiled into the crate they are testing. It stays out of
+# `check` rather than out of the bar for the reason it always did — the first
+# one costs minutes and a network, and `check` is the command you run
+# constantly.
+[doc("Run every container test — what `verify` adds")]
+containers: image-handshake
 
-[doc("Drive a container from this repository's own code — needs a built image")]
+[doc("Drive a container from this repository's own code — builds what it needs")]
 image-handshake:
-    # Every ignored test that costs nothing to run. They are ignored for one
-    # reason — they need the image built above, which `check` must not spend
-    # minutes building — so this selects by exclusion rather than by naming
-    # them, and keeps covering the next one somebody writes. `just check`
-    # already reports how many it skipped.
+    # Every ignored test that costs nothing but time. They are ignored for one
+    # reason — the first of them builds an image, which `check` must not spend
+    # minutes on — so this selects by exclusion rather than by naming them, and
+    # keeps covering the next one somebody writes. `just check` already reports
+    # how many it skipped.
     cargo nextest run --workspace --locked --run-ignored ignored-only \
         -E 'not test(/costs_a_credential/)'
 
