@@ -317,20 +317,24 @@ and wrong within a day.
   so it wants a test that asserts the tools are *there*, not merely that a
   session started.
 
-- Next, prove a real message arrives, because nothing has. Slack is built in
-  both directions — a job speaks on its project's channel, and a reply reaches
-  it through the thread it was said in — and every test of either half stops at
-  a blocked network. That proves both names were found and says nothing about
-  whether Slack accepts them, which is the half that fails in front of a
-  person. There is no `slack-token` in `.local` and no paid test using one,
-  which is the same shape as `just image-session` and `just propose` and
-  probably wants the same answer.
+- Next, cover Slack against regression, because it works and nothing in the
+  repository would notice if it stopped. Both directions have been driven end
+  to end against a real workspace — a job speaks on its project's channel, and
+  a reply reaches it through the thread it was said in. So the open item is
+  not whether it works. It is that the only evidence lives outside the
+  repository, and a clone cannot re-run it.
+
+  Every automated test of either half stops at a blocked network, which proves
+  both names were found and says nothing about whether Slack accepts them —
+  the half that fails in front of a person. There is no `slack-token` in
+  `.local` and no test that spends one, which is the same shape as
+  `just image-session` and `just propose` and probably wants the same answer.
 
   Note the interaction with
   `docs/decisions/0034-tools-are-served-not-shipped.md`: the speaking half
   moves from a program in the image to a tool the instance serves, so a test
-  written against the program would have to be written twice. Worth doing
-  after that lands rather than before.
+  written against the program would be written twice. Worth doing after that
+  lands rather than before.
 
 - Then have the daemon post into a job's thread when the **agent or its
   container fails**, which is the one case the agent cannot report on: a
