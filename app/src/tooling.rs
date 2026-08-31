@@ -1213,24 +1213,27 @@ mod tests {
             )
             .await;
 
-            let started: Vec<_> = store
-                .read()
+            let recorded = store.read();
+            let jobs = recorded
                 .projects
                 .get(&project)
                 .expect("the project")
                 .jobs
+                .clone();
+            drop(recorded);
+            let started: Vec<_> = jobs
                 .values()
                 .map(|job| (job.reason.clone(), job.kickoff.clone()))
                 .collect();
 
-            // Both containers, whatever happened: the foreman's, and whichever
-            // job it started. A test that leaks one leaks it on every run.
+            // This test's own containers, whatever happened: its foreman, and
+            // whichever jobs that foreman started. Deliberately *not* every
+            // container carrying the project label — tests run concurrently,
+            // and sweeping those killed a container another test was still
+            // driving, which surfaced over there as an unexplained exit 137.
             drop(stageman_agent::discard(&runtime, &name).await);
-            for left in stageman_agent::abandoned(&runtime)
-                .await
-                .unwrap_or_default()
-            {
-                drop(stageman_agent::discard(&runtime, &left).await);
+            for job in jobs.keys() {
+                drop(stageman_agent::discard(&runtime, &stageman_job::container(*job)).await);
             }
             serving.abort();
 

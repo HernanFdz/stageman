@@ -637,11 +637,10 @@ pub async fn deliver(
     };
 
     let tools = tools_for(store, job, speaking.clone());
-    let progress =
-        match stageman_job::resume(runtime, job, speaking.as_ref(), tools.as_ref(), said).await {
-            Ok(answer) => outcome(&answer),
-            Err(error) => Progress::Failed(because(&error)),
-        };
+    let progress = match stageman_job::resume(runtime, job, tools.as_ref(), said).await {
+        Ok(answer) => outcome(&answer),
+        Err(error) => Progress::Failed(because(&error)),
+    };
     if let Progress::Failed(ref why) = progress {
         tracing::warn!(%job, %why, "the reply did not reach the job");
     }
@@ -799,7 +798,6 @@ pub async fn reconcile(
         let progress = match stageman_job::resume(
             runtime,
             job,
-            speaking.as_ref(),
             tools.as_ref(),
             stageman_foreman::resumption_notice(),
         )

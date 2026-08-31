@@ -160,15 +160,9 @@ pub async fn attend(
         // on the session declaration `resume` sends, which is what lets a
         // restarted instance name a different port — see
         // `docs/decisions/0034-tools-are-served-not-shipped.md`.
-        stageman_agent::resume(
-            runtime,
-            &name,
-            handout.thread(),
-            Some(tools),
-            &asked(said, agents),
-        )
-        .await
-        .map_err(ForemanError::Agent)
+        stageman_agent::resume(runtime, &name, Some(tools), &asked(said, agents))
+            .await
+            .map_err(ForemanError::Agent)
     } else {
         // The opening and the first message together, because a session that
         // was told who it is and then asked nothing would have spent a turn
@@ -219,21 +213,16 @@ pub fn opening(repository: &str) -> String {
 You are the foreman for {repository}.
 
 People talk to you on a channel. Each message they send you arrives as its own \
-turn, and the only way to answer is to **run the command-line program \
-`stageman-say`**, which is installed in this container. It is not a tool you \
-can call — run it in a shell, the way you would run `git`:
-
-    stageman-say 'what you want to say'
+turn, and the only way to answer is to **call the `say` tool**.
 
 Nothing you write as ordinary output is seen by anybody. What you pass to \
-`stageman-say` lands in the thread of the message you are answering, so a \
-person can always see which of their messages you meant.
+`say` lands in the thread of the message you are answering, so a person can \
+always see which of their messages you meant.
 
 **You do not do the work yourself.** You have no copy of the repository and no \
 credentials to reach it, and that is deliberate rather than something missing: \
 reaching a repository is a job's business, not yours. When something needs \
-doing, **call the `start_job` tool**. That one really is a tool you call, \
-unlike the program above.
+doing, **call the `start_job` tool**.
 
 A job is one agent in a container of its own, holding this project's \
 credentials, which can clone the repository, change it and open a pull \
@@ -280,7 +269,7 @@ A person said this to you on the channel:
 {said}
 
 Answer it, or start a job for it with the `start_job` tool, or both. Then \
-run `stageman-say` before you finish: a turn that ends without running it has told \
+call `say` before you finish: a turn that ends without calling it has told \
 nobody anything, however much you wrote.
 
 The agents this project's jobs may run on, and what each is for:
@@ -417,7 +406,7 @@ say so at the root of the channel instead: it does not read replies here."
 /// Whether a job has anywhere to speak.
 ///
 /// Decides one paragraph of the kickoff, and it has to be decided rather than
-/// assumed either way. A prompt naming `stageman-say` to a job whose project
+/// assumed either way. A prompt naming the `say` tool to a job whose project
 /// has no channel bound teaches an agent to run a command that cannot work; a
 /// prompt withholding it from one that has leaves the tool installed and
 /// unmentioned, which is the same as not shipping it.
@@ -426,7 +415,7 @@ say so at the root of the channel instead: it does not read replies here."
 /// is read and `kickoff(repository, work, true)` says nothing at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Voice {
-    /// A channel is bound, so `stageman-say` reaches somebody.
+    /// A channel is bound, so the `say` tool reaches somebody.
     Channel,
     /// Nothing is bound. The job can still do work that never needs to speak —
     /// see `docs/decisions/0005-conversation-happens-on-channels.md`.
@@ -464,8 +453,8 @@ pub enum Voice {
 pub fn kickoff(repository: &str, work: &str, voice: Voice) -> String {
     let tools = match voice {
         Voice::Channel => {
-            "You have git, gh and stageman-say, and gh is already \
-signed in as the account this work belongs to."
+            "You have git and gh, and the `say` tool for talking to people; \
+gh is already signed in as the account this work belongs to."
         }
         Voice::Silent => {
             "You have git and gh, and gh is already signed in as the \
@@ -476,9 +465,8 @@ account this work belongs to."
     let speaking = match voice {
         Voice::Channel => {
             "\
-Finish by saying what you did, using stageman-say, which takes what you want \
-to say as its one argument. Nobody reads this terminal, so anything you do not \
-say there is lost — including the answer, if the work was a question. Say what \
+Finish by saying what you did, by calling the `say` tool. Nobody reads this \
+terminal, so anything you do not say there is lost — including the answer, if the work was a question. Say what \
 you found, what you changed, or what you could not do.
 
 Use it during the work as well, whenever you need an answer from a person: say \
@@ -581,8 +569,8 @@ guess, and do not wait — nobody is watching this terminal."
             "You are working on https://example.invalid/repo.
 
 Nothing has been checked out for you. If the work needs the repository, clone it into the \
-current directory yourself. You have git, gh and stageman-say, and gh is already signed in as \
-the account this work belongs to.
+current directory yourself. You have git and gh, and the `say` tool for talking to people; gh \
+is already signed in as the account this work belongs to.
 
 The work:
 
@@ -592,8 +580,8 @@ When you have a change to propose, open a pull request and stop there. Do not me
 deploy anything, and do not push to the default branch. Somebody reads what you propose before \
 it counts for anything, which is what lets you work unattended.
 
-Finish by saying what you did, using stageman-say, which takes what you want to say as its one \
-argument. Nobody reads this terminal, so anything you do not say there is lost — including the \
+Finish by saying what you did, by calling the `say` tool. Nobody reads this terminal, so \
+anything you do not say there is lost — including the \
 answer, if the work was a question. Say what you found, what you changed, or what you could not \
 do.
 
@@ -614,8 +602,8 @@ so do not wait for one and do not guess."
         let bound = super::kickoff("https://example.invalid/repo", "anything", Voice::Channel);
         let silent = super::kickoff("https://example.invalid/repo", "anything", Voice::Silent);
 
-        assert!(bound.contains("stageman-say"), "{bound}");
-        assert!(!silent.contains("stageman-say"), "{silent}");
+        assert!(bound.contains("`say` tool"), "{bound}");
+        assert!(!silent.contains("`say`"), "{silent}");
     }
 
     /// Neither form tells a job to wait, and that is the constraint
@@ -891,19 +879,15 @@ when you finish."
             "You are the foreman for https://example.invalid/repo.
 
 People talk to you on a channel. Each message they send you arrives as its own turn, and the \
-only way to answer is to **run the command-line program `stageman-say`**, which is installed in \
-this container. It is not a tool you can call — run it in a shell, the way you would run `git`:
+only way to answer is to **call the `say` tool**.
 
-    stageman-say 'what you want to say'
-
-Nothing you write as ordinary output is seen by anybody. What you pass to `stageman-say` lands \
-in the thread of the message you are answering, so a person can always see which of their \
-messages you meant.
+Nothing you write as ordinary output is seen by anybody. What you pass to `say` lands in the \
+thread of the message you are answering, so a person can always see which of their messages you \
+meant.
 
 **You do not do the work yourself.** You have no copy of the repository and no credentials to \
 reach it, and that is deliberate rather than something missing: reaching a repository is a job's \
-business, not yours. When something needs doing, **call the `start_job` tool**. That one really \
-is a tool you call, unlike the program above.
+business, not yours. When something needs doing, **call the `start_job` tool**.
 
 A job is one agent in a container of its own, holding this project's credentials, which can \
 clone the repository, change it and open a pull request. It reports in a thread of its own. Its \
@@ -930,9 +914,8 @@ told."
 
 look at the parser
 
-Answer it, or start a job for it with the `start_job` tool, or both. Then run `stageman-say` \
-before you finish: a turn that ends without running it has told nobody anything, however much you \
-wrote.
+Answer it, or start a job for it with the `start_job` tool, or both. Then call `say` before you \
+finish: a turn that ends without calling it has told nobody anything, however much you wrote.
 
 The agents this project's jobs may run on, and what each is for:
 
@@ -947,26 +930,31 @@ inferred is one a person will act on, and you have no way to check it."
         );
     }
 
-    /// The instruction has to say `stageman-say` is a program, not a tool.
+    /// The instruction has to name the tool, and say ordinary output is lost.
     ///
-    /// **Found by running it.** The first version said "you answer with
-    /// stageman-say", which reads perfectly and behaved wrong: the agent
-    /// searched for a tool by that name, found none, and answered in ordinary
-    /// output that nobody sees. The job kickoff never had this problem because
-    /// it lists the program beside `git` and `gh`, which an agent already
-    /// knows are commands.
+    /// **Found by running it**, when saying was a program. The opening read
+    /// "you answer with stageman-say", which is perfectly clear English and
+    /// behaved wrong: the agent took it for a tool name, searched for one,
+    /// found nothing, and answered in ordinary output — which the daemon
+    /// discards. The turn ended cleanly, nothing failed, and the person who
+    /// asked got silence.
+    ///
+    /// `docs/decisions/0034-tools-are-served-not-shipped.md` resolved that by
+    /// agreeing with the agent: it is a tool now, so the reflex that was wrong
+    /// is right. What survives is the second half of the lesson, which was
+    /// never about the mechanism — an agent has no way to know that ordinary
+    /// output goes nowhere, so it has to be told.
     #[test]
-    fn a_foreman_is_told_that_saying_something_means_running_a_command() {
+    fn a_foreman_is_told_which_tool_answers_and_that_output_reaches_nobody() {
         let told = super::opening("https://example.invalid/repo");
 
-        assert!(told.contains("command-line program"), "{told}");
-        assert!(told.contains("run it in a shell"), "{told}");
         assert!(
-            told.contains("not a tool you can call"),
-            "the mistake it made was looking for a tool: {told}"
+            told.contains("call the `say` tool"),
+            "the tool that answers has to be named: {told}"
         );
-        // And that ordinary output reaches nobody, which is why the agent
-        // believed it had answered when it had not.
+        // The half of the original lesson that outlived the mechanism: an
+        // agent has no way to know its ordinary output goes nowhere, and one
+        // that is not told believes it has answered when it has not.
         assert!(
             told.contains("Nothing you write as ordinary output"),
             "{told}"

@@ -110,11 +110,10 @@ pub async fn start(
 pub async fn resume(
     runtime: &ContainerRuntime,
     job: JobId,
-    thread: Option<&stageman_core::Thread>,
     tools: Option<&stageman_agent::Tools>,
     notice: &str,
 ) -> Result<Answer, JobError> {
-    stageman_agent::resume(runtime, &container(job), thread, tools, notice)
+    stageman_agent::resume(runtime, &container(job), tools, notice)
         .await
         .map_err(JobError::Agent)
 }

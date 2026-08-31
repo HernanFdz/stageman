@@ -41,7 +41,7 @@ use agent_client_protocol::schema::v1::{
 };
 use agent_client_protocol::{ByteStreams, Client, ConnectionTo};
 use parking_lot::Mutex;
-use stageman_core::{Agent, Channel, Handout, Platform, Secret, Thread};
+use stageman_core::{Agent, Channel, Handout, Platform, Secret};
 use tokio::io::AsyncReadExt as _;
 use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
 
@@ -738,94 +738,6 @@ fn declaration(tools: &Tools) -> McpServer {
 /// of the domain.
 const TOOLS_SERVER: &str = "stageman";
 
-/// Where a container reads the thread it should speak in.
-///
-/// **A file rather than a variable, and that is not a preference.** A
-/// container's environment is fixed when it is created and no runtime can
-/// change it on restart — so a variable can only ever carry a value that is
-/// constant for the container's whole life. A job's thread is; a foreman's is
-/// not, because one long-lived container answers a different thread every
-/// turn. `docs/conventions.md` §2 anticipated this in the vocabulary before
-/// the code needed it: delivery is "a variable for one, a file at an expected
-/// path for another".
-const THREAD_PATH: &str = "/tmp/stageman-thread";
-
-/// Puts the thread a container should speak in where it will read it.
-///
-/// Copied in while the container is stopped, which is every moment between
-/// turns. Measured on both runtimes: copying into a stopped container works,
-/// overwrites an earlier value, and leaves the writable layer — and therefore
-/// the agent's session — untouched.
-///
-/// Absent thread, absent file: nothing is copied, and the tool speaks at the
-/// root of the channel. That is what makes the absence meaningful rather than
-/// a default.
-///
-/// Skipped by mutation testing, and the reason is worth stating rather than
-/// assumed: it is covered by a container test, and container tests are
-/// `#[ignore]` so that `just check` needs no built image — which means the
-/// gate cannot run them and a mutant cannot be killed by them. The decision it
-/// contains is the early return on an absent thread, and that is asserted by
-/// the tool's own behaviour with no file present.
-///
-/// # Errors
-///
-/// Fails if the thread cannot be written or the runtime refuses the copy.
-#[mutants::skip]
-async fn place_thread(
-    runtime: &ContainerRuntime,
-    name: &str,
-    thread: Option<&Thread>,
-) -> Result<(), AgentError> {
-    let Some(thread) = thread else {
-        return Ok(());
-    };
-    place(runtime, name, THREAD_PATH, &thread.id).await
-}
-
-/// Copies one short value into a stopped container.
-#[mutants::skip]
-async fn place(
-    runtime: &ContainerRuntime,
-    name: &str,
-    path: &str,
-    value: &str,
-) -> Result<(), AgentError> {
-    // Neither of the values placed this way is a credential — a thread
-    // identifier and an address — so a file under the system's temporary
-    // directory is the right place to stage one, unlike anything in
-    // `variables`, which never touches a filesystem at all.
-    let staged = std::env::temp_dir().join(format!("stageman-place-{name}"));
-    std::fs::write(&staged, value).map_err(|source| AgentError::Container {
-        status: "writing what a container reads".to_owned(),
-        message: source.to_string(),
-    })?;
-
-    let copied = tokio::process::Command::new(runtime.path())
-        .args([
-            "cp".as_ref(),
-            staged.as_os_str(),
-            format!("{name}:{path}").as_ref(),
-        ])
-        .kill_on_drop(true)
-        .output()
-        .await;
-    let removed = std::fs::remove_file(&staged);
-    drop(removed);
-
-    let copied = copied.map_err(|source| AgentError::Container {
-        status: "copying the thread".to_owned(),
-        message: source.to_string(),
-    })?;
-    if copied.status.success() {
-        return Ok(());
-    }
-    Err(AgentError::Container {
-        status: copied.status.to_string(),
-        message: String::from_utf8_lossy(&copied.stderr).trim().to_owned(),
-    })
-}
-
 /// The label every container this project starts carries.
 ///
 /// How a container that outlives the process which started it is found again.
@@ -915,7 +827,6 @@ pub async fn begin(
         });
     }
 
-    place_thread(runtime, name, handout.thread()).await?;
     let container = spawn(runtime, &started_arguments(name), &delivering)?;
     converse(container, Opening::Fresh, tools, question).await
 }
@@ -955,15 +866,15 @@ fn started_arguments(name: &str) -> Vec<String> {
 pub async fn resume(
     runtime: &ContainerRuntime,
     name: &str,
-    thread: Option<&Thread>,
     tools: Option<&Tools>,
     question: &str,
 ) -> Result<Answer, AgentError> {
     settle(runtime, name).await?;
-    // Before starting, because a stopped container is the only time this can
-    // be written — and it is why a foreman can answer a different thread every
-    // turn from one container whose environment never changes.
-    place_thread(runtime, name, thread).await?;
+    // Nothing is written into the container before it starts any more. The
+    // thread this turn belongs in travels on `tools`, which is the whole of
+    // why a container can be told a different one every turn without its
+    // environment changing — see
+    // `docs/decisions/0034-tools-are-served-not-shipped.md`.
     let container = spawn(runtime, &started_arguments(name), &[])?;
     converse(container, Opening::Resumed, tools, question).await
 }
@@ -1512,238 +1423,6 @@ mod tests {
         );
     }
 
-    /// The tool in the image reads exactly what this crate delivers.
-    ///
-    /// **The only test that closes this loop.** Two contracts are chosen twice
-    /// — the variable names, and the path the thread is written to — and only
-    /// one side of each is Rust. A typo on either produces a job that is told
-    /// it can speak and finds nothing, with every unit test on both sides
-    /// still passing.
-    ///
-    /// Created, copied into, then started, which is the real path a foreman
-    /// takes rather than an approximation of it. The network is off, so this
-    /// reaches the *request* and never Slack — getting that far means both the
-    /// variables and the file were found, which is the whole of what is under
-    /// test. Actually posting needs a credential the gate cannot have.
-    #[tokio::test]
-    #[ignore = "needs a container runtime and a built image; run `just image-handshake`"]
-    async fn the_tool_in_the_image_reads_what_this_crate_delivers() {
-        let runtime = located_runtime();
-        let name = "stageman-delivery-probe";
-        drop(discard(&runtime, name).await);
-
-        let (state, project) = instance_with_a_channel("sk-ant-oat01-xyz");
-        let handout = Handout::for_job(&state, Agent::Claude, project)
-            .expect("a watched project")
-            .speaking_in(stageman_core::Thread {
-                channel: Channel::Slack,
-                id: "1728312345.678901".to_owned(),
-            });
-        let delivered = variables(&handout);
-        assert_eq!(delivered.len(), 4, "no thread among them: {delivered:?}");
-
-        let mut command = tokio::process::Command::new(runtime.path());
-        command.args(["create", "--name", name, "--network", "none"]);
-        for (named, value) in &delivered {
-            command.arg("--env").arg(named);
-            command.env(named, value.expose());
-        }
-        command
-            .args(["--entrypoint", "stageman-say"])
-            .arg(image(Agent::Claude))
-            .arg("does this reach anybody?");
-        let created = command.output().await.expect("the runtime creates it");
-        assert!(created.status.success(), "{created:?}");
-
-        place_thread(&runtime, name, handout.thread())
-            .await
-            .expect("the thread can be placed");
-
-        let ran = tokio::process::Command::new(runtime.path())
-            .args(["start", "--attach", name])
-            .output()
-            .await
-            .expect("the runtime starts it");
-        let said = String::from_utf8_lossy(&ran.stderr);
-
-        assert!(
-            !said.contains("No channel is bound"),
-            "the tool did not find what this crate delivered: {said}"
-        );
-        assert!(
-            said.contains("could not be reached"),
-            "expected a blocked request, got: {said}"
-        );
-        assert!(!said.contains("xoxb-not-a-real-token"), "{said}");
-
-        drop(discard(&runtime, name).await);
-    }
-
-    /// The thread can change between turns of one container.
-    ///
-    /// **The test that would have caught what nearly shipped.** The thread
-    /// used to travel as an environment variable, which a container fixes at
-    /// creation — so a foreman answering its second message would have
-    /// answered it in the first message's thread, silently and for ever.
-    ///
-    /// Measured rather than reasoned: copying into a stopped container works
-    /// on both runtimes, overwrites an earlier value, and leaves the writable
-    /// layer — and so the agent's session — untouched.
-    #[tokio::test]
-    #[ignore = "needs a container runtime and a built image; run `just image-handshake`"]
-    async fn a_second_turn_can_speak_in_a_different_thread() {
-        let runtime = located_runtime();
-        let name = "stageman-thread-probe";
-        drop(discard(&runtime, name).await);
-
-        let created = tokio::process::Command::new(runtime.path())
-            .args([
-                "create",
-                "--name",
-                name,
-                "--interactive",
-                "--entrypoint",
-                "sh",
-                image(Agent::Claude),
-                "-c",
-                "cat /tmp/stageman-thread",
-            ])
-            .output()
-            .await
-            .expect("the runtime creates a container");
-        assert!(created.status.success(), "{created:?}");
-
-        let first = stageman_core::Thread {
-            channel: Channel::Slack,
-            id: "1111111111.111111".to_owned(),
-        };
-        place_thread(&runtime, name, Some(&first))
-            .await
-            .expect("a thread can be placed before the first start");
-        let said = tokio::process::Command::new(runtime.path())
-            .args(["start", "--attach", name])
-            .output()
-            .await
-            .expect("the runtime starts it");
-        assert_eq!(String::from_utf8_lossy(&said.stdout).trim(), first.id);
-
-        // It has now run and stopped, which is every moment between a
-        // foreman's turns.
-        let second = stageman_core::Thread {
-            channel: Channel::Slack,
-            id: "2222222222.222222".to_owned(),
-        };
-        place_thread(&runtime, name, Some(&second))
-            .await
-            .expect("and again once it has stopped");
-        let said = tokio::process::Command::new(runtime.path())
-            .args(["start", "--attach", name])
-            .output()
-            .await
-            .expect("the runtime starts it again");
-        assert_eq!(
-            String::from_utf8_lossy(&said.stdout).trim(),
-            second.id,
-            "the same container has to be able to answer a different thread"
-        );
-
-        drop(discard(&runtime, name).await);
-    }
-
-    /// Asking a tool for help is answered, never published.
-    ///
-    /// **Found by watching an agent use it.** Agents reach for `--help` before
-    /// using an unfamiliar command, and `stageman-say` took its one argument
-    /// as the message — so "--help" was posted to a real channel. Nothing
-    /// failed; the tool did exactly what it was told.
-    ///
-    /// One program now: `docs/decisions/0034-tools-are-served-not-shipped.md`
-    /// removed the one that asked for work, because a served tool takes typed
-    /// arguments and has nothing to ask `--help` about.
-    #[tokio::test]
-    #[ignore = "needs a container runtime and a built image; run `just image-handshake`"]
-    async fn a_tool_asked_for_help_answers_rather_than_acting() {
-        let runtime = located_runtime();
-
-        for tool in ["stageman-say"] {
-            let helped = tokio::process::Command::new(runtime.path())
-                .args([
-                    "run",
-                    "--rm",
-                    "--network",
-                    "none",
-                    "--entrypoint",
-                    tool,
-                    image(Agent::Claude),
-                    "--help",
-                ])
-                .output()
-                .await
-                .expect("the runtime runs a container");
-
-            assert!(helped.status.success(), "{tool} --help: {helped:?}");
-            let told = String::from_utf8_lossy(&helped.stdout);
-            assert!(told.contains(&format!("usage: {tool}")), "{told}");
-
-            // And anything else that looks like an option is refused rather
-            // than taken as content — a mistyped flag must not become a
-            // message on a channel or the reason for a job.
-            let refused = tokio::process::Command::new(runtime.path())
-                .args([
-                    "run",
-                    "--rm",
-                    "--network",
-                    "none",
-                    "--entrypoint",
-                    tool,
-                    image(Agent::Claude),
-                    "--nonsense",
-                ])
-                .output()
-                .await
-                .expect("the runtime runs a container");
-
-            assert_eq!(refused.status.code(), Some(2), "{tool}: {refused:?}");
-            assert!(
-                String::from_utf8_lossy(&refused.stderr).contains("is not an option"),
-                "{refused:?}"
-            );
-        }
-    }
-
-    /// A project with nothing bound gets a tool that says so and stops.
-    ///
-    /// The other half of the pair, and the one an operator meets: the agent is
-    /// not told about the tool at all in that case, so anything reaching it is
-    /// an agent that found it anyway — and the answer has to be a refusal
-    /// rather than a crash.
-    #[tokio::test]
-    #[ignore = "needs a container runtime and a built image; run `just image-handshake`"]
-    async fn the_tool_refuses_cleanly_when_no_channel_is_bound() {
-        let runtime = located_runtime();
-
-        let output = tokio::process::Command::new(runtime.path())
-            .args([
-                "run",
-                "--rm",
-                "--network",
-                "none",
-                "--entrypoint",
-                "stageman-say",
-                image(Agent::Claude),
-                "is anybody there?",
-            ])
-            .output()
-            .await
-            .expect("the runtime runs a container");
-
-        assert_eq!(output.status.code(), Some(3), "{output:?}");
-        assert!(
-            String::from_utf8_lossy(&output.stderr).contains("No channel is bound"),
-            "{output:?}"
-        );
-    }
-
     /// An image nobody ever built must not read as an agent that cannot speak.
     ///
     /// Both fail as silence on the connection, and the error an operator gets
@@ -2205,7 +1884,6 @@ mod tests {
                 &runtime,
                 name,
                 None,
-                None,
                 "What was the word I asked you to remember? Reply with it alone.",
             )
             .await
@@ -2246,7 +1924,6 @@ mod tests {
             let picked_up = resume(
                 &runtime,
                 name,
-                None,
                 None,
                 "You were interrupted. In one short line, what were you doing?",
             )
