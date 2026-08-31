@@ -1,15 +1,20 @@
 //! Where a foreman asks this instance for something.
 //!
-//! A listener of its own, separate from the dashboard's, serving exactly one
-//! route. Separate because of where it has to bind: the dashboard stays on
-//! loopback, and this cannot — see
-//! `docs/decisions/0033-the-job-endpoint-listens-beyond-loopback.md`.
+//! A listener of its own, separate from the dashboard's. Separate because of
+//! where it has to bind: the dashboard stays on loopback, and this cannot —
+//! see `docs/decisions/0033-the-job-endpoint-listens-beyond-loopback.md`.
 //!
-//! **Three things stand between a stranger and creating jobs**, and only the
+//! **Two things stand between a stranger and creating jobs**, and only the
 //! first is a real barrier. The warrant, which nothing but a foreman's
-//! container is given. The peer check below, which refuses anything that did
-//! not come from this machine or its containers. And the fact that one route
-//! is served here and nothing else.
+//! container is given. And the peer check below, which refuses anything that
+//! did not come from this machine or its containers.
+//!
+//! It used to be three: this listener served one route and nothing else.
+//! `docs/decisions/0034-tools-are-served-not-shipped.md` puts the tools
+//! endpoint here too, which is a wider surface behind the same two barriers —
+//! that record says why the trade is worth it, and `tooling` is the other
+//! route. This one is on its way out with the program that calls it; the
+//! barriers are shared rather than duplicated in the meantime.
 
 // Through the framework's re-export rather than a direct dependency, for the
 // reason serving does the same: the version that matters is whichever one the
@@ -243,7 +248,7 @@ pub struct Started {
     job: String,
 }
 
-/// Serves the one route a foreman may reach.
+/// Serves what a foreman may reach: the job route, and the tools endpoint.
 ///
 /// **Bound to every interface**, which is not a preference: it is the only
 /// address a container can reach on every platform, measured on both runtimes.
@@ -260,7 +265,7 @@ pub async fn bind() -> std::io::Result<tokio::net::TcpListener> {
     tokio::net::TcpListener::bind(("0.0.0.0", *PORT)).await
 }
 
-/// Serves the one route a foreman may reach, on a listener already bound.
+/// Serves what a foreman may reach, on a listener already bound.
 ///
 /// Bound separately and earlier, so that failing to bind is *reported* rather
 /// than logged into a scrolling terminal. A port already taken is the ordinary
@@ -276,6 +281,7 @@ pub async fn serve(
 
     let router = axum::Router::new()
         .route("/job", post(asked))
+        .route("/mcp", crate::tooling::served())
         .layer(axum::Extension(store));
 
     axum::serve(
@@ -359,7 +365,7 @@ async fn asked(
 /// runs but this project does not allow — which is a refusal rather than a
 /// substitution, because silently running a different agent than the one asked
 /// for is a wrong answer that looks like a right one.
-fn named_agent(
+pub fn named_agent(
     state: &stageman_core::State,
     project: stageman_core::ProjectId,
     named: &str,
@@ -377,7 +383,7 @@ fn named_agent(
 ///
 /// Said back with a refusal, so a foreman that guessed wrong is told what it
 /// could have said rather than only that it was wrong.
-fn allowed_agents(
+pub fn allowed_agents(
     state: &stageman_core::State,
     project: stageman_core::ProjectId,
 ) -> Vec<&'static str> {

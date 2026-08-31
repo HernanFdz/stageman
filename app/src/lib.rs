@@ -23,6 +23,8 @@ mod instance;
 mod listening;
 #[cfg(feature = "server")]
 mod serving;
+#[cfg(feature = "server")]
+pub(crate) mod tooling;
 
 pub mod dashboard;
 pub mod ui;
