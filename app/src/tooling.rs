@@ -791,6 +791,57 @@ mod tests {
         );
     }
 
+    /// Minting forgets that speaker's last credential and nobody else's.
+    ///
+    /// The claim `Sessions` makes about being bounded by construction, which
+    /// was prose until mutation testing pointed out that inverting either
+    /// comparison — or swapping the `||` for an `&&` — changed nothing any
+    /// test could see. Both failure directions matter: keeping a superseded
+    /// credential alive leaves a container able to speak after its turn, and
+    /// forgetting too much silences a job the moment its foreman takes another
+    /// turn.
+    #[test]
+    fn minting_forgets_that_speaker_and_leaves_every_other() {
+        let sessions = Sessions::default();
+        let a_job = Speaker::Job(stageman_core::JobId::from_uuid(Uuid::from_u128(7)));
+        let elsewhere = ProjectId::from_uuid(Uuid::from_u128(2));
+
+        // The same speaker again: what it held before stops meaning anything.
+        let stale = sessions.mint(a_foreman());
+        let current = sessions.mint(a_foreman());
+        assert!(
+            sessions.holder(stale.expose()).is_none(),
+            "a superseded credential still worked, so a container could speak after its turn",
+        );
+        assert!(sessions.holder(current.expose()).is_some());
+
+        // A different speaker of the same project is untouched.
+        let job = sessions.mint(Warranted {
+            project: a_project(),
+            speaker: a_job,
+            thread: None,
+        });
+        let foreman = sessions.mint(a_foreman());
+        assert!(
+            sessions.holder(job.expose()).is_some(),
+            "a job was silenced by its foreman taking another turn",
+        );
+        assert!(sessions.holder(foreman.expose()).is_some());
+
+        // And so is the same speaker of a different project.
+        let theirs = sessions.mint(Warranted {
+            project: elsewhere,
+            speaker: Speaker::Foreman,
+            thread: None,
+        });
+        let mine = sessions.mint(a_foreman());
+        assert!(
+            sessions.holder(theirs.expose()).is_some(),
+            "one project's foreman invalidated another's",
+        );
+        assert!(sessions.holder(mine.expose()).is_some());
+    }
+
     /// A job may speak and may not start jobs, which is 0032's property.
     ///
     /// It used to hold by construction: a job's container was never given a

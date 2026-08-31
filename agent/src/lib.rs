@@ -1001,9 +1001,16 @@ fn spawn(
 
 /// Makes a session, or picks up the one this container already holds.
 ///
+/// Skipped by mutation testing, and the reason is worth stating rather than
+/// assumed: every path through this needs a container answering the protocol,
+/// so it is covered only by tests the gate cannot run. What it decides that
+/// *can* be checked cheaply — the declaration a session carries — is
+/// `declaration`, which is pure and has its own test.
+///
 /// `None` means there was nothing to pick up, which is a container stopped
 /// before its agent said anything: sessions are written when something is
 /// said, not when one is created.
+#[mutants::skip]
 async fn open_session(
     connection: &ConnectionTo<AgentRole>,
     opening: Opening,

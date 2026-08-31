@@ -1403,6 +1403,63 @@ mod tests {
         assert!(reopened.read().projects.contains_key(&id));
     }
 
+    /// A job this instance cannot place is given no tools at all.
+    ///
+    /// The refusal that stands where `unwrap_or_default` nearly went. A
+    /// credential naming the wrong project would let one project's job speak
+    /// on another's channel — a silent misattribution rather than a visible
+    /// failure — so the absence has to travel rather than be filled in.
+    /// Mutation testing found nothing checking it, which is exactly the shape
+    /// `.quality/gate-reference.md` warns a substituted default takes.
+    #[test]
+    fn a_job_this_instance_cannot_place_is_given_no_tools() {
+        use stageman_core::{Progress, Timestamp};
+
+        let directory = TempDir::new().expect("a temporary directory");
+        let mut state = configured();
+        let project = ProjectId::from_uuid(Uuid::from_u128(3));
+        let job = JobId::from_uuid(Uuid::from_u128(7));
+        state.projects.insert(
+            project,
+            stageman_core::Project {
+                name: "aviary".to_owned(),
+                repository: "https://example.invalid/aviary".to_owned(),
+                foreman_agent: Agent::Claude,
+                job_agents: std::collections::BTreeSet::from([Agent::Claude]),
+                credentials: std::collections::BTreeMap::new(),
+                channels: std::collections::BTreeMap::new(),
+                jobs: std::collections::BTreeMap::new(),
+                attending: stageman_core::Attending::default(),
+            },
+        );
+        state
+            .projects
+            .get_mut(&project)
+            .expect("the project")
+            .jobs
+            .insert(
+                job,
+                stageman_core::Job {
+                    agent: Agent::Claude,
+                    reason: "because".to_owned(),
+                    kickoff: "do the thing".to_owned(),
+                    created_at: Timestamp::now(),
+                    progress: Progress::Idle,
+                    thread: None,
+                },
+            );
+        let store = Store::create(snapshot_path(&directory), key(), state).expect("it can write");
+
+        assert!(
+            super::tools_for(&store, job, None).is_some(),
+            "a job this instance holds must be given the tools it speaks with",
+        );
+        assert!(
+            super::tools_for(&store, JobId::from_uuid(Uuid::from_u128(99)), None).is_none(),
+            "a job this instance cannot place must be given none, not somebody else's",
+        );
+    }
+
     #[test]
     fn reading_does_not_rewrite_the_snapshot() {
         // Every write re-seals with fresh nonces, so an unnecessary write is
