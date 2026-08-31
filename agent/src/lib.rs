@@ -351,14 +351,32 @@ pub async fn build(
         .await
         .map_err(AgentError::Exit)?;
 
-    if !finished.status.success() {
-        return Err(AgentError::Build {
-            message: last_words(&finished.stderr),
-        });
+    outcome(
+        finished.status.success(),
+        &finished.stdout,
+        &finished.stderr,
+    )
+}
+
+/// What a finished build means.
+///
+/// Split from [`build`] so that both outcomes can be asserted without a
+/// container runtime, which puts it on the same seam
+/// [`handshake_arguments`] is on the other side of: running a process is the
+/// part a test cannot afford, and deciding what its result meant is the part
+/// worth checking.
+///
+/// Mutation testing is what found this. With the decision inline, a build that
+/// failed could have been reported as an image — and the reverse — with every
+/// test still green, because the only cases exercising it were `#[ignore]`d.
+fn outcome(succeeded: bool, answered: &[u8], complained: &[u8]) -> Result<Image, AgentError> {
+    if succeeded {
+        Ok(Image(String::from_utf8_lossy(answered).trim().to_owned()))
+    } else {
+        Err(AgentError::Build {
+            message: last_words(complained),
+        })
     }
-    Ok(Image(
-        String::from_utf8_lossy(&finished.stdout).trim().to_owned(),
-    ))
 }
 
 /// The end of what a failed build said, as one line.
@@ -1408,8 +1426,18 @@ mod tests {
     /// runtime to assert something pure. This is the seam that keeps the
     /// cheap tests cheap.
     fn built() -> Image {
-        Image("sha256:0123456789abcdef".to_owned())
+        Image(BUILT.to_owned())
     }
+
+    /// The same identifier as a literal, which is what the assertions compare
+    /// against.
+    ///
+    /// Never `built().as_argument()`, and that is the whole point of it
+    /// existing: an assertion that reads the value back through the method
+    /// under test compares a mutation to itself and passes. Mutation testing
+    /// found exactly that — [`Image::as_argument`] could return an empty
+    /// string with every argument test still green.
+    const BUILT: &str = "sha256:0123456789abcdef";
 
     /// Every stage this crate asks for exists in the recipe it asks of.
     ///
@@ -1476,7 +1504,31 @@ mod tests {
     fn a_handshake_runs_the_image_that_was_built() {
         let image = built();
         let arguments = handshake_arguments(&image);
-        assert_eq!(arguments.last(), Some(&image.as_argument()));
+        assert_eq!(arguments.last(), Some(&BUILT));
+    }
+
+    /// A build that worked is the image it named, and nothing else.
+    ///
+    /// Trimmed, because both runtimes end that line and an identifier with a
+    /// newline in it is not one a container can be started from.
+    #[test]
+    fn a_build_that_succeeded_is_the_image_it_named() {
+        let image =
+            outcome(true, b"sha256:abcdef123456\n", b"").expect("a build that worked is an image");
+        assert_eq!(image.as_argument(), "sha256:abcdef123456");
+    }
+
+    /// A build that failed is not an image, however much it printed.
+    ///
+    /// The other half of the one above, and the pair is the point: either on
+    /// its own would still pass with the test of success inverted.
+    #[test]
+    fn a_build_that_failed_is_not_an_image() {
+        let failure = outcome(false, b"sha256:notthis\n", b"#4 ERROR: exit code 1\n");
+        let Err(AgentError::Build { message }) = failure else {
+            panic!("expected a build failure, got {failure:?}");
+        };
+        assert!(message.contains("ERROR: exit code 1"), "{message}");
     }
 
     /// A build that failed says the end of what it said, not the beginning.
@@ -1971,10 +2023,7 @@ mod tests {
         let arguments = session_arguments(&built(), &variables(&handout));
 
         assert!(!arguments.iter().any(|a| a == "none"), "{arguments:?}");
-        assert_eq!(
-            arguments.last().map(String::as_str),
-            Some(built().as_argument())
-        );
+        assert_eq!(arguments.last().map(String::as_str), Some(BUILT));
     }
 
     /// Tests that spend real money, kept in their own module so a filter can
@@ -2002,7 +2051,7 @@ mod tests {
         );
         assert_eq!(
             arguments.last().map(String::as_str),
-            Some(built().as_argument()),
+            Some(BUILT),
             "the image has to stay last"
         );
         // The whole difference between a container that survives being killed

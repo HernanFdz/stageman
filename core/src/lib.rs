@@ -2388,6 +2388,27 @@ mod tests {
         assert!(!format!("{:?}", key()).contains('7'));
     }
 
+    /// Writing a key down and reading it back is the identity, and the text is
+    /// the one everybody else already writes.
+    ///
+    /// The literal rather than a round-trip alone, which is the whole reason
+    /// this encoder lives on the type: a round-trip would pass just as
+    /// happily against a different alphabet or padding, as long as both halves
+    /// agreed. What must not change is the *text*, because the environment
+    /// variable and the generated file hold the same thing and are read by the
+    /// same parser — see
+    /// `docs/decisions/0037-the-instance-key-is-generated-on-first-run.md`.
+    #[test]
+    fn a_key_written_down_is_the_key_that_comes_back() {
+        let written = key().to_base64();
+
+        assert_eq!(written, "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=");
+        assert_eq!(
+            Key::from_base64(&written).expect("what this wrote, it can read"),
+            key()
+        );
+    }
+
     #[test]
     fn every_agent_says_what_it_is_good_for() {
         // The foreman picks an agent by reading this, so an empty one is

@@ -655,17 +655,42 @@ fn instance_key() -> Result<(Key, KeySource), StartupError> {
     }
 
     let path = configuration_directory()?.join(KEY_FILE);
-    match fs::read_to_string(&path) {
-        Ok(kept) => Ok((
-            Key::from_base64(kept.trim()).map_err(StartupError::Key)?,
+    if let Some(text) = kept(fs::read_to_string(&path), &path)? {
+        return Ok((
+            Key::from_base64(text.trim()).map_err(StartupError::Key)?,
             KeySource::Kept(path),
-        )),
-        Err(why) if why.kind() == io::ErrorKind::NotFound => {
-            let key = minted()?;
-            write_key(&path, &key)?;
-            Ok((key, KeySource::Generated(path)))
-        }
-        Err(source) => Err(StartupError::KeyFile { path, source }),
+        ));
+    }
+    let key = minted()?;
+    write_key(&path, &key)?;
+    Ok((key, KeySource::Generated(path)))
+}
+
+/// What a read of the key file meant: the key, or that there is not one yet.
+///
+/// Deciding, split from reading, for the reason [`missing`] above is a named
+/// function rather than a comparison at its one call site — except that this
+/// one earns it twice over. The distinction is the whole of what stands
+/// between "this is a first run" and "your key file cannot be read", and those
+/// want opposite answers: generating over the second would report that the
+/// file already exists, which is true, useless, and points away from the
+/// permission that actually failed.
+///
+/// Taking the read rather than performing it is what makes that assertable. A
+/// test can hand this a permission failure; a test that had to *produce* one
+/// on a real filesystem would depend on not being run as root.
+///
+/// Mutation testing found this, and then found it again: naming the comparison
+/// left the guard that used it still uncovered, because nothing exercised the
+/// site. Only moving the decision somewhere a test could reach it closed both.
+fn kept(read: Result<String, io::Error>, path: &Path) -> Result<Option<String>, StartupError> {
+    match read {
+        Ok(text) => Ok(Some(text)),
+        Err(why) if why.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(StartupError::KeyFile {
+            path: path.to_owned(),
+            source,
+        }),
     }
 }
 
@@ -794,6 +819,40 @@ mod tests {
     use super::{RUNTIME, missing};
     use stageman_agent::ContainerRuntime;
     use std::path::PathBuf;
+
+    /// Only a key file that is not there means there is no key yet.
+    ///
+    /// All three branches, because the failure this guards is one-sided: a
+    /// decision that called every failure a first run would silently mint a
+    /// second key over an unreadable one, and one that called none of them a
+    /// first run would make a first run impossible.
+    #[test]
+    fn only_a_missing_key_file_means_there_is_no_key_yet() {
+        use super::{StartupError, kept};
+        use std::io::{Error, ErrorKind};
+
+        let path = PathBuf::from("/nowhere/stageman/key");
+
+        assert_eq!(
+            kept(Ok("a key".to_owned()), &path).expect("a key that read is not a failure"),
+            Some("a key".to_owned()),
+        );
+        assert_eq!(
+            kept(Err(Error::from(ErrorKind::NotFound)), &path)
+                .expect("a first run is not a failure"),
+            None,
+            "a key file that is not there is a first run",
+        );
+        for refused in [ErrorKind::PermissionDenied, ErrorKind::IsADirectory] {
+            assert!(
+                matches!(
+                    kept(Err(Error::from(refused)), &path),
+                    Err(StartupError::KeyFile { .. })
+                ),
+                "{refused:?} must not read as a first run — it would mint a second key",
+            );
+        }
+    }
 
     /// The sentinel means what the one function that reads it says it means.
     ///
