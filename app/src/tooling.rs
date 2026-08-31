@@ -62,6 +62,12 @@ pub enum Speaker {
 
 /// What a presented credential entitles its bearer to.
 ///
+/// Named for what `docs/decisions/0032-a-foreman-asks-the-instance-by-warrant.md`
+/// called it, because that is what it is: a warrant, scoped. Deliberately not
+/// `Speaking`, which this codebase already uses for the speaking half of a
+/// channel binding — both are in scope here the moment anything says
+/// something, and `docs/conventions.md` §2 is about exactly this near-miss.
+///
 /// **A session, not a project.** The warrant it replaces was per project and
 /// therefore constant across turns, which is fine for "may this start jobs?"
 /// and useless for "which thread is this answering?" — a job's thread is the
@@ -69,7 +75,7 @@ pub enum Speaker {
 /// per session lets the answer travel with the request instead of being
 /// written into a container that then cannot be told again.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Speaking {
+pub struct Warranted {
     /// Which project's work this is.
     pub project: ProjectId,
     /// Who is doing it.
@@ -94,7 +100,7 @@ pub struct Speaking {
 /// speaker held before, so the map holds one entry per live session rather
 /// than one per turn ever taken.
 #[derive(Debug, Default)]
-pub struct Sessions(parking_lot::Mutex<std::collections::HashMap<String, Speaking>>);
+pub struct Sessions(parking_lot::Mutex<std::collections::HashMap<String, Warranted>>);
 
 impl Sessions {
     /// Mints a credential for one session, forgetting that speaker's last.
@@ -104,7 +110,7 @@ impl Sessions {
     /// from here" rather than two — the same argument
     /// `docs/decisions/0032-a-foreman-asks-the-instance-by-warrant.md` made for
     /// the warrant this replaces.
-    pub fn mint(&self, speaking: Speaking) -> Secret {
+    pub fn mint(&self, warranted: Warranted) -> Secret {
         let credential = format!(
             "{}{}",
             uuid::Uuid::new_v4().simple(),
@@ -112,16 +118,16 @@ impl Sessions {
         );
         let mut held = self.0.lock();
         held.retain(|_, known| {
-            known.project != speaking.project || known.speaker != speaking.speaker
+            known.project != warranted.project || known.speaker != warranted.speaker
         });
-        held.insert(credential.clone(), speaking);
+        held.insert(credential.clone(), warranted);
         drop(held);
         Secret::new(credential)
     }
 
     /// What a presented credential authorises, if this instance minted it.
     #[must_use]
-    pub fn holder(&self, presented: &str) -> Option<Speaking> {
+    pub fn holder(&self, presented: &str) -> Option<Warranted> {
         self.0.lock().get(presented).cloned()
     }
 }
@@ -156,11 +162,33 @@ pub struct Tool {
 /// schema no value can satisfy reads to a model as a broken tool, where a
 /// plain string reaches the refusal below and says why.
 #[must_use]
-pub fn tools(speaking: &Speaking, agents: &[&str]) -> Vec<Tool> {
-    if speaking.speaker != Speaker::Foreman {
-        // A job may not start jobs. Under the warrant this was the absence of
-        // a file; it is now this line, which is why it has a test.
-        return Vec::new();
+pub fn tools(warranted: &Warranted, agents: &[&str]) -> Vec<Tool> {
+    // Offered to everything this instance runs, because speaking is the one
+    // thing a foreman and a job both do — and the only thing a job does
+    // outside its own container at all.
+    let say = Tool {
+        name: "say",
+        description: "Say something to the people on this project's channel. \
+                      This is the only way anything you write reaches a person: \
+                      ordinary output is seen by nobody."
+            .to_owned(),
+        schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "What to say, in your own words.",
+                },
+            },
+            "required": ["message"],
+        }),
+    };
+
+    if warranted.speaker != Speaker::Foreman {
+        // A job may speak and may not start jobs. Under the warrant that was
+        // the absence of a file; it is now this line, which is why it has a
+        // test.
+        return vec![say];
     }
 
     let mut agent = serde_json::json!({
@@ -173,33 +201,36 @@ pub fn tools(speaking: &Speaking, agents: &[&str]) -> Vec<Tool> {
         fields.insert("enum".to_owned(), serde_json::json!(agents));
     }
 
-    vec![Tool {
-        name: "start_job",
-        description: "Start a job on this project. A job is one agent working in an \
+    vec![
+        say,
+        Tool {
+            name: "start_job",
+            description: "Start a job on this project. A job is one agent working in an \
                       isolated container of its own, from kickoff to completion. It \
                       happens once and is not retried."
-            .to_owned(),
-        schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "reason": {
-                    "type": "string",
-                    "description": "Why this job should exist, in your own words. \
-                                    A person reads this on the dashboard to \
-                                    understand why you decided to start it.",
+                .to_owned(),
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "reason": {
+                        "type": "string",
+                        "description": "Why this job should exist, in your own words. \
+                                        A person reads this on the dashboard to \
+                                        understand why you decided to start it.",
+                    },
+                    "instructions": {
+                        "type": "string",
+                        "description": "What the job's agent is to do. It begins from \
+                                        this and never writes its own, so say enough \
+                                        that somebody arriving with no other context \
+                                        could act on it.",
+                    },
+                    "agent": agent,
                 },
-                "instructions": {
-                    "type": "string",
-                    "description": "What the job's agent is to do. It begins from \
-                                    this and never writes its own, so say enough \
-                                    that somebody arriving with no other context \
-                                    could act on it.",
-                },
-                "agent": agent,
-            },
-            "required": ["reason", "instructions", "agent"],
-        }),
-    }]
+                "required": ["reason", "instructions", "agent"],
+            }),
+        },
+    ]
 }
 
 /// What one request on this endpoint means.
@@ -216,6 +247,8 @@ pub enum Call {
     Listing,
     /// Asking to start a job.
     Starting(Starting),
+    /// Asking to say something to a person.
+    Saying(String),
     /// A tool this instance does not serve, by name.
     NoSuchTool(String),
     /// Something needing no answer at all.
@@ -271,9 +304,6 @@ fn calling(params: &serde_json::Value) -> Call {
         .get("name")
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
-    if name != "start_job" {
-        return Call::NoSuchTool(name.to_owned());
-    }
     let arguments = params.get("arguments");
     let field = |key: &str| {
         arguments
@@ -282,6 +312,12 @@ fn calling(params: &serde_json::Value) -> Call {
             .unwrap_or_default()
             .to_owned()
     };
+    if name == "say" {
+        return Call::Saying(field("message"));
+    }
+    if name != "start_job" {
+        return Call::NoSuchTool(name.to_owned());
+    }
     Call::Starting(Starting {
         reason: field("reason"),
         instructions: field("instructions"),
@@ -375,8 +411,8 @@ async fn called(
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
 
-    let speaking = presented(&headers).and_then(|credential| sessions.holder(credential));
-    let Some(speaking) = speaking else {
+    let warranted = presented(&headers).and_then(|credential| sessions.holder(credential));
+    let Some(warranted) = warranted else {
         // Deliberately the same answer as a bad peer, and deliberately without
         // detail: anything distinguishing "no such credential" from "not
         // allowed" is something to guess against.
@@ -398,17 +434,81 @@ async fn called(
             }),
         ),
         Call::Listing => {
-            let agents = allowed_agents(&store.read(), speaking.project);
+            let agents = allowed_agents(&store.read(), warranted.project);
             answered(
                 incoming.id,
-                serde_json::json!({"tools": tools(&speaking, &agents)}),
+                serde_json::json!({"tools": tools(&warranted, &agents)}),
             )
         }
         Call::NoSuchTool(named) => failed(
             incoming.id,
             &format!("this instance serves no tool called {named:?}"),
         ),
-        Call::Starting(starting) => starting_a_job(&store, &speaking, &starting, incoming.id),
+        Call::Starting(starting) => starting_a_job(&store, &warranted, &starting, incoming.id),
+        Call::Saying(message) => saying(&store, &warranted, &message, incoming.id).await,
+    }
+}
+
+/// Says something on the channel, in whichever thread the caller belongs to.
+///
+/// **The thread comes from the credential, never from the caller.** That is
+/// the whole reason a credential is minted per session rather than per
+/// project: a job's thread is fixed for its life and a foreman's is different
+/// every turn, and an agent choosing its own would be an agent able to speak
+/// into somebody else's conversation.
+///
+/// A failure comes back as a tool result rather than a protocol error, and
+/// that matters more here than anywhere. The program this replaces checked the
+/// platform's own `ok` field because a refusal arrives as a success with a
+/// body saying otherwise — and the failure that produced was the worst kind:
+/// the agent believed it had spoken, stopped as it was told to, and nobody was
+/// ever told anything.
+#[mutants::skip]
+async fn saying(
+    store: &std::sync::Arc<crate::Store>,
+    warranted: &Warranted,
+    message: &str,
+    id: Option<serde_json::Value>,
+) -> axum::response::Response {
+    if message.trim().is_empty() {
+        return failed(id, "nothing was said, so nothing was posted");
+    }
+
+    let Some(thread) = warranted.thread.clone() else {
+        // Not a refusal of the agent so much as of this instance: a session
+        // declared with nowhere to speak should not have been offered a tool
+        // that speaks.
+        tracing::warn!(project = %warranted.project, "something spoke with no thread to speak in");
+        return failed(id, "there is no conversation to say this in");
+    };
+
+    let bound = {
+        let state = store.read();
+        let found = state
+            .projects
+            .get(&warranted.project)
+            .and_then(|watched| watched.channels.get(&thread.channel))
+            .map(stageman_core::ChannelConfig::speaking);
+        drop(state);
+        found
+    };
+    let Some(bound) = bound else {
+        tracing::warn!(project = %warranted.project, "no channel is bound to say this on");
+        return failed(
+            id,
+            "no channel is bound to this project, so there is nobody to say this to",
+        );
+    };
+
+    match crate::channel::say_in(&bound, &thread, message).await {
+        Ok(()) => succeeded(id, "said"),
+        Err(why) => {
+            // Said back verbatim rather than summarised: an explanation the
+            // agent inferred is one a person will act on, and it has no way to
+            // check it.
+            tracing::warn!(project = %warranted.project, %why, "saying it failed");
+            failed(id, &format!("it could not be said: {why}"))
+        }
     }
 }
 
@@ -422,17 +522,17 @@ async fn called(
 #[mutants::skip]
 fn starting_a_job(
     store: &std::sync::Arc<crate::Store>,
-    speaking: &Speaking,
+    warranted: &Warranted,
     starting: &Starting,
     id: Option<serde_json::Value>,
 ) -> axum::response::Response {
-    if speaking.speaker != Speaker::Foreman {
+    if warranted.speaker != Speaker::Foreman {
         // Refused rather than merely unlisted. A tool nobody was offered can
         // still be called by name, so the check that matters is this one.
-        tracing::warn!(project = %speaking.project, "a job asked to start a job");
+        tracing::warn!(project = %warranted.project, "a job asked to start a job");
         return failed(id, "this instance serves no tool called \"start_job\"");
     }
-    let project = speaking.project;
+    let project = warranted.project;
 
     let Some(agent) = named_agent(&store.read(), project, &starting.agent) else {
         let allowed = allowed_agents(&store.read(), project).join(", ");
@@ -556,7 +656,7 @@ pub fn allowed_agents(
 #[cfg(test)]
 mod tests {
     use super::{
-        Call, PROTOCOL, Sessions, Speaker, Speaking, Starting, allowed_agents, axum, decode,
+        Call, PROTOCOL, Sessions, Speaker, Starting, Warranted, allowed_agents, axum, decode,
         endpoint, named_agent, presented, tools,
     };
     use stageman_core::{ProjectId, Uuid};
@@ -566,8 +666,8 @@ mod tests {
     }
 
     /// A foreman of that project, answering nothing in particular.
-    fn a_foreman() -> Speaking {
-        Speaking {
+    fn a_foreman() -> Warranted {
+        Warranted {
             project: a_project(),
             speaker: Speaker::Foreman,
             thread: None,
@@ -639,9 +739,16 @@ mod tests {
         );
 
         assert_eq!(
-            decode("tools/call", &serde_json::json!({"name": "say"})),
-            Call::NoSuchTool("say".to_owned()),
-            "a tool this instance does not serve yet is named back",
+            decode(
+                "tools/call",
+                &serde_json::json!({"name": "say", "arguments": {"message": "it is done"}}),
+            ),
+            Call::Saying("it is done".to_owned()),
+        );
+        assert_eq!(
+            decode("tools/call", &serde_json::json!({"name": "publish"})),
+            Call::NoSuchTool("publish".to_owned()),
+            "a tool this instance does not serve is named back",
         );
         assert_eq!(
             decode("tools/call", &serde_json::json!({})),
@@ -665,24 +772,26 @@ mod tests {
     #[test]
     fn what_a_foreman_is_offered_names_the_agents_it_may_choose() {
         let offered = tools(&a_foreman(), &["claude"]);
-        assert_eq!(offered.len(), 1);
-        assert_eq!(offered[0].name, "start_job");
+        let starting = offered
+            .iter()
+            .find(|tool| tool.name == "start_job")
+            .expect("a foreman is offered the tool that starts jobs");
 
-        let agent = &offered[0].schema["properties"]["agent"];
+        let agent = &starting.schema["properties"]["agent"];
         assert_eq!(
             agent["enum"],
             serde_json::json!(["claude"]),
             "the closed set is in the schema, so a foreman picks rather than guesses",
         );
 
-        let required = &offered[0].schema["required"];
+        let required = &starting.schema["required"];
         assert_eq!(
             required,
             &serde_json::json!(["reason", "instructions", "agent"])
         );
     }
 
-    /// A job is offered nothing, and this is the property 0032 defended.
+    /// A job may speak and may not start jobs, which is 0032's property.
     ///
     /// It used to hold by construction: a job's container was never given a
     /// warrant, so there was no code to get wrong. It is now a decision this
@@ -691,21 +800,29 @@ mod tests {
     /// because a tool nobody was offered can still be called by name.
     #[test]
     fn a_job_is_offered_no_tool_that_starts_jobs() {
-        let job = Speaking {
+        let job = Warranted {
             project: a_project(),
             speaker: Speaker::Job(stageman_core::JobId::from_uuid(Uuid::from_u128(7))),
             thread: None,
         };
 
-        assert!(
-            tools(&job, &["claude"]).is_empty(),
-            "a job was offered a tool, and the only one that exists starts jobs",
+        let offered: Vec<_> = tools(&job, &["claude"])
+            .iter()
+            .map(|tool| tool.name)
+            .collect();
+        assert_eq!(
+            offered,
+            vec!["say"],
+            "a job may say things and may not start jobs",
         );
+
+        let foreman: Vec<_> = tools(&a_foreman(), &["claude"])
+            .iter()
+            .map(|tool| tool.name)
+            .collect();
         assert!(
-            tools(&a_foreman(), &["claude"])
-                .iter()
-                .any(|offered| offered.name == "start_job"),
-            "and a foreman must still be offered it, or this proves nothing",
+            foreman.contains(&"start_job") && foreman.contains(&"say"),
+            "and a foreman must be offered both, or this proves nothing: {foreman:?}",
         );
     }
 
@@ -716,7 +833,11 @@ mod tests {
     #[test]
     fn no_agents_omits_the_enumeration_rather_than_emitting_an_empty_one() {
         let offered = tools(&a_foreman(), &[]);
-        let agent = &offered[0].schema["properties"]["agent"];
+        let starting = offered
+            .iter()
+            .find(|tool| tool.name == "start_job")
+            .expect("a foreman is offered the tool that starts jobs");
+        let agent = &starting.schema["properties"]["agent"];
         assert_eq!(agent["type"], "string");
         assert!(agent.get("enum").is_none(), "no enumeration at all");
     }
@@ -831,9 +952,25 @@ mod tests {
         )
         .await;
         let listed: serde_json::Value = listed.json().await.expect("a JSON answer");
-        assert_eq!(listed["result"]["tools"][0]["name"], "start_job");
+        let offered = listed["result"]["tools"]
+            .as_array()
+            .expect("a list of tools")
+            .clone();
+        let named: Vec<_> = offered
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        assert!(
+            named.contains(&"start_job") && named.contains(&"say"),
+            "{named:?}"
+        );
+
+        let starting = offered
+            .iter()
+            .find(|tool| tool["name"] == "start_job")
+            .expect("the tool that starts jobs");
         assert_eq!(
-            listed["result"]["tools"][0]["inputSchema"]["properties"]["agent"]["enum"],
+            starting["inputSchema"]["properties"]["agent"]["enum"],
             serde_json::json!(["claude"]),
             "the project's own agents reach the schema, not a fixed list",
         );
@@ -955,7 +1092,7 @@ mod tests {
             // `127.0.0.1` on the host's own stack. Port zero so this never
             // contends with a running instance.
             let sessions = std::sync::Arc::new(super::super::Sessions::default());
-            let credential = sessions.mint(super::super::Speaking {
+            let credential = sessions.mint(super::super::Warranted {
                 project,
                 speaker: super::super::Speaker::Foreman,
                 thread: None,
@@ -1049,7 +1186,7 @@ mod tests {
             );
 
             let sessions = std::sync::Arc::new(super::super::Sessions::default());
-            let credential = sessions.mint(super::super::Speaking {
+            let credential = sessions.mint(super::super::Warranted {
                 project,
                 speaker: super::super::Speaker::Foreman,
                 thread: None,
@@ -1171,6 +1308,59 @@ mod tests {
             attending: stageman_core::Attending::default(),
             jobs: BTreeMap::new(),
         }
+    }
+
+    /// Saying nothing, saying it nowhere, and saying it to nobody all refuse.
+    ///
+    /// The three ways `say` can fail without a network, and all three are the
+    /// dangerous shape: the program this replaces checked the platform's own
+    /// `ok` field because a refusal arrives looking like a success, and the
+    /// failure that produced was an agent that believed it had spoken and
+    /// stopped. Each of these comes back as a failed tool result the model can
+    /// read, rather than a protocol error only its machinery sees.
+    #[tokio::test]
+    async fn saying_refuses_visibly_when_there_is_nothing_or_nowhere_to_say_it() {
+        let (store, _directory, _warrant, _sessions) = an_instance_with_a_foreman();
+
+        let refusal = async |warranted: &Warranted, message: &str| {
+            let response =
+                super::saying(&store, warranted, message, Some(serde_json::json!(1))).await;
+            let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .expect("a body");
+            serde_json::from_slice::<serde_json::Value>(&body).expect("JSON")
+        };
+
+        let nowhere = a_foreman();
+        let said = refusal(&nowhere, "anything at all").await;
+        assert_eq!(said["result"]["isError"], true, "{said}");
+        assert!(
+            said["result"]["content"][0]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("no conversation")),
+            "a session with no thread has nowhere to speak: {said}",
+        );
+
+        let empty = refusal(&nowhere, "   ").await;
+        assert_eq!(empty["result"]["isError"], true, "{empty}");
+
+        // A thread on a channel this project has no binding for: the tool
+        // exists, the conversation exists, and there is no way to reach it.
+        let unbound = Warranted {
+            thread: Some(stageman_core::Thread {
+                channel: stageman_core::Channel::Slack,
+                id: "1700000000.000100".to_owned(),
+            }),
+            ..a_foreman()
+        };
+        let unreachable = refusal(&unbound, "anything at all").await;
+        assert_eq!(unreachable["result"]["isError"], true, "{unreachable}");
+        assert!(
+            unreachable["result"]["content"][0]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("no channel is bound")),
+            "{unreachable}",
+        );
     }
 
     /// A credential is read from a bearer header and nothing else.

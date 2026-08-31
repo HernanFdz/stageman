@@ -308,6 +308,28 @@ impl Started {
     }
 }
 
+/// What a job is told about the tools it may use.
+///
+/// Minted fresh on every start and every resume, carrying the thread that job
+/// speaks in. A job is offered only the tool that speaks — starting jobs is a
+/// foreman's, and `crate::tooling::tools` is where that is decided.
+/// `None` for a job this instance cannot place, which is honest rather than
+/// tidy: a credential naming the wrong project would let one project's job
+/// speak on another's channel, and a substituted default is exactly what
+/// `.quality/gate-reference.md` forbids. A job with no tools reports having
+/// none, which is a visible failure rather than a silent misattribution.
+fn tools_for(store: &Store, job: JobId, thread: Option<Thread>) -> Option<stageman_agent::Tools> {
+    let project = store.read().project_of(job)?;
+    Some(stageman_agent::Tools::new(
+        crate::tooling::endpoint(*crate::endpoint::PORT),
+        crate::SESSIONS.mint(crate::tooling::Warranted {
+            project,
+            speaker: crate::tooling::Speaker::Job(job),
+            thread,
+        }),
+    ))
+}
+
 /// Records a job on a project, ready to be run.
 ///
 /// **The record is written before the container exists, and the order is not
@@ -474,7 +496,13 @@ pub async fn supervise(
         }
     };
 
-    let progress = match stageman_job::start(runtime, &handout, job, &kickoff).await {
+    let thread = store
+        .read()
+        .job(job)
+        .and_then(|recorded| recorded.thread.clone());
+    let tools = tools_for(store, job, thread);
+    let progress = match stageman_job::start(runtime, &handout, job, tools.as_ref(), &kickoff).await
+    {
         Ok(answer) => outcome(&answer),
         Err(error) => Progress::Failed(because(&error)),
     };
@@ -608,10 +636,12 @@ pub async fn deliver(
         thread
     };
 
-    let progress = match stageman_job::resume(runtime, job, speaking.as_ref(), said).await {
-        Ok(answer) => outcome(&answer),
-        Err(error) => Progress::Failed(because(&error)),
-    };
+    let tools = tools_for(store, job, speaking.clone());
+    let progress =
+        match stageman_job::resume(runtime, job, speaking.as_ref(), tools.as_ref(), said).await {
+            Ok(answer) => outcome(&answer),
+            Err(error) => Progress::Failed(because(&error)),
+        };
     if let Progress::Failed(ref why) = progress {
         tracing::warn!(%job, %why, "the reply did not reach the job");
     }
@@ -765,10 +795,12 @@ pub async fn reconcile(
             drop(state);
             thread
         };
+        let tools = tools_for(store, job, speaking.clone());
         let progress = match stageman_job::resume(
             runtime,
             job,
             speaking.as_ref(),
+            tools.as_ref(),
             stageman_foreman::resumption_notice(),
         )
         .await
@@ -1111,7 +1143,7 @@ async fn turn(
     // with it: a foreman answers in whichever thread it was spoken to in, so
     // the credential is what carries that rather than a file written into the
     // container — see `docs/decisions/0034-tools-are-served-not-shipped.md`.
-    let credential = crate::SESSIONS.mint(crate::tooling::Speaking {
+    let credential = crate::SESSIONS.mint(crate::tooling::Warranted {
         project,
         speaker: crate::tooling::Speaker::Foreman,
         thread: Some(errand.thread.clone()),
