@@ -211,15 +211,23 @@ mod tests {
     /// one side: the filter stops matching, orphans stop being found, and an
     /// instance with several reads exactly like a clean one.
     ///
-    /// Needs a runtime and an image and no credential, because it never runs
-    /// an agent.
+    /// Needs a runtime and a network and no credential, because it never runs
+    /// an agent — it overrides the entry point, so any image will do and a
+    /// foreman's is the cheaper one to build.
     #[tokio::test]
-    #[ignore = "needs a container runtime and a built image; run `just image-handshake`"]
+    #[ignore = "needs a container runtime and the network; run `just image-handshake`"]
     async fn a_container_named_for_a_job_is_swept_up_as_that_job() {
         let runtime = located_runtime();
         let job = a_job();
         let name = container(job);
         discard(&runtime, job).await.expect("a clean slate");
+        let anything = stageman_agent::build(
+            &runtime,
+            stageman_core::Agent::Claude,
+            stageman_core::Role::Foreman,
+        )
+        .await
+        .expect("the image builds");
 
         let created = std::process::Command::new(runtime.path())
             .args([
@@ -233,7 +241,7 @@ mod tests {
                 "none",
                 "--entrypoint",
                 "sh",
-                stageman_agent::image(stageman_core::Agent::Claude),
+                anything.as_argument(),
                 "-c",
                 "sleep 30",
             ])

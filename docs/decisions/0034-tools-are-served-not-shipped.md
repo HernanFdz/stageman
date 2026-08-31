@@ -23,9 +23,9 @@ neither — it was a claim about two adapters at one moment, and the second half
 was never tried at all.
 
 Both halves were measured, against the adapter pinned in
-`images/claude/Dockerfile`. Protocol names below are unbackticked deliberately:
-they belong to a dependency, and `just drift` resolves a backticked identifier
-against this source.
+`agent/images/claude/Dockerfile`. Protocol names below are unbackticked
+deliberately: they belong to a dependency, and `just drift` resolves a
+backticked identifier against this source.
 
 **Over the protocol connection: no, and it fails silently.** The adapter
 advertises mcpCapabilities of http and sse, and no acp. Offering an

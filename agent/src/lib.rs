@@ -43,8 +43,8 @@ use agent_client_protocol::{ByteStreams, Client, ConnectionTo};
 use parking_lot::Mutex;
 #[cfg(test)]
 use stageman_core::Channel;
-use stageman_core::{Agent, Handout, Platform, Secret};
-use tokio::io::AsyncReadExt as _;
+use stageman_core::{Agent, Handout, Platform, Role, Secret};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
 
 // The protocol library calls the far end of a connection `Agent` too, and it
@@ -222,16 +222,166 @@ impl ContainerRuntime {
     }
 }
 
-/// The image tag an agent's container is started from.
+/// The recipe an agent's image is built from.
 ///
-/// Adapter knowledge, and compiled in for the same reason the agent set is
-/// closed: an image is code, so an image an operator could name is one they
-/// could name wrongly. `project.just` builds under this tag, and a test in
-/// this module holds the two together.
-#[must_use]
-pub const fn image(agent: Agent) -> &'static str {
+/// Compiled in, which is the whole of
+/// `docs/decisions/0035-an-image-is-built-never-named.md`: what a host needs
+/// is a container runtime, and a recipe that ships beside the binary is a
+/// second thing to carry and a thing that can be older than the code driving
+/// it. It stays a file rather than a string literal so it keeps its comments
+/// and its diffs — `include_str!` is what makes it part of the artifact.
+///
+/// Adapter knowledge, for the same reason the agent set is closed: an image is
+/// code.
+const fn recipe(agent: Agent) -> &'static str {
     match agent {
-        Agent::Claude => "stageman/claude:dev",
+        Agent::Claude => include_str!("../images/claude/Dockerfile"),
+    }
+}
+
+/// Which stage of a recipe one role's image is built from.
+///
+/// The two names are the recipe's and this crate's at once, which is the one
+/// place they have to agree; a test below builds both so that renaming a stage
+/// in the recipe alone cannot pass. See
+/// `docs/decisions/0036-a-foremans-image-is-not-a-jobs.md` for why there are
+/// two at all.
+const fn stage(role: Role) -> &'static str {
+    match role {
+        Role::Foreman => "thinking",
+        Role::Job => "working",
+    }
+}
+
+/// An image, named by its content and by nothing else.
+///
+/// There is no tag, which is the point rather than an omission: an image an
+/// operator could name is one they could name wrongly, and an image *nobody*
+/// can name cannot be stale, cannot be confused with another instance's, and
+/// needs no agreement between this crate and anything that builds it.
+///
+/// Opaque on purpose. What is inside is whatever the runtime answered with —
+/// a digest on one, a bare identifier on the other — and the only thing this
+/// project does with it is start a container.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Image(String);
+
+impl Image {
+    /// The identifier, as the runtime wants it on a command line.
+    #[must_use]
+    pub fn as_argument(&self) -> &str {
+        &self.0
+    }
+}
+
+/// How much of a failed build is kept, in lines counted from the end.
+///
+/// From the end rather than the beginning, which is the opposite of
+/// [`printed`] and deliberate: a container that fails says so immediately, and
+/// a build that fails says so after however many layers succeeded first.
+const BUILD_TAIL: usize = 12;
+
+/// The arguments that build one stage of a recipe, reading it from standard
+/// input.
+///
+/// A build with no context at all — the trailing `-` — because the recipe is
+/// the only input there is. `docs/decisions/0034-tools-are-served-not-shipped.md`
+/// is what keeps that true: nothing this project writes goes in the image, so
+/// there is nothing a context could carry.
+///
+/// Quiet, so that the identifier is the whole of standard output and can be
+/// taken as the answer. What a build has to say about itself still arrives on
+/// standard error, which is where the failure message below comes from.
+const fn build_arguments(role: Role) -> [&'static str; 5] {
+    ["build", "--quiet", "--target", stage(role), "-"]
+}
+
+/// Builds the image one container will run, and answers with its identity.
+///
+/// Run in front of every container rather than once and remembered. A cached
+/// rebuild costs about a second and reaches no network, and it compares the
+/// recipe's instructions rather than a name — so it is a freshness check that
+/// an existence check could not be, and the runtime's own layer cache is a
+/// better memo than this process could keep: it survives a restart, and it
+/// notices an edit.
+///
+/// # Errors
+///
+/// Fails if the runtime cannot be started, or if the build itself does not
+/// finish — no network on a machine that has never built this, most often,
+/// which is why [`AgentError::Build`] carries what the build said last rather
+/// than what it said first.
+pub async fn build(
+    runtime: &ContainerRuntime,
+    agent: Agent,
+    role: Role,
+) -> Result<Image, AgentError> {
+    let mut building = tokio::process::Command::new(runtime.path())
+        .args(build_arguments(role))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|source| AgentError::Runtime {
+            path: runtime.path().to_owned(),
+            source,
+        })?;
+
+    let Some(mut writing) = building.stdin.take() else {
+        return Err(AgentError::NoChannel);
+    };
+    // Written whole and then closed, which is safe only because a recipe is a
+    // few kilobytes and a pipe buffer is tens of them. A larger one would have
+    // to be written while the output is drained, for the reason [`greet`]
+    // drains standard error while the exchange happens.
+    writing
+        .write_all(recipe(agent).as_bytes())
+        .await
+        .map_err(|source| AgentError::Runtime {
+            path: runtime.path().to_owned(),
+            source,
+        })?;
+    // A build does not begin until it has the whole recipe, and it learns that
+    // from end-of-file. Dropping the handle is what sends one.
+    drop(writing);
+
+    let finished = building
+        .wait_with_output()
+        .await
+        .map_err(AgentError::Exit)?;
+
+    if !finished.status.success() {
+        return Err(AgentError::Build {
+            message: last_words(&finished.stderr),
+        });
+    }
+    Ok(Image(
+        String::from_utf8_lossy(&finished.stdout).trim().to_owned(),
+    ))
+}
+
+/// The end of what a failed build said, as one line.
+///
+/// By lines rather than by bytes, which is what keeps this off the panic
+/// lints: taking the last *n* characters of a string means slicing it at an
+/// index nothing guarantees is a character boundary, and the escape from that
+/// is exactly the kind `.quality/gate-reference.md` forbids. Lines are already
+/// whole.
+fn last_words(said: &[u8]) -> String {
+    let text = String::from_utf8_lossy(said);
+    let mut kept: Vec<&str> = text
+        .lines()
+        .rev()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(BUILD_TAIL)
+        .collect();
+    kept.reverse();
+    if kept.is_empty() {
+        "it said nothing".to_owned()
+    } else {
+        kept.join("; ")
     }
 }
 
@@ -241,7 +391,7 @@ pub const fn image(agent: Agent) -> &'static str {
 /// one. No network and no workspace: nothing before the first prompt needs
 /// either, and a check that reaches the internet is a check that fails for
 /// reasons unrelated to what it tests.
-const fn handshake_arguments(agent: Agent) -> [&'static str; 6] {
+fn handshake_arguments(image: &Image) -> [&str; 6] {
     [
         "run",
         // Leaves nothing behind once the container exits, which is half of the
@@ -252,7 +402,7 @@ const fn handshake_arguments(agent: Agent) -> [&'static str; 6] {
         "--interactive",
         "--network",
         "none",
-        image(agent),
+        image.as_argument(),
     ]
 }
 
@@ -324,6 +474,19 @@ pub enum AgentError {
         /// What it said about itself, truncated.
         message: String,
     },
+    /// The image could not be built from the recipe compiled in here.
+    ///
+    /// New with `docs/decisions/0035-an-image-is-built-never-named.md`, and it
+    /// replaces a failure that used to arrive as [`AgentError::Container`]:
+    /// an image nobody had built. That one is now impossible, because a build
+    /// runs in front of every container — so what is left is a build that
+    /// could not finish, which is a different thing with a different fix. The
+    /// first one an operator with no network will meet.
+    #[error("the agent's image could not be built: {message}")]
+    Build {
+        /// The last of what the build said, which is where a build says why.
+        message: String,
+    },
     /// The runtime started without giving the streams the protocol needs.
     #[error("the container runtime offered no channel to speak the protocol over")]
     NoChannel,
@@ -370,18 +533,25 @@ pub enum AgentError {
 ///
 /// # Errors
 ///
-/// Fails if the runtime cannot be started, if the container exits without
-/// speaking — a missing image, most often — or if the exchange itself does not
-/// complete. The three are separate variants because an operator acts on them
-/// differently.
-pub async fn handshake(runtime: &ContainerRuntime, agent: Agent) -> Result<Greeting, AgentError> {
-    greet(runtime, &handshake_arguments(agent)).await
+/// Fails if the runtime cannot be started, if the image cannot be built, if
+/// the container exits without speaking, or if the exchange itself does not
+/// complete. Each is a separate variant because an operator acts on them
+/// differently — and since
+/// `docs/decisions/0035-an-image-is-built-never-named.md` the second of those
+/// has taken over from what used to be the commonest cause of the third.
+pub async fn handshake(
+    runtime: &ContainerRuntime,
+    agent: Agent,
+    role: Role,
+) -> Result<Greeting, AgentError> {
+    let image = build(runtime, agent, role).await?;
+    greet(runtime, &handshake_arguments(&image)).await
 }
 
 /// Runs the runtime with `arguments` and greets whatever answers.
 ///
 /// Split from [`handshake`] only so that the failure paths can be reached from
-/// a test: which image is run is the difference between a container that
+/// a test: what a container is started with is the difference between one that
 /// greets and one that never starts, and taking the arguments here is what
 /// lets a test ask for the second without the agent set having to contain a
 /// deliberately broken member.
@@ -570,13 +740,13 @@ fn claude_credential_variable(credential: &Secret) -> &'static str {
 /// the two drift apart, and a runtime told to forward a variable that is not
 /// set says nothing at all — leaving a job that cannot authenticate and no line
 /// anywhere explaining why.
-fn session_arguments(agent: Agent, delivering: &[(&'static str, Secret)]) -> Vec<String> {
+fn session_arguments(image: &Image, delivering: &[(&'static str, Secret)]) -> Vec<String> {
     let mut arguments = vec![
         "run".to_owned(),
         "--rm".to_owned(),
         "--interactive".to_owned(),
     ];
-    arguments.extend(carrying(agent, delivering));
+    arguments.extend(carrying(image, delivering));
     arguments
 }
 
@@ -586,7 +756,7 @@ fn session_arguments(agent: Agent, delivering: &[(&'static str, Secret)]) -> Vec
 /// — the previous shape built one list and edited it into the other by
 /// removing a flag and splicing at an index, which the gate is right to call a
 /// panic waiting for somebody to reorder the head.
-fn carrying(agent: Agent, delivering: &[(&'static str, Secret)]) -> Vec<String> {
+fn carrying(image: &Image, delivering: &[(&'static str, Secret)]) -> Vec<String> {
     let mut arguments = Vec::new();
     for (name, _) in delivering {
         arguments.push("--env".to_owned());
@@ -595,7 +765,7 @@ fn carrying(agent: Agent, delivering: &[(&'static str, Secret)]) -> Vec<String> 
     // Deliberately no `--network none` here, unlike the handshake: reaching a
     // model needs the network, and so does cloning. Which hosts it *ought* to
     // reach is the egress allowlist still open in `docs/open-questions.md`.
-    arguments.push(image(agent).to_owned());
+    arguments.push(image.as_argument().to_owned());
     arguments
 }
 
@@ -644,9 +814,10 @@ pub async fn ask(
     question: &str,
 ) -> Result<Answer, AgentError> {
     let delivering = variables(handout);
+    let image = build(runtime, handout.agent(), handout.role()).await?;
     let container = spawn(
         runtime,
-        &session_arguments(handout.agent(), &delivering),
+        &session_arguments(&image, &delivering),
         &delivering,
     )?;
     converse(container, Opening::Fresh, tools, question).await
@@ -745,7 +916,7 @@ const OWNER_LABEL: &str = "stageman.job";
 /// this system needs and why.
 fn retained_arguments(
     name: &str,
-    agent: Agent,
+    image: &Image,
     delivering: &[(&'static str, Secret)],
 ) -> Vec<String> {
     // Created rather than run, and never removed: the thread has to be put in
@@ -764,7 +935,7 @@ fn retained_arguments(
         "--label".to_owned(),
         format!("{OWNER_LABEL}={name}"),
     ];
-    arguments.extend(carrying(agent, delivering));
+    arguments.extend(carrying(image, delivering));
     arguments
 }
 
@@ -790,11 +961,16 @@ pub async fn begin(
     question: &str,
 ) -> Result<Answer, AgentError> {
     let delivering = variables(handout);
+    // Which image is decided by the handout rather than passed in beside it.
+    // That is what stops a container holding a foreman's credentials from
+    // being started on a job's image — see
+    // `docs/decisions/0036-a-foremans-image-is-not-a-jobs.md`.
+    let image = build(runtime, handout.agent(), handout.role()).await?;
     // Created rather than run, so there is a moment between existing and
     // starting in which the thread can be put in place. `run` would have
     // started it immediately and left nowhere to do that.
     let created = tokio::process::Command::new(runtime.path())
-        .args(retained_arguments(name, handout.agent(), &delivering))
+        .args(retained_arguments(name, &image, &delivering))
         .envs(
             delivering
                 .iter()
@@ -1225,32 +1401,71 @@ mod tests {
         );
     }
 
-    /// The tag the image is built under, read from the recipe that builds it.
+    /// An identifier standing in for one a runtime would have answered with.
     ///
-    /// Two files have to agree on this string and no compiler can make them:
-    /// `project.just` cannot read a Rust constant, and the constant cannot be
-    /// generated without putting a build step in front of every check. So the
-    /// agreement is asserted instead, which is the same trade the drift checks
-    /// make everywhere else.
-    fn tag_in_the_recipe() -> String {
-        let recipe =
-            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../project.just"))
-                .expect("project.just sits beside this crate");
-        recipe
-            .lines()
-            .find_map(|line| line.strip_prefix("image_tag :="))
-            .map(|value| value.trim().trim_matches('"').to_owned())
-            .expect("project.just declares image_tag")
+    /// The argument builders take a built image, and building one needs a
+    /// runtime — so a test about *arguments* would otherwise need a container
+    /// runtime to assert something pure. This is the seam that keeps the
+    /// cheap tests cheap.
+    fn built() -> Image {
+        Image("sha256:0123456789abcdef".to_owned())
     }
 
+    /// Every stage this crate asks for exists in the recipe it asks of.
+    ///
+    /// The agreement no compiler can make, and the one that replaced a
+    /// harder one. It used to be an image tag written in two files, held
+    /// together by parsing `project.just` from a test;
+    /// `docs/decisions/0035-an-image-is-built-never-named.md` removed the tag
+    /// and `docs/decisions/0036-a-foremans-image-is-not-a-jobs.md` put this in
+    /// its place — a stage name in the recipe and the same name in [`stage`].
+    ///
+    /// Strictly cheaper than what it replaces, and that is the compiled-in
+    /// recipe paying for itself: the text is in the binary, so this reads no
+    /// file and reaches no second directory.
     #[test]
-    fn the_recipe_builds_the_tag_the_adapter_runs() {
-        assert_eq!(image(Agent::Claude), tag_in_the_recipe());
+    fn every_stage_the_adapter_asks_for_is_in_the_recipe() {
+        let recipe = recipe(Agent::Claude);
+        for role in [Role::Foreman, Role::Job] {
+            let declared = format!("AS {}", stage(role));
+            assert!(
+                recipe.contains(&declared),
+                "the recipe declares no `{declared}`, so a build for {role:?} would fail \
+                 at the runtime rather than here",
+            );
+        }
+    }
+
+    /// The two roles do not build the same thing.
+    ///
+    /// Worth asserting on its own, because a copy-paste in [`stage`] would
+    /// leave the test above perfectly green while handing a foreman a job's
+    /// image — which is the whole of what 0036 refuses.
+    #[test]
+    fn a_foreman_and_a_job_are_built_from_different_stages() {
+        assert_ne!(stage(Role::Foreman), stage(Role::Job));
+    }
+
+    /// A build reads its recipe from standard input and names no context.
+    #[test]
+    fn a_build_takes_its_recipe_on_standard_input_and_no_context() {
+        let arguments = build_arguments(Role::Job);
+        assert_eq!(arguments[0], "build");
+        assert!(
+            arguments.contains(&"--quiet"),
+            "without this the identifier is not the whole of standard output",
+        );
+        assert_eq!(
+            arguments.last(),
+            Some(&"-"),
+            "the trailing dash is the recipe arriving on standard input",
+        );
     }
 
     #[test]
     fn a_handshake_asks_for_no_network_and_leaves_nothing_behind() {
-        let arguments = handshake_arguments(Agent::Claude);
+        let image = built();
+        let arguments = handshake_arguments(&image);
         assert_eq!(arguments[0], "run");
         assert!(arguments.contains(&"--rm"));
         assert!(arguments.contains(&"--interactive"));
@@ -1258,9 +1473,29 @@ mod tests {
     }
 
     #[test]
-    fn a_handshake_runs_the_image_that_agent_lives_in() {
-        let arguments = handshake_arguments(Agent::Claude);
-        assert_eq!(arguments.last(), Some(&image(Agent::Claude)));
+    fn a_handshake_runs_the_image_that_was_built() {
+        let image = built();
+        let arguments = handshake_arguments(&image);
+        assert_eq!(arguments.last(), Some(&image.as_argument()));
+    }
+
+    /// A build that failed says the end of what it said, not the beginning.
+    #[test]
+    fn a_failed_build_is_reported_from_its_last_words() {
+        let said = b"#4 [2/3] RUN npm install\n#4 0.4 npm error network\n#4 ERROR: exit code 1\n";
+        let reported = last_words(said);
+        assert!(reported.contains("ERROR: exit code 1"), "{reported}");
+        assert!(reported.contains("npm error network"), "{reported}");
+    }
+
+    /// A build that said nothing still says something.
+    ///
+    /// An empty message would render as "the agent's image could not be
+    /// built: " and send somebody to read the source.
+    #[test]
+    fn a_silent_failed_build_still_reports_something() {
+        assert!(!last_words(b"").is_empty());
+        assert!(!last_words(b"   \n\n  \n").is_empty());
     }
 
     #[test]
@@ -1336,7 +1571,7 @@ mod tests {
     #[tokio::test]
     async fn a_runtime_that_is_not_there_fails_as_a_runtime_rather_than_a_protocol() {
         let runtime = ContainerRuntime::new(PathBuf::from("/nonexistent/container/runtime"));
-        let failure = handshake(&runtime, Agent::Claude).await;
+        let failure = handshake(&runtime, Agent::Claude, Role::Foreman).await;
         assert!(matches!(failure, Err(AgentError::Runtime { .. })));
     }
 
@@ -1354,26 +1589,78 @@ mod tests {
         ContainerRuntime::new(PathBuf::from(path.trim()))
     }
 
-    /// Drives a real container, so it needs a runtime and a built image.
+    /// Drives a real container, so it needs a runtime and a network.
     ///
     /// Ignored by default rather than absent: `just check` stays a gate you can
     /// run constantly, and nextest still counts this as ignored — which is the
     /// distinction that matters, because a test behind a `cfg` nobody selected
     /// appears nowhere and the total still reads as complete. Run it with
     /// `just image-handshake`.
+    ///
+    /// It no longer needs an image somebody built first: [`handshake`] builds
+    /// one, which means this now covers the build as well as the exchange.
+    /// **Both roles**, because two images is the thing 0036 claims and one
+    /// greeting proves nothing about the other — and because a foreman's is
+    /// the one whose stage could be edited into uselessness without any test
+    /// of a job's noticing.
     #[tokio::test]
-    #[ignore = "needs a container runtime and a built image; run `just image-handshake`"]
+    #[ignore = "needs a container runtime and the network; run `just image-handshake`"]
     async fn a_container_answers_the_protocol() {
         let runtime = located_runtime();
 
-        let greeting = handshake(&runtime, Agent::Claude)
-            .await
-            .expect("the image answers the handshake");
+        for role in [Role::Foreman, Role::Job] {
+            let greeting = handshake(&runtime, Agent::Claude, role)
+                .await
+                .unwrap_or_else(|why| panic!("{role:?} answers the handshake: {why}"));
 
-        assert_eq!(greeting.protocol_version, ProtocolVersion::V1);
-        let adapter = greeting.adapter.expect("the adapter names itself");
-        assert!(!adapter.name.is_empty());
-        assert!(!adapter.version.is_empty());
+            assert_eq!(greeting.protocol_version, ProtocolVersion::V1);
+            let adapter = greeting.adapter.expect("the adapter names itself");
+            assert!(!adapter.name.is_empty());
+            assert!(!adapter.version.is_empty());
+        }
+    }
+
+    /// A foreman's container cannot reach a repository, because it has no tool
+    /// that could.
+    ///
+    /// The evidence behind
+    /// `docs/decisions/0036-a-foremans-image-is-not-a-jobs.md`, and the reason
+    /// that record is a decision rather than a preference: the narrowing in
+    /// `docs/decisions/0027-a-channel-is-not-a-platform.md` withheld a
+    /// credential, and this withholds the capability. Asserted in both
+    /// directions, because a split that quietly stopped splitting would leave
+    /// a one-sided test green.
+    #[tokio::test]
+    #[ignore = "needs a container runtime and the network; run `just image-handshake`"]
+    async fn only_a_jobs_image_can_reach_a_repository() {
+        let runtime = located_runtime();
+
+        for (role, expected) in [(Role::Foreman, false), (Role::Job, true)] {
+            let image = build(&runtime, Agent::Claude, role)
+                .await
+                .unwrap_or_else(|why| panic!("{role:?} builds: {why}"));
+            let looked = tokio::process::Command::new(runtime.path())
+                .args([
+                    "run",
+                    "--rm",
+                    "--network",
+                    "none",
+                    "--entrypoint",
+                    "sh",
+                    image.as_argument(),
+                    "-c",
+                    "command -v git && command -v gh",
+                ])
+                .output()
+                .await
+                .expect("the runtime runs");
+            assert_eq!(
+                looked.status.success(),
+                expected,
+                "{role:?} should{} reach a repository",
+                if expected { "" } else { " not" },
+            );
+        }
     }
 
     /// A container that fills its error pipe must not become a hang.
@@ -1383,11 +1670,16 @@ mod tests {
     /// on the write under either of the two mistakes this guards: draining
     /// after the exchange instead of during it, or stopping the drain at the
     /// bound. It reuses the agent's own image with the entry point overridden,
-    /// so it needs nothing built that the tests above do not already need.
+    /// so it asks for nothing the tests above do not already build.
     #[tokio::test]
-    #[ignore = "needs a container runtime and a built image; run `just image-handshake`"]
+    #[ignore = "needs a container runtime and the network; run `just image-handshake`"]
     async fn a_container_that_floods_its_error_pipe_does_not_hang() {
         let runtime = located_runtime();
+        // A foreman's, because this overrides the entry point and so needs the
+        // smaller of the two rather than either in particular.
+        let flooding = build(&runtime, Agent::Claude, Role::Foreman)
+            .await
+            .expect("the image builds");
 
         let failure = greet(
             &runtime,
@@ -1399,7 +1691,7 @@ mod tests {
                 "none",
                 "--entrypoint",
                 "sh",
-                image(Agent::Claude),
+                flooding.as_argument(),
                 "-c",
                 "yes noise | head -c 200000 >&2; exit 3",
             ],
@@ -1417,15 +1709,26 @@ mod tests {
         );
     }
 
-    /// An image nobody ever built must not read as an agent that cannot speak.
+    /// A container that dies before speaking must not read as an agent that
+    /// cannot speak.
     ///
     /// Both fail as silence on the connection, and the error an operator gets
-    /// is the only thing that distinguishes "build the image" from "the
-    /// adapter is broken". This needs a runtime but deliberately no image,
-    /// which is the whole point of it.
+    /// is the only thing that distinguishes "the container did not start" from
+    /// "the adapter is broken".
+    ///
+    /// It used to be named for its commonest cause — an image nobody had built
+    /// — and `docs/decisions/0035-an-image-is-built-never-named.md` retired
+    /// that cause rather than this test, which is why the name changed and the
+    /// assertion did not. What is left is every other way a container fails to
+    /// start, and the classification matters just as much for those: the
+    /// runtime out of space, an entry point that exits, a daemon that stops
+    /// between the build and the run.
+    ///
+    /// It still asks for an image that does not exist, because that is simply
+    /// the cheapest container that reliably dies before speaking.
     #[tokio::test]
     #[ignore = "needs a container runtime; run `just image-handshake`"]
-    async fn an_image_that_was_never_built_fails_as_a_container_not_a_protocol() {
+    async fn a_container_that_never_starts_fails_as_a_container_not_a_protocol() {
         let runtime = located_runtime();
 
         let failure = greet(
@@ -1436,7 +1739,7 @@ mod tests {
                 "--interactive",
                 "--network",
                 "none",
-                "stageman/no-such-image-was-ever-built:dev",
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
             ],
         )
         .await;
@@ -1644,7 +1947,7 @@ mod tests {
         let (state, project) = instance_with_a_channel("sk-ant-oat01-secret-value");
         let handout = Handout::for_job(&state, Agent::Claude, project).expect("a watched project");
 
-        let arguments = session_arguments(handout.agent(), &variables(&handout));
+        let arguments = session_arguments(&built(), &variables(&handout));
         let line = arguments.join(" ");
 
         assert!(!line.contains("sk-ant-oat01-secret-value"), "{line}");
@@ -1665,26 +1968,26 @@ mod tests {
         let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
         let handout = Handout::for_foreman(&state, project).expect("a watched project");
 
-        let arguments = session_arguments(handout.agent(), &variables(&handout));
+        let arguments = session_arguments(&built(), &variables(&handout));
 
         assert!(!arguments.iter().any(|a| a == "none"), "{arguments:?}");
         assert_eq!(
             arguments.last().map(String::as_str),
-            Some(image(Agent::Claude))
+            Some(built().as_argument())
         );
     }
 
     /// Tests that spend real money, kept in their own module so a filter can
     /// name them as a group rather than one at a time. Run with
     /// `just image-session`; `just image-handshake` deliberately excludes them,
-    /// because everything it runs needs only a runtime and an image.
+    /// because everything it runs needs only a runtime and a network.
 
     #[test]
     fn a_retained_container_is_named_labelled_and_survives_its_own_exit() {
         let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
         let handout = Handout::for_foreman(&state, project).expect("a watched project");
 
-        let arguments = retained_arguments("stageman-job-abc", Agent::Claude, &variables(&handout));
+        let arguments = retained_arguments("stageman-job-abc", &built(), &variables(&handout));
         let line = arguments.join(" ");
 
         assert!(line.contains("--name stageman-job-abc"), "{line}");
@@ -1699,7 +2002,7 @@ mod tests {
         );
         assert_eq!(
             arguments.last().map(String::as_str),
-            Some(image(Agent::Claude)),
+            Some(built().as_argument()),
             "the image has to stay last"
         );
         // The whole difference between a container that survives being killed
@@ -1732,14 +2035,17 @@ mod tests {
     }
 
     /// A container this project started, found without consulting the instance
-    /// and then removed. Needs a runtime and an image, and no credential: it
+    /// and then removed. Needs a runtime and a network, and no credential: it
     /// overrides the entry point rather than running an agent.
     #[tokio::test]
-    #[ignore = "needs a container runtime and a built image; run `just image-handshake`"]
+    #[ignore = "needs a container runtime and the network; run `just image-handshake`"]
     async fn a_container_this_project_started_is_found_by_label_and_discarded() {
         let runtime = located_runtime();
         let name = "stageman-job-sweep-probe";
         discard(&runtime, name).await.expect("a clean slate");
+        let anything = build(&runtime, Agent::Claude, Role::Foreman)
+            .await
+            .expect("the image builds");
 
         let created = std::process::Command::new(runtime.path())
             .args([
@@ -1753,7 +2059,7 @@ mod tests {
                 "none",
                 "--entrypoint",
                 "sh",
-                image(Agent::Claude),
+                anything.as_argument(),
                 "-c",
                 "sleep 30",
             ])

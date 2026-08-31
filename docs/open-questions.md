@@ -296,6 +296,26 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   deciding what a job that cannot start should look like in general — the same
   question wearing a different hat, and worth answering once.
 
+- **Should the browser's bundle live inside the binary?** What ships is a
+  server executable and a `public/` directory of static assets beside it, which
+  is two things where the rest of the deployment story is now one:
+  `docs/decisions/0035-an-image-is-built-never-named.md` puts the agent's
+  recipe in the binary, and nothing else is carried alongside. Embedding the
+  bundle the same way would make the artifact a single file somebody can copy
+  anywhere.
+
+  What makes it a question rather than an obvious next step is who owns that
+  directory. The framework decides its layout and reads it from disk, and the
+  function that finds it already restates a private rule of the framework's
+  and says in its own comment that restating somebody else's rule is drift
+  waiting to happen. Embedding means owning that rule outright, and serving the
+  files ourselves rather than letting the framework do it.
+
+  Settled by finding out how much of the framework's serving has to be
+  reimplemented to do it — if the answer is a route that reads from a compiled-in
+  map instead of a directory, it is cheap; if it is the asset pipeline, it is
+  not.
+
 ## Next
 
 Intended next steps, in order, each with its reason. Written as intentions, not

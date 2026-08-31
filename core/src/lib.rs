@@ -248,7 +248,7 @@ pub struct ChannelConfig {
     /// What the channel is reached with.
     ///
     /// Belongs to the project rather than the instance, for the reason
-    /// `docs/decisions/0020-the-foreman-belongs-to-a-project.md` gives:
+    /// `docs/decisions/0020-the-orchestrator-belongs-to-a-project.md` gives:
     /// watching a project's channels needs that project's credentials, and one
     /// holder of every project's at once is the shape being avoided.
     pub credential: Secret,
@@ -546,7 +546,7 @@ pub struct Project {
     /// Per project rather than per instance, because watching a project's
     /// channels needs that project's credentials and a shared foreman
     /// would hold every project's at once — see
-    /// `docs/decisions/0020-the-foreman-belongs-to-a-project.md`.
+    /// `docs/decisions/0020-the-orchestrator-belongs-to-a-project.md`.
     pub foreman_agent: Agent,
     /// The agents this project's jobs may run on.
     ///
@@ -1298,6 +1298,30 @@ pub enum Recipient {
     NoSuchJob(ProjectId),
 }
 
+/// Which of the two things that run an agent this is for.
+///
+/// The vocabulary in `docs/conventions.md` §2 has exactly two, and they differ
+/// in what they are allowed to reach rather than in degree: a foreman judges
+/// signals and never touches a repository, a job does the work and must.
+///
+/// It lives on a [`Handout`] because that is already the value which says what
+/// one process may see, and because the two constructors below are the only
+/// places the answer is known. Carrying it means an adapter can build the
+/// narrower image for a foreman without being told separately — and being told
+/// separately is what would let the image and the credentials disagree, which
+/// is the failure `docs/decisions/0036-a-foremans-image-is-not-a-jobs.md`
+/// exists to close.
+///
+/// Deliberately not serialised, for the reason a handout is not: this
+/// describes a process about to be started, never anything kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// The one long-lived agent a project's foreman thinks with.
+    Foreman,
+    /// One agent doing one piece of work, in one workspace.
+    Job,
+}
+
 /// Exactly what one agent process is allowed to see, and nothing more.
 ///
 /// The piece of logic `docs/architecture.md` §1 says looks like plumbing and
@@ -1326,6 +1350,7 @@ pub enum Recipient {
 #[derive(Clone)]
 pub struct Handout {
     agent: Agent,
+    role: Role,
     agent_credential: Secret,
     platforms: BTreeMap<Platform, Secret>,
     channels: BTreeMap<Channel, Speaking>,
@@ -1351,7 +1376,7 @@ impl Handout {
     /// Per project rather than per instance, because the channels it watches
     /// belong to a project and a shared foreman would hold every
     /// project's credentials at once —
-    /// `docs/decisions/0020-the-foreman-belongs-to-a-project.md`.
+    /// `docs/decisions/0020-the-orchestrator-belongs-to-a-project.md`.
     ///
     /// # Errors
     ///
@@ -1377,6 +1402,7 @@ impl Handout {
             .ok_or(HandoutError::UnconfiguredAgent(agent))?;
         Ok(Self {
             agent,
+            role: Role::Foreman,
             agent_credential: config.auth_token.clone(),
             platforms: BTreeMap::new(),
             channels: speaking(watching),
@@ -1414,6 +1440,7 @@ impl Handout {
             .ok_or(HandoutError::UnknownProject(project))?;
         Ok(Self {
             agent,
+            role: Role::Job,
             agent_credential: config.auth_token.clone(),
             platforms: project.credentials.clone(),
             channels: speaking(project),
@@ -1431,6 +1458,16 @@ impl Handout {
     #[must_use]
     pub const fn agent(&self) -> Agent {
         self.agent
+    }
+
+    /// Which of the two things that run an agent this was built for.
+    ///
+    /// Read by an adapter to decide which image to build, and by nothing else.
+    /// It is derived from the constructor rather than passed in, so a handout
+    /// carrying a foreman's credentials cannot be built for a job's image.
+    #[must_use]
+    pub const fn role(&self) -> Role {
+        self.role
     }
 
     /// What the agent authenticates with.
@@ -1497,6 +1534,7 @@ impl fmt::Debug for Handout {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Handout")
             .field("agent", &self.agent)
+            .field("role", &self.role)
             .field("agent_credential", &"<redacted>")
             .field("platforms", &self.platforms.keys().collect::<Vec<_>>())
             .field("channels", &self.channels.keys().collect::<Vec<_>>())
