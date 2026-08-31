@@ -1112,7 +1112,10 @@ async fn turn(
         &handout,
         project,
         &repository,
-        &crate::asking::endpoint(*crate::asking::PORT),
+        stageman_foreman::Answering {
+            job: &crate::asking::endpoint(*crate::asking::PORT),
+            tools: &crate::tooling::endpoint(*crate::asking::PORT),
+        },
         &agents,
         &errand.said,
     )

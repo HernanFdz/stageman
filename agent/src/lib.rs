@@ -34,10 +34,10 @@ use std::process::Stdio;
 use std::sync::Arc;
 
 use agent_client_protocol::schema::v1::{
-    ContentBlock, InitializeRequest, InitializeResponse, ListSessionsRequest, LoadSessionRequest,
-    NewSessionRequest, PromptRequest, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SelectedPermissionOutcome, SessionId, SessionNotification,
-    SessionUpdate, TextContent,
+    ContentBlock, HttpHeader, InitializeRequest, InitializeResponse, ListSessionsRequest,
+    LoadSessionRequest, McpServer, McpServerHttp, NewSessionRequest, PromptRequest,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    SelectedPermissionOutcome, SessionId, SessionNotification, SessionUpdate, TextContent,
 };
 use agent_client_protocol::{ByteStreams, Client, ConnectionTo};
 use parking_lot::Mutex;
@@ -653,6 +653,7 @@ pub struct Answer {
 pub async fn ask(
     runtime: &ContainerRuntime,
     handout: &Handout,
+    tools: Option<&Tools>,
     question: &str,
 ) -> Result<Answer, AgentError> {
     let delivering = variables(handout);
@@ -661,8 +662,81 @@ pub async fn ask(
         &session_arguments(handout.agent(), &delivering),
         &delivering,
     )?;
-    converse(container, Opening::Fresh, question).await
+    converse(container, Opening::Fresh, tools, question).await
 }
+
+/// Where an agent reaches the tools this instance serves, and what it presents.
+///
+/// `docs/decisions/0034-tools-are-served-not-shipped.md` has the instance
+/// serve its own tools rather than ship programs that call it, and this is
+/// what one agent is told about them. Both halves are needed together: an
+/// address nothing may use is no more useful than a credential with nowhere
+/// to present it, so they are one value rather than two parameters that could
+/// be passed apart.
+///
+/// **Named on every session and again on every resume**, which is what makes
+/// this an address rather than a file. A container told a port once could not
+/// be told a different one later, which is why an endpoint was written into
+/// it; a session declaration is supplied afresh each time a session is created
+/// or loaded, so an instance restarted on another port simply says so again.
+#[derive(Clone)]
+pub struct Tools {
+    /// Where the tools are served.
+    endpoint: String,
+    /// What authorises this agent to use them, and decides which it is offered.
+    credential: Secret,
+}
+
+impl Tools {
+    /// What to tell an agent about the tools it may use.
+    #[must_use]
+    pub fn new(endpoint: impl Into<String>, credential: Secret) -> Self {
+        Self {
+            endpoint: endpoint.into(),
+            credential,
+        }
+    }
+}
+
+/// Redacting, because this carries a credential.
+///
+/// `docs/conventions.md` §4 requires it of anything that can hold one, and the
+/// derived version would print whatever `Secret` prints — which is safe today
+/// and would stop being so the moment somebody changed that, silently and
+/// somewhere else. Written out here so this type's own test pins it.
+impl std::fmt::Debug for Tools {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Tools")
+            .field("endpoint", &self.endpoint)
+            .field("credential", &"<redacted>")
+            .finish()
+    }
+}
+
+/// What the tools look like on a session request.
+///
+/// Pure and separate from sending one, so the shape actually put on the wire
+/// is asserted in the gate rather than inferred from a container that ran.
+/// The transport is HTTP because that is what the adapters advertise: 0034
+/// measured the alternative — a server offered over the protocol connection
+/// itself — being accepted and silently dropped.
+fn declaration(tools: &Tools) -> McpServer {
+    McpServer::Http(
+        McpServerHttp::new(TOOLS_SERVER, tools.endpoint.clone()).headers(vec![HttpHeader::new(
+            "Authorization",
+            format!("Bearer {}", tools.credential.expose()),
+        )]),
+    )
+}
+
+/// What this instance calls itself when it serves tools.
+///
+/// It prefixes every tool name the model sees, so it has to be the same string
+/// the endpoint reports about itself. Asserted against that one in the app's
+/// own tests rather than shared as a constant, because the two crates are on
+/// opposite sides of a boundary that exists to keep the agent's business out
+/// of the domain.
+const TOOLS_SERVER: &str = "stageman";
 
 /// Where a container reads the thread it should speak in.
 ///
@@ -838,6 +912,7 @@ pub async fn begin_with(
     handout: &Handout,
     name: &str,
     endpoint: Option<&str>,
+    tools: Option<&Tools>,
     question: &str,
 ) -> Result<Answer, AgentError> {
     let delivering = variables(handout);
@@ -868,7 +943,7 @@ pub async fn begin_with(
     place_thread(runtime, name, handout.thread()).await?;
     place_endpoint(runtime, name, endpoint).await?;
     let container = spawn(runtime, &started_arguments(name), &delivering)?;
-    converse(container, Opening::Fresh, question).await
+    converse(container, Opening::Fresh, tools, question).await
 }
 
 /// Starts a retained container and puts the first question to it.
@@ -883,9 +958,10 @@ pub async fn begin(
     runtime: &ContainerRuntime,
     handout: &Handout,
     name: &str,
+    tools: Option<&Tools>,
     question: &str,
 ) -> Result<Answer, AgentError> {
-    begin_with(runtime, handout, name, None, question).await
+    begin_with(runtime, handout, name, None, tools, question).await
 }
 
 /// What starts a container that already exists, attached.
@@ -924,6 +1000,7 @@ pub async fn resume(
     runtime: &ContainerRuntime,
     name: &str,
     thread: Option<&Thread>,
+    tools: Option<&Tools>,
     question: &str,
 ) -> Result<Answer, AgentError> {
     settle(runtime, name).await?;
@@ -932,7 +1009,7 @@ pub async fn resume(
     // turn from one container whose environment never changes.
     place_thread(runtime, name, thread).await?;
     let container = spawn(runtime, &started_arguments(name), &[])?;
-    converse(container, Opening::Resumed, question).await
+    converse(container, Opening::Resumed, tools, question).await
 }
 
 /// Makes sure a container is stopped before anything tries to start it.
@@ -1076,15 +1153,22 @@ fn spawn(
 async fn open_session(
     connection: &ConnectionTo<AgentRole>,
     opening: Opening,
+    tools: Option<&Tools>,
 ) -> Result<Option<SessionId>, agent_client_protocol::Error> {
     match opening {
-        Opening::Fresh => Ok(Some(
-            connection
-                .send_request(NewSessionRequest::new(PathBuf::from(WORKSPACE)))
-                .block_task()
-                .await?
-                .session_id,
-        )),
+        Opening::Fresh => {
+            let mut request = NewSessionRequest::new(PathBuf::from(WORKSPACE));
+            if let Some(tools) = tools {
+                request.mcp_servers.push(declaration(tools));
+            }
+            Ok(Some(
+                connection
+                    .send_request(request)
+                    .block_task()
+                    .await?
+                    .session_id,
+            ))
+        }
         Opening::Resumed => {
             let known = connection
                 .send_request(ListSessionsRequest::new())
@@ -1096,13 +1180,17 @@ async fn open_session(
             let Some(found) = known.sessions.into_iter().next() else {
                 return Ok(None);
             };
-            connection
-                .send_request(LoadSessionRequest::new(
-                    found.session_id.clone(),
-                    PathBuf::from(WORKSPACE),
-                ))
-                .block_task()
-                .await?;
+            // Declared again here, and this is the half that makes the
+            // endpoint file unnecessary: a resumed container is told where to
+            // reach the instance *now*, so a port that changed between turns
+            // is simply named again rather than baked in when the container
+            // was created.
+            let mut request =
+                LoadSessionRequest::new(found.session_id.clone(), PathBuf::from(WORKSPACE));
+            if let Some(tools) = tools {
+                request.mcp_servers.push(declaration(tools));
+            }
+            connection.send_request(request).block_task().await?;
             Ok(Some(found.session_id))
         }
     }
@@ -1112,6 +1200,7 @@ async fn open_session(
 async fn converse(
     mut container: tokio::process::Child,
     opening: Opening,
+    tools: Option<&Tools>,
     question: &str,
 ) -> Result<Answer, AgentError> {
     let (Some(to_agent), Some(from_agent), Some(complaints)) = (
@@ -1177,7 +1266,7 @@ async fn converse(
                         .block_task()
                         .await?;
 
-                    let Some(session_id) = open_session(&connection, opening).await? else {
+                    let Some(session_id) = open_session(&connection, opening, tools).await? else {
                         return Ok(None);
                     };
                     let reply = connection
@@ -1215,6 +1304,65 @@ async fn converse(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What an agent is told about the tools, field by field.
+    ///
+    /// Asserted on the typed value rather than on serialised JSON, because the
+    /// wire format belongs to the protocol library and re-encoding it here
+    /// would test that library rather than this decision. What is this crate's
+    /// to get right is *which* transport and *what* headers, and both are here.
+    ///
+    /// The transport is the whole of what
+    /// `docs/decisions/0034-tools-are-served-not-shipped.md` measured: a server
+    /// offered over the protocol connection is accepted by the pinned adapter
+    /// and silently dropped, so this has to be the HTTP one.
+    #[test]
+    fn the_tools_are_declared_over_http_with_the_credential_in_a_header() {
+        let tools = Tools::new(
+            "http://host.docker.internal:47113/mcp",
+            Secret::new("a-warrant".to_owned()),
+        );
+
+        let McpServer::Http(declared) = declaration(&tools) else {
+            panic!("the tools must be offered over HTTP, which is what adapters accept");
+        };
+        assert_eq!(declared.name, TOOLS_SERVER);
+        assert_eq!(declared.url, "http://host.docker.internal:47113/mcp");
+
+        let [header] = declared.headers.as_slice() else {
+            panic!("exactly one header, carrying the credential");
+        };
+        assert_eq!(header.name, "Authorization");
+        assert_eq!(
+            header.value, "Bearer a-warrant",
+            "presented as a bearer, which is what the endpoint reads",
+        );
+    }
+
+    /// The declaration carries a credential, so formatting it must not.
+    ///
+    /// `docs/conventions.md` §4 requires this of anything able to hold one.
+    /// The endpoint is deliberately still printed: it is an address, it is
+    /// already reported at startup, and a redacted one would make a container
+    /// that cannot reach the instance much harder to diagnose.
+    #[test]
+    fn the_tools_do_not_print_the_credential_they_carry() {
+        let tools = Tools::new(
+            "http://host.docker.internal:47113/mcp",
+            Secret::new("a-warrant-nobody-should-see".to_owned()),
+        );
+
+        let printed = format!("{tools:?}");
+        assert!(
+            !printed.contains("a-warrant-nobody-should-see"),
+            "the credential reached a formatted string: {printed}",
+        );
+        assert!(printed.contains("redacted"), "{printed}");
+        assert!(
+            printed.contains("47113"),
+            "the address is not a secret and is what a failure to reach it needs: {printed}",
+        );
+    }
 
     /// The tag the image is built under, read from the recipe that builds it.
     ///
@@ -2050,6 +2198,7 @@ mod tests {
             let answer = ask(
                 &runtime,
                 &handout,
+                None,
                 "Reply with exactly one word, lowercase, no punctuation: pong",
             )
             .await
@@ -2079,6 +2228,7 @@ mod tests {
                 &runtime,
                 &handout,
                 name,
+                None,
                 "Remember this word and reply with it, alone: marmalade",
             )
             .await
@@ -2097,6 +2247,7 @@ mod tests {
             let second = resume(
                 &runtime,
                 name,
+                None,
                 None,
                 "What was the word I asked you to remember? Reply with it alone.",
             )
@@ -2128,6 +2279,7 @@ mod tests {
                     &runtime,
                     &handout,
                     name,
+                    None,
                     "Count from 1 to 40, one number per line, pausing two seconds between each.",
                 ),
             )
@@ -2137,6 +2289,7 @@ mod tests {
             let picked_up = resume(
                 &runtime,
                 name,
+                None,
                 None,
                 "You were interrupted. In one short line, what were you doing?",
             )

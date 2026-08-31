@@ -122,6 +122,26 @@ Whatever it has to say appears in this thread. Job {job}."
     )
 }
 
+/// Where this instance answers a foreman, in the two spellings it has.
+///
+/// One concept and two strings, and only until
+/// `docs/decisions/0034-tools-are-served-not-shipped.md` finishes: a foreman
+/// still runs a shipped program that posts to one route, and is also offered
+/// tools served at the other. When the program goes, so does the first field
+/// and this type collapses to the second.
+///
+/// Bundled rather than passed apart because they are derived from one port and
+/// travel together everywhere — and because passing them separately put this
+/// function over the argument limit, which was the right complaint about the
+/// wrong thing.
+#[derive(Debug, Clone, Copy)]
+pub struct Answering<'a> {
+    /// The route the shipped program posts to.
+    pub job: &'a str,
+    /// Where the tools this instance serves are reached.
+    pub tools: &'a str,
+}
+
 /// Starts a foreman's session, or continues the one it already has.
 ///
 /// **Which of the two is asked of the runtime, never of the instance.** A
@@ -144,11 +164,19 @@ pub async fn attend(
     handout: &Handout,
     project: ProjectId,
     repository: &str,
-    endpoint: &str,
+    answering: Answering<'_>,
     agents: &[(&str, &str)],
     said: &str,
 ) -> Result<Answer, ForemanError> {
     let name = container(project);
+    // Built from the warrant the handout already carries, so what authorises
+    // this foreman is one value rather than two that could disagree. A project
+    // with no warrant declares no tools at all, which is the same absence that
+    // used to stop a job creating jobs — see
+    // `docs/decisions/0034-tools-are-served-not-shipped.md`.
+    let tools = handout
+        .warrant()
+        .map(|warrant| stageman_agent::Tools::new(answering.tools, warrant.clone()));
     let existing = stageman_agent::abandoned(runtime)
         .await
         .map_err(ForemanError::Agent)?;
@@ -159,20 +187,33 @@ pub async fn attend(
         // Written before every start, not once at creation: the port can be
         // named by the environment, so an instance restarted with a different
         // one would otherwise leave this container asking nowhere.
-        stageman_agent::place_endpoint(runtime, &name, Some(endpoint))
+        stageman_agent::place_endpoint(runtime, &name, Some(answering.job))
             .await
             .map_err(ForemanError::Agent)?;
-        stageman_agent::resume(runtime, &name, handout.thread(), &asked(said, agents))
-            .await
-            .map_err(ForemanError::Agent)
+        stageman_agent::resume(
+            runtime,
+            &name,
+            handout.thread(),
+            tools.as_ref(),
+            &asked(said, agents),
+        )
+        .await
+        .map_err(ForemanError::Agent)
     } else {
         // The opening and the first message together, because a session that
         // was told who it is and then asked nothing would have spent a turn
         // saying hello.
         let first = format!("{}\n\n{}", opening(repository), asked(said, agents));
-        stageman_agent::begin_with(runtime, handout, &name, Some(endpoint), &first)
-            .await
-            .map_err(ForemanError::Agent)
+        stageman_agent::begin_with(
+            runtime,
+            handout,
+            &name,
+            Some(answering.job),
+            tools.as_ref(),
+            &first,
+        )
+        .await
+        .map_err(ForemanError::Agent)
     }
 }
 

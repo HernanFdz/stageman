@@ -86,7 +86,7 @@ pub async fn start(
     job: JobId,
     kickoff: &str,
 ) -> Result<Answer, JobError> {
-    stageman_agent::begin(runtime, handout, &container(job), kickoff)
+    stageman_agent::begin(runtime, handout, &container(job), None, kickoff)
         .await
         .map_err(JobError::Agent)
 }
@@ -112,7 +112,7 @@ pub async fn resume(
     thread: Option<&stageman_core::Thread>,
     notice: &str,
 ) -> Result<Answer, JobError> {
-    stageman_agent::resume(runtime, &container(job), thread, notice)
+    stageman_agent::resume(runtime, &container(job), thread, None, notice)
         .await
         .map_err(JobError::Agent)
 }
