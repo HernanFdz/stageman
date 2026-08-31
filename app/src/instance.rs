@@ -1089,20 +1089,6 @@ async fn turn(
     project: ProjectId,
     errand: &Errand,
 ) -> Result<(), RunError> {
-    // Minted here rather than in the domain, which takes no randomness by
-    // design, and lazily rather than at project creation: a project whose
-    // foreman never runs never needs one, and every project that already
-    // exists has none.
-    {
-        let mut state = store.update();
-        if let Some(watched) = state.projects.get_mut(&project)
-            && watched.warrant.is_none()
-        {
-            watched.warrant = Some(minted_warrant());
-        }
-        drop(state);
-    }
-
     let (repository, handout) = {
         let state = store.read();
         let repository = state
@@ -1159,22 +1145,6 @@ async fn turn(
     .await
     .map(drop)
     .map_err(|why| RunError::Foreman(why.to_string()))
-}
-
-/// A fresh warrant.
-///
-/// Two version-four identifiers, which is what this crate already mints
-/// anything unguessable from — a job's identifier and a project's are both
-/// this. Using the same source keeps one answer to "where does an unguessable
-/// value here come from" rather than introducing an encoding and a second
-/// generator for one field.
-///
-/// Two rather than one for margin: one is already past brute force at 122
-/// bits, and a warrant is the single thing standing between any container on
-/// the machine and a foreman's authority. Measured, not assumed: an unrelated
-/// container reaches this daemon as easily as a foreman's does.
-fn minted_warrant() -> stageman_core::Secret {
-    stageman_core::Secret::new(format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4()))
 }
 
 /// Says something in a thread on the instance's own behalf.
@@ -1248,7 +1218,6 @@ mod tests {
                 job_agents: only_claude(),
                 credentials: BTreeMap::new(),
                 channels: BTreeMap::new(),
-                warrant: None,
                 attending: stageman_core::Attending::default(),
                 jobs: BTreeMap::from([(
                     job,
@@ -1424,7 +1393,6 @@ mod tests {
                     credentials: BTreeMap::new(),
                     channels: BTreeMap::new(),
                     jobs: BTreeMap::new(),
-                    warrant: None,
                     attending: stageman_core::Attending::default(),
                 },
             );
@@ -1510,7 +1478,6 @@ mod tests {
                 credentials: BTreeMap::new(),
                 channels: BTreeMap::new(),
                 jobs,
-                warrant: None,
                 attending: stageman_core::Attending::default(),
             },
         );
@@ -1688,31 +1655,6 @@ mod tests {
         );
     }
 
-    /// A warrant is long, unguessable, and different every time.
-    ///
-    /// Anything that can reach the daemon may try to guess one — measured:
-    /// an unrelated container reaches the host as easily as a foreman's does
-    /// — so the only thing standing between a job's agent and a foreman's
-    /// authority is that this is not worth attacking.
-    #[test]
-    fn a_minted_warrant_is_long_and_never_the_same_twice() {
-        let first = super::minted_warrant();
-        let second = super::minted_warrant();
-
-        assert_eq!(first.expose().len(), 72, "two identifiers, hyphens and all");
-        assert!(
-            first
-                .expose()
-                .chars()
-                .all(|c| c.is_ascii_hexdigit() || c == '-')
-        );
-        assert_ne!(
-            first.expose(),
-            second.expose(),
-            "a warrant reused across projects would be one warrant"
-        );
-    }
-
     /// Only the message that found the foreman idle drives its loop.
     ///
     /// Inverting this comparison would have every other message start a second
@@ -1863,7 +1805,6 @@ mod tests {
                     credentials: BTreeMap::new(),
                     channels: BTreeMap::new(),
                     jobs: BTreeMap::new(),
-                    warrant: None,
                     attending: stageman_core::Attending::default(),
                 },
             );

@@ -883,8 +883,6 @@ mod tests {
                 channels: BTreeMap::new(),
                 jobs: BTreeMap::new(),
                 // No warrant: what a credential means is this instance's own
-                // ephemeral business now rather than a project's configuration.
-                warrant: None,
                 attending: Attending::default(),
             },
         );
@@ -1071,7 +1069,6 @@ mod tests {
                     credentials: BTreeMap::new(),
                     channels: BTreeMap::new(),
                     jobs: BTreeMap::new(),
-                    warrant: None,
                     attending: Attending::default(),
                 },
             );
@@ -1169,7 +1166,6 @@ mod tests {
                     credentials: BTreeMap::new(),
                     channels: BTreeMap::new(),
                     jobs: BTreeMap::new(),
-                    warrant: None,
                     attending: Attending::default(),
                 },
             );
@@ -1307,7 +1303,6 @@ mod tests {
             job_agents: BTreeSet::from(agents),
             credentials: BTreeMap::new(),
             channels: BTreeMap::new(),
-            warrant: None,
             attending: stageman_core::Attending::default(),
             jobs: BTreeMap::new(),
         }

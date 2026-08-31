@@ -101,7 +101,6 @@ async fn propose() -> Result<(), String> {
             credentials,
             channels: std::collections::BTreeMap::new(),
             jobs: std::collections::BTreeMap::new(),
-            warrant: None,
             attending: stageman_core::Attending::default(),
         },
     );

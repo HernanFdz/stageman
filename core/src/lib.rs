@@ -579,25 +579,6 @@ pub struct Project {
     /// Nested rather than held globally so that "a job belongs to exactly one
     /// project" is structural instead of a field somebody has to keep true.
     pub jobs: BTreeMap<JobId, Job>,
-    /// What its foreman presents when it asks this instance to do something.
-    ///
-    /// **Not a fourth kind of token.** This codebase already uses that word
-    /// for what an agent authenticates with, what a job reaches a platform
-    /// with, and what a channel is posted on — three different things. A
-    /// warrant is none of them: it authorises one bearer to ask *this
-    /// instance* for one act, and it never leaves the machine.
-    ///
-    /// It exists because a container that can reach the daemon is not
-    /// necessarily a foreman's. Measured rather than assumed: an unrelated
-    /// `alpine` container reaches the host exactly as easily as a foreman's
-    /// image does, so without this every job's agent could create jobs with a
-    /// foreman's authority. See
-    /// `docs/decisions/0032-a-foreman-asks-the-instance-by-warrant.md`.
-    ///
-    /// Optional, because every project that already exists has none and one is
-    /// minted when a foreman first needs it. A project with no foreman running
-    /// needs no warrant.
-    pub warrant: Option<Secret>,
     /// What its foreman is doing, and what is waiting behind it.
     ///
     /// Per project because a foreman is, and persisted because a message
@@ -740,31 +721,6 @@ impl State {
         self.projects
             .values()
             .find_map(|project| project.jobs.get(&job))
-    }
-
-    /// Which project a warrant belongs to, if any does.
-    ///
-    /// The warrant both authorises and identifies: a foreman presenting one is
-    /// saying which project it speaks for by the fact of holding that value.
-    /// Nothing else has to be sent, and nothing sent could contradict it —
-    /// a request naming a project it has no warrant for is a request with the
-    /// wrong warrant.
-    ///
-    /// Compared in full and never by prefix. A warrant is the only thing
-    /// standing between any container on the machine and a foreman's
-    /// authority, per
-    /// `docs/decisions/0032-a-foreman-asks-the-instance-by-warrant.md`.
-    #[must_use]
-    pub fn warranted(&self, presented: &str) -> Option<ProjectId> {
-        self.projects
-            .iter()
-            .find(|(_, project)| {
-                project
-                    .warrant
-                    .as_ref()
-                    .is_some_and(|held| held.expose() == presented)
-            })
-            .map(|(id, _)| *id)
     }
 
     /// Which project a job belongs to.
@@ -921,11 +877,6 @@ impl State {
                         channels,
                         jobs: project.jobs.clone(),
                         attending: project.attending.clone(),
-                        warrant: project
-                            .warrant
-                            .as_ref()
-                            .map(|secret| secret.seal(key, nonces()))
-                            .transpose()?,
                     },
                 ))
             })
@@ -1169,11 +1120,6 @@ pub struct SealedProject {
     pub channels: BTreeMap<Channel, SealedChannelConfig>,
     /// Its jobs, which hold nothing needing sealing.
     pub jobs: BTreeMap<JobId, Job>,
-    /// Its foreman's warrant, sealed like every other credential.
-    ///
-    /// Defaulted, because projects exist that predate foremen having one.
-    #[serde(default)]
-    pub warrant: Option<SealedSecret>,
     /// What its foreman was doing, which holds nothing needing sealing either:
     /// a message from a person is not a credential.
     ///
@@ -1259,7 +1205,6 @@ impl Snapshot {
                         channels,
                         jobs: project.jobs,
                         attending: project.attending,
-                        warrant: project.warrant.map(|secret| secret.open(key)).transpose()?,
                     },
                 ))
             })
@@ -1385,7 +1330,6 @@ pub struct Handout {
     platforms: BTreeMap<Platform, Secret>,
     channels: BTreeMap<Channel, Speaking>,
     thread: Option<Thread>,
-    warrant: Option<Secret>,
 }
 
 impl Handout {
@@ -1438,7 +1382,6 @@ impl Handout {
             channels: speaking(watching),
             // Only a foreman may ask this instance for anything, so only a
             // foreman's handout carries what proves the asking.
-            warrant: watching.warrant.clone(),
             // The foreman speaks at the root of the channel, which is
             // what makes a reply there addressed to it. See
             // `docs/decisions/0029-a-reply-is-routed-by-its-thread.md`.
@@ -1475,9 +1418,6 @@ impl Handout {
             platforms: project.credentials.clone(),
             channels: speaking(project),
             // Never for a job. A job that could create jobs would have a
-            // foreman's authority, which is the whole thing the warrant exists
-            // to withhold.
-            warrant: None,
             // Narrowed by [`Handout::speaking_in`] once the job has a thread.
             thread: None,
         })
@@ -1544,15 +1484,6 @@ impl Handout {
     pub const fn thread(&self) -> Option<&Thread> {
         self.thread.as_ref()
     }
-
-    /// What this process presents when it asks the instance for something.
-    ///
-    /// Present for a foreman and absent for a job, which is not a detail: it
-    /// is the whole of what stops a job creating jobs.
-    #[must_use]
-    pub const fn warrant(&self) -> Option<&Secret> {
-        self.warrant.as_ref()
-    }
 }
 
 impl fmt::Debug for Handout {
@@ -1570,7 +1501,6 @@ impl fmt::Debug for Handout {
             .field("platforms", &self.platforms.keys().collect::<Vec<_>>())
             .field("channels", &self.channels.keys().collect::<Vec<_>>())
             .field("thread", &self.thread)
-            .field("warrant", &self.warrant.as_ref().map(|_| "<redacted>"))
             .finish()
     }
 }
@@ -1622,10 +1552,6 @@ mod tests {
     /// The second credential, which opens an event stream rather than posting.
     /// Distinct again, so a handout carrying it is detectable.
     const LISTEN_TOKEN: &str = "xapp-not-a-real-token";
-    /// What a foreman presents to this instance. Distinct again, so a handout
-    /// carrying it where it should not is detectable rather than merely full.
-    const WARRANT: &str = "warrant-not-a-real-secret";
-
     /// An instance with an agent configured and nothing else.
     fn configured() -> State {
         State {
@@ -1668,7 +1594,6 @@ mod tests {
             credentials,
             channels,
             jobs,
-            warrant: None,
             attending: Attending::default(),
         }
     }
@@ -2562,97 +2487,7 @@ mod tests {
         assert_eq!(narrowed.channels().count(), 1);
     }
 
-    /// A warrant reaches a foreman's handout and never a job's.
-    ///
-    /// The whole of what stops a job creating jobs. Measured rather than
-    /// assumed that it is needed: an unrelated container reaches the host as
-    /// easily as a foreman's does, so nothing about being in a container makes
-    /// a process a foreman.
-    #[test]
-    fn only_a_foreman_is_handed_a_warrant() {
-        let (mut state, mine, _) = two_projects();
-        state.projects.get_mut(&mine).expect("the project").warrant =
-            Some(Secret::new(WARRANT.to_owned()));
-
-        assert_eq!(
-            Handout::for_foreman(&state, mine)
-                .expect("a watched project")
-                .warrant()
-                .map(Secret::expose),
-            Some(WARRANT)
-        );
-        assert_eq!(
-            Handout::for_job(&state, Agent::Claude, mine)
-                .expect("a watched project")
-                .warrant(),
-            None,
-            "a job that could ask the instance for anything has a foreman's authority"
-        );
-    }
-
-    /// A warrant names the project that holds it, and nothing else.
-    #[test]
-    fn a_warrant_says_which_project_it_speaks_for() {
-        let (mut state, mine, theirs) = two_projects();
-        state.projects.get_mut(&mine).expect("the project").warrant =
-            Some(Secret::new(WARRANT.to_owned()));
-
-        assert_eq!(state.warranted(WARRANT), Some(mine));
-
-        // A project with no warrant is never matched, however empty the value.
-        assert_eq!(state.warranted(""), None);
-        assert_eq!(state.warranted("warrant-somebody-invented"), None);
-        assert_eq!(
-            state
-                .projects
-                .get(&theirs)
-                .expect("the other project")
-                .warrant,
-            None
-        );
-
-        // Never by prefix, because a shorter guess must not open a longer
-        // secret.
-        // Sliced by characters rather than by byte index, which the gate is
-        // right to call a panic on any string it does not itself control.
-        let shorter: String = WARRANT.chars().take(5).collect();
-        assert_eq!(state.warranted(&shorter), None);
-        assert_eq!(state.warranted(&format!("{WARRANT}extra")), None);
-    }
-
     /// A warrant is sealed like every other credential, and survives.
-    #[test]
-    fn a_warrant_is_sealed_and_survives_the_snapshot() {
-        let mut state = populated();
-        let project = *state.projects.keys().next().expect("a project");
-        state
-            .projects
-            .get_mut(&project)
-            .expect("the project")
-            .warrant = Some(Secret::new(WARRANT.to_owned()));
-
-        let json = serde_json::to_string(
-            &state
-                .seal(&key(), &mut counting_nonces())
-                .expect("sealing cannot fail"),
-        )
-        .expect("a snapshot serialises");
-        assert!(!json.contains(WARRANT), "{json}");
-
-        let reopened: Snapshot = serde_json::from_str(&json).expect("and parses back");
-        let reopened = reopened.open(&key()).expect("and opens");
-        assert_eq!(
-            reopened
-                .projects
-                .get(&project)
-                .expect("the project survived")
-                .warrant
-                .as_ref()
-                .map(Secret::expose),
-            Some(WARRANT)
-        );
-    }
-
     /// The credential that listens never reaches a handout at all.
     ///
     /// `docs/decisions/0029-a-reply-is-routed-by-its-thread.md` says the token
