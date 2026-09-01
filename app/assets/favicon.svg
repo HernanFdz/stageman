@@ -1,0 +1,23 @@
+<!-- The dashboard's mark: a spotlight falling on a stage floor.
+
+     Flat fills, no gradient and no stroke, because the size this is actually
+     read at is sixteen pixels in a tab strip, where a gradient is a smudge and
+     a hairline stroke is nothing at all. The gap between the beam and the
+     floor is wide for the same reason: at that size it is one pixel, and a
+     narrower one closes up.
+
+     The green is the primary colour token of `app/tailwind.css`, and this is
+     the one place in the repository that value is written twice. An external
+     SVG is fetched on its own and has no stylesheet, so it cannot read a
+     custom property. The duplication is the format's rather than a choice,
+     which is why it is recorded here instead of removed.
+
+     Note for whoever edits this text: an XML comment may not contain two
+     hyphens in a row, so the token above is named rather than spelled. A
+     renderer refuses the whole file over it, which is a long way to walk for
+     a sentence. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+    <rect width="32" height="32" rx="7" fill="#2f6f4e"/>
+    <path d="M13 6h6l6.5 14.5h-19z" fill="#ffffff"/>
+    <rect x="5" y="23.5" width="22" height="3.5" rx="1.75" fill="#ffffff"/>
+</svg>

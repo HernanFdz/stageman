@@ -65,6 +65,25 @@ pub use projects_view::{Project, ProjectsView};
 )]
 const STYLESHEET: Asset = asset!("/assets/styles.css");
 
+/// The mark a browser puts in its tab strip.
+///
+/// Named rather than left to the default, and that is the whole of what it is
+/// for: a page declaring no icon is one every browser then asks `/favicon.ico`
+/// for, and nothing here serves that path — so the first thing this dashboard
+/// did on arriving was put a 404 in the console of whoever opened it. Declaring
+/// one is what stops the request, rather than answering it.
+///
+/// It is tracked rather than generated, unlike the stylesheet above, so there
+/// is nothing for the build script to guarantee and no entry in
+/// `.quality/generated-paths`.
+// The same expectation as the stylesheet, for the same reason: it fires inside
+// the macro's expansion rather than against anything written here.
+#[expect(
+    clippy::volatile_composites,
+    reason = "raised against third-party macro output, not against anything written here"
+)]
+const FAVICON: Asset = asset!("/assets/favicon.svg");
+
 /// Every screen there is.
 ///
 /// Flat, and it should stay that way for as long as it can. This operates one
@@ -109,6 +128,7 @@ pub fn Dashboard() -> Element {
 #[component]
 pub fn Shell() -> Element {
     rsx! {
+        document::Link { rel: "icon", r#type: "image/svg+xml", href: FAVICON }
         document::Stylesheet { href: STYLESHEET }
         div { class: "min-h-screen bg-background font-sans text-foreground",
             header { class: "border-b border-border bg-surface",
