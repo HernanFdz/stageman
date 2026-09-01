@@ -290,6 +290,31 @@ justify is usually obsolete.
   would silently stop covering half the application. The line excludes the four
   internal crates by name; a crate added later fails there until somebody says
   which side of the split it is on, which is the right default.
+- **Two things `dx` produces are corrected rather than accepted, and a `dx`
+  upgrade is the moment to re-check both.** Neither is a broken build. Both are
+  a line in the console of a page that otherwise works perfectly — which is
+  exactly why they are written down here, because nothing else would ever bring
+  anybody back to them.
+
+  **The index is not byte-for-byte what the bundler wrote.** It preloads the
+  browser's half with `rel="preload" as="script"` and then loads that same file
+  with `<script type="module">`; a browser fetches a module in its own mode, so
+  the preloaded copy matches nothing and is thrown away — sixty kilobytes
+  fetched twice, and Firefox saying so. One literal is rewritten as the index
+  is written out, and nothing else is touched.
+
+  **A release's wasm carries no name section**, because Firefox reads one that
+  is present and *empty* by running off the end of it into the next custom
+  section and reporting the module as validated with a warning. Emptying it is
+  the bindgen step's doing and preserving the husk is the optimizer's, so the
+  fix is `--debug-symbols false` in the build recipe. Not
+  `[web.wasm_opt] debug` in `app/Dioxus.toml`, which is the obvious place and
+  does nothing: the flag overwrites that field rather than reading it.
+
+  Both fail in the safe direction, which is the whole argument for doing either
+  to somebody else's output. A substitution that stops matching leaves a page
+  that works and a console line that came back; a flag that stops being
+  accepted stops the build and says which one.
 - **Typed errors per crate, and no `anyhow` in core, agent, foreman or
   job.** That is the gate's bar restated only where it bites: **app** is a
   binary and may do as it likes internally, but the other four are libraries

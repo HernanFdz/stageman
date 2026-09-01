@@ -951,8 +951,50 @@ fn materialise(directory: &Path, index: &[u8]) -> Result<PathBuf, StartupError> 
         source,
     };
     fs::create_dir_all(directory).map_err(failed)?;
-    fs::write(&written, index).map_err(failed)?;
+    fs::write(&written, modulepreloaded(index)).map_err(failed)?;
     Ok(written)
+}
+
+/// How the bundler asks a browser to preload the browser's half.
+///
+/// It emits this and then loads the same file with `<script type="module">`,
+/// and to a browser those are two different requests: a module is fetched in
+/// its own mode, so the preloaded copy never matches the one the page goes on
+/// to ask for. Firefox says so — *preloaded with link preload was not used* —
+/// having fetched sixty kilobytes twice to find out.
+const PRELOADED: &str = r#"rel="preload" as="script""#;
+
+/// What it should have said.
+///
+/// `modulepreload` is the tag whose fetch matches a module's, so the preload
+/// is used rather than raced. `as` goes with it because the relationship
+/// already implies the destination, and the `href` and `crossorigin` either
+/// side of this are left exactly as they were.
+const MODULEPRELOADED: &str = r#"rel="modulepreload""#;
+
+/// The carried index, with the browser's half preloaded as the module it is.
+///
+/// A substitution over somebody else's generated file, which is worth being
+/// plain about rather than burying. [`PRELOADED`] is a literal the bundler
+/// writes, so a version of it spelling that differently is a version this
+/// quietly stops correcting — and what comes back then is the console line it
+/// was written for, on a page that still works. That asymmetry is the whole
+/// argument for patching generated output here: the failure of the patch is
+/// the state before it.
+///
+/// Everything else is left alone, deliberately. This is not an HTML rewriter
+/// and must not become one — the index is the renderer's input, and a
+/// transformation that reflowed it would change what the framework parses.
+///
+/// Bytes that are not text come back untouched rather than lossily converted.
+/// An index this could not read is not one it should be editing, and a build
+/// carrying no browser half has no such tag in the first place, so leaving it
+/// alone is the ordinary case rather than a failure.
+fn modulepreloaded(index: &[u8]) -> Vec<u8> {
+    std::str::from_utf8(index).map_or_else(
+        |_| index.to_vec(),
+        |text| text.replace(PRELOADED, MODULEPRELOADED).into_bytes(),
+    )
 }
 
 /// Removes what [`materialise`] wrote, so nothing is left on disk.
@@ -1219,6 +1261,55 @@ mod tests {
             std::fs::read_to_string(&written).expect("it is there"),
             "<html>carried</html>",
             "the framework would parse whatever this wrote",
+        );
+    }
+
+    /// The browser's half is preloaded as the module the page then loads.
+    ///
+    /// Written against the tag the bundler actually emits rather than a
+    /// paraphrase of it, because a paraphrase would keep passing after the
+    /// real one changed shape — and the substitution missing is silent by
+    /// design, so this test is the only thing that would say so.
+    #[test]
+    fn a_module_is_preloaded_as_a_module() {
+        use super::modulepreloaded;
+
+        let emitted = concat!(
+            r#"<link rel="preload" as="script" href="/./assets/x-dxh0.js" crossorigin>"#,
+            r#"<script type="module" async src="/./assets/x-dxh0.js"></script>"#,
+        );
+
+        let corrected =
+            String::from_utf8(modulepreloaded(emitted.as_bytes())).expect("text in, text out");
+
+        assert_eq!(
+            corrected,
+            concat!(
+                r#"<link rel="modulepreload" href="/./assets/x-dxh0.js" crossorigin>"#,
+                r#"<script type="module" async src="/./assets/x-dxh0.js"></script>"#,
+            ),
+            "the link should preload a module, and nothing else should move",
+        );
+    }
+
+    /// An index with nothing to correct is passed through untouched.
+    ///
+    /// Two of them, and they are different failures rather than the same one
+    /// twice: a build carrying no browser half has no such tag, and bytes that
+    /// are not text are not an index this has any business editing. Both must
+    /// arrive at the framework exactly as they left.
+    #[test]
+    fn an_index_with_no_such_tag_is_left_alone() {
+        use super::modulepreloaded;
+
+        assert_eq!(
+            modulepreloaded(b"<html>no client here</html>"),
+            b"<html>no client here</html>",
+        );
+        assert_eq!(
+            modulepreloaded(&[0xff, 0xfe, 0x00]),
+            &[0xff, 0xfe, 0x00],
+            "bytes that are not text are not rewritten lossily",
         );
     }
 
