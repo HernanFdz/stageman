@@ -164,6 +164,22 @@ dev *arguments:
 # so this recipe holds it rather than offering it. The wasm being far smaller
 # is the lesser half of the reason.
 #
+# **`--debug-symbols false` on the browser's half is not the tautology it
+# looks like.** The flag defaults to *true*, and it wins over
+# `[web.wasm_opt] debug` in `app/Dioxus.toml`, because the tooling overwrites
+# that field with this flag rather than reading it — so this is the only place
+# the question can be answered at all, and the obvious place is the wrong one.
+#
+# What it buys is not size. `strip = "debuginfo"` in the release profile leaves
+# no debug information for it to keep, so the only thing it was preserving was
+# an *empty* name section: the bindgen step is told to remove the names and
+# leaves the section behind it, and `--debuginfo` then carries the husk
+# through. Firefox reads a name section that is present and empty by running
+# off the end of it into the next custom section, misreading that section's
+# header as a subsection of this one, and reports the module as validated with
+# a warning on every single load. Off, the optimizer strips the section
+# instead of preserving it — and there was never anything in it to lose.
+#
 # Targets are named `<os>-<arch>` rather than by triple, because this is the
 # layer where commands are spelled and nobody should have to type
 # `x86_64-unknown-linux-gnu`. The list is deliberately short: a name appears
@@ -241,7 +257,7 @@ build target="host":
 
     echo "==> pass 1 of 2: building the browser's half"
     dx build --release --fullstack --package stageman \
-        @client --no-default-features --features web \
+        @client --no-default-features --features web --debug-symbols false \
         @server --features server $targeting
     rm -rf "$embed"
     mkdir -p "$embed"
@@ -249,7 +265,7 @@ build target="host":
 
     echo "==> pass 2 of 2: building the server that carries it"
     dx build --release --fullstack --package stageman \
-        @client --no-default-features --features web \
+        @client --no-default-features --features web --debug-symbols false \
         @server --features server $targeting
 
     # One file, named for what it is. `dx` calls it `server`, which says
