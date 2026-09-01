@@ -162,13 +162,29 @@ jobs:
 
       - run: just release "${{ steps.settle.outputs.version }}" linux-x64
 
-      - name: name the artefact for whoever downloads it
-        env:
-          VERSION: ${{ steps.settle.outputs.version }}
+      # No copy and no rename: what `just build` produced is what ships, under
+      # the name it already has.
+      #
+      # **The version is deliberately not in the filename.** It is in the tag
+      # the asset hangs from and in the binary itself, which answers
+      # `--version` without being started — so a third copy in the filename
+      # would be a third place for it to disagree. What it buys is a URL that
+      # does not change: `/releases/latest/download/stageman-linux-x64`
+      # resolves for every release, where a versioned name can only ever be
+      # written down after the fact.
+      #
+      # The cost is that two releases downloaded into one directory overwrite
+      # each other. That is the trade being made: the file no longer says which
+      # version it is, and the binary does.
+      #
+      # The checksum is written from inside `dist` so it names the file rather
+      # than a path, which is what `sha256sum -c` wants after downloading both
+      # into the same place.
+      - name: a checksum to download beside it
         run: |
           set -euo pipefail
-          cp "dist/stageman-linux-x64" "stageman-${VERSION}-linux-x64"
-          sha256sum "stageman-${VERSION}-linux-x64" > "stageman-${VERSION}-linux-x64.sha256"
+          cd dist
+          sha256sum stageman-linux-x64 > stageman-linux-x64.sha256
 
       # A draft, and the tag does not exist yet. Publishing is what creates it,
       # at the commit named here — so the tag can only ever point at what was
@@ -180,5 +196,5 @@ jobs:
           draft: true
           fail_on_unmatched_files: true
           files: |
-            stageman-${{ steps.settle.outputs.version }}-linux-x64
-            stageman-${{ steps.settle.outputs.version }}-linux-x64.sha256
+            dist/stageman-linux-x64
+            dist/stageman-linux-x64.sha256

@@ -76,10 +76,23 @@ What gets reported is `STAGEMAN_LOG`. It takes the same filter syntax as
 `RUST_LOG` and defaults to `warn` — enough to see what needs attention, not a
 commentary on things going right.
 
+Each release carries one Linux binary, and the latest is always at the same
+address:
+
+```sh
+curl -LO https://github.com/HernanFdz/stageman/releases/latest/download/stageman-linux-x64
+curl -LO https://github.com/HernanFdz/stageman/releases/latest/download/stageman-linux-x64.sha256
+sha256sum -c stageman-linux-x64.sha256
+chmod +x stageman-linux-x64
+```
+
+The filename carries no version on purpose — that is what the tag it hangs
+from is for, and what the binary answers when asked. Which is why the address
+above never changes.
+
 Releases are cut from the Actions tab — *release* → **Run workflow** — by
 naming a version and, if it should not be the head of `main`, a commit to build
-from. Pushing a tag by hand does nothing. Each release carries one Linux
-binary. `stageman --version`
+from. Pushing a tag by hand does nothing. `stageman --version`
 answers without starting anything, so a downloaded file can always say which
 release it is and what it was built for. A binary you built yourself says that
 instead of a version, which is the honest answer. There is no package to
