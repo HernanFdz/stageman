@@ -1,20 +1,27 @@
-# The published package, and the one you run. It may name all three internal
-# crates; nothing may name it.
+# The one you run. It may name all three internal crates; nothing may name it.
+#
+# **Not a published package**, per
+# `docs/decisions/0039-a-release-is-a-tagged-binary.md` — a registry builds with
+# `cargo` alone and so cannot carry the browser half, which would make an
+# install a dashboard that renders and never responds. `publish = false` in the
+# workspace is what refuses it.
 #
 # `README.md` and `LICENSE` here are symlinks to the files at the repository
-# root. A published package cannot reach outside its own directory, so
-# packaging follows the link and ships the content — and there is still only
-# one copy under version control.
+# root, which packaging would have followed. They stay because the first is
+# this crate's front page — every example in it is compiled as a doctest — and
+# the second belongs beside the code whether or not anybody ships it.
 
 [package]
 name = "stageman"
 description = "An orchestration platform for sleepless coding agents."
 readme = "README.md"
-keywords = ["agentic", "coding"]
-# Must be a slug crates.io actually recognises, or `cargo publish` rejects the
-# package. Nothing in the gate checks this; the scaffold's placeholder did not.
-categories = ["development-tools"]
 version.workspace = true
+# Inherited rather than repeated. Workspace inheritance is opt-in per field, so
+# without this line the workspace's `publish = false` applies to everything
+# except the one package anybody would try to publish — which is the shape of
+# mistake that looks configured and is not. The four internal crates declare it
+# themselves and always have.
+publish.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
