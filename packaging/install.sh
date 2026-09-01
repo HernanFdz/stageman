@@ -420,6 +420,11 @@ main() {
 
     detect_target
 
+    # Reported, and never acted on. Matching versions do not short-circuit the
+    # download, deliberately: re-running is also how somebody repairs an
+    # install — a deleted unit, a half-finished update, a binary that was moved
+    # — and a run that decided there was nothing to do would be useless in
+    # exactly those cases. The cost is one download of a file already present.
     present="$(installed_version)"
     if [ -n "${present}" ]; then
         say "stageman ${present} is installed; this is ${VERSION}."
@@ -451,27 +456,38 @@ main() {
         why_it_did_not_start
     fi
 
-    step "stageman ${VERSION} is running"
-    say ""
-    say "It has no agents and no projects yet, which is a perfectly good instance —"
-    say "you give it those in the dashboard. Where that dashboard is listening, where"
-    say "its instance file went and which container runtime it found are all printed"
-    say "at startup:"
-    say ""
     case "${PLATFORM}" in
         linux)
-            say "  journalctl --unit ${SERVICE} --lines 20"
-            say ""
-            say "It listens on 127.0.0.1:8080 by default. To change that, or to reach it"
-            say "from another machine, edit ${UNIT}."
+            reading="journalctl --unit ${SERVICE} --lines 20"
+            configured_in="${UNIT}"
             ;;
         macos)
-            say "  tail -n 20 ${LOG}"
-            say ""
-            say "It listens on 127.0.0.1:8080 by default. To change that, or to reach it"
-            say "from another machine, edit ${PLIST}."
+            reading="tail -n 20 ${LOG}"
+            configured_in="${PLIST}"
             ;;
     esac
+
+    # **Says nothing about what is in the instance**, and that is the fix rather
+    # than the wording. This script never opens one. What used to be here said
+    # the instance had no agents and no projects yet — true of a first install,
+    # a plain guess otherwise, and read as a statement of fact by somebody
+    # updating a machine with real projects on it. The daemon names the instance
+    # it opened, in the lines below, for the same reason nothing here goes
+    # looking for a container runtime: it already knows, and a second answer can
+    # only be the wrong one.
+    step "stageman ${VERSION} is running"
+    say ""
+    say "Which instance it opened, where the dashboard is listening and which"
+    say "container runtime it found are all printed at startup:"
+    say ""
+    say "  ${reading}"
+    say ""
+    say "An instance already on this machine is opened as it was — nothing here"
+    say "writes to one. A new one starts with no agents and no projects, which you"
+    say "add in the dashboard."
+    say ""
+    say "It listens on 127.0.0.1:8080 by default. To change that, or to reach it"
+    say "from another machine, edit ${configured_in}."
     say ""
     say "Re-run this script to update. Run it with --uninstall to remove it."
 }
