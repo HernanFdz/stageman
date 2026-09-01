@@ -205,7 +205,19 @@ fn started(variables: &[(&str, String)]) -> Serving {
     }
     let mut child = command.spawn().expect("the binary runs");
     let stdout = child.stdout.take().expect("its output was piped");
-    let (said, address) = listening(stdout);
+    // Killed here rather than left to `Serving`'s drop, because there is no
+    // `Serving` yet: dropping a `Child` does not stop the process it names, so
+    // a start that never announces would otherwise leak a serving binary per
+    // failed test — and a suite that leaks one per failure takes longer to fail
+    // than mutation testing is willing to wait, which is how this was found.
+    let (said, address) = match watch(stdout) {
+        Ok(seen) => seen,
+        Err(why) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("{why}");
+        }
+    };
     Serving {
         child,
         said,
@@ -229,6 +241,10 @@ const PATIENCE: Duration = Duration::from_secs(5);
 
 /// Reads a starting binary's output until it names the address it took.
 ///
+/// Answers rather than panicking, so the caller still owns the child and can
+/// stop it. Panicking here would abandon a process that is serving happily and
+/// simply never said so.
+///
 /// Read on another thread with a deadline, which is not ceremony: a blocking
 /// read of a serving process's output has no end of file to reach, so a start
 /// that prints nothing hangs rather than fails. Mutation testing found this by
@@ -246,7 +262,7 @@ const PATIENCE: Duration = Duration::from_secs(5);
 /// End of file before the address means it exited instead of serving, and the
 /// output it did produce is the only evidence of why — so it is reported
 /// rather than swallowed.
-fn listening(stdout: ChildStdout) -> (String, String) {
+fn watch(stdout: ChildStdout) -> Result<(String, String), String> {
     const MARKER: &str = "dashboard  http://";
 
     let (found, arrived) = mpsc::channel();
@@ -268,9 +284,11 @@ fn listening(stdout: ChildStdout) -> (String, String) {
     });
 
     match arrived.recv_timeout(PATIENCE) {
-        Ok(Some(listening)) => listening,
-        Ok(None) => panic!("it stopped without ever saying where it was listening"),
-        Err(waited) => panic!("it started and never said where it was listening: {waited}"),
+        Ok(Some(listening)) => Ok(listening),
+        Ok(None) => Err("it stopped without ever saying where it was listening".to_owned()),
+        Err(waited) => Err(format!(
+            "it started and never said where it was listening: {waited}"
+        )),
     }
 }
 
@@ -661,6 +679,7 @@ fn saying_where_the_instance_goes_still_wins() {
 /// door. Without it, a `cargo` build has no bundle at all — which is the case
 /// every other test here runs in, and is asserted first so that this test
 /// fails if the two ever stop differing.
+
 #[test]
 fn a_build_says_whether_it_has_a_browser_half() {
     let (_kept, snapshot) = scratch();
