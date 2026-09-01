@@ -25,8 +25,23 @@ true, that channel cannot produce a working product.
 
 ## Decision
 
-**A release is cut by pushing a tag, and produces binaries. This project is
-never published to a registry.**
+**A release is cut from the forge's own interface and produces binaries. This
+project is never published to a registry.**
+
+The trigger was a tag push and is now a dispatched workflow, and the reason is
+worth keeping: a tag pushed by hand can name any commit, so the tag decided
+what got built. Now a version is asked for and the build settles what the tag
+will point at. It is also the only shape in which the commit released can be
+something other than the head of `main` while still being checked — a
+dispatched workflow can take an argument, and a tag cannot.
+
+**The tag is created by publishing the draft, not by the workflow.** That is
+the platform's constraint rather than a preference: a tag the workflow created
+would be attributed to the GitHub Actions app, and the rule restricting who may
+create `refs/tags/v*` cannot name that app as an exception on a user-owned
+repository. So the release is drafted against a tag that does not exist yet,
+recording the commit it was built from, and publishing brings the tag into
+being at that commit. Measured: a draft release does not create its tag.
 
 - **Publication is refused mechanically**, not by convention: every package
   carries `publish = false`, and every version is `0.0.0`. The first stops

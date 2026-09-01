@@ -76,7 +76,10 @@ What gets reported is `STAGEMAN_LOG`. It takes the same filter syntax as
 `RUST_LOG` and defaults to `warn` — enough to see what needs attention, not a
 commentary on things going right.
 
-Releases are tagged, and each carries one Linux binary. `stageman --version`
+Releases are cut from the Actions tab — *release* → **Run workflow** — by
+naming a version and, if it should not be the head of `main`, a commit to build
+from. Pushing a tag by hand does nothing. Each release carries one Linux
+binary. `stageman --version`
 answers without starting anything, so a downloaded file can always say which
 release it is and what it was built for. A binary you built yourself says that
 instead of a version, which is the honest answer. There is no package to
