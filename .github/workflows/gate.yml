@@ -15,9 +15,25 @@
 
 name: gate
 
+# Pull requests only, and never a push to `main`. Two things make a second run
+# there redundant rather than merely expensive.
+#
+# The gate's own ruleset requires branches to be up to date before merging, so
+# a pull request is checked against exactly the content that lands — the
+# classic failure where two independently-green branches merge into a broken
+# `main` cannot happen here.
+#
+# And nothing reaches `main` except through a pull request. The ruleset
+# requiring one is bypassable only in "for pull requests only" mode, which
+# GitHub defines as *requiring* its actor to open one: it permits merging
+# without an approval, never pushing directly. So there is no path to `main`
+# that a run here does not already cover.
+#
+# What this does give up is noticing a newly published advisory on a quiet
+# week, since `deps` asks a live database and only runs when something is
+# proposed. A schedule would cover that better than a push trigger ever did,
+# and is deliberately not added until somebody wants it.
 on:
-  push:
-    branches: [main]
   pull_request:
 
 concurrency:
