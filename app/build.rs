@@ -27,6 +27,23 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 
+/// What a release build is told its version is.
+///
+/// The presence of this is what makes a build a release: there is no separate
+/// flag, because two variables that can disagree are worse than one that
+/// cannot. See `docs/decisions/0039-a-release-is-a-tagged-binary.md`.
+const VERSION: &str = "STAGEMAN_BUILD_VERSION";
+
+/// The commit a release was built from, and when that commit was made.
+///
+/// Required alongside the version rather than optional. The date is the
+/// commit's rather than this build's, so that rebuilding one tag cannot
+/// produce a binary claiming a different one.
+const PROVENANCE: &[&str] = &["STAGEMAN_BUILD_COMMIT", "STAGEMAN_BUILD_DATE"];
+
+/// The triple this is being built for, which the compiler already knows.
+const TARGET: &str = "STAGEMAN_BUILD_TARGET";
+
 /// Where `just build` leaves the browser's half for this to embed.
 const BUNDLE: &str = "bundle";
 
@@ -36,6 +53,7 @@ const TABLE: &str = "bundle.rs";
 fn main() {
     stylesheet();
     embed();
+    provenance();
 }
 
 /// Guarantees the stylesheet exists before `asset!` looks for it.
@@ -148,4 +166,46 @@ fn collect(root: &Path, at: &Path, found: &mut Vec<(String, String)>) {
             }
         }
     }
+}
+
+/// Settles what this binary will say about itself.
+///
+/// Two jobs, and they are here rather than in the source for opposite reasons.
+///
+/// The target is *derived*: cargo tells a build script what it is building for
+/// and tells the crate nothing, so this is the only place it can come from —
+/// which is also the right place, because it is the one part of a release's
+/// provenance that whoever invoked the build could get wrong and the build
+/// cannot.
+///
+/// The rest is *checked*: `option_env!` in the source would let a release
+/// built without its commit fall back to reporting no release at all, quietly.
+/// A release missing its provenance is broken rather than partial, so it stops
+/// here instead.
+fn provenance() {
+    // Read through `env::var` rather than trusted to change detection: this
+    // decides whether to fail, and a decision made on a stale value is worse
+    // than no decision. `option_env!` in the source is separately tracked by
+    // the compiler, which is why nothing else here has to be.
+    println!("cargo::rerun-if-env-changed={VERSION}");
+    for named in PROVENANCE {
+        println!("cargo::rerun-if-env-changed={named}");
+    }
+
+    if std::env::var_os(VERSION).is_some() {
+        for named in PROVENANCE {
+            assert!(
+                std::env::var_os(named).is_some(),
+                "{VERSION} is set, so this is a release build, and {named} is not set.\n\
+                 A release that cannot say which commit it came from is broken rather \
+                 than partial,\n  so this refuses rather than building a binary that \
+                 reports itself as no release at all.",
+            );
+        }
+    }
+
+    // Always set, so the source reads it with `env!` rather than testing for
+    // it: every build knows its own target, release or not.
+    let target = std::env::var("TARGET").unwrap_or_else(|_| "unknown".to_owned());
+    println!("cargo::rustc-env={TARGET}={target}");
 }

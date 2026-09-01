@@ -24,6 +24,8 @@ mod instance;
 #[cfg(feature = "server")]
 mod listening;
 #[cfg(feature = "server")]
+pub mod release;
+#[cfg(feature = "server")]
 mod serving;
 #[cfg(feature = "server")]
 pub(crate) mod tooling;

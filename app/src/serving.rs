@@ -249,6 +249,18 @@ fn missing(runtime: &ContainerRuntime) -> bool {
 /// rather than handed to a caller who has nothing better to do with it.
 #[must_use]
 pub fn serve() -> ExitCode {
+    // Every field on its own line: this is the whole output, so it has the room
+    // that the startup block does not.
+    //
+    // Before the subscriber, the runtime, the instance and the runtime check,
+    // because it is a question about this file rather than about this machine
+    // — and it has to be answerable on a machine where none of the rest would
+    // work. Asking a binary what it is must never require it to be able to run.
+    if asked_what_it_is(std::env::args().skip(1)) {
+        print!("{}", crate::release::detailed());
+        return ExitCode::SUCCESS;
+    }
+
     // Standard error, which is a real answer for a process somebody started
     // and is watching, and a placeholder for the daemon this becomes — see
     // `docs/decisions/0018-diagnostics-are-emitted-through-tracing.md`.
@@ -282,6 +294,24 @@ pub fn serve() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Whether the only thing wanted is what this binary is.
+///
+/// Hand-rolled rather than parsed, because this is the whole command line
+/// there is: stageman takes its configuration from the environment and the
+/// dashboard, so a parser would be a dependency in front of one question. Both
+/// spellings, because both are what people type.
+///
+/// Anything else is ignored rather than refused. A binary a service manager
+/// starts with an argument nobody meant is better serving than exiting, and
+/// there is no argument it could be given that means something else.
+///
+/// It takes the arguments rather than reading them, because a test cannot
+/// choose what a process was started with — and the two spellings and the
+/// comparison between them are exactly what is worth asserting.
+fn asked_what_it_is(mut arguments: impl Iterator<Item = String>) -> bool {
+    arguments.any(|argument| argument == "--version" || argument == "-V")
 }
 
 /// Prints a failure and everything underneath it.
@@ -355,7 +385,9 @@ async fn start() -> Result<(), StartupError> {
     // fails `version`, which is why this asks for the latter.
     runtime.verify().await.map_err(StartupError::Runtime)?;
 
-    let swept = crate::reconcile(&store, runtime)
+    // The work matters and the tally does not: everything it finds worth acting
+    // on, it warns about by name as it goes.
+    crate::reconcile(&store, runtime)
         .await
         .map_err(StartupError::Sweep)?;
 
@@ -404,11 +436,33 @@ async fn start() -> Result<(), StartupError> {
     } else {
         router.serve_api_application(configured, Dashboard)
     };
-    let client = match (carried, &beside) {
-        (Some(_), _) => Client::Carried(crate::bundle::CARRIED.count()),
-        (None, Some(path)) => Client::Beside(path.clone()),
-        (None, None) => Client::Absent,
-    };
+    // Warned rather than printed, because it is an anomaly rather than a fact:
+    // every build that ships carries one. What it produces is a dashboard that
+    // renders and never responds, which is the state most easily mistaken for
+    // one that works — so it is worth saying, and worth saying only when true.
+    if clientless(carried, beside.as_deref()) {
+        tracing::warn!(
+            "this build carries no browser half and none is beside it — the dashboard \
+             will render and never respond. `just build` produces one that does"
+        );
+    }
+
+    // The same treatment, for the same reason. This used to be a count of
+    // channels with somewhere to listen, which told an operator that one of
+    // three was misconfigured without telling them which. A binding with no
+    // credential to listen with produces no error and looks exactly like a
+    // platform that has sent nothing, so it has to be said — by name.
+    // Bound before the loop so the read guard is dropped at this statement
+    // rather than held across it: warning is not a reason to keep the instance
+    // locked, and the gate is right to say so.
+    let deaf = unheard(&store.read());
+    for project in deaf {
+        tracing::warn!(
+            %project,
+            "a channel is bound with no credential to listen with, so nothing it says \
+             will be heard — which is indistinguishable from nobody saying anything"
+        );
+    }
 
     // Reached by the dashboard's route as an extension rather than as a
     // context, because a context only exists while a page is being rendered —
@@ -445,18 +499,7 @@ async fn start() -> Result<(), StartupError> {
         file: path,
         key: source,
     };
-    announce(
-        runtime,
-        &store,
-        &swept,
-        serving,
-        &client,
-        &kept,
-        tools
-            .as_ref()
-            .ok()
-            .and_then(|bound| bound.local_addr().ok()),
-    )?;
+    announce(runtime, serving, &kept)?;
 
     match tools {
         Ok(listening) => {
@@ -477,12 +520,25 @@ async fn start() -> Result<(), StartupError> {
         .map_err(StartupError::Serving)
 }
 
-/// How many channels this instance can hear replies on.
+/// Whether this build has no browser half anywhere.
 ///
-/// A channel bound without the credential that listens is counted as nothing,
-/// which is the point: it is the ordinary shape of a project that speaks and
-/// is not answered, and it is also what a half-finished setup looks like.
-fn listening(state: &stageman_core::State) -> usize {
+/// Both halves of the question, and a named function rather than a condition
+/// written where it is used, for the reason [`missing`] above is one: the two
+/// sources are not interchangeable and getting the combination wrong is
+/// silent. Warning when only one is absent would fire on every ordinary
+/// development build, which is how a warning stops being read.
+const fn clientless(carried: Option<&[u8]>, beside: Option<&Path>) -> bool {
+    carried.is_none() && beside.is_none()
+}
+
+/// Every project whose channels it cannot hear replies on.
+///
+/// By name rather than by count, which is the whole change: an operator told
+/// that two of three projects are listening still has to work out which one is
+/// not. A binding with no credential to listen with is not an error and
+/// produces no warning of its own — it looks exactly like a platform that has
+/// sent nothing — so this is the only thing that tells the two apart.
+fn unheard(state: &stageman_core::State) -> Vec<String> {
     state
         .projects
         .values()
@@ -490,14 +546,15 @@ fn listening(state: &stageman_core::State) -> usize {
             project
                 .channels
                 .values()
-                .any(|bound| bound.listen_credential.is_some())
+                .any(|bound| bound.listen_credential.is_none())
         })
-        .count()
+        .map(|project| project.name.clone())
+        .collect()
 }
 
 #[cfg(test)]
-mod listening_tests {
-    use super::listening;
+mod unheard_tests {
+    use super::unheard;
     use stageman_core::{Agent, Channel, ChannelConfig, Project, ProjectId, Secret, State, Uuid};
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -522,87 +579,70 @@ mod listening_tests {
         }
     }
 
-    /// The count says what can be heard, not what is bound.
+    /// It names the projects that cannot be heard, and only those.
     ///
-    /// The distinction this line exists for: a channel bound with no
-    /// credential to listen with is a project that speaks and is not answered,
-    /// which looks exactly like a half-finished setup and produces no warning
-    /// either way.
+    /// By name, which is the point of it: this replaced a count, and a count
+    /// told an operator that something was misconfigured without telling them
+    /// what. Bound is not the same as listening — a channel with no credential
+    /// to listen with is a project that speaks and is never answered, and it
+    /// looks exactly like a platform that has sent nothing.
     #[test]
-    fn only_a_channel_with_somewhere_to_listen_is_counted() {
+    fn only_a_project_that_cannot_be_heard_is_named() {
         let mut state = State::default();
-        assert_eq!(listening(&state), 0);
+        assert!(unheard(&state).is_empty());
 
         state.projects.insert(
             ProjectId::from_uuid(Uuid::from_u128(1)),
-            watching("a", false),
+            watching("heard", true),
         );
-        assert_eq!(listening(&state), 0, "bound is not the same as listening");
+        assert!(
+            unheard(&state).is_empty(),
+            "a listening channel is not a problem"
+        );
 
         state.projects.insert(
             ProjectId::from_uuid(Uuid::from_u128(2)),
-            watching("b", true),
+            watching("deaf", false),
         );
-        assert_eq!(listening(&state), 1);
+        assert_eq!(unheard(&state), vec!["deaf".to_owned()]);
 
         state.projects.insert(
             ProjectId::from_uuid(Uuid::from_u128(3)),
-            watching("c", true),
+            watching("also-deaf", false),
         );
-        assert_eq!(listening(&state), 2);
+        let mut named = unheard(&state);
+        named.sort();
+        assert_eq!(named, vec!["also-deaf".to_owned(), "deaf".to_owned()]);
     }
 }
 
-/// Says what was found and where the dashboard is, on standard output.
+/// Says what this is and where the dashboard is, on standard output.
 ///
 /// Not through `tracing`, for the same reason [`report`] is not: this is what
 /// somebody who typed the command is waiting to read, and a verbosity setting
 /// must not be able to withhold it.
+///
+/// **Four facts and an address, and nothing that is merely true right now.**
+/// It used to count agents, projects, listening channels, swept jobs and
+/// containers left alone. Those are state at one arbitrary moment — no more
+/// worth printing than the same numbers a second later — and every one of them
+/// that an operator could act on is already a warning naming the thing it is
+/// about, which a count never could. What is left is what does not change
+/// while the process runs: what this binary is, what it needs, what opens its
+/// instance, and where that instance is.
 fn announce(
     runtime: &ContainerRuntime,
-    store: &Store,
-    swept: &crate::Swept,
     serving: SocketAddr,
-    client: &Client,
     kept: &Kept,
-    tools: Option<SocketAddr>,
 ) -> Result<(), StartupError> {
     println!();
     println!("stageman is running.");
-    println!("  instance   {}", kept.file.display());
-    // Printed for the reason the instance path is: an instance opened under a
-    // key nobody meant to use looks exactly like an instance that lost its
-    // projects, and this is the one line that tells those apart.
-    println!("  key        {}", kept.key);
+    // Outward from the program to this instance's data: what it is, what it
+    // needs in order to work, what opens its file, and where that file is.
+    println!("  version    {}", crate::release::described());
     println!("  runtime    {}", runtime.path().display());
-    println!("  agents     {}", store.read().agents.len());
-    println!("  projects   {}", store.read().projects.len());
-    // Printed rather than logged, because the failure it answers is a channel
-    // bound with no credential to listen with — which is not an error, produces
-    // no warning, and is indistinguishable from a platform sending nothing.
-    // The count is the cheapest thing that tells them apart.
-    println!("  listening  {} channel(s)", listening(&store.read()));
-    // Printed because it is a port open on every interface, and because it
-    // can fail to open at all — a port already taken leaves a foreman able to
-    // talk and unable to work, and that has to be visible here rather than in
-    // a log line nobody was watching.
-    match tools {
-        Some(bound) => println!("  tools      {bound}"),
-        None => println!(
-            "  tools      NOT SERVED — port {} is taken, so no agent can reach a tool and \
-             none will say so",
-            *crate::endpoint::PORT
-        ),
-    }
-    println!(
-        "  swept      {} resumed, {} failed, {} stranded",
-        swept.resumed, swept.failed, swept.stranded
-    );
-    println!(
-        "  left alone {} unidentified, {} naming a forgotten job",
-        swept.unidentified, swept.forgotten
-    );
-    println!("  client     {client}");
+    println!("  key        {}", kept.key);
+    println!("  instance   {}", kept.file.display());
     println!();
     // Last, and that ordering is load-bearing rather than cosmetic: this line
     // is what anything supervising a start waits for, so everything worth
@@ -995,32 +1035,6 @@ fn serving_embedded(mut router: axum::Router) -> axum::Router {
     router
 }
 
-/// What browser half this binary is running with, for the line that says so.
-///
-/// Three states rather than two since the bundle can be carried, and the
-/// distinction is worth printing: they fail in different ways and an operator
-/// looking at a page that does not respond needs to know which one they have.
-enum Client {
-    /// Carried inside this binary, with this many files.
-    Carried(usize),
-    /// Found in a directory beside it.
-    Beside(PathBuf),
-    /// Neither, which is what `cargo build` produces.
-    Absent,
-}
-
-impl fmt::Display for Client {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Carried(files) => write!(f, "carried in this binary, {files} file(s)"),
-            Self::Beside(path) => write!(f, "{}", path.display()),
-            Self::Absent => {
-                f.write_str("not built — the dashboard is rendered here and stays still")
-            }
-        }
-    }
-}
-
 /// The value of a variable, when it is set to something.
 ///
 /// Set-but-empty counts as unset, because a variable cleared by a wrapper
@@ -1038,6 +1052,52 @@ mod tests {
     use super::{RUNTIME, missing};
     use stageman_agent::ContainerRuntime;
     use std::path::PathBuf;
+
+    /// A browser half from either source is a browser half.
+    ///
+    /// All four combinations, because the failure is one-sided in both
+    /// directions: a condition that warned when either was absent would fire
+    /// on every development build until nobody read it, and one that warned
+    /// when neither was would never fire at all.
+    #[test]
+    fn only_a_build_with_no_browser_half_anywhere_is_clientless() {
+        use super::clientless;
+        use std::path::Path;
+
+        let beside = Path::new("/somewhere/public");
+
+        assert!(clientless(None, None), "nothing carried and nothing beside");
+        assert!(
+            !clientless(Some(b"<html></html>"), None),
+            "carried is enough"
+        );
+        assert!(!clientless(None, Some(beside)), "beside is enough");
+        assert!(!clientless(Some(b"<html></html>"), Some(beside)));
+    }
+
+    /// Both spellings ask, and nothing else does.
+    ///
+    /// Every part of this is worth asserting: that either spelling is enough,
+    /// that both are required to *match* rather than to coincide, and that an
+    /// ordinary argument is not mistaken for one. A binary that read `--help`
+    /// as a version request would exit instead of serving.
+    #[test]
+    fn only_the_two_spellings_ask_what_it_is() {
+        use super::asked_what_it_is;
+
+        let given =
+            |arguments: &[&str]| asked_what_it_is(arguments.iter().map(|a| (*a).to_owned()));
+
+        assert!(given(&["--version"]));
+        assert!(given(&["-V"]));
+        assert!(given(&["--serve", "--version"]), "position does not matter");
+
+        assert!(!given(&[]), "no arguments is not a question");
+        assert!(!given(&["--help"]));
+        assert!(!given(&["-v"]), "lowercase is not the flag");
+        assert!(!given(&["--versions"]));
+        assert!(!given(&["version"]));
+    }
 
     /// Nothing of the index survives, the directory it needed included.
     ///

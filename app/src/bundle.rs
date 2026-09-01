@@ -56,17 +56,6 @@ impl Bundle {
         Self(table)
     }
 
-    /// How many files there are.
-    ///
-    /// Reported at startup rather than merely counted. "Carried" and "carried,
-    /// but empty" would print the same without it, and they are different
-    /// failures: the first works and the second serves a page that fetches
-    /// nothing.
-    #[must_use]
-    pub const fn count(self) -> usize {
-        self.0.len()
-    }
-
     /// Every entry, for whoever is building routes out of them.
     #[must_use]
     pub const fn entries(self) -> &'static [(&'static str, &'static [u8])] {
@@ -133,11 +122,16 @@ mod tests {
         ("assets/app-abc.wasm", b"\0asm"),
     ]);
 
+    /// What is carried is what was compiled in, and nothing else.
     #[test]
-    fn a_bundle_counts_what_it_holds() {
-        assert_eq!(CARRYING.count(), 3);
-        assert_eq!(Bundle(&[]).count(), 0);
-        assert_eq!(CARRIED.count(), EMBEDDED.len(), "the real one agrees too");
+    fn a_bundle_holds_the_table_it_was_given() {
+        assert_eq!(CARRYING.entries().len(), 3);
+        assert!(Bundle(&[]).entries().is_empty());
+        assert_eq!(
+            CARRIED.entries(),
+            EMBEDDED,
+            "the real one is the real table"
+        );
     }
 
     /// The index is found by its own name and nothing else is mistaken for it.

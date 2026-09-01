@@ -459,6 +459,18 @@ runs a recipe by hand any more; the tests build what they need from the recipe
 compiled into the crate they are testing, which is the same code the daemon
 runs.
 
+**Three variables are read at build time rather than at run time**, and the
+distinction matters more than it looks: everything else spelled `STAGEMAN_*` is
+configuration a running daemon reads, while `STAGEMAN_BUILD_VERSION`,
+`STAGEMAN_BUILD_COMMIT` and `STAGEMAN_BUILD_DATE` are implanted into a binary
+when it is compiled and mean nothing to one that is already running. The word
+`BUILD` is in the name for that reason. Setting the first is what makes a build
+a release; the build script refuses if the other two are then missing, because
+a release that cannot say where it came from is broken rather than partial. See
+`docs/decisions/0039-a-release-is-a-tagged-binary.md`, and note that
+`just release` sets all three from a tag and from git, so nobody sets them by
+hand.
+
 **Two credentials, if you want to run the tests that cost money.**
 `just image-session` drives a real agent against a real model, and
 `just propose` opens a real pull request. Both read from files this repository

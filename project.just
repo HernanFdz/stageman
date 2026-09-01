@@ -215,7 +215,7 @@ build target="host":
         ;;
     esac
     built="{{ justfile_directory() }}/target/dx/stageman/release/web"
-    shipping="{{ justfile_directory() }}/dist/{{ target }}"
+    shipping="{{ justfile_directory() }}/dist/stageman-{{ target }}"
     embed="{{ justfile_directory() }}/app/bundle"
 
     # Twice, and the reason is ordering rather than caution. The server embeds
@@ -252,11 +252,13 @@ build target="host":
         @client --no-default-features --features web \
         @server --features server $targeting
 
-    # One file. The browser's half is inside it, so there is no `public/` to
-    # copy and nothing to keep together.
-    rm -rf "$shipping"
-    mkdir -p "$shipping"
-    cp -R "$built/server" "$shipping/"
+    # One file, named for what it is. `dx` calls it `server`, which says
+    # nothing once it is somewhere else — and a name that depends on which
+    # machine built it is a name nobody can identify later, which is why
+    # `host` is never what a published artefact is called.
+    mkdir -p "{{ justfile_directory() }}/dist"
+    rm -f "$shipping"
+    cp "$built/server" "$shipping"
 
     # Left as a fresh clone has it. The directory is a compile-time input, so
     # leaving it full would make an ordinary `cargo build` — and therefore
@@ -265,3 +267,45 @@ build target="host":
     # from the far side.
     rm -rf "$embed"
     mkdir -p "$embed"
+
+    # Said out loud, because a build's two questions are what it made and what
+    # it will run on, and the second is the one whose wrong answer is only
+    # discovered on the machine you copied it to.
+    echo
+    echo "built: $shipping"
+    # What it will run on comes from the file, because that is the question a
+    # cross build gets wrong and the one whose wrong answer surfaces only on
+    # the machine you copied it to. What it says it is comes from asking it,
+    # which only works when it can run here — so it is attempted rather than
+    # relied on.
+    if command -v file >/dev/null 2>&1; then
+      file -b "$shipping"
+    fi
+    "$shipping" --version 2>/dev/null || true
+
+
+# What continuous integration runs when a tag is pushed, and what you run to
+# reproduce one by hand. The derivation lives here rather than in the workflow
+# for the reason the main justfile states: every rule lives in the justfile, so
+# the forge runs the identical thing and the two cannot drift apart.
+#
+# The version comes from the tag and nowhere else — no manifest holds one, per
+# `docs/decisions/0039-a-release-is-a-tagged-binary.md`, so there is nothing for
+# it to disagree with. The commit and its date come from git, which is the only
+# thing that actually knows them; the date is the commit's rather than this
+# moment's, so that rebuilding one tag cannot produce a binary claiming a
+# different one.
+[doc("Build a release artefact with its provenance implanted: `just release v0.2.0`")]
+release version target="linux-x64":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tag="{{ version }}"
+    # A tag is written `v0.2.0` and a version is `0.2.0`. Stripped in one place
+    # so that nothing downstream has to know the convention.
+    export STAGEMAN_BUILD_VERSION="${tag#v}"
+    export STAGEMAN_BUILD_COMMIT="$(git rev-parse --short=12 HEAD)"
+    # Committer date, as a plain date. `%cs` is already ISO 8601 and already
+    # has no time in it, which is the precision this claim deserves.
+    export STAGEMAN_BUILD_DATE="$(git show -s --format=%cs HEAD)"
+    echo "==> releasing $STAGEMAN_BUILD_VERSION from $STAGEMAN_BUILD_COMMIT ($STAGEMAN_BUILD_DATE)"
+    just build {{ target }}

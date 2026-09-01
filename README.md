@@ -76,6 +76,14 @@ What gets reported is `STAGEMAN_LOG`. It takes the same filter syntax as
 `RUST_LOG` and defaults to `warn` — enough to see what needs attention, not a
 commentary on things going right.
 
+Releases are tagged, and each carries one Linux binary. `stageman --version`
+answers without starting anything, so a downloaded file can always say which
+release it is and what it was built for. A binary you built yourself says that
+instead of a version, which is the honest answer. There is no package to
+install: building the browser's half needs the Dioxus tooling, which a registry
+does not run, so an installed package would be a dashboard that renders and
+never responds.
+
 The browser's half is inside the executable, so what you copy is one file.
 Starting it writes that half's `index.html` beside the executable for as long
 as it takes to read — the framework will only accept it as a path — and removes

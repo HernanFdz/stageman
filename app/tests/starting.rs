@@ -385,8 +385,12 @@ fn starting_needs_no_answers_and_no_terminal() {
     let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
     let said = &running.said;
 
-    assert!(said.contains("agents     0"), "{said}");
-    assert!(said.contains("projects   0"), "{said}");
+    // Reaching the address line is most of the assertion — `serving` fails
+    // loudly if the process stops before printing one — so what is left to
+    // check is that it got there having asked nothing and written an instance
+    // it invented the whole of.
+    assert!(said.contains("stageman is running"), "{said}");
+    assert!(snapshot.exists(), "it should have written an instance");
 }
 
 #[test]
@@ -414,6 +418,42 @@ fn starting_again_changes_nothing() {
 // check it made is not lost: it is `a_runtime_that_runs_and_refuses_is_not_usable`
 // in the agent crate, against the mechanism rather than through the binary,
 // which is where it could always have been.
+
+/// Asking what it is needs nothing at all.
+///
+/// No key, no instance, no container runtime — and that is the property rather
+/// than an incidental one. A binary is asked what it is precisely when
+/// something is wrong with the machine it is on, so an answer that required
+/// the machine to be working would be useless exactly when it was wanted.
+/// `env_clear` here is the whole test.
+#[test]
+fn it_says_what_it_is_without_needing_anything() {
+    let finished = Command::new(env!("CARGO_BIN_EXE_stageman"))
+        .env_clear()
+        .arg("--version")
+        .output()
+        .expect("the binary runs");
+
+    assert!(
+        finished.status.success(),
+        "it should answer and exit cleanly: {}",
+        String::from_utf8_lossy(&finished.stderr),
+    );
+    let said = String::from_utf8_lossy(&finished.stdout);
+    // One labelled fact per line, in the shape the startup block uses, so the
+    // two read as one thing rather than as two formats for the same facts.
+    for line in said.lines() {
+        assert!(line.starts_with("  "), "not a labelled line: {line:?}");
+    }
+    // The gate builds no release, so what it must say is that it is not one —
+    // and it must still name what it was built for, which every build knows.
+    assert!(said.contains("not a release build"), "{said}");
+    assert!(said.contains("target"), "{said}");
+    assert!(
+        said.contains(std::env::consts::ARCH),
+        "it should name the target it was built for: {said}",
+    );
+}
 
 /// A start with no key generates one, and the next start reuses it.
 ///
@@ -671,50 +711,18 @@ fn saying_where_the_instance_goes_still_wins() {
     assert_eq!(running.instance(), snapshot);
 }
 
-/// The startup summary distinguishes a build with a browser bundle from one
-/// without, and both are ordinary.
-///
-/// `DIOXUS_PUBLIC_PATH` is what the Dioxus tooling sets, so pointing it at a
-/// directory is the same thing a real bundle does rather than a test-only
-/// door. Without it, a `cargo` build has no bundle at all — which is the case
-/// every other test here runs in, and is asserted first so that this test
-/// fails if the two ever stop differing.///
-/// **There is a third state this cannot reach**: a binary carrying the bundle
-/// inside itself, per
-/// `docs/decisions/0038-the-browsers-half-lives-in-the-binary.md`. What is
-/// embedded is decided when this binary is compiled, and the gate compiles it
-/// with nothing — so no test running against it can produce that state, and
-/// one pretending to would be asserting about a build nobody ships. The pure
-/// half of it is covered by unit tests on the table and its lookups; the whole
-/// of it is what `just build` produces and running that is what proves it.
-
-#[test]
-fn a_build_says_whether_it_has_a_browser_half() {
-    let (_kept, snapshot) = scratch();
-    let bundle = tempfile::tempdir().expect("a temporary directory");
-
-    let without = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
-    assert!(
-        without.said.contains("client     not built"),
-        "{}",
-        without.said
-    );
-    drop(without);
-
-    let with = serving(
-        &snapshot,
-        &[
-            ("STAGEMAN_KEY", KEY),
-            ("DIOXUS_PUBLIC_PATH", &bundle.path().to_string_lossy()),
-        ],
-    );
-
-    assert!(
-        with.said.contains(&*bundle.path().to_string_lossy()),
-        "it should name the bundle it found: {}",
-        with.said
-    );
-}
+// The startup summary used to distinguish a build with a browser bundle from
+// one without, and a test here asserted both halves. Both are gone: what ships
+// always carries its own, so the line said the expected thing every time it
+// was read, and `docs/decisions/0038-the-browsers-half-lives-in-the-binary.md`
+// is what made that true.
+//
+// The states still exist — an ordinary `cargo build` carries nothing — and are
+// now a warning instead, which says the same thing only when it is worth
+// saying. That is deliberately *not* covered here: this harness reads a
+// running process's standard output and never its standard error, so covering
+// it would mean teaching it to read both. Recorded rather than left as a gap
+// nobody chose.
 
 /// A project's running count is not its job count.
 ///
