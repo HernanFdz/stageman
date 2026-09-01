@@ -44,6 +44,18 @@ stageman-job = { path = "job" }
 # This makes the runtime behaviour uniform, and is the backstop for the
 # overflow that clippy::arithmetic_side_effects only warns about statically.
 overflow-checks = true
+# Debug information, and not the symbol table. Measured on the shipped
+# artefact: 32.4MB unstripped, 21.1MB without debug information, 17.4MB
+# without symbols either.
+#
+# The last step is refused rather than overlooked. `overflow-checks` above
+# makes a panic a *designed* failure here rather than only a bug — and this is
+# a daemon on somebody else's machine, killed at three in the morning, where
+# one log is all anybody gets. A panic names its own file and line whatever is
+# stripped, because that is a static string rather than debug information; what
+# a symbol table buys is the chain of calls that led there. Three and a half
+# megabytes is a poor price for reading that chain once.
+strip = "debuginfo"
 
 [workspace.lints.rust]
 # Cannot be overridden anywhere, including in-source — so the escape is a
