@@ -421,7 +421,10 @@ built from this gate, this one needs:
   evidence the containers work; `just image-handshake` is.
 - **`dx`, the Dioxus CLI** — `cargo install dioxus-cli`, needed to build the
   browser half into a bundle. `just dev` serves both halves with reloading and
-  `just build` produces the bundle that ships; `just check` needs neither them
+  `just build` produces the single file that ships — the browser's half is
+  compiled into it, per
+  `docs/decisions/0038-the-browsers-half-lives-in-the-binary.md`, which is why
+  that recipe builds twice; `just check` needs neither them
   nor a bundle, because the wasm pass is `cargo` against a target and that is a
   toolchain fact.
 
@@ -455,6 +458,18 @@ gate you run constantly. What changed with 0035 is only who builds it. Nobody
 runs a recipe by hand any more; the tests build what they need from the recipe
 compiled into the crate they are testing, which is the same code the daemon
 runs.
+
+**Three variables are read at build time rather than at run time**, and the
+distinction matters more than it looks: everything else spelled `STAGEMAN_*` is
+configuration a running daemon reads, while `STAGEMAN_BUILD_VERSION`,
+`STAGEMAN_BUILD_COMMIT` and `STAGEMAN_BUILD_DATE` are implanted into a binary
+when it is compiled and mean nothing to one that is already running. The word
+`BUILD` is in the name for that reason. Setting the first is what makes a build
+a release; the build script refuses if the other two are then missing, because
+a release that cannot say where it came from is broken rather than partial. See
+`docs/decisions/0039-a-release-is-a-tagged-binary.md`, and note that
+`just release` sets all three from a tag and from git, so nobody sets them by
+hand.
 
 **Two credentials, if you want to run the tests that cost money.**
 `just image-session` drives a real agent against a real model, and

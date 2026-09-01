@@ -1,0 +1,118 @@
+# Cutting a release, which is pushing a tag — see
+# docs/decisions/0039-a-release-is-a-tagged-binary.md.
+#
+# Deliberately contains no logic, for the reason gate.yml gives: every rule
+# lives in the justfile, so this and your machine run the identical thing and
+# cannot drift apart. `just release <tag>` derives the version from the tag and
+# the commit and its date from git, and can be run by hand to reproduce exactly
+# what this produces. What is left here is the forge's own half — checking out,
+# installing tools, and attaching files to a release.
+#
+# Nothing is published to a registry and nothing ever will be: a registry builds
+# with `cargo` alone, so it cannot carry the browser half, and an install would
+# be a dashboard that renders and never responds. Binaries are the only channel
+# that produces a working product, which is why this workflow exists at all.
+#
+# Only Linux is built, and that is Apple's decision rather than a scope one:
+# linking for a Darwin target needs a software development kit licensed for use
+# on Apple hardware only, so no Linux runner can produce a macOS binary however
+# well it cross-compiles the other way. Somebody on a Mac builds their own.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    permissions:
+      # The only thing this needs beyond reading the repository, and it is
+      # needed for exactly one step: creating the release and attaching the
+      # binary. Declared here rather than left to the default, which is
+      # whatever the repository settings happen to say.
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # `just release` asks git for the commit and its date, so the tag has
+          # to arrive as a commit with history rather than as a bare tree.
+          fetch-depth: 0
+
+      # A tag names a commit, not a branch, and nothing about pushing one says
+      # where that commit came from. `main` is protected so changes are
+      # reviewed — and of the two rulesets guarding it, the human-approval half
+      # is the one with a bypass — so a tag on a commit that never reached
+      # `main` would publish a binary containing code no pull request ever saw.
+      #
+      # This cannot be a ruleset. Every rule GitHub offers for tags governs the
+      # tag's name, who may push it, and whether it may be moved or removed;
+      # none constrains which commit it points at. So it is checked here.
+      #
+      # Here rather than in the justfile, which is the one place this workflow
+      # departs from gate.yml's "no logic" rule and is worth saying why: it is a
+      # fact about this forge's branch rather than about the code, and
+      # `just release` has to stay runnable on a branch — which is how it was
+      # tested before any of this existed.
+      - name: the tag must name a commit on main
+        run: |
+          set -euo pipefail
+          # Fetched explicitly rather than relying on what `checkout` leaves
+          # behind: `fetch-depth: 0` is documented to fetch history, not to
+          # guarantee any particular remote-tracking ref, and a check that
+          # silently could not find `main` would be worse than no check.
+          git fetch --no-tags --quiet origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::${GITHUB_REF_NAME} names ${GITHUB_SHA}, which is not on main."
+            echo "A release is built from reviewed code. Merge it first, then tag the merge." >&2
+            exit 1
+          fi
+          echo "${GITHUB_REF_NAME} names ${GITHUB_SHA}, which is on main."
+
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      # The version has to match the `dioxus` dependency exactly, because `dx`
+      # generates the glue the runtime hydrates against — docs/conventions.md
+      # §5. Pinned here for that reason and not merely for reproducibility.
+      # `binstall` fetches a prebuilt one where there is one and falls back to
+      # building it where there is not, which is the difference between a
+      # release taking a minute and taking ten.
+      - uses: cargo-bins/cargo-binstall@main
+      - run: cargo binstall --no-confirm --locked dioxus-cli@0.7.9
+
+      # One command, and the same one a person runs. The target is named rather
+      # than left to `host`: an artefact whose name depends on which machine
+      # built it is one nobody can identify later.
+      - run: just release "${{ github.ref_name }}" linux-x64
+
+      # Attached under a name carrying the version, because a file downloaded
+      # into somebody's directory has nothing else to say which release it is.
+      # The binary itself still knows — `--version` answers without starting a
+      # server, which is why it exists.
+      - run: |
+          set -euo pipefail
+          version="${{ github.ref_name }}"
+          cp dist/stageman-linux-x64 "stageman-${version}-linux-x64"
+          sha256sum "stageman-${version}-linux-x64" > "stageman-${version}-linux-x64.sha256"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            stageman-${{ github.ref_name }}-linux-x64
+            stageman-${{ github.ref_name }}-linux-x64.sha256
+          # Written by hand afterwards. Generated notes would be a commit log,
+          # and a release is a thing somebody decided rather than a range.
+          draft: true
+          fail_on_unmatched_files: true

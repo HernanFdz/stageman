@@ -10,21 +10,34 @@ members = ["core", "agent", "foreman", "job", "app", "xtask"]
 resolver = "3"
 
 [workspace.package]
-version = "0.1.0"
+# Meaningless on purpose, and refused on purpose. A release is a tagged binary
+# and never a package — `docs/decisions/0039-a-release-is-a-tagged-binary.md` —
+# so a number here would be a second place for a version to live and the only
+# one nobody updates. What a binary reports comes from the tag it was built
+# from; a build told nothing says so.
+version = "0.0.0"
+# The enforcement rather than the label. `cargo publish` refuses rather than
+# this resting on nobody trying — which matters because a published package
+# cannot carry the browser half, and would install a dashboard that renders and
+# never responds.
+publish = false
 edition = "2024"
 rust-version = "1.95.0"
 license = "MIT"
 repository = "https://github.com/HernanFdz/stageman"
 
 # The whole internal dependency graph in one place, so the shape is readable
-# without opening five manifests. What is absent matters as much as what is
-# here: neither `foreman` nor `job` may name the other, and the only
-# thing stopping them is that no such dependency is ever declared.
+# without opening five manifests. No version requirements: a path dependency
+# needs one only in order to be published, and nothing here ever is.
+#
+# What is absent matters as much as what is here: neither `foreman` nor `job`
+# may name the other, and the only thing stopping them is that no such
+# dependency is ever declared.
 [workspace.dependencies]
-stageman-core = { path = "core", version = "0.1.0" }
-stageman-agent = { path = "agent", version = "0.1.0" }
-stageman-foreman = { path = "foreman", version = "0.1.0" }
-stageman-job = { path = "job", version = "0.1.0" }
+stageman-core = { path = "core" }
+stageman-agent = { path = "agent" }
+stageman-foreman = { path = "foreman" }
+stageman-job = { path = "job" }
 
 [profile.release]
 # Debug builds already panic on integer overflow; release wraps silently.

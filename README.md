@@ -76,14 +76,30 @@ What gets reported is `STAGEMAN_LOG`. It takes the same filter syntax as
 `RUST_LOG` and defaults to `warn` — enough to see what needs attention, not a
 commentary on things going right.
 
+Releases are tagged, and each carries one Linux binary. `stageman --version`
+answers without starting anything, so a downloaded file can always say which
+release it is and what it was built for. A binary you built yourself says that
+instead of a version, which is the honest answer. There is no package to
+install: building the browser's half needs the Dioxus tooling, which a registry
+does not run, so an installed package would be a dashboard that renders and
+never responds.
+
+The browser's half is inside the executable, so what you copy is one file.
+Starting it writes that half's `index.html` beside the executable for as long
+as it takes to read — the framework will only accept it as a path — and removes
+it again, so nothing accumulates. If the executable lives somewhere it may not
+write, `/usr/local/bin` being the obvious case, set `DIOXUS_PUBLIC_PATH` to a
+directory it may, which is one line in a service unit. It refuses to start
+rather than serving a page that would render and never respond.
+
 Where the dashboard listens is `IP` and `PORT`, defaulting to `127.0.0.1:8080`.
 Those two names are generic, and they are what they are because the Dioxus
 tooling sets them: a binary that read its own pair would need translating every
 time it was run for development. Ask for port zero and the operating system
 picks; either way the address actually taken is printed at startup, along with
-whether a browser bundle was found beside the binary. A build without one still
-serves the dashboard — the page is rendered on the server and arrives
-complete, it just does not update itself afterwards.
+where the browser's half came from. A build without one still serves the
+dashboard — the page is rendered on the server and arrives complete, it just
+does not update itself afterwards.
 
 Which agents are configured is yours to decide, the foreman picks one per
 job from what you have set up, and the dashboard shows which agent ran each

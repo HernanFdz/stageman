@@ -18,3 +18,9 @@ app/assets/styles.css
 # Derived twice over — a build artifact of a build artifact — and the thing it
 # holds is a release binary, which has no business in git either way.
 /dist
+
+# Where `just build` stages the browser's half between its two passes, for the
+# build script to compile in. Emptied at the end of that recipe and by
+# `just dev`, so a tree at rest has it empty — which is the state a fresh clone
+# and continuous integration are both in.
+app/bundle/

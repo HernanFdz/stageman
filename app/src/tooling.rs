@@ -430,7 +430,7 @@ async fn called(
             serde_json::json!({
                 "protocolVersion": protocol,
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": SERVER, "version": env!("CARGO_PKG_VERSION")},
+                "serverInfo": {"name": SERVER, "version": crate::release::described()},
             }),
         ),
         Call::Listing => {

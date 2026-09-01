@@ -136,6 +136,14 @@ dev *arguments:
     fi
     export STAGEMAN_KEY="$(cat "$key")"
     export STAGEMAN_STATE="${STAGEMAN_STATE:-$scratch/instance.json}"
+    # Emptied, because the bundle directory is a compile-time input and a
+    # binary carrying one prefers it over the live tree `dx` is serving. A
+    # stale bundle embedded here would look exactly like hot reloading having
+    # stopped working, which is a long way to walk for a directory nobody
+    # meant to leave behind. `just build` empties it too, so this is a second
+    # line of defence rather than the only one.
+    rm -rf "{{ justfile_directory() }}/app/bundle"
+    mkdir -p "{{ justfile_directory() }}/app/bundle"
     # Deliberately not echoed here. The binary prints where its instance is as
     # part of the summary it prints anyway, so saying it first only produces
     # the same line twice, several seconds apart, with a build between them.
@@ -206,16 +214,98 @@ build target="host":
         exit 1
         ;;
     esac
+    built="{{ justfile_directory() }}/target/dx/stageman/release/web"
+    shipping="{{ justfile_directory() }}/dist/stageman-{{ target }}"
+    embed="{{ justfile_directory() }}/app/bundle"
+
+    # Twice, and the reason is ordering rather than caution. The server embeds
+    # the browser's half at compile time, and the tooling builds both halves in
+    # parallel — its one ordering flag runs the server *first*, which is the
+    # wrong way round. So the first pass exists to produce a client, and the
+    # second is the one whose server carries it. See
+    # `docs/decisions/0038-the-browsers-half-lives-in-the-binary.md`.
+    #
+    # Emptied rather than copied over, here and below. An asset's filename
+    # carries a hash of its contents, so a stale file survives a rebuild under
+    # a name the new `index.html` never mentions — a bundle that grows one dead
+    # file per build and never says so.
+    # Emptied before anything else, because `dx` does not do it: an asset's
+    # filename carries a hash of its contents, so every build leaves its
+    # predecessors behind under names the new `index.html` never mentions.
+    # Left alone, this directory accumulates a dead wasm module per build —
+    # measured at four of them, some nine megabytes, all of which would have
+    # been compiled into the binary and served by nothing. The same reasoning
+    # applies here as to the destination below; the difference is that this one
+    # is somebody else's directory, so nothing but doing it ourselves fixes it.
+    rm -rf "$built"
+
+    echo "==> pass 1 of 2: building the browser's half"
     dx build --release --fullstack --package stageman \
         @client --no-default-features --features web \
         @server --features server $targeting
-    # Emptied rather than copied over. An asset's filename carries a hash of
-    # its contents, so a stale `public/` survives a rebuild under a name the
-    # new `index.html` does not mention — a bundle that grows one dead file per
-    # build and never says so. The destination can only be one of the three
-    # names above, because anything else left through the `exit 1`.
-    built="{{ justfile_directory() }}/target/dx/stageman/release/web"
-    shipping="{{ justfile_directory() }}/dist/{{ target }}"
-    rm -rf "$shipping"
-    mkdir -p "$shipping"
-    cp -R "$built/server" "$built/public" "$shipping/"
+    rm -rf "$embed"
+    mkdir -p "$embed"
+    cp -R "$built/public/." "$embed/"
+
+    echo "==> pass 2 of 2: building the server that carries it"
+    dx build --release --fullstack --package stageman \
+        @client --no-default-features --features web \
+        @server --features server $targeting
+
+    # One file, named for what it is. `dx` calls it `server`, which says
+    # nothing once it is somewhere else — and a name that depends on which
+    # machine built it is a name nobody can identify later, which is why
+    # `host` is never what a published artefact is called.
+    mkdir -p "{{ justfile_directory() }}/dist"
+    rm -f "$shipping"
+    cp "$built/server" "$shipping"
+
+    # Left as a fresh clone has it. The directory is a compile-time input, so
+    # leaving it full would make an ordinary `cargo build` — and therefore
+    # `just check` — produce a different binary here than it does in continuous
+    # integration, which is the kind of difference that is only ever noticed
+    # from the far side.
+    rm -rf "$embed"
+    mkdir -p "$embed"
+
+    # Said out loud, because a build's two questions are what it made and what
+    # it will run on, and the second is the one whose wrong answer is only
+    # discovered on the machine you copied it to.
+    echo
+    echo "built: $shipping"
+    # What it will run on comes from the file, because that is the question a
+    # cross build gets wrong and the one whose wrong answer surfaces only on
+    # the machine you copied it to. What it says it is comes from asking it,
+    # which only works when it can run here — so it is attempted rather than
+    # relied on.
+    if command -v file >/dev/null 2>&1; then
+      file -b "$shipping"
+    fi
+    "$shipping" --version 2>/dev/null || true
+
+
+# What continuous integration runs when a tag is pushed, and what you run to
+# reproduce one by hand. The derivation lives here rather than in the workflow
+# for the reason the main justfile states: every rule lives in the justfile, so
+# the forge runs the identical thing and the two cannot drift apart.
+#
+# The version comes from the tag and nowhere else — no manifest holds one, per
+# `docs/decisions/0039-a-release-is-a-tagged-binary.md`, so there is nothing for
+# it to disagree with. The commit and its date come from git, which is the only
+# thing that actually knows them; the date is the commit's rather than this
+# moment's, so that rebuilding one tag cannot produce a binary claiming a
+# different one.
+[doc("Build a release artefact with its provenance implanted: `just release v0.2.0`")]
+release version target="linux-x64":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tag="{{ version }}"
+    # A tag is written `v0.2.0` and a version is `0.2.0`. Stripped in one place
+    # so that nothing downstream has to know the convention.
+    export STAGEMAN_BUILD_VERSION="${tag#v}"
+    export STAGEMAN_BUILD_COMMIT="$(git rev-parse --short=12 HEAD)"
+    # Committer date, as a plain date. `%cs` is already ISO 8601 and already
+    # has no time in it, which is the precision this claim deserves.
+    export STAGEMAN_BUILD_DATE="$(git show -s --format=%cs HEAD)"
+    echo "==> releasing $STAGEMAN_BUILD_VERSION from $STAGEMAN_BUILD_COMMIT ($STAGEMAN_BUILD_DATE)"
+    just build {{ target }}
