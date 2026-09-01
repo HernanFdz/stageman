@@ -70,7 +70,7 @@ jobs:
       version: ${{ steps.settle.outputs.version }}
       commit: ${{ steps.settle.outputs.commit }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Always main, whatever was dispatched: what is released is decided
           # by the inputs below rather than by which branch the button was
@@ -177,7 +177,7 @@ jobs:
             runner: macos-latest
             architecture: arm64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: main
           fetch-depth: 0
@@ -222,12 +222,12 @@ jobs:
               ;;
           esac
 
-      # The executable bit does not survive an artifact — v4 packs a zip, which
-      # drops it — and that is fine rather than something to work around: a
-      # release asset is not executable when downloaded either, which is why
-      # `chmod +x` is in every set of instructions for one. Nothing between
-      # here and the release needs to run it.
-      - uses: actions/upload-artifact@v4
+      # The executable bit does not survive an artifact — they are packed as
+      # zips, which drop it — and that is fine rather than something to work
+      # around: a release asset is not executable when downloaded either, which
+      # is why `chmod +x` is in every set of instructions for one. Nothing
+      # between here and the release needs to run it.
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
           path: dist/stageman-${{ matrix.target }}
@@ -260,7 +260,7 @@ jobs:
       # would take the artifacts with it. At the settled commit rather than the
       # head of main: the script a release publishes has to be the one that was
       # reviewed alongside the binaries it installs.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: main
           fetch-depth: 0
@@ -280,7 +280,7 @@ jobs:
       # the layout the files below name. Each artifact holds exactly one file
       # and they are named for their targets, so nothing collides — including
       # with the script written into the same directory above.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -309,7 +309,7 @@ jobs:
       # A draft, and the tag does not exist yet. Publishing is what creates it,
       # at the commit named here — so the tag can only ever point at what was
       # built, and only you can bring it into existence.
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.settle.outputs.version }}
           target_commitish: ${{ needs.settle.outputs.commit }}
