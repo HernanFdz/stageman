@@ -229,6 +229,16 @@ build target="host":
     # carries a hash of its contents, so a stale file survives a rebuild under
     # a name the new `index.html` never mentions — a bundle that grows one dead
     # file per build and never says so.
+    # Emptied before anything else, because `dx` does not do it: an asset's
+    # filename carries a hash of its contents, so every build leaves its
+    # predecessors behind under names the new `index.html` never mentions.
+    # Left alone, this directory accumulates a dead wasm module per build —
+    # measured at four of them, some nine megabytes, all of which would have
+    # been compiled into the binary and served by nothing. The same reasoning
+    # applies here as to the destination below; the difference is that this one
+    # is somebody else's directory, so nothing but doing it ourselves fixes it.
+    rm -rf "$built"
+
     echo "==> pass 1 of 2: building the browser's half"
     dx build --release --fullstack --package stageman \
         @client --no-default-features --features web \
