@@ -1,4 +1,5 @@
-# Cutting a release — see docs/decisions/0039-a-release-is-a-tagged-binary.md.
+# Cutting a release — see docs/decisions/0039-a-release-is-a-tagged-binary.md
+# and docs/decisions/0040-a-release-is-built-on-the-machine-it-is-for.md.
 #
 # **Pushing a tag does nothing.** This used to trigger on `push: tags`, and no
 # longer does: a tag pushed by hand is now a silent no-op, which is worth
@@ -29,10 +30,13 @@
 # by hand to reproduce exactly what this produces. What is here is what only
 # the forge knows — which commit was asked for, and whether it is allowed.
 #
-# Only Linux is built, and that is Apple's licence rather than a scope
-# decision: linking for a Darwin target needs a software development kit
-# licensed for Apple hardware only, so no Linux runner can produce a macOS
-# binary however well it cross-compiles the other way.
+# **Three jobs, and the split is load-bearing rather than tidy.** Settling runs
+# alone so a mistyped version fails before any runner installs a toolchain.
+# Building is one job per target, on a runner of that target's own platform,
+# because a Linux runner cannot link for Darwin at any price. Drafting is one
+# job because it is the only writer: two builds each attaching their own file
+# to one release is a race whose failure mode is a published release quietly
+# missing a platform.
 
 name: release
 
@@ -56,13 +60,15 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  release:
-    name: release
+  # Everything that can be refused is refused here, before a single tool is
+  # installed, so a mistyped version fails in seconds rather than after two
+  # ten-minute builds.
+  settle:
+    name: settle
     runs-on: ubuntu-latest
-    permissions:
-      # For creating the release. Note this is *not* enough to create the tag,
-      # and does not need to be — see the header.
-      contents: write
+    outputs:
+      version: ${{ steps.settle.outputs.version }}
+      commit: ${{ steps.settle.outputs.commit }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -73,10 +79,6 @@ jobs:
           ref: main
           fetch-depth: 0
 
-      # Everything that can be refused is refused here, before a single tool is
-      # installed, so a mistyped version fails in seconds rather than after a
-      # ten-minute build.
-      #
       # Inputs arrive through the environment rather than being interpolated
       # into the script. `${{ }}` inside a `run:` is pasted in as text before
       # the shell sees it, so a version containing shell syntax would execute;
@@ -145,9 +147,44 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "cutting ${ASKED_VERSION} from ${building}"
 
+  # One job per target, each on a runner of that target's own platform. Nothing
+  # here is cross-compiled: every target below is the host triple of the
+  # machine building it, which is why no linker is configured and no target is
+  # installed. See 0040.
+  build:
+    name: build ${{ matrix.target }}
+    needs: settle
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # The default, said out loud because it is the behaviour wanted: a target
+      # that cannot be built must stop the release rather than produce most of
+      # one. `draft` needs every build anyway, so this only decides how much
+      # runner time is spent finding that out.
+      fail-fast: true
+      matrix:
+        include:
+          - target: linux-x64
+            runner: ubuntu-latest
+            # What the built file must actually be, as `file` spells it. See
+            # the step that reads it.
+            architecture: x86-64
+          # `macos-latest` rather than a pinned image, which is the opposite of
+          # what determinism usually asks for and is deliberate: runner images
+          # are retired on GitHub's schedule, and that failure would land on
+          # the one workflow whose breaking is most expensive to discover. What
+          # a pin was protecting against is asserted directly below instead.
+          - target: macos-arm64
+            runner: macos-latest
+            architecture: arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
       # Detached on purpose: what is built is a commit, not a branch, and
       # `just release` reads the commit and its date from HEAD.
-      - run: git checkout --detach ${{ steps.settle.outputs.commit }}
+      - run: git checkout --detach ${{ needs.settle.outputs.commit }}
 
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
@@ -160,7 +197,93 @@ jobs:
       - uses: cargo-bins/cargo-binstall@main
       - run: cargo binstall --no-confirm --locked dioxus-cli@0.7.9
 
-      - run: just release "${{ steps.settle.outputs.version }}" linux-x64
+      - run: just release "${{ needs.settle.outputs.version }}" ${{ matrix.target }}
+
+      # The name says which machine the file is for, and until here nothing has
+      # checked that it is true. It is worth a step of its own because the
+      # symptom of it being false is `Exec format error` on somebody else's
+      # computer, days later, with nothing in the release saying which half was
+      # wrong. `just build` already prints this line; asserting it is what
+      # turns a printed fact into a refusal.
+      - name: the file is for the machine it is named for
+        env:
+          ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          set -euo pipefail
+          built="dist/stageman-${{ matrix.target }}"
+          described="$(file -b "$built")"
+          echo "$built: $described"
+          case "$described" in
+            *"${ARCHITECTURE}"*) ;;
+            *)
+              echo "::error::${built} is '${described}', which is not ${ARCHITECTURE}."
+              echo "The runner is not the machine this target names. A release asset that lies about its architecture fails at exec time on somebody else's computer." >&2
+              exit 1
+              ;;
+          esac
+
+      # The executable bit does not survive an artifact — v4 packs a zip, which
+      # drops it — and that is fine rather than something to work around: a
+      # release asset is not executable when downloaded either, which is why
+      # `chmod +x` is in every set of instructions for one. Nothing between
+      # here and the release needs to run it.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/stageman-${{ matrix.target }}
+          if-no-files-found: error
+          # Long enough to reach the job below and no longer. What is worth
+          # keeping is attached to the release.
+          retention-days: 1
+
+  # The only writer. Everything built lands here and becomes one draft, so
+  # there is no moment at which a release exists carrying some of its binaries.
+  # `needs` names `settle` as well as `build`, which looks redundant because
+  # `build` already waits for it — and for ordering it would be. It is not
+  # ordering. `needs.<job>.outputs` resolves only for jobs this one lists
+  # directly, and a transitive dependency is not one: drop `settle` here and
+  # every `needs.settle.outputs.*` below silently becomes the empty string.
+  # The tag name is one of them, and the release action falls back to the
+  # current ref when handed nothing — so the result is a draft release for a
+  # tag called `main`, outside the `refs/tags/v*` rulesets, which is precisely
+  # the failure the settle job exists to prevent.
+  draft:
+    name: draft
+    needs: [settle, build]
+    runs-on: ubuntu-latest
+    permissions:
+      # For creating the release. Note this is *not* enough to create the tag,
+      # and does not need to be — see the header.
+      contents: write
+    steps:
+      # Checked out first, because `actions/checkout` clears the workspace and
+      # would take the artifacts with it. At the settled commit rather than the
+      # head of main: the script a release publishes has to be the one that was
+      # reviewed alongside the binaries it installs.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - run: git checkout --detach ${{ needs.settle.outputs.commit }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      # The version is substituted into the tracked template here, so the
+      # published script installs *this* release's binaries rather than
+      # whatever `latest` means when somebody runs it. The recipe asserts that
+      # exactly one line changed, so this cannot quietly publish a template.
+      # See docs/decisions/0041-installing-is-a-script-published-with-the-release.md.
+      - run: just installer "${{ needs.settle.outputs.version }}"
+
+      # `merge-multiple` flattens every artifact into one directory, which is
+      # the layout the files below name. Each artifact holds exactly one file
+      # and they are named for their targets, so nothing collides — including
+      # with the script written into the same directory above.
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
 
       # No copy and no rename: what `just build` produced is what ships, under
       # the name it already has.
@@ -177,24 +300,22 @@ jobs:
       # each other. That is the trade being made: the file no longer says which
       # version it is, and the binary does.
       #
-      # The checksum is written from inside `dist` so it names the file rather
-      # than a path, which is what `sha256sum -c` wants after downloading both
-      # into the same place.
-      - name: a checksum to download beside it
-        run: |
-          set -euo pipefail
-          cd dist
-          sha256sum stageman-linux-x64 > stageman-linux-x64.sha256
-
+      # **No checksum is attached, deliberately** — 0040. One published beside
+      # the binary comes from the same release over the same connection, so
+      # anybody able to replace one could replace both, and GitHub already
+      # records a digest per asset. A verification step that resembles a
+      # security control without being one is worse than none.
+      #
       # A draft, and the tag does not exist yet. Publishing is what creates it,
       # at the commit named here — so the tag can only ever point at what was
       # built, and only you can bring it into existence.
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.settle.outputs.version }}
-          target_commitish: ${{ steps.settle.outputs.commit }}
+          tag_name: ${{ needs.settle.outputs.version }}
+          target_commitish: ${{ needs.settle.outputs.commit }}
           draft: true
           fail_on_unmatched_files: true
           files: |
+            dist/install.sh
             dist/stageman-linux-x64
-            dist/stageman-linux-x64.sha256
+            dist/stageman-macos-arm64

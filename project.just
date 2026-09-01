@@ -309,3 +309,72 @@ release version target="linux-x64":
     export STAGEMAN_BUILD_DATE="$(git show -s --format=%cs HEAD)"
     echo "==> releasing $STAGEMAN_BUILD_VERSION from $STAGEMAN_BUILD_COMMIT ($STAGEMAN_BUILD_DATE)"
     just build {{ target }}
+
+# What turns the tracked template into the script a release publishes.
+#
+# Here rather than in the release workflow for the reason the main justfile
+# states and `.github/workflows/release.yml` repeats: every rule lives in the
+# justfile, so continuous integration runs the identical thing and the two
+# cannot drift. It also means the published installer can be reproduced by hand
+# and diffed against what a release actually attached.
+#
+# One substitution, and the recipe asserts that. The whole argument for
+# publishing this per release rather than serving it from a branch is that the
+# script is pinned to one set of assets — so "it differs from the template by
+# exactly one line" is the property worth checking rather than describing, and
+# a second placeholder appearing later fails here instead of shipping.
+#
+# It deliberately does not read anything out of `dist`. There was a version
+# where it hashed the binaries and templated the checksums in, and
+# `docs/decisions/0040-a-release-is-built-on-the-machine-it-is-for.md` records
+# why that went: a checksum from the same release is not evidence about the
+# binary. What replaced it is in the script — it runs what it downloaded before
+# installing it — which needs nothing from here.
+[doc("Template the published installer for a version: `just installer v0.2.0`")]
+installer version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tag="{{ version }}"
+    # Stripped exactly as `release` strips it, and for a sharper reason here:
+    # the script compares its own version against what an installed binary
+    # reports, and a binary reports `0.2.0` rather than `v0.2.0`.
+    bare="${tag#v}"
+    template="{{ justfile_directory() }}/packaging/install.sh"
+    shipping="{{ justfile_directory() }}/dist/install.sh"
+
+    if ! grep -q '@VERSION@' "$template"; then
+      echo "no @VERSION@ placeholder in $template" >&2
+      echo "Substituting nothing would publish a script that refuses to run." >&2
+      exit 1
+    fi
+
+    mkdir -p "{{ justfile_directory() }}/dist"
+    sed "s/@VERSION@/${bare}/" "$template" > "$shipping"
+
+    # Anything still spelled like a placeholder is one nobody substituted. The
+    # script's own guard catches `@VERSION@` at run time; this catches the
+    # second placeholder somebody adds without adding a `sed` for it, which the
+    # guard would not.
+    if grep -n '@[A-Z_][A-Z_]*@' "$shipping"; then
+      echo "the lines above still hold a placeholder" >&2
+      exit 1
+    fi
+
+    # Exactly one line differs, which is the property the decision record
+    # claims and this is what makes it true rather than asserted. `diff` exits
+    # non-zero on a difference, which is the expected case, so its status is
+    # not what is being read.
+    changed="$(diff "$template" "$shipping" | grep -c '^[<>]' || true)"
+    if [ "$changed" != "2" ]; then
+      echo "$changed changed line(s) between the template and the published script; expected 2" >&2
+      diff "$template" "$shipping" || true
+      exit 1
+    fi
+
+    # Parsed as the shell that will run it, on the artifact that ships rather
+    # than on the template. Costs nothing, needs nothing installed, and a
+    # syntax error here would otherwise be discovered by whoever piped it into
+    # a shell.
+    sh -n "$shipping"
+    chmod +x "$shipping"
+    echo "built: $shipping (stageman ${bare})"

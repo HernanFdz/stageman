@@ -76,19 +76,88 @@ What gets reported is `STAGEMAN_LOG`. It takes the same filter syntax as
 `RUST_LOG` and defaults to `warn` — enough to see what needs attention, not a
 commentary on things going right.
 
-Each release carries one Linux binary, and the latest is always at the same
-address:
+## Installing it
+
+One command. It works out which binary this machine needs, installs it, sets it
+up to run as a service as you, and starts it:
 
 ```sh
-curl -LO https://github.com/HernanFdz/stageman/releases/latest/download/stageman-linux-x64
-curl -LO https://github.com/HernanFdz/stageman/releases/latest/download/stageman-linux-x64.sha256
-sha256sum -c stageman-linux-x64.sha256
-chmod +x stageman-linux-x64
+curl -fsSL https://github.com/HernanFdz/stageman/releases/latest/download/install.sh | sh
 ```
 
-The filename carries no version on purpose — that is what the tag it hangs
-from is for, and what the binary answers when asked. Which is why the address
-above never changes.
+It asks for `sudo` for the two files that need it — the binary, and on Linux
+the unit beside it — and refuses to run as root outright. stageman runs as the
+person who operates it and keeps its instance in that account's home, so a run
+as root would install a service for root and put the instance somewhere you
+cannot reach, which looks exactly like it worked.
+
+**Re-running it is how you update.** There is no separate update command and no
+`self-update` subcommand: the address above always serves the newest script,
+that script is pinned to the release it was published with, and it replaces
+whatever is installed and restarts the service. It tells you which version it
+found and which one it is installing.
+
+**Removing it** keeps your instance, which is the whole of what stageman knows:
+
+```sh
+curl -fsSL https://github.com/HernanFdz/stageman/releases/latest/download/install.sh | sh -s -- --uninstall
+```
+
+Each release publishes its own copy of that script, and the copy is fixed to
+that release's binaries rather than to whatever is latest at the time it runs.
+So an installation is reproducible: the script from `v0.1.0` installs `v0.1.0`
+today and next year. `packaging/install.sh` is what it is built from, and it
+differs by exactly one line — the version — which the build asserts rather than
+promises.
+
+The script needs a container runtime to already be there, and deliberately will
+not install one: that needs root for something that is not stageman, and your
+package manager does it properly. If stageman does not stay running, the script
+prints what the daemon said, which names every path it looked in.
+
+### Or do it by hand
+
+Each release carries one binary per machine it is built on — Linux on x86-64,
+macOS on Apple silicon — and the latest of each is always at the same address:
+
+```sh
+curl -Lo stageman https://github.com/HernanFdz/stageman/releases/latest/download/stageman-linux-x64
+chmod +x stageman
+./stageman --version
+```
+
+```sh
+curl -Lo stageman https://github.com/HernanFdz/stageman/releases/latest/download/stageman-macos-arm64
+chmod +x stageman
+./stageman --version
+```
+
+**The asset is named for the machine and the file you keep is not**, which is
+the same split the version already gets: an address has to say which binary it
+is handing you, because nothing else there can, while a file sitting on the
+machine that will run it restates what you already know. Ask it instead —
+`--version` answers with the release and the target it was built for, without
+starting anything, which is also the cheapest proof the download arrived
+whole. Neither address ever changes.
+
+**Fetch it with `curl`, not with a browser.** The macOS binary is not signed,
+and macOS refuses to run an unsigned executable that arrived carrying a
+download marker — which a browser attaches and `curl` does not. The message
+blames a developer who cannot be verified and reads exactly like a corrupt
+file, so the `--version` line above is where you would meet it. If you have
+already downloaded one that way, `xattr -d com.apple.quarantine stageman`
+removes the marker.
+
+There is no checksum to download beside these, and that is deliberate rather
+than missing: one published in the same release, fetched over the same
+connection from the same account, is not evidence about the binary — anybody
+able to replace one could replace both. GitHub records a SHA-256 digest for
+every asset and shows it on the release, which is the same assurance without a
+step that resembles a stronger one.
+
+Nothing is built for Linux on arm64 yet. Building one needs a cross linker
+rather than a decision, and until somebody has run what it produces, an absent
+binary is a more honest answer than an untried one.
 
 Releases are cut from the Actions tab — *release* → **Run workflow** — by
 naming a version and, if it should not be the head of `main`, a commit to build
