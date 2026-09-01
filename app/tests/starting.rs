@@ -678,7 +678,15 @@ fn saying_where_the_instance_goes_still_wins() {
 /// directory is the same thing a real bundle does rather than a test-only
 /// door. Without it, a `cargo` build has no bundle at all — which is the case
 /// every other test here runs in, and is asserted first so that this test
-/// fails if the two ever stop differing.
+/// fails if the two ever stop differing.///
+/// **There is a third state this cannot reach**: a binary carrying the bundle
+/// inside itself, per
+/// `docs/decisions/0038-the-browsers-half-lives-in-the-binary.md`. What is
+/// embedded is decided when this binary is compiled, and the gate compiles it
+/// with nothing — so no test running against it can produce that state, and
+/// one pretending to would be asserting about a build nobody ships. The pure
+/// half of it is covered by unit tests on the table and its lookups; the whole
+/// of it is what `just build` produces and running that is what proves it.
 
 #[test]
 fn a_build_says_whether_it_has_a_browser_half() {

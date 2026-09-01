@@ -136,6 +136,14 @@ dev *arguments:
     fi
     export STAGEMAN_KEY="$(cat "$key")"
     export STAGEMAN_STATE="${STAGEMAN_STATE:-$scratch/instance.json}"
+    # Emptied, because the bundle directory is a compile-time input and a
+    # binary carrying one prefers it over the live tree `dx` is serving. A
+    # stale bundle embedded here would look exactly like hot reloading having
+    # stopped working, which is a long way to walk for a directory nobody
+    # meant to leave behind. `just build` empties it too, so this is a second
+    # line of defence rather than the only one.
+    rm -rf "{{ justfile_directory() }}/app/bundle"
+    mkdir -p "{{ justfile_directory() }}/app/bundle"
     # Deliberately not echoed here. The binary prints where its instance is as
     # part of the summary it prints anyway, so saying it first only produces
     # the same line twice, several seconds apart, with a build between them.
@@ -206,16 +214,44 @@ build target="host":
         exit 1
         ;;
     esac
+    built="{{ justfile_directory() }}/target/dx/stageman/release/web"
+    shipping="{{ justfile_directory() }}/dist/{{ target }}"
+    embed="{{ justfile_directory() }}/app/bundle"
+
+    # Twice, and the reason is ordering rather than caution. The server embeds
+    # the browser's half at compile time, and the tooling builds both halves in
+    # parallel — its one ordering flag runs the server *first*, which is the
+    # wrong way round. So the first pass exists to produce a client, and the
+    # second is the one whose server carries it. See
+    # `docs/decisions/0038-the-browsers-half-lives-in-the-binary.md`.
+    #
+    # Emptied rather than copied over, here and below. An asset's filename
+    # carries a hash of its contents, so a stale file survives a rebuild under
+    # a name the new `index.html` never mentions — a bundle that grows one dead
+    # file per build and never says so.
+    echo "==> pass 1 of 2: building the browser's half"
     dx build --release --fullstack --package stageman \
         @client --no-default-features --features web \
         @server --features server $targeting
-    # Emptied rather than copied over. An asset's filename carries a hash of
-    # its contents, so a stale `public/` survives a rebuild under a name the
-    # new `index.html` does not mention — a bundle that grows one dead file per
-    # build and never says so. The destination can only be one of the three
-    # names above, because anything else left through the `exit 1`.
-    built="{{ justfile_directory() }}/target/dx/stageman/release/web"
-    shipping="{{ justfile_directory() }}/dist/{{ target }}"
+    rm -rf "$embed"
+    mkdir -p "$embed"
+    cp -R "$built/public/." "$embed/"
+
+    echo "==> pass 2 of 2: building the server that carries it"
+    dx build --release --fullstack --package stageman \
+        @client --no-default-features --features web \
+        @server --features server $targeting
+
+    # One file. The browser's half is inside it, so there is no `public/` to
+    # copy and nothing to keep together.
     rm -rf "$shipping"
     mkdir -p "$shipping"
-    cp -R "$built/server" "$built/public" "$shipping/"
+    cp -R "$built/server" "$shipping/"
+
+    # Left as a fresh clone has it. The directory is a compile-time input, so
+    # leaving it full would make an ordinary `cargo build` — and therefore
+    # `just check` — produce a different binary here than it does in continuous
+    # integration, which is the kind of difference that is only ever noticed
+    # from the far side.
+    rm -rf "$embed"
+    mkdir -p "$embed"

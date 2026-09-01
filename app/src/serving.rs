@@ -152,6 +152,26 @@ enum StartupError {
     /// Serving stopped on something other than being asked to.
     #[error("serving the dashboard stopped")]
     Serving(#[source] io::Error),
+    /// The index could not be put where the framework will read it.
+    ///
+    /// Fatal rather than a warning, and that is the judgement worth recording:
+    /// a binary carrying a browser half and unable to place its index serves a
+    /// page that renders and never comes alive, which is almost indistinguishable
+    /// from one that works. `docs/conventions.md` §3 puts what an operator can
+    /// act on in the dashboard — and this cannot be, because the dashboard is
+    /// the thing that would not be working.
+    #[error(
+        "the browser half could not be placed at {path}.\n  This binary carries \
+         one, and the directory it must be written to is not writable.\n  Either \
+         run from a directory you can write to, or set DIOXUS_PUBLIC_PATH to one."
+    )]
+    Bundle {
+        /// Where it tried to write.
+        path: PathBuf,
+        /// Why it could not.
+        #[source]
+        source: io::Error,
+    },
     /// There is no randomness to generate a key from.
     ///
     /// Refused rather than substituted. A predictable key is worse than no
@@ -358,19 +378,38 @@ async fn start() -> Result<(), StartupError> {
     // somebody has to test one.
     let store = Arc::new(store);
 
-    // Two routers, and which one is a question about how this binary was
-    // built rather than about how it is configured. `cargo build` produces a
-    // server and no client, and that is a working thing to run — the page is
-    // rendered here and arrives complete, it just does not come alive
-    // afterwards. Anything that serves the bundle it does not have would be
-    // serving nothing.
-    let bundle = bundle().filter(|path| path.is_dir());
+    // Three states, and which one holds is a question about how this binary
+    // was built rather than about how it is configured.
+    //
+    // *Carrying its own* — what `just build` produces. The index is written
+    // where the framework looks, read once, and removed; every other file is
+    // served from memory by a route of ours, so the framework is asked for a
+    // rendering that serves no static files at all.
+    //
+    // *A bundle beside it* — what `dx serve` arranges during development, and
+    // what a hand-assembled directory looks like. The framework serves it.
+    //
+    // *Neither* — what `cargo build` produces, and a working thing to run: the
+    // page is rendered here and arrives complete, it just does not come alive
+    // afterwards.
+    let carried = crate::bundle::CARRIED.index();
+    let configured = configuration(carried, public_directory())?;
+
+    let beside = public_directory().filter(|path| path.is_dir());
     let router = axum::Router::new();
-    let router = if bundle.is_some() {
-        router.serve_dioxus_application(ServeConfig::new(), Dashboard)
+    let router = if carried.is_some() {
+        serving_embedded(router.serve_api_application(configured, Dashboard))
+    } else if beside.is_some() {
+        router.serve_dioxus_application(configured, Dashboard)
     } else {
-        router.serve_api_application(ServeConfig::new(), Dashboard)
+        router.serve_api_application(configured, Dashboard)
     };
+    let client = match (carried, &beside) {
+        (Some(_), _) => Client::Carried(crate::bundle::CARRIED.count()),
+        (None, Some(path)) => Client::Beside(path.clone()),
+        (None, None) => Client::Absent,
+    };
+
     // Reached by the dashboard's route as an extension rather than as a
     // context, because a context only exists while a page is being rendered —
     // see `crate::dashboard::instance`. A layer is on every request, which is
@@ -411,7 +450,7 @@ async fn start() -> Result<(), StartupError> {
         &store,
         &swept,
         serving,
-        bundle.as_deref(),
+        &client,
         &kept,
         tools
             .as_ref()
@@ -524,7 +563,7 @@ fn announce(
     store: &Store,
     swept: &crate::Swept,
     serving: SocketAddr,
-    bundle: Option<&Path>,
+    client: &Client,
     kept: &Kept,
     tools: Option<SocketAddr>,
 ) -> Result<(), StartupError> {
@@ -563,13 +602,7 @@ fn announce(
         "  left alone {} unidentified, {} naming a forgotten job",
         swept.unidentified, swept.forgotten
     );
-    println!(
-        "  client     {}",
-        bundle.map_or_else(
-            || "not built — the dashboard is rendered here and stays still".to_owned(),
-            |path| path.display().to_string()
-        )
-    );
+    println!("  client     {client}");
     println!();
     // Last, and that ordering is load-bearing rather than cosmetic: this line
     // is what anything supervising a start waits for, so everything worth
@@ -782,7 +815,7 @@ fn instance_path() -> Result<PathBuf, StartupError> {
     Ok(directory.join(INSTANCE_FILE))
 }
 
-/// Where a client bundle would be, if this binary was built with one.
+/// The directory the framework resolves a browser half from.
 ///
 /// The same rule Dioxus applies, restated because the function that applies it
 /// is private and because it panics on a directory that is not there. Asking
@@ -792,7 +825,15 @@ fn instance_path() -> Result<PathBuf, StartupError> {
 /// Restating somebody else's rule is drift waiting to happen, and what keeps
 /// it honest is that the integration tests run this binary: a Dioxus upgrade
 /// that moved the directory would fail them here rather than in production.
-fn bundle() -> Option<PathBuf> {
+///
+/// **It is now read for two reasons rather than one**, and that is why it is
+/// named for the directory rather than for the bundle that may be in it: it
+/// says where a bundle would be found, and it says where this binary must put
+/// its own index so the framework will find *that* — see
+/// [`materialise`] and
+/// `docs/decisions/0038-the-browsers-half-lives-in-the-binary.md`. One rule,
+/// read twice, so the two can never point at different directories.
+fn public_directory() -> Option<PathBuf> {
     if let Ok(path) = std::env::var("DIOXUS_PUBLIC_PATH") {
         return Some(PathBuf::from(path));
     }
@@ -800,6 +841,184 @@ fn bundle() -> Option<PathBuf> {
         .ok()?
         .parent()
         .map(|beside| beside.join("public"))
+}
+
+/// Builds the serving configuration, putting a carried index in front of it.
+///
+/// The whole of the arrangement in
+/// `docs/decisions/0038-the-browsers-half-lives-in-the-binary.md`, in the order
+/// that makes it safe: write the index where the framework looks, build the
+/// configuration — which is the one call that reads it — then take it away.
+///
+/// With nothing carried this is the configuration on its own, which is what
+/// every build that is not `just build` produces.
+///
+/// It takes the directory rather than resolving one, for the reason
+/// [`materialise`] does: the gate compiles this binary carrying nothing, so a
+/// test can only reach the interesting half by being handed somewhere to put
+/// it.
+///
+/// # Errors
+///
+/// Fails if there is nowhere to derive a directory from, or the index cannot be
+/// written there. Both are refusals rather than a configuration without a
+/// client: a binary carrying a browser half that could not place it would serve
+/// a page which renders and never responds, and the dashboard is the thing an
+/// operator would otherwise be sent to fix it in.
+fn configuration(
+    carried: Option<&[u8]>,
+    directory: Option<PathBuf>,
+) -> Result<ServeConfig, StartupError> {
+    let Some(index) = carried else {
+        return Ok(ServeConfig::new());
+    };
+    let directory = directory.ok_or_else(|| StartupError::Bundle {
+        path: PathBuf::new(),
+        source: io::Error::other("this program has no location to derive one from"),
+    })?;
+    let written = materialise(&directory, index)?;
+    let configured = ServeConfig::new();
+    withdraw(&written);
+    Ok(configured)
+}
+
+/// Puts the carried index where the framework will read it, and says where.
+///
+/// The framework accepts an index only as a path. The one call that takes a
+/// parsed index in memory needs a type its own crate does not export, checked
+/// in three releases — so this writes the file, and the caller removes it as
+/// soon as the configuration has been built. It is on disk for the length of
+/// one read.
+///
+/// Written unconditionally rather than deferring to a file already there.
+/// Assets are named by a hash of their contents and this binary's index names
+/// the hashes this binary carries, so an index left by some other build would
+/// send a browser looking for files nothing here has. Overwriting is the safe
+/// direction.
+///
+/// It takes the directory rather than resolving one, which is what lets a test
+/// hand it somewhere harmless. Resolving is [`public_directory`]'s job and the
+/// caller's to ask for, so the two questions — *where does the framework look*
+/// and *can this be written there* — are answered in different places.
+///
+/// # Errors
+///
+/// Fails if the directory cannot be made or the file cannot be written.
+fn materialise(directory: &Path, index: &[u8]) -> Result<PathBuf, StartupError> {
+    let written = directory.join(crate::bundle::INDEX);
+    let failed = |source| StartupError::Bundle {
+        path: written.clone(),
+        source,
+    };
+    fs::create_dir_all(directory).map_err(failed)?;
+    fs::write(&written, index).map_err(failed)?;
+    Ok(written)
+}
+
+/// Removes what [`materialise`] wrote, so nothing is left on disk.
+///
+/// Best effort and deliberately silent. The configuration has already been
+/// built by the time this runs, so a file that cannot be removed changes
+/// nothing about whether the dashboard works — and the next start overwrites
+/// it. Refusing to start over an undeletable temporary file would be trading a
+/// working instance for tidiness.
+///
+/// **The directory goes too, but only if it is empty**, and `remove_dir` is
+/// what makes that safe to attempt rather than something to reason about
+/// first. It is `rmdir` underneath: emptiness and removal are one operation,
+/// so there is no window in which a directory tested as empty gains a file
+/// before it is taken away. Trying and being refused *is* the check.
+///
+/// That the refusal is silent is the point rather than laziness. A directory
+/// with anything else in it belongs to somebody else — an operator who pointed
+/// `DIOXUS_PUBLIC_PATH` at a real bundle, most obviously — and leaving it is
+/// the correct outcome, not a failure to report. Only a directory this created
+/// and emptied is one nothing else wants, and that one is recreated on the
+/// next start anyway.
+fn withdraw(written: &Path) {
+    drop(fs::remove_file(written));
+    if let Some(directory) = written.parent() {
+        drop(fs::remove_dir(directory));
+    }
+}
+
+/// Adds a route per carried file, so the bundle is served from memory.
+///
+/// One exact route each rather than a wildcard under a prefix. There is no
+/// path to normalise and no way to ask for something outside the table, so the
+/// class of bug where a crafted path escapes the directory cannot occur — it
+/// is not defended against, it is absent.
+///
+/// The index is skipped: it is the renderer's input rather than a response,
+/// and serving the unrendered template would hand back a page that boots
+/// without the state the server had already put in it.
+/// What each carried file is served as, and under what path.
+///
+/// Split from registering it so that the two decisions here — which files get
+/// a route, and what each is called — can be asserted without building a
+/// router or driving one. It takes the table rather than reading the one
+/// compiled in, and that is the difference between a test and a tautology: the
+/// gate embeds nothing, so a function reading the real table would return
+/// nothing and agree with every mutation of itself.
+fn routed(carried: crate::bundle::Bundle) -> Vec<(String, &'static str, &'static [u8])> {
+    carried
+        .entries()
+        .iter()
+        .filter(|(served, _)| *served != crate::bundle::INDEX)
+        .map(|(served, bytes)| {
+            (
+                format!("/{served}"),
+                crate::bundle::content_type(served),
+                *bytes,
+            )
+        })
+        .collect()
+}
+
+/// Registers one route per entry [`routed`] names.
+///
+/// Skipped by mutation testing, and untestable rather than untested: what it
+/// does beyond `routed` is one framework call per entry, and reaching it needs
+/// a binary with a bundle compiled into it — which the gate never builds,
+/// because the directory it would come from is empty in a fresh clone. What
+/// can be checked is checked, one function up.
+#[mutants::skip]
+fn serving_embedded(mut router: axum::Router) -> axum::Router {
+    for (path, kind, body) in routed(crate::bundle::CARRIED) {
+        router = router.route(
+            &path,
+            axum::routing::get(move || async move {
+                ([(axum::http::header::CONTENT_TYPE, kind)], body)
+            }),
+        );
+    }
+    router
+}
+
+/// What browser half this binary is running with, for the line that says so.
+///
+/// Three states rather than two since the bundle can be carried, and the
+/// distinction is worth printing: they fail in different ways and an operator
+/// looking at a page that does not respond needs to know which one they have.
+enum Client {
+    /// Carried inside this binary, with this many files.
+    Carried(usize),
+    /// Found in a directory beside it.
+    Beside(PathBuf),
+    /// Neither, which is what `cargo build` produces.
+    Absent,
+}
+
+impl fmt::Display for Client {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Carried(files) => write!(f, "carried in this binary, {files} file(s)"),
+            Self::Beside(path) => write!(f, "{}", path.display()),
+            Self::Absent => {
+                f.write_str("not built — the dashboard is rendered here and stays still")
+            }
+        }
+    }
 }
 
 /// The value of a variable, when it is set to something.
@@ -819,6 +1038,216 @@ mod tests {
     use super::{RUNTIME, missing};
     use stageman_agent::ContainerRuntime;
     use std::path::PathBuf;
+
+    /// Nothing of the index survives, the directory it needed included.
+    ///
+    /// The directory is the half that was missed first time round: the file
+    /// went and an empty `public/` stayed beside the binary, which is exactly
+    /// the residue this whole arrangement exists to avoid.
+    #[test]
+    fn withdrawing_takes_the_directory_it_needed_with_it() {
+        use super::{materialise, withdraw};
+
+        let elsewhere = tempfile::tempdir().expect("a temporary directory");
+        let at = elsewhere.path().join("public");
+
+        let written = materialise(&at, b"<html></html>").expect("it is writable");
+        assert!(at.is_dir(), "it should have made the directory");
+
+        withdraw(&written);
+
+        assert!(
+            !written.exists(),
+            "the index outlived the read it existed for"
+        );
+        assert!(
+            !at.exists(),
+            "an empty directory was left beside the binary"
+        );
+    }
+
+    /// A directory holding anything else is left exactly as it was.
+    ///
+    /// The case an operator creates by pointing `DIOXUS_PUBLIC_PATH` at a real
+    /// bundle. Removing it would take their files with it, so being refused is
+    /// the outcome asked for rather than an error — which is why nothing here
+    /// reports one.
+    #[test]
+    fn a_directory_holding_anything_else_survives() {
+        use super::{materialise, withdraw};
+
+        let elsewhere = tempfile::tempdir().expect("a temporary directory");
+        let at = elsewhere.path().join("public");
+        std::fs::create_dir_all(&at).expect("the directory is made");
+        let theirs = at.join("something-else.js");
+        std::fs::write(&theirs, "not ours").expect("their file is written");
+
+        let written = materialise(&at, b"<html></html>").expect("it is writable");
+        withdraw(&written);
+
+        assert!(!written.exists(), "ours should still be removed");
+        assert!(at.is_dir(), "their directory should have survived");
+        assert_eq!(
+            std::fs::read_to_string(&theirs).expect("their file is still there"),
+            "not ours",
+        );
+    }
+
+    /// A carried index is written, read, and taken away again.
+    ///
+    /// Asserted through a sentinel rather than by looking at what comes back,
+    /// because the configuration is opaque: a stale index is put there first,
+    /// and what proves the whole sequence ran is that it is gone afterwards.
+    /// Nothing else could have removed it.
+    #[test]
+    fn a_carried_index_is_written_read_and_taken_away() {
+        use super::configuration;
+
+        let elsewhere = tempfile::tempdir().expect("a temporary directory");
+        let at = elsewhere.path().join("public");
+        std::fs::create_dir_all(&at).expect("the directory is made");
+        let stale = at.join("index.html");
+        std::fs::write(&stale, "STALE").expect("the sentinel is written");
+
+        configuration(Some(b"<html>ours</html>"), Some(at)).expect("it is configurable");
+
+        assert!(
+            !stale.exists(),
+            "the index should have been overwritten and then removed",
+        );
+    }
+
+    /// A binary carrying nothing touches nothing.
+    ///
+    /// The other half, and the one that keeps `just dev` working: a build with
+    /// no bundle of its own must leave a directory that has one alone.
+    #[test]
+    fn carrying_nothing_leaves_the_directory_alone() {
+        use super::configuration;
+
+        let elsewhere = tempfile::tempdir().expect("a temporary directory");
+        let at = elsewhere.path().join("public");
+        std::fs::create_dir_all(&at).expect("the directory is made");
+        let theirs = at.join("index.html");
+        std::fs::write(&theirs, "THEIRS").expect("the sentinel is written");
+
+        configuration(None, Some(at)).expect("it is configurable");
+
+        assert_eq!(
+            std::fs::read_to_string(&theirs).expect("it is still there"),
+            "THEIRS",
+            "a build carrying nothing must not disturb a bundle beside it",
+        );
+    }
+
+    /// The index is written where it was asked for, with what it was given.
+    ///
+    /// The whole of what the framework needs from us, and the one step that
+    /// touches a disk — so it is worth asserting rather than assuming, and
+    /// asserting somewhere harmless rather than beside a real binary.
+    #[test]
+    fn the_index_is_written_where_the_framework_will_look() {
+        use super::materialise;
+
+        let elsewhere = tempfile::tempdir().expect("a temporary directory");
+        let nested = elsewhere.path().join("public");
+
+        let written = materialise(&nested, b"<html>carried</html>").expect("it is writable");
+
+        assert_eq!(written, nested.join("index.html"));
+        assert_eq!(
+            std::fs::read_to_string(&written).expect("it is there"),
+            "<html>carried</html>",
+            "the framework would parse whatever this wrote",
+        );
+    }
+
+    /// A directory that cannot be written is a refusal, not an empty success.
+    ///
+    /// The failure this guards is the expensive one: a binary carrying a
+    /// browser half that quietly serves a page which renders and never
+    /// responds. Provoked with a path under a file, which cannot be a
+    /// directory on any platform.
+    #[test]
+    fn an_index_that_cannot_be_written_is_a_failure() {
+        use super::{StartupError, materialise};
+
+        let elsewhere = tempfile::tempdir().expect("a temporary directory");
+        let blocked = elsewhere.path().join("a-file");
+        std::fs::write(&blocked, "not a directory").expect("the file is written");
+
+        let refused = materialise(&blocked.join("public"), b"<html></html>");
+
+        assert!(
+            matches!(refused, Err(StartupError::Bundle { .. })),
+            "expected a refusal, got {refused:?}",
+        );
+    }
+
+    /// What was written is taken away again.
+    ///
+    /// The point of writing it at all is that it does not stay, so this is the
+    /// assertion that the whole arrangement rests on.
+    #[test]
+    fn what_was_written_does_not_stay() {
+        use super::{materialise, withdraw};
+
+        let elsewhere = tempfile::tempdir().expect("a temporary directory");
+        let written = materialise(elsewhere.path(), b"<html></html>").expect("it is writable");
+        assert!(written.exists());
+
+        withdraw(&written);
+
+        assert!(
+            !written.exists(),
+            "the index outlived the read it existed for"
+        );
+        // Removing what is already gone is the outcome asked for rather than a
+        // failure, and a second start must not trip over the first.
+        withdraw(&written);
+    }
+
+    /// The index gets no route, and everything else gets one under its path.
+    ///
+    /// Vacuous when nothing is embedded, which is the gate's case — the table
+    /// is a compile-time input, so no test can put anything in it. What this
+    /// catches is the filter inverting, which would serve the unrendered
+    /// template and nothing else.
+    #[test]
+    fn the_index_is_not_routed_and_the_rest_are() {
+        use super::routed;
+
+        // A table of this shape rather than the one compiled in. The gate
+        // embeds nothing, so asserting against the real table would assert
+        // that nothing maps to nothing.
+        let carrying = crate::bundle::Bundle::of(&[
+            ("index.html", b"<html></html>"),
+            ("assets/app-abc.js", b"console.log(1)"),
+            ("assets/app-abc.wasm", b"\0asm"),
+        ]);
+
+        let routes = routed(carrying);
+
+        assert_eq!(
+            routes.len(),
+            2,
+            "the index must not get a route: {routes:?}"
+        );
+        let paths: Vec<&str> = routes.iter().map(|(path, ..)| path.as_str()).collect();
+        assert!(paths.contains(&"/assets/app-abc.js"), "{paths:?}");
+        assert!(paths.contains(&"/assets/app-abc.wasm"), "{paths:?}");
+        assert!(!paths.contains(&"/index.html"), "{paths:?}");
+
+        let wasm = routes
+            .iter()
+            .find(|(path, ..)| path == "/assets/app-abc.wasm")
+            .expect("the wasm is routed");
+        assert_eq!(
+            wasm.1, "application/wasm",
+            "a browser refuses a module served as anything else",
+        );
+        assert_eq!(wasm.2, b"\0asm", "the route serves the bytes it was given");
+    }
 
     /// Only a key file that is not there means there is no key yet.
     ///

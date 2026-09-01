@@ -14,6 +14,8 @@
 //! `docs/decisions/0022-the-browser-never-sees-the-domain.md`.
 
 #[cfg(feature = "server")]
+mod bundle;
+#[cfg(feature = "server")]
 mod channel;
 #[cfg(feature = "server")]
 pub(crate) mod endpoint;

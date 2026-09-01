@@ -421,7 +421,10 @@ built from this gate, this one needs:
   evidence the containers work; `just image-handshake` is.
 - **`dx`, the Dioxus CLI** — `cargo install dioxus-cli`, needed to build the
   browser half into a bundle. `just dev` serves both halves with reloading and
-  `just build` produces the bundle that ships; `just check` needs neither them
+  `just build` produces the single file that ships — the browser's half is
+  compiled into it, per
+  `docs/decisions/0038-the-browsers-half-lives-in-the-binary.md`, which is why
+  that recipe builds twice; `just check` needs neither them
   nor a bundle, because the wasm pass is `cargo` against a target and that is a
   toolchain fact.
 
