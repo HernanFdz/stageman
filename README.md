@@ -76,6 +76,47 @@ What gets reported is `STAGEMAN_LOG`. It takes the same filter syntax as
 `RUST_LOG` and defaults to `warn` — enough to see what needs attention, not a
 commentary on things going right.
 
+## Installing it
+
+One command. It works out which binary this machine needs, installs it, sets it
+up to run as a service as you, and starts it:
+
+```sh
+curl -fsSL https://github.com/HernanFdz/stageman/releases/latest/download/install.sh | sh
+```
+
+It asks for `sudo` for the two files that need it — the binary, and on Linux
+the unit beside it — and refuses to run as root outright. stageman runs as the
+person who operates it and keeps its instance in that account's home, so a run
+as root would install a service for root and put the instance somewhere you
+cannot reach, which looks exactly like it worked.
+
+**Re-running it is how you update.** There is no separate update command and no
+`self-update` subcommand: the address above always serves the newest script,
+that script is pinned to the release it was published with, and it replaces
+whatever is installed and restarts the service. It tells you which version it
+found and which one it is installing.
+
+**Removing it** keeps your instance, which is the whole of what stageman knows:
+
+```sh
+curl -fsSL https://github.com/HernanFdz/stageman/releases/latest/download/install.sh | sh -s -- --uninstall
+```
+
+Each release publishes its own copy of that script, and the copy is fixed to
+that release's binaries rather than to whatever is latest at the time it runs.
+So an installation is reproducible: the script from `v0.1.0` installs `v0.1.0`
+today and next year. `packaging/install.sh` is what it is built from, and it
+differs by exactly one line — the version — which the build asserts rather than
+promises.
+
+The script needs a container runtime to already be there, and deliberately will
+not install one: that needs root for something that is not stageman, and your
+package manager does it properly. If stageman does not stay running, the script
+prints what the daemon said, which names every path it looked in.
+
+### Or do it by hand
+
 Each release carries one binary per machine it is built on — Linux on x86-64,
 macOS on Apple silicon — and the latest of each is always at the same address:
 

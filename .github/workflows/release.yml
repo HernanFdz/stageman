@@ -238,6 +238,15 @@ jobs:
 
   # The only writer. Everything built lands here and becomes one draft, so
   # there is no moment at which a release exists carrying some of its binaries.
+  # `needs` names `settle` as well as `build`, which looks redundant because
+  # `build` already waits for it — and for ordering it would be. It is not
+  # ordering. `needs.<job>.outputs` resolves only for jobs this one lists
+  # directly, and a transitive dependency is not one: drop `settle` here and
+  # every `needs.settle.outputs.*` below silently becomes the empty string.
+  # The tag name is one of them, and the release action falls back to the
+  # current ref when handed nothing — so the result is a draft release for a
+  # tag called `main`, outside the `refs/tags/v*` rulesets, which is precisely
+  # the failure the settle job exists to prevent.
   draft:
     name: draft
     needs: [settle, build]
@@ -247,9 +256,30 @@ jobs:
       # and does not need to be — see the header.
       contents: write
     steps:
+      # Checked out first, because `actions/checkout` clears the workspace and
+      # would take the artifacts with it. At the settled commit rather than the
+      # head of main: the script a release publishes has to be the one that was
+      # reviewed alongside the binaries it installs.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - run: git checkout --detach ${{ needs.settle.outputs.commit }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      # The version is substituted into the tracked template here, so the
+      # published script installs *this* release's binaries rather than
+      # whatever `latest` means when somebody runs it. The recipe asserts that
+      # exactly one line changed, so this cannot quietly publish a template.
+      # See docs/decisions/0041-installing-is-a-script-published-with-the-release.md.
+      - run: just installer "${{ needs.settle.outputs.version }}"
+
       # `merge-multiple` flattens every artifact into one directory, which is
       # the layout the files below name. Each artifact holds exactly one file
-      # and they are named for their targets, so nothing can collide.
+      # and they are named for their targets, so nothing collides — including
+      # with the script written into the same directory above.
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -286,5 +316,6 @@ jobs:
           draft: true
           fail_on_unmatched_files: true
           files: |
+            dist/install.sh
             dist/stageman-linux-x64
             dist/stageman-macos-arm64

@@ -137,6 +137,15 @@ pub fn plausible_repo_path(token: &str) -> bool {
     // of the batch — every later candidate goes unchecked and the check reports
     // a clean result. Letting `../other/src` through did exactly that, and only
     // the broken fixture noticed.
+    //
+    // A token holding a variable expansion is somebody else's filesystem, not
+    // this repository's, and `git check-ignore` cannot tell the difference: it
+    // reads `${HOME}` as an ordinary directory name, so `${HOME}/.local/share`
+    // matches a `.local/` entry and is reported as a violation of a rule about
+    // fresh clones. A shipped shell script naming a path on the machine it
+    // installs to is the case that found this, and the reasoning generalises to
+    // every `$PWD`, `%h` and `${{ }}` a workflow or recipe contains. The check's
+    // own principle applies — under-reporting beats crying wolf.
     let leading_dot_ok = token
         .strip_prefix('.')
         .is_none_or(|rest| rest.contains('/') && !rest.starts_with('.'));
@@ -147,6 +156,7 @@ pub fn plausible_repo_path(token: &str) -> bool {
         && !token.starts_with('-')
         && !token.contains("//")
         && !token.contains('*')
+        && !token.contains('$')
 }
 
 /// The `check_matrix` from the justfile, as one argument list per pass.
@@ -400,6 +410,26 @@ mod tests {
         // repository and abandons every candidate after it in the batch.
         assert!(!plausible_repo_path("../other-project/src"));
         assert!(!plausible_repo_path("../../etc/passwd"));
+    }
+
+    /// A path built from a variable belongs to whatever machine expands it.
+    ///
+    /// Not a hypothetical: `git check-ignore` reads `${HOME}` as a directory
+    /// name like any other, so a shipped installer naming
+    /// `${HOME}/.local/share/stageman` is reported as a tracked file naming an
+    /// ignored path — a rule about fresh clones, applied to somebody else's
+    /// home directory.
+    #[test]
+    fn a_variable_expansion_is_not_a_path_in_this_repository() {
+        assert!(!plausible_repo_path("${HOME}/.local/share/stageman"));
+        assert!(!plausible_repo_path("$HOME/.config/stageman/key"));
+        assert!(!plausible_repo_path(
+            "${{ github.workspace }}/dist/install.sh"
+        ));
+        assert!(
+            plausible_repo_path("packaging/install.sh"),
+            "the same file named relative to the repository is still checked"
+        );
     }
 
     #[test]
