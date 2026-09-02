@@ -91,6 +91,16 @@ thiserror = "2.0.20"
 # is the one building. Needed here for the browser's entry point, which no
 # configuration the tests run under compiles at all.
 mutants = "0.0.4"
+# Icons, for both halves. Only the categories named here are compiled, and an
+# icon outside them does not fail to draw — it fails to resolve, as a missing
+# name. So an import that will not compile usually means a category to add
+# rather than an icon that does not exist, and the crate's own source says
+# which: each module carries the `cfg` listing every category it belongs to,
+# and one icon is often in several.
+#
+# Not optional, unlike everything the daemon needs. An icon is drawn in the
+# browser, which is the half that has no features beyond the framework.
+lucide-dioxus = { version = "2.43.0", features = ["accessibility", "arrows"] }
 
 etcetera = { version = "0.11.0", optional = true }
 parking_lot = { version = "0.12.5", optional = true }

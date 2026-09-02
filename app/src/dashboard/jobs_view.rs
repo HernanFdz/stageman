@@ -16,6 +16,7 @@
 use dioxus::prelude::*;
 #[cfg(feature = "server")]
 use dioxus::server::axum::Extension;
+use lucide_dioxus::{ExternalLink, Eye, EyeOff};
 use serde::{Deserialize, Serialize};
 
 use super::agents_view::Agent;
@@ -96,6 +97,20 @@ pub struct Job {
     pub created_at: String,
     /// Where it has got to.
     pub standing: Standing,
+    /// Where to look at whatever it is showing.
+    ///
+    /// Built on the server rather than assembled here, because it is made from
+    /// the domain this instance answers on and the browser has no business
+    /// knowing that — a page that composed its own would be a second place for
+    /// the rule in `docs/decisions/0042-a-job-shows-its-work-on-a-subdomain.md`
+    /// to live, and the one nobody would update.
+    ///
+    /// **Always present, and it promises nothing.** Nothing here knows whether
+    /// a job has anything listening: the port is published when its container
+    /// is created, whether or not its agent ever uses it. So this is an address
+    /// rather than a claim, and following it when there is nothing there says
+    /// so plainly.
+    pub tunnel: String,
 }
 
 /// One project and its jobs.
@@ -258,6 +273,7 @@ fn working(state: &stageman_core::State, project: &str) -> DashboardResult<Worki
             kickoff: job.kickoff.clone(),
             created_at: job.created_at.to_string(),
             standing: standing(&job.progress),
+            tunnel: crate::tunnel::showing(*id),
         })
         .collect();
     jobs.sort_by(|one, other| other.created_at.cmp(&one.created_at));
@@ -409,12 +425,49 @@ fn RanJob(job: Job) -> Element {
             if let Standing::Failed { why } = &job.standing {
                 p { class: "text-xs text-failed", "{why}" }
             }
-            div {
+            // Icons rather than words, because a row of jobs is a list and a
+            // list reads better as shapes. Both carry an accessible name and a
+            // tooltip: an icon-only control with neither is a puzzle, and the
+            // tooltip is the only thing that says which address the second one
+            // goes to.
+            //
+            // The glyphs are deliberately not hidden from assistive technology
+            // and do not need to be. A label on the control replaces whatever
+            // its contents would have computed, so an unnamed drawing inside
+            // one contributes nothing to say twice.
+            div { class: "flex items-center gap-1",
                 button {
                     r#type: "button",
-                    class: "text-xs text-muted-foreground hover:text-foreground",
+                    // Padded and pulled back, so the target is bigger than the
+                    // shape without moving anything around it.
+                    class: "-m-1 rounded p-1 text-muted-foreground hover:text-foreground \
+                            focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
                     onclick: move |_| showing.toggle(),
-                    if showing() { "hide what it was told" } else { "what it was told" }
+                    aria_label: if showing() { "Hide what it was told" } else { "What it was told" },
+                    title: if showing() { "Hide what it was told" } else { "What it was told" },
+                    if showing() {
+                        EyeOff { size: 16, class: "shrink-0" }
+                    } else {
+                        Eye { size: 16, class: "shrink-0" }
+                    }
+                }
+                // In a tab of its own, and told to carry nothing there. What
+                // is on the other side is an application this instance's agent
+                // wrote, so it gets neither a handle on the page that opened
+                // it nor the address that page was at.
+                //
+                // An arrow leaving a frame rather than an eye, and the
+                // distinction is worth keeping: an eye means *reveal this*, as
+                // the control beside it does, and this one navigates away.
+                a {
+                    class: "-m-1 rounded p-1 text-muted-foreground hover:text-foreground \
+                            focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
+                    href: "{job.tunnel}",
+                    target: "_blank",
+                    rel: "noopener noreferrer",
+                    aria_label: "Look at what it is showing",
+                    title: "Look at what it is showing — {job.tunnel}",
+                    ExternalLink { size: 16, class: "shrink-0" }
                 }
                 if showing() {
                     pre { class: "mt-1.5 max-h-64 overflow-auto whitespace-pre-wrap rounded-md \
@@ -549,6 +602,56 @@ mod server_tests {
     fn the_other_two_cross_as_themselves() {
         assert_eq!(standing(&Progress::Working), Standing::Working);
         assert_eq!(standing(&Progress::Idle), Standing::Idle);
+    }
+
+    /// Every job crosses with the address that reaches that job.
+    ///
+    /// Worth asserting on the way across rather than trusting the builder: the
+    /// address is made from an identifier, and a page showing one job's link
+    /// under another's is a person looking at the wrong thing and being sure
+    /// they are looking at the right one.
+    #[test]
+    fn a_job_crosses_with_the_address_that_reaches_it() {
+        let mut watched = running_on(BTreeSet::from([Agent::Claude]));
+        for which in 1..=2_u128 {
+            let job = stageman_core::JobId::from_uuid(stageman_core::Uuid::from_u128(which));
+            watched.jobs.insert(
+                job,
+                stageman_core::Job {
+                    agent: Agent::Claude,
+                    reason: "because".to_owned(),
+                    kickoff: "do the thing".to_owned(),
+                    created_at: stageman_core::Timestamp::now(),
+                    progress: Progress::Working,
+                    thread: None,
+                },
+            );
+        }
+
+        let project = stageman_core::ProjectId::from_uuid(stageman_core::Uuid::from_u128(7));
+        let mut state = stageman_core::State::default();
+        state.agents.insert(
+            Agent::Claude,
+            stageman_core::AgentConfig {
+                auth_token: stageman_core::Secret::new("a-credential".to_owned()),
+            },
+        );
+        state.projects.insert(project, watched);
+
+        let shown = super::working(&state, &project.to_string()).expect("a watched project");
+
+        assert_eq!(shown.jobs.len(), 2);
+        for job in &shown.jobs {
+            assert!(
+                job.tunnel
+                    .contains(&format!("{}.{}", job.id, *crate::tunnel::DOMAIN)),
+                "a job's address has to name that job: {job:?}",
+            );
+        }
+        assert_ne!(
+            shown.jobs[0].tunnel, shown.jobs[1].tunnel,
+            "two jobs never share one",
+        );
     }
 }
 
