@@ -124,6 +124,13 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   channel work, and the cheap thing to record now is that the two are the same
   problem.
 
+  `docs/decisions/0042-a-job-shows-its-work-on-a-subdomain.md` raises the price
+  of leaving one. A retained container is no longer only a writable layer
+  nobody reclaims: it is a reachable one, serving whatever its agent last put
+  up, for as long as it exists. Retirement is now the only way to close a
+  tunnel, which turns this from housekeeping into the answer to a question that
+  record could not answer for itself.
+
 - **How is the foreman's long-lived container held open?**
   `docs/decisions/0012-agents-run-in-containers.md` puts the agent the
   foreman thinks with in one long-lived container, on the reasoning that
@@ -221,24 +228,21 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   — a gate that did not need a runtime would not need any of this, and that is
   the cheapest available answer if the rest turns out to be expensive.
 
-- **Does the dashboard need authentication before it leaves `127.0.0.1`?**
-  Nothing authenticates a request today, and the default address makes that
-  survivable rather than correct: anything that can reach the port can read
-  every project's name and, once the views exist, change what this instance
-  runs. The address is configurable, so the protection is a default and not a
-  boundary.
+- **How is a wildcard certificate obtained for an instance's domain?** A
+  certificate covering `*.<domain>` cannot be issued over HTTP validation, so
+  the ordinary path — and the one somebody will try first — does not work. It
+  needs DNS-01, which means the issuing client holds a credential for the
+  domain's DNS.
 
-  Worth stating what it is *not*: no credential is served — see
-  `docs/decisions/0022-the-browser-never-sees-the-domain.md` and the invariant
-  in `docs/architecture.md` §2 — so this is about who may operate the instance
-  rather than about what leaks from reading it.
+  Not this project's code, and recorded here anyway because it is the step
+  most likely to be discovered late and the only one in
+  `docs/decisions/0042-a-job-shows-its-work-on-a-subdomain.md`'s deployment
+  story that cannot be improvised on the day. Note that a tunnel-style
+  provider avoids it entirely by terminating TLS on its own certificate, which
+  may make the question moot rather than answered.
 
-  Settled by deciding whether this is ever reached from another machine.
-  `docs/vision.md` §3 has a daemon on somebody's own machine, and if that holds
-  the answer is to document the default loudly and stop. The moment somebody
-  wants it from a phone, the answer is a real one and the cheapest real one is
-  probably a reverse proxy that already does this, rather than a login page
-  here.
+  Settled by picking the forwarding infra, since the answer is a property of
+  that choice rather than an independent decision.
 
 - **How does a page find out that something changed?** Everything the dashboard
   shows is read once, while the page is rendered. A job finishing, a signal

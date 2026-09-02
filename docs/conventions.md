@@ -146,6 +146,24 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   parsed as one it loses the microseconds and addresses no message, and the
   failure reads like a permissions problem.
 
+- **tunnel** — the way in to what a job has put up for somebody to look at:
+  one port published from its container when that container is created, and
+  the address that reaches it. One per job, always, and never asked for — a
+  job has one because it is a job, which is what lets nothing about it be
+  stored. See
+  `docs/decisions/0042-a-job-shows-its-work-on-a-subdomain.md`.
+
+  The word names the mechanism, and §2 usually rejects one that does — the
+  argument against *checkout*. It survives here because the mechanism is
+  genuinely the concept: nothing decides that a tunnel exists, nothing decides
+  what is on it, and this project never knows whether anything is listening.
+  A word implying intent would claim all three. Not *preview*, which is the
+  near-miss worth recording: it says something finished is being shown for
+  approval, and half of what this is for is watching unfinished work move.
+  Not *port forward* either, which is the same mechanism named one layer down,
+  where the interesting part — that somebody is at the other end of it — has
+  disappeared.
+
 - **reason** — the free text the foreman writes when it creates a job,
   saying why it decided to. Prose meant for a human reading the dashboard, not
   a key pointing at a signal. It is the whole of a job's provenance, which is
