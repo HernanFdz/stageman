@@ -88,15 +88,25 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   Settled by the first thing that needs to *read* a log rather than write one,
   which is still the dashboard.
 
-- **Does a stopped container behave the same way on every runtime this has to
-  run on?** `docs/decisions/0015-a-job-survives-the-daemon-dying.md` rests on
-  one measurement taken on Docker Desktop on macOS: hard-killing the attached
+- **Does a container behave the same way on every runtime this has to run on,
+  now that a turn is a process rather than a restart?**
+  `docs/decisions/0015-a-job-survives-the-daemon-dying.md` rests on one
+  measurement taken on Docker Desktop on macOS: hard-killing the attached
   client leaves the container exited with its filesystem intact, and starting it
   again resumes the session. The mechanism was not identified, so it is evidence
   rather than a guarantee — and the whole resume design now depends on it, which
-  makes this the most load-bearing unverified claim in the repository. Settled
-  by running the same probe on a Linux engine, which is where CI runs, and on a
-  rootless runtime. If it does not generalise, the fallback is not obvious and
+  makes this the most load-bearing unverified claim in the repository.
+
+  `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`
+  replaces the half that was measured. A turn is no longer a stopped container
+  being started; it is an agent run inside one that is already up, and a hard
+  kill now ends that agent while leaving the container going. Neither half of
+  the original observation describes it, so the claim has to be taken again
+  rather than carried over — and the new one is about whether an agent run this
+  way resumes its session at all.
+
+  Settled by running the probe, in its new shape, on a Linux engine — which is
+  where CI runs — and on a rootless runtime. If it does not generalise, the fallback is not obvious and
   is worth thinking about before the probe rather than after: most likely
   recording enough to recreate the container rather than restart it, which is a
   different design and not a patch to this one.
@@ -130,6 +140,14 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   up, for as long as it exists. Retirement is now the only way to close a
   tunnel, which turns this from housekeeping into the answer to a question that
   record could not answer for itself.
+
+  `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`
+  raises it again, and changes what is being reclaimed. A container showing
+  something is not stopped, so an agent that leaves a server bound holds a
+  *running* container indefinitely — this stops being about disk and becomes
+  about memory on somebody's laptop. The cheap answer in the meantime needs no
+  design at all: ask the agent to stop what it is showing, which is a message
+  to a job, and that already works.
 
 - **How is the foreman's long-lived container held open?**
   `docs/decisions/0012-agents-run-in-containers.md` puts the agent the

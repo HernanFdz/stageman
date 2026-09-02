@@ -104,8 +104,12 @@ Record the near-miss too: the term you rejected, and what it would have implied.
 - **job** — one agent, in one isolated workspace, on one project, from kickoff
   to completion. A job happens once, and there is no retry: a second attempt is
   a new job with its own workspace. It may, however, outlive the process
-  supervising it — the daemon being killed stops a job's container rather than
-  ending the job, and startup puts it back to work. **Resuming is not
+  supervising it — the daemon being killed leaves a job's container behind
+  rather than ending the job, and startup puts it back to work. Behind and
+  *stopped*, unless its tunnel is answering, in which case it is left running
+  and whatever it was showing stays reachable — see
+  `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`.
+  **Resuming is not
   retrying**, and the distinction is the whole of it: a resumed job is the same
   job continuing, which is why nothing records an attempt count and why the
   outward-facing things it already did are not done twice. See
@@ -395,7 +399,8 @@ it lands.
   rather than retiring it: the test is now evidence about what that container
   actually permits, and construction is only an argument about what the code
   asks for.
-- **Killing stageman leaves nothing running and nothing untracked.** Hard-killing
+- **Killing stageman leaves nothing untracked, and nothing running that is not
+  holding a live tunnel.** Hard-killing
   the process is a supported operation with a test, not an accident recovered
   from by hand. This is a long-lived daemon on somebody's own machine, so it
   *will* be killed mid-job — and the failure mode is a silent leak rather than a
@@ -409,6 +414,15 @@ it lands.
   is a leak. That makes the test *harder* rather than laxer, because it now has
   to tell the two apart — a suite that merely counts what is left behind would
   pass on the leak and fail on the feature.
+
+  `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`
+  narrowed it a second time, in the same direction and further. A container
+  showing something a person can reach is left *running*, and on a hard kill
+  that is not a choice: nothing of this project's runs on a kill, so there is no
+  shutdown path in which it could be otherwise. What the test has to tell apart
+  is now three things rather than two — a container held open because its tunnel
+  answers, one retained stopped because its job can be resumed, and one nothing
+  can name, which is the only leak. Count anything and it passes on the last.
 - **A field added to the sealed form is defaulted, and a literal older file
   proves it.** `docs/decisions/0011-state-is-a-snapshot-not-a-database.md`
   versions nothing and says what that costs: an added field is free *with a
