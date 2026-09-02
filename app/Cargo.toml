@@ -46,6 +46,8 @@ server = [
     "dep:parking_lot",
     "dep:rand",
     "dep:futures-util",
+    "dep:hyper",
+    "dep:hyper-util",
     "dep:reqwest",
     "dep:tokio-tungstenite",
     "dep:serde_json",
@@ -89,6 +91,16 @@ thiserror = "2.0.20"
 # is the one building. Needed here for the browser's entry point, which no
 # configuration the tests run under compiles at all.
 mutants = "0.0.4"
+# Icons, for both halves. Only the categories named here are compiled, and an
+# icon outside them does not fail to draw — it fails to resolve, as a missing
+# name. So an import that will not compile usually means a category to add
+# rather than an icon that does not exist, and the crate's own source says
+# which: each module carries the `cfg` listing every category it belongs to,
+# and one icon is often in several.
+#
+# Not optional, unlike everything the daemon needs. An icon is drawn in the
+# browser, which is the half that has no features beyond the framework.
+lucide-dioxus = { version = "2.43.0", features = ["accessibility", "arrows"] }
 
 etcetera = { version = "0.11.0", optional = true }
 parking_lot = { version = "0.12.5", optional = true }
@@ -117,6 +129,18 @@ tokio-tungstenite = { version = "0.29.0", default-features = false, features = [
     "connect",
     "rustls-tls-webpki-roots",
 ], optional = true }
+# The tunnel's own half. A job's container publishes a port and this forwards
+# to it, which needs a client speaking the same HTTP the framework's server
+# does — including the upgrade handshake, because watching work evolve means a
+# dev server with a websocket and a proxy that only forwards request and
+# response produces a page that renders once and never moves.
+#
+# Versions match what the framework already serves with, deliberately: these
+# are hyper's own types crossing between its server and its client, and two
+# majors in one process do not interoperate. They are in the lockfile through
+# the framework either way, so this adds direct names and no new audited code.
+hyper = { version = "1.11.1", features = ["client", "http1"], optional = true }
+hyper-util = { version = "0.1.20", features = ["tokio"], optional = true }
 reqwest = { version = "0.12.28", default-features = false, features = [
     "json",
     "rustls-tls",
@@ -127,6 +151,7 @@ stageman-core = { workspace = true, optional = true }
 stageman-job = { workspace = true, optional = true }
 stageman-foreman = { workspace = true, optional = true }
 tokio = { version = "1.53.1", features = [
+    "io-util",
     "macros",
     "net",
     "rt-multi-thread",

@@ -88,15 +88,25 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   Settled by the first thing that needs to *read* a log rather than write one,
   which is still the dashboard.
 
-- **Does a stopped container behave the same way on every runtime this has to
-  run on?** `docs/decisions/0015-a-job-survives-the-daemon-dying.md` rests on
-  one measurement taken on Docker Desktop on macOS: hard-killing the attached
+- **Does a container behave the same way on every runtime this has to run on,
+  now that a turn is a process rather than a restart?**
+  `docs/decisions/0015-a-job-survives-the-daemon-dying.md` rests on one
+  measurement taken on Docker Desktop on macOS: hard-killing the attached
   client leaves the container exited with its filesystem intact, and starting it
   again resumes the session. The mechanism was not identified, so it is evidence
   rather than a guarantee — and the whole resume design now depends on it, which
-  makes this the most load-bearing unverified claim in the repository. Settled
-  by running the same probe on a Linux engine, which is where CI runs, and on a
-  rootless runtime. If it does not generalise, the fallback is not obvious and
+  makes this the most load-bearing unverified claim in the repository.
+
+  `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`
+  replaces the half that was measured. A turn is no longer a stopped container
+  being started; it is an agent run inside one that is already up, and a hard
+  kill now ends that agent while leaving the container going. Neither half of
+  the original observation describes it, so the claim has to be taken again
+  rather than carried over — and the new one is about whether an agent run this
+  way resumes its session at all.
+
+  Settled by running the probe, in its new shape, on a Linux engine — which is
+  where CI runs — and on a rootless runtime. If it does not generalise, the fallback is not obvious and
   is worth thinking about before the probe rather than after: most likely
   recording enough to recreate the container rather than restart it, which is a
   different design and not a patch to this one.
@@ -123,6 +133,21 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   under Next. So this is not a separate feature to design; it falls out of the
   channel work, and the cheap thing to record now is that the two are the same
   problem.
+
+  `docs/decisions/0042-a-job-shows-its-work-on-a-subdomain.md` raises the price
+  of leaving one. A retained container is no longer only a writable layer
+  nobody reclaims: it is a reachable one, serving whatever its agent last put
+  up, for as long as it exists. Retirement is now the only way to close a
+  tunnel, which turns this from housekeeping into the answer to a question that
+  record could not answer for itself.
+
+  `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`
+  raises it again, and changes what is being reclaimed. A container showing
+  something is not stopped, so an agent that leaves a server bound holds a
+  *running* container indefinitely — this stops being about disk and becomes
+  about memory on somebody's laptop. The cheap answer in the meantime needs no
+  design at all: ask the agent to stop what it is showing, which is a message
+  to a job, and that already works.
 
 - **How is the foreman's long-lived container held open?**
   `docs/decisions/0012-agents-run-in-containers.md` puts the agent the
@@ -221,24 +246,21 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   — a gate that did not need a runtime would not need any of this, and that is
   the cheapest available answer if the rest turns out to be expensive.
 
-- **Does the dashboard need authentication before it leaves `127.0.0.1`?**
-  Nothing authenticates a request today, and the default address makes that
-  survivable rather than correct: anything that can reach the port can read
-  every project's name and, once the views exist, change what this instance
-  runs. The address is configurable, so the protection is a default and not a
-  boundary.
+- **How is a wildcard certificate obtained for an instance's domain?** A
+  certificate covering `*.<domain>` cannot be issued over HTTP validation, so
+  the ordinary path — and the one somebody will try first — does not work. It
+  needs DNS-01, which means the issuing client holds a credential for the
+  domain's DNS.
 
-  Worth stating what it is *not*: no credential is served — see
-  `docs/decisions/0022-the-browser-never-sees-the-domain.md` and the invariant
-  in `docs/architecture.md` §2 — so this is about who may operate the instance
-  rather than about what leaks from reading it.
+  Not this project's code, and recorded here anyway because it is the step
+  most likely to be discovered late and the only one in
+  `docs/decisions/0042-a-job-shows-its-work-on-a-subdomain.md`'s deployment
+  story that cannot be improvised on the day. Note that a tunnel-style
+  provider avoids it entirely by terminating TLS on its own certificate, which
+  may make the question moot rather than answered.
 
-  Settled by deciding whether this is ever reached from another machine.
-  `docs/vision.md` §3 has a daemon on somebody's own machine, and if that holds
-  the answer is to document the default loudly and stop. The moment somebody
-  wants it from a phone, the answer is a real one and the cheapest real one is
-  probably a reverse proxy that already does this, rather than a login page
-  here.
+  Settled by picking the forwarding infra, since the answer is a property of
+  that choice rather than an independent decision.
 
 - **How does a page find out that something changed?** Everything the dashboard
   shows is read once, while the page is rendered. A job finishing, a signal

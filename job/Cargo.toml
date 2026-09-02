@@ -16,6 +16,15 @@ repository.workspace = true
 stageman-agent.workspace = true
 stageman-core.workspace = true
 thiserror = "2.0.20"
+# An attribute and nothing else — it compiles to nothing unless cargo-mutants
+# is the one building. Needed because the container-driving functions here are
+# covered only by tests the gate cannot run.
+mutants = "0.0.4"
+# Deciding whether a job is still showing something means opening a connection
+# to it and giving up quickly if nothing answers, which is a socket and a
+# clock. Nothing else here reaches the network: an agent is a subprocess, and
+# that belongs to the adapter.
+tokio = { version = "1.53.1", features = ["net", "time"] }
 
 [lints]
 workspace = true

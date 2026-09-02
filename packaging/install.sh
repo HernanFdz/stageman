@@ -167,7 +167,53 @@ fetch() {
 
 # ---------------------------------------------------------------- the service
 
+# What a person typed, as a domain.
+#
+# Lenient about the one thing everybody pastes — a scheme, and the trailing
+# slash that comes with it — because a URL is what a browser shows and a domain
+# is what this wants. Everything left is refused here rather than accepted and
+# quietly ignored later: the daemon falls back to its default on a value it
+# cannot read, which is the right behaviour for a service already running and
+# the wrong one for a person standing at a terminal who can be told.
+cleaned_domain() {
+    given="${1#https://}"
+    given="${given#http://}"
+    given="${given%/}"
+    case "${given}" in
+        '' | */* | *:* | *' '*)
+            fail "that is not a domain: ${1}" \
+                "Give the name on its own, like --domain stageman.example.com."
+            ;;
+    esac
+    printf '%s' "${given}"
+}
+
+# The domain this instance was last installed with.
+#
+# Read back so that re-running the installer — which is how you update — does
+# not silently drop it. That failure would look like nothing at all until the
+# next job told somebody to visit a name that stopped resolving.
+existing_domain() {
+    case "${PLATFORM}" in
+        linux)
+            [ -f "${UNIT}" ] || return 0
+            sed -n 's/^Environment=STAGEMAN_DOMAIN=//p' "${UNIT}" | head -1
+            ;;
+        macos)
+            [ -f "${PLIST}" ] || return 0
+            /usr/libexec/PlistBuddy -c \
+                'Print :EnvironmentVariables:STAGEMAN_DOMAIN' "${PLIST}" 2>/dev/null || true
+            ;;
+    esac
+}
+
+
 write_systemd_unit() {
+    # Absent rather than empty when there is none: the daemon's own default is
+    # what an unset variable means, and a variable set to nothing is a value it
+    # would have to decide what to do with.
+    DOMAIN_LINE=''
+    [ -n "${DOMAIN}" ] && DOMAIN_LINE="Environment=STAGEMAN_DOMAIN=${DOMAIN}"
     # `After=docker.service` with no matching `Wants=`, which is the whole
     # point: `After` only orders against a unit that is being started anyway,
     # so it costs nothing on a machine running Podman and having no unit by
@@ -191,6 +237,7 @@ Type=simple
 User=${OPERATOR}
 Environment=HOME=${HOME}
 Environment=DIOXUS_PUBLIC_PATH=${PUBLIC}
+${DOMAIN_LINE}
 ExecStart=${BINARY}
 Restart=on-failure
 RestartSec=5
@@ -202,6 +249,11 @@ UNITFILE
 }
 
 write_launch_agent() {
+    # Absent rather than empty when there is none, for the reason the unit's is.
+    DOMAIN_KEY=''
+    [ -n "${DOMAIN}" ] && DOMAIN_KEY="    <key>STAGEMAN_DOMAIN</key>
+    <string>${DOMAIN}</string>
+"
     mkdir -p "${HOME}/Library/LaunchAgents"
     cat > "${PLIST}" <<PLISTFILE
 <?xml version="1.0" encoding="UTF-8"?>
@@ -218,7 +270,7 @@ write_launch_agent() {
   <dict>
     <key>DIOXUS_PUBLIC_PATH</key>
     <string>${PUBLIC}</string>
-  </dict>
+${DOMAIN_KEY}  </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
@@ -359,10 +411,18 @@ uninstall() {
 usage() {
     say "stageman ${VERSION} — installer"
     say ""
-    say "  sh install.sh              install or update, and run it as a service"
-    say "  sh install.sh --uninstall  remove the service and the binary, keep the instance"
+    say "  sh install.sh                     install or update, and run it as a service"
+    say "  sh install.sh --domain <domain>   the domain this instance answers on"
+    say "  sh install.sh --uninstall         remove the service and the binary, keep the instance"
     say ""
-    say "Re-running this is how you update. It is the same command either way."
+    say "A domain is what makes a job's work reachable: each job is served at"
+    say "<job-id>.<domain>, and the dashboard at the domain itself. Point whatever"
+    say "forwards *.<domain> at this machine, and have it authenticate — nothing here"
+    say "does. Without one, jobs are shown at <job-id>.localhost, which works on this"
+    say "machine and nowhere else."
+    say ""
+    say "Re-running this is how you update. It is the same command either way, and a"
+    say "domain already set is kept unless --domain says otherwise."
     exit 0
 }
 
@@ -375,12 +435,19 @@ main() {
             ;;
     esac
 
-    for argument in "$@"; do
-        case "${argument}" in
+    while [ "$#" -gt 0 ]; do
+        case "${1}" in
             --uninstall) WANTS_UNINSTALL='yes' ;;
+            --domain)
+                shift
+                [ "$#" -gt 0 ] || fail "--domain needs a value, like --domain stageman.example.com."
+                DOMAIN="$(cleaned_domain "${1}")"
+                ;;
+            --domain=*) DOMAIN="$(cleaned_domain "${1#--domain=}")" ;;
             -h | --help) usage ;;
-            *) fail "unknown option ${argument}." "Try --help." ;;
+            *) fail "unknown option ${1}." "Try --help." ;;
         esac
+        shift
     done
 
     # Refused rather than accommodated, and this is the one piece of policy in
@@ -445,6 +512,12 @@ main() {
     as_root install -m 755 "${DOWNLOAD}" "${BINARY}"
     mkdir -p "${PUBLIC}"
 
+    # Kept rather than rewritten. Re-running this is how you update, so a
+    # domain set once and not repeated has to survive — dropping it would take
+    # every job's address away with no error anywhere, and the next thing an
+    # agent told somebody to look at would resolve to their own machine.
+    [ -n "${DOMAIN}" ] || DOMAIN="$(existing_domain)"
+
     step "setting it up to run as a service, as ${OPERATOR}"
     case "${PLATFORM}" in
         linux) write_systemd_unit ;;
@@ -493,4 +566,6 @@ main() {
 }
 
 WANTS_UNINSTALL='no'
+# Empty means the daemon's own default, which is `localhost`.
+DOMAIN=''
 main "$@"

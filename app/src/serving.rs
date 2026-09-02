@@ -88,6 +88,14 @@ const INSTANCE_DIRECTORY: &str = "stageman";
 /// What the instance's file is called.
 const INSTANCE_FILE: &str = "instance.json";
 
+/// How often to ask whether a container held open is still worth holding.
+///
+/// A minute, which is slow for a poll and correct for this: what it is waiting
+/// for is a person losing interest in a page, and the cost of noticing late is
+/// a container running for another minute. Anything faster would spend a
+/// subprocess per running job to learn nothing.
+const SETTLING_INTERVAL: std::time::Duration = std::time::Duration::from_mins(1);
+
 /// How much is reported, when the environment does not say.
 const DEFAULT_VERBOSITY: &str = "warn";
 
@@ -403,6 +411,10 @@ async fn start() -> Result<(), StartupError> {
     let serving = listener
         .local_addr()
         .map_err(|source| StartupError::Listen { address, source })?;
+    // Recorded rather than recomputed, so that the address a job is told to
+    // show somebody names the port in use. A port of zero is an ordinary
+    // request for whichever one is free, and only this knows the answer.
+    crate::tunnel::SERVING.get_or_init(|| serving.port());
 
     // Handed to the dashboard's route rather than reached for through a
     // global. One process operates one instance, so a global would even be
@@ -470,6 +482,14 @@ async fn start() -> Result<(), StartupError> {
     // both paths.
     let router = router.layer(axum::Extension(Arc::clone(&store)));
 
+    // Outermost, and that is the whole of it: a job's tunnel serves an
+    // application somebody else's agent wrote, so it must not pass through the
+    // server-function and static-file machinery on its way — a path collision
+    // would otherwise decide which of the two answers. Applied last because a
+    // layer added last is the one that runs first. See
+    // `docs/decisions/0042-a-job-shows-its-work-on-a-subdomain.md`.
+    let router = router.layer(axum::middleware::from_fn(crate::tunnel::route));
+
     // One task per project that has somewhere to listen. Spawned rather than
     // awaited, and after the sweep rather than before: a reply arriving for a
     // job the sweep has not yet placed would be routed against a state that is
@@ -479,6 +499,8 @@ async fn start() -> Result<(), StartupError> {
     // more here than anywhere — a socket is open for as long as the process is,
     // and awaiting one would mean the dashboard never starts.
     crate::listen(&store, runtime);
+
+    settling(&store);
 
     // Where a foreman asks for a job. Its own listener, on its own port and
     // every interface — the dashboard stays on loopback, and this cannot,
@@ -518,6 +540,27 @@ async fn start() -> Result<(), StartupError> {
     axum::serve(listener, router)
         .await
         .map_err(StartupError::Serving)
+}
+
+/// Asks, for as long as this process runs, whether a container held open still
+/// deserves to be.
+///
+/// A server an agent left running does not tell this instance when it stops,
+/// so the only way to notice is to look — see
+/// `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`.
+///
+/// Spawned rather than awaited, like everything else started here, and off the
+/// request path for the reason `docs/conventions.md` §3 gives.
+#[mutants::skip]
+fn settling(store: &Arc<crate::Store>) {
+    let resting = Arc::clone(store);
+    tokio::spawn(async move {
+        let mut every = tokio::time::interval(SETTLING_INTERVAL);
+        loop {
+            every.tick().await;
+            crate::settle(&resting, &RUNTIME).await;
+        }
+    });
 }
 
 /// Whether this build has no browser half anywhere.
@@ -622,14 +665,14 @@ mod unheard_tests {
 /// somebody who typed the command is waiting to read, and a verbosity setting
 /// must not be able to withhold it.
 ///
-/// **Four facts and an address, and nothing that is merely true right now.**
+/// **Five facts and an address, and nothing that is merely true right now.**
 /// It used to count agents, projects, listening channels, swept jobs and
 /// containers left alone. Those are state at one arbitrary moment — no more
 /// worth printing than the same numbers a second later — and every one of them
 /// that an operator could act on is already a warning naming the thing it is
 /// about, which a count never could. What is left is what does not change
 /// while the process runs: what this binary is, what it needs, what opens its
-/// instance, and where that instance is.
+/// instance, where that instance is, and what it answers to.
 fn announce(
     runtime: &ContainerRuntime,
     serving: SocketAddr,
@@ -643,6 +686,11 @@ fn announce(
     println!("  runtime    {}", runtime.path().display());
     println!("  key        {}", kept.key);
     println!("  instance   {}", kept.file.display());
+    // Last of the facts, and the one most likely to be wrong on a machine
+    // this was deployed to: an instance nobody told a domain tells people to
+    // look at a name that resolves to their own loopback. It fails as a wrong
+    // answer rather than as an absent feature, so it is said out loud.
+    println!("  domain     {}", *crate::tunnel::DOMAIN);
     println!();
     // Last, and that ordering is load-bearing rather than cosmetic: this line
     // is what anything supervising a start waits for, so everything worth

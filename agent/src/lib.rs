@@ -409,7 +409,7 @@ fn last_words(said: &[u8]) -> String {
 /// one. No network and no workspace: nothing before the first prompt needs
 /// either, and a check that reaches the internet is a check that fails for
 /// reasons unrelated to what it tests.
-fn handshake_arguments(image: &Image) -> [&str; 6] {
+fn handshake_arguments(image: &Image) -> [&str; 7] {
     [
         "run",
         // Leaves nothing behind once the container exits, which is half of the
@@ -421,6 +421,10 @@ fn handshake_arguments(image: &Image) -> [&str; 6] {
         "--network",
         "none",
         image.as_argument(),
+        // Named, because the image no longer runs the agent by itself: it
+        // holds a container open so that one can be run inside it, and this is
+        // the path that still wants the container to *be* the agent.
+        AGENT_PROGRAM,
     ]
 }
 
@@ -765,6 +769,10 @@ fn session_arguments(image: &Image, delivering: &[(&'static str, Secret)]) -> Ve
         "--interactive".to_owned(),
     ];
     arguments.extend(carrying(image, delivering));
+    // After the image, which is what makes it the command rather than another
+    // flag. The image holds a container open by default; this path wants the
+    // container to be one agent and end with it.
+    arguments.push(AGENT_PROGRAM.to_owned());
     arguments
 }
 
@@ -914,6 +922,15 @@ fn declaration(tools: &Tools) -> McpServer {
 /// of the domain.
 const TOOLS_SERVER: &str = "stageman";
 
+/// The agent program inside the image, which used to be its entry point.
+///
+/// Named here because the container no longer runs it as itself: it is run
+/// inside a container that is already up, so something has to say what to run.
+/// That is this adapter's business and nowhere else's — `docs/conventions.md`
+/// §3 keeps the agent's quirks behind this crate's boundary, and which program
+/// implements the protocol is the most agent-specific fact there is.
+const AGENT_PROGRAM: &str = "claude-agent-acp";
+
 /// The label every container this project starts carries.
 ///
 /// How a container that outlives the process which started it is found again.
@@ -923,6 +940,21 @@ const TOOLS_SERVER: &str = "stageman";
 /// see only what the snapshot already knew would never find the case it exists
 /// for.
 const OWNER_LABEL: &str = "stageman.job";
+
+/// The port inside a job's container that a tunnel reaches.
+///
+/// One constant rather than a choice, because a mapping cannot be added to a
+/// container that already exists — measured in
+/// `docs/decisions/0042-a-job-shows-its-work-on-a-subdomain.md`, and the whole
+/// reason nothing asks for a tunnel. Every job's container publishes this one,
+/// at creation, whether or not anything ever listens on it.
+///
+/// **Unusual rather than familiar, on purpose.** Publishing a port does not
+/// bind it inside the container, so the risk this number avoids is not a
+/// collision: it is an agent that starts a dev server on 3000 to check its own
+/// work and finds it published to whoever can reach this instance. A number
+/// nobody reaches for by habit is only ever bound deliberately.
+pub const TUNNEL_PORT: u16 = 47_201;
 
 /// The arguments that start a container meant to outlive this process.
 ///
@@ -942,12 +974,31 @@ fn retained_arguments(
     let mut arguments = vec![
         "create".to_owned(),
         "--interactive".to_owned(),
+        // The runtime's own init as process one, which does two things this
+        // needs. It reaps what an agent orphans — and since
+        // `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`
+        // a container outlives the agent that filled it, so there is now time
+        // to accumulate them. And it passes on the signal that stops a
+        // container, which process one otherwise ignores, so stopping takes an
+        // instant rather than a timeout.
+        "--init".to_owned(),
         // So that one hostname reaches this instance whichever runtime is in
         // use. Measured on both: Docker and Podman each honour it, and
         // without it a container on Linux can reach the host by no name at
         // all.
         "--add-host".to_owned(),
         "host.docker.internal:host-gateway".to_owned(),
+        // The tunnel, published here because there is nowhere later: the
+        // mapping is fixed when the container is created and no runtime can
+        // add one afterwards.
+        //
+        // Loopback on the host, and an empty host port so the runtime picks a
+        // free one atomically — choosing one here by binding and releasing it
+        // is a race, and this project has already lost a port that way. What
+        // it picked is asked for rather than recorded, because Docker assigns
+        // a new one on every start and Podman does not.
+        "--publish".to_owned(),
+        format!("127.0.0.1::{TUNNEL_PORT}"),
         "--name".to_owned(),
         name.to_owned(),
         "--label".to_owned(),
@@ -1008,21 +1059,63 @@ pub async fn begin(
         });
     }
 
-    let container = spawn(runtime, &started_arguments(name), &delivering)?;
+    hold(runtime, name).await?;
+    let container = spawn(runtime, &agent_arguments(name), &[])?;
     converse(container, Opening::Fresh, tools, question).await
 }
 
-/// What starts a container that already exists, attached.
+/// What makes sure a container is up, without attaching to it.
 ///
-/// Shared by beginning and resuming, which is what they became once the thread
-/// stopped travelling in the environment: both create nothing at this point and
-/// both attach to a container that is already there.
-fn started_arguments(name: &str) -> Vec<String> {
+/// Nothing attaches to the container itself any more — the agent is run inside
+/// it — so this only has to leave it running. Starting one that is already
+/// running is success on both runtimes, which is what lets beginning and
+/// resuming share it without asking first: a container held open because its
+/// tunnel answers is already up, and one that was stopped is not.
+fn holding_arguments(name: &str) -> Vec<String> {
+    vec!["start".to_owned(), name.to_owned()]
+}
+
+/// What runs the agent inside a container that is already up.
+///
+/// The pipes belong to this process rather than to the container, which is the
+/// whole change: the end of a turn closes them and ends the agent, and the
+/// container carries on. Nothing is forwarded with `--env`, because the
+/// variables were named when the container was created and everything run
+/// inside it inherits them.
+fn agent_arguments(name: &str) -> Vec<String> {
     vec![
-        "start".to_owned(),
+        "exec".to_owned(),
         "--interactive".to_owned(),
         name.to_owned(),
+        AGENT_PROGRAM.to_owned(),
     ]
+}
+
+/// Leaves a container running, whether or not it already was.
+///
+/// # Errors
+///
+/// Fails if the runtime cannot be run, or refuses — a container that does not
+/// exist being the ordinary refusal.
+#[mutants::skip]
+async fn hold(runtime: &ContainerRuntime, name: &str) -> Result<(), AgentError> {
+    let started = tokio::process::Command::new(runtime.path())
+        .args(holding_arguments(name))
+        .kill_on_drop(true)
+        .output()
+        .await
+        .map_err(|source| AgentError::Runtime {
+            path: runtime.path().to_owned(),
+            source,
+        })?;
+
+    if started.status.success() {
+        return Ok(());
+    }
+    Err(AgentError::Container {
+        status: started.status.to_string(),
+        message: String::from_utf8_lossy(&started.stderr).trim().to_owned(),
+    })
 }
 
 /// Restarts a stopped container and continues the session inside it.
@@ -1050,27 +1143,38 @@ pub async fn resume(
     tools: Option<&Tools>,
     question: &str,
 ) -> Result<Answer, AgentError> {
-    settle(runtime, name).await?;
-    // Nothing is written into the container before it starts any more. The
-    // thread this turn belongs in travels on `tools`, which is the whole of
-    // why a container can be told a different one every turn without its
-    // environment changing — see
-    // `docs/decisions/0034-tools-are-served-not-shipped.md`.
-    let container = spawn(runtime, &started_arguments(name), &[])?;
+    // Made sure of rather than settled. This used to stop the container first,
+    // against a race in which a container still shutting down could not be
+    // attached to — and there is nothing to attach to any more, because the
+    // agent runs inside a container rather than being it. Stopping first would
+    // now be actively wrong: a container held open because its tunnel answers
+    // is one somebody may be looking at.
+    //
+    // Nothing is written into the container before it starts. The thread this
+    // turn belongs in travels on `tools`, which is the whole of why a container
+    // can be told a different one every turn without its environment changing —
+    // see `docs/decisions/0034-tools-are-served-not-shipped.md`.
+    hold(runtime, name).await?;
+    let container = spawn(runtime, &agent_arguments(name), &[])?;
     converse(container, Opening::Resumed, tools, question).await
 }
 
-/// Makes sure a container is stopped before anything tries to start it.
+/// Stops a container, leaving it and everything in it where it is.
 ///
-/// Found by a test rather than by reasoning, and it is a real race rather than
-/// a test artefact. Killing the client that was driving a container does not
-/// stop the container instantly, and starting one that is still running does
-/// not attach — so a resume attempted in that window finds a closed transport
-/// and reads as a protocol failure, which is the least informative thing it
-/// could be. Stopping first collapses the window: the runtime treats stopping
-/// an already-stopped container as success, so this costs nothing in the
-/// ordinary case where the container stopped long ago.
-async fn settle(runtime: &ContainerRuntime, name: &str) -> Result<(), AgentError> {
+/// The other half of `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`:
+/// a container is no longer stopped by the turn inside it ending, so something
+/// has to stop it, and that something is a caller who has decided nothing is
+/// being shown. Stopping one already stopped is success on both runtimes, so a
+/// caller need not ask first.
+///
+/// Not [`discard`], which removes it: what is inside is a job's work and the
+/// session it would be resumed from.
+///
+/// # Errors
+///
+/// Fails if the runtime cannot be run, or refuses — a container that does not
+/// exist being the ordinary refusal.
+pub async fn halt(runtime: &ContainerRuntime, name: &str) -> Result<(), AgentError> {
     let stopped = tokio::process::Command::new(runtime.path())
         .args(["stop", name])
         .kill_on_drop(true)
@@ -1098,16 +1202,30 @@ async fn settle(runtime: &ContainerRuntime, name: &str) -> Result<(), AgentError
 /// # Errors
 ///
 /// Fails if the runtime cannot be run, or refuses the query.
+#[mutants::skip]
 pub async fn abandoned(runtime: &ContainerRuntime) -> Result<Vec<String>, AgentError> {
+    listed(
+        runtime,
+        &["ps", "--all", "--filter", &format!("label={OWNER_LABEL}")],
+    )
+    .await
+}
+
+/// The names a listing query reports.
+///
+/// Shared by the two that ask it, which differ by one flag. Written once
+/// because the format string is the part that has to match on both — a listing
+/// that printed anything else would be parsed as container names and produce a
+/// sweep acting on nothing.
+///
+/// Skipped by mutation testing, like everything here that drives the runtime:
+/// what it does is spawn a process and hand the output to [`names`], which is
+/// where the deciding is and is tested directly.
+#[mutants::skip]
+async fn listed(runtime: &ContainerRuntime, query: &[&str]) -> Result<Vec<String>, AgentError> {
     let listed = tokio::process::Command::new(runtime.path())
-        .args([
-            "ps",
-            "--all",
-            "--filter",
-            &format!("label={OWNER_LABEL}"),
-            "--format",
-            "{{.Names}}",
-        ])
+        .args(query)
+        .args(["--format", "{{.Names}}"])
         .kill_on_drop(true)
         .output()
         .await
@@ -1122,12 +1240,109 @@ pub async fn abandoned(runtime: &ContainerRuntime) -> Result<Vec<String>, AgentE
             message: String::from_utf8_lossy(&listed.stderr).trim().to_owned(),
         });
     }
-    Ok(String::from_utf8_lossy(&listed.stdout)
+    Ok(names(&String::from_utf8_lossy(&listed.stdout)))
+}
+
+/// The container names in what a listing reported.
+///
+/// Pure, so what a sweep works from can be tested without a runtime. A blank
+/// line is dropped rather than carried: the runtime prints one when it found
+/// nothing, and a name that is the empty string reaches a subcommand that
+/// would then address something other than what was meant.
+fn names(reported: &str) -> Vec<String> {
+    reported
         .lines()
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .map(str::to_owned)
-        .collect())
+        .collect()
+}
+
+/// Which host port a container's tunnel is reachable on, right now.
+///
+/// **Asked for rather than remembered, and that is the whole point.** The two
+/// runtimes disagree about what happens to an ephemeral published port when a
+/// container is stopped and started again — Docker assigns a new one, Podman
+/// keeps the old — so anything storing this is correct on one and silently
+/// wrong on the other, in the resume path, which is the least observed code
+/// here. The runtime is the only thing that knows, so the runtime is asked.
+/// Measured in `docs/decisions/0042-a-job-shows-its-work-on-a-subdomain.md`.
+///
+/// `None` for a container that exists and has no mapping — one created before
+/// this project published anything, which is an ordinary thing to meet after
+/// an upgrade rather than a failure.
+///
+/// # Errors
+///
+/// Fails if the runtime cannot be run, or refuses the query. A container that
+/// is not there refuses, which is correct: nothing can be reached on it.
+///
+/// Skipped by mutation testing, like everything else here that drives the
+/// runtime: what it does is spawn a process and hand the output to
+/// the private parser beside it, which is where the deciding is and is tested
+/// directly. The
+/// container behaviour it wraps is pinned by an ignored test below, and an
+/// ignored test kills no mutant.
+#[mutants::skip]
+pub async fn tunnel_port(
+    runtime: &ContainerRuntime,
+    name: &str,
+) -> Result<Option<u16>, AgentError> {
+    let reported = tokio::process::Command::new(runtime.path())
+        .args(["port", name, &TUNNEL_PORT.to_string()])
+        .kill_on_drop(true)
+        .output()
+        .await
+        .map_err(|source| AgentError::Runtime {
+            path: runtime.path().to_owned(),
+            source,
+        })?;
+
+    if !reported.status.success() {
+        return Err(AgentError::Unusable {
+            path: runtime.path().to_owned(),
+            message: String::from_utf8_lossy(&reported.stderr).trim().to_owned(),
+        });
+    }
+    Ok(published(&String::from_utf8_lossy(&reported.stdout)))
+}
+
+/// The host port in what the runtime reported, if it reported one.
+///
+/// Pure, so every shape either runtime prints can be tested without a
+/// container. It takes the port from the *last* colon onwards rather than
+/// splitting on colons, because a mapping published on IPv6 is printed as
+/// `[::]:64383` and splitting would find the address instead — and both
+/// runtimes will print a v6 line alongside the v4 one on a dual-stack host.
+///
+/// The first line that yields a port wins. Nothing here prefers one family
+/// over the other: both reach the same container, and this connects over
+/// loopback where both work.
+fn published(reported: &str) -> Option<u16> {
+    reported
+        .lines()
+        .filter_map(|line| line.trim().rsplit(':').next())
+        .find_map(|port| port.trim().parse().ok())
+}
+
+/// Every container this project has running right now, by name.
+///
+/// The same question [`abandoned`] asks, narrowed to what is up. Since
+/// `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`
+/// those are two different sets and the difference is the point: a container
+/// that is merely retained costs a writable layer, and one that is running
+/// costs whatever is running in it.
+///
+/// # Errors
+///
+/// Fails if the runtime cannot be run, or refuses the query.
+#[mutants::skip]
+pub async fn running(runtime: &ContainerRuntime) -> Result<Vec<String>, AgentError> {
+    listed(
+        runtime,
+        &["ps", "--filter", &format!("label={OWNER_LABEL}")],
+    )
+    .await
 }
 
 /// Removes a container and everything inside it.
@@ -1500,11 +1715,24 @@ mod tests {
         assert_eq!(arguments[3..5], ["--network", "none"]);
     }
 
+    /// The image comes after every flag, and the agent after the image.
+    ///
+    /// Order rather than presence, because both mistakes are silent. A flag
+    /// after the image is not a flag, it is an argument to whatever runs
+    /// inside — and since the image holds a container open by default rather
+    /// than running the agent, a list ending at the image starts a container
+    /// that sleeps and never speaks.
     #[test]
-    fn a_handshake_runs_the_image_that_was_built() {
+    fn a_handshake_runs_the_agent_in_the_image_that_was_built() {
         let image = built();
         let arguments = handshake_arguments(&image);
-        assert_eq!(arguments.last(), Some(&BUILT));
+
+        assert_eq!(arguments.last(), Some(&AGENT_PROGRAM));
+        assert_eq!(
+            arguments.iter().rev().nth(1),
+            Some(&BUILT),
+            "everything before the command has to be behind the image",
+        );
     }
 
     /// A build that worked is the image it named, and nothing else.
@@ -2023,7 +2251,16 @@ mod tests {
         let arguments = session_arguments(&built(), &variables(&handout));
 
         assert!(!arguments.iter().any(|a| a == "none"), "{arguments:?}");
-        assert_eq!(arguments.last().map(String::as_str), Some(BUILT));
+        assert_eq!(
+            arguments.last().map(String::as_str),
+            Some(AGENT_PROGRAM),
+            "a one-shot container is the agent, so it has to be asked for",
+        );
+        assert_eq!(
+            arguments.iter().rev().nth(1).map(String::as_str),
+            Some(BUILT),
+            "and everything before the command is behind the image",
+        );
     }
 
     /// Tests that spend real money, kept in their own module so a filter can
@@ -2062,25 +2299,122 @@ mod tests {
         assert!(arguments.iter().any(|a| a == "--interactive"), "{line}");
     }
 
-    /// Starting a container that exists names it, attaches, and nothing else.
+    /// The tunnel is published here or nowhere: no runtime adds one later.
     ///
-    /// The shared tail beginning and resuming both end with, since the thread
-    /// stopped travelling in the environment. Worth asserting because it is
-    /// the only thing between a created container and a conversation: an
-    /// argument list that lost `--interactive` would produce a session with no
-    /// stdin, which reads as an agent that will not speak.
+    /// Asserted on the exact string rather than on the flag alone, because the
+    /// two halves that matter are both in the value. Without the `127.0.0.1`
+    /// the runtime publishes on every interface, which would put a server an
+    /// agent wrote onto whatever network this machine has joined. Without the
+    /// empty host port this would be picking one itself, which is a race.
     #[test]
-    fn starting_an_existing_container_attaches_to_it_by_name() {
-        let arguments = started_arguments("stageman-foreman-abc");
+    fn a_retained_container_publishes_its_tunnel_on_loopback() {
+        let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
+        let handout = Handout::for_foreman(&state, project).expect("a watched project");
 
-        assert_eq!(
-            arguments,
-            vec![
-                "start".to_owned(),
-                "--interactive".to_owned(),
-                "stageman-foreman-abc".to_owned(),
-            ]
+        let arguments = retained_arguments("stageman-job-abc", &built(), &variables(&handout));
+        let line = arguments.join(" ");
+
+        assert!(
+            line.contains(&format!("--publish 127.0.0.1::{TUNNEL_PORT}")),
+            "{line}"
         );
+    }
+
+    /// A listing is the names in it, and nothing blank.
+    ///
+    /// The blank matters more than it looks: a runtime that found nothing
+    /// prints an empty line, and an empty name reaches a subcommand that would
+    /// then address something other than what was meant.
+    #[test]
+    fn a_listing_is_the_names_in_it_and_nothing_blank() {
+        assert_eq!(
+            names("stageman-job-one\n  stageman-job-two  \n"),
+            vec!["stageman-job-one".to_owned(), "stageman-job-two".to_owned()],
+        );
+        assert!(names("").is_empty(), "a runtime that found nothing");
+        assert!(
+            names("\n  \n\n").is_empty(),
+            "and the blank lines it prints"
+        );
+    }
+
+    /// Both runtimes print an address and a port, and the address may be v6.
+    #[test]
+    fn a_published_port_is_read_from_the_last_colon() {
+        assert_eq!(published("127.0.0.1:64383\n"), Some(64_383));
+        assert_eq!(
+            published("[::]:64383\n"),
+            Some(64_383),
+            "splitting on colons would find the address in a v6 mapping",
+        );
+        assert_eq!(
+            published("0.0.0.0:42539\n[::]:42539\n"),
+            Some(42_539),
+            "a dual-stack host reports both families and either reaches it",
+        );
+    }
+
+    /// A container with no mapping is not a failure, and says so as `None`.
+    ///
+    /// What one created before this project published anything reports, which
+    /// is an ordinary thing to meet after an upgrade rather than a fault.
+    #[test]
+    fn a_container_with_no_mapping_reports_no_port() {
+        assert_eq!(published(""), None);
+        assert_eq!(published("\n  \n"), None);
+        assert_eq!(
+            published("127.0.0.1:not-a-port\n"),
+            None,
+            "unparseable is absent rather than a wrong number",
+        );
+    }
+
+    /// Making sure a container is up names it and does not attach.
+    ///
+    /// The absence is the assertion. Attaching here is what this stopped
+    /// doing: the agent runs inside the container rather than being it, so a
+    /// stray `--interactive` would hold this process against a container that
+    /// never exits and the turn would never start.
+    #[test]
+    fn holding_a_container_open_names_it_and_attaches_to_nothing() {
+        assert_eq!(
+            holding_arguments("stageman-foreman-abc"),
+            vec!["start".to_owned(), "stageman-foreman-abc".to_owned()],
+        );
+    }
+
+    /// The agent is run inside the container, over pipes this process owns.
+    ///
+    /// `--interactive` moved here, and it is the only thing between a running
+    /// container and a conversation: without it the agent gets no standard
+    /// input, which reads as an agent that will not speak.
+    #[test]
+    fn the_agent_runs_inside_the_container_with_a_pipe_of_its_own() {
+        assert_eq!(
+            agent_arguments("stageman-job-abc"),
+            vec![
+                "exec".to_owned(),
+                "--interactive".to_owned(),
+                "stageman-job-abc".to_owned(),
+                AGENT_PROGRAM.to_owned(),
+            ],
+        );
+    }
+
+    /// A container is created with an init, or nothing reaps what it orphans.
+    ///
+    /// Cheap to lose and expensive to notice: without it the process holding
+    /// the container open is process one, which reaps nothing and ignores the
+    /// signal that stops a container — so a long job accumulates zombies and
+    /// every stop waits for a timeout first.
+    #[test]
+    fn a_retained_container_is_created_with_an_init() {
+        let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
+        let handout = Handout::for_foreman(&state, project).expect("a watched project");
+
+        let arguments = retained_arguments("stageman-job-abc", &built(), &variables(&handout));
+
+        assert!(arguments.iter().any(|a| a == "--init"), "{arguments:?}");
     }
 
     /// A container this project started, found without consulting the instance
@@ -2129,6 +2463,150 @@ mod tests {
         assert!(!after.iter().any(|left| left == name), "{after:?}");
         // Removing what is already gone is the outcome asked for, not a failure.
         discard(&runtime, name).await.expect("idempotent");
+    }
+
+    /// A container outlives a process run inside it, and stops when told.
+    ///
+    /// The mechanism this whole decision turns on, and the one thing no unit
+    /// test can reach: that a container created from this image holds itself
+    /// open, that running something inside it and letting that finish does not
+    /// take it down, and that stopping it does. Every one of those is a
+    /// property of the runtime and the image together.
+    ///
+    /// It runs `true` rather than the agent, which is the point — a credential
+    /// would only make the process inside more interesting, and what is being
+    /// asserted is what happens to the container when *any* process in it
+    /// ends. `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`
+    /// replaced a measurement with this one.
+    #[tokio::test]
+    #[ignore = "needs a container runtime and the network; run `just image-handshake`"]
+    async fn a_container_outlives_what_runs_inside_it() {
+        let runtime = located_runtime();
+        let name = "stageman-job-lifetime-probe";
+        discard(&runtime, name).await.expect("a clean slate");
+
+        let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
+        let handout = Handout::for_foreman(&state, project).expect("a watched project");
+        let delivering = variables(&handout);
+        let image = build(&runtime, Agent::Claude, Role::Foreman)
+            .await
+            .expect("the image builds");
+
+        let created = tokio::process::Command::new(runtime.path())
+            .args(retained_arguments(name, &image, &delivering))
+            .envs(
+                delivering
+                    .iter()
+                    .map(|(named, value)| ((*named).to_owned(), value.expose().to_owned())),
+            )
+            .output()
+            .await
+            .expect("the runtime runs");
+        assert!(
+            created.status.success(),
+            "{}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+
+        hold(&runtime, name).await.expect("it starts");
+        assert!(
+            running(&runtime)
+                .await
+                .expect("a listing")
+                .iter()
+                .any(|up| up == name),
+            "the image has to hold the container open with nothing running in it",
+        );
+
+        // Something that finishes at once. Under the mechanism this replaced,
+        // a process ending was the container ending.
+        let inside = tokio::process::Command::new(runtime.path())
+            .args(["exec", name, "true"])
+            .output()
+            .await
+            .expect("the runtime runs");
+        assert!(
+            inside.status.success(),
+            "{}",
+            String::from_utf8_lossy(&inside.stderr)
+        );
+        assert!(
+            running(&runtime)
+                .await
+                .expect("a listing")
+                .iter()
+                .any(|up| up == name),
+            "a container has to outlive a process that ran inside it",
+        );
+
+        halt(&runtime, name).await.expect("it stops");
+        let up = running(&runtime).await.expect("a listing");
+        let left = abandoned(&runtime).await.expect("a listing");
+        assert!(!up.iter().any(|running| running == name), "{up:?}");
+        assert!(
+            left.iter().any(|behind| behind == name),
+            "stopping keeps the container and its session: {left:?}",
+        );
+
+        discard(&runtime, name).await.expect("it is removable");
+    }
+
+    /// A published tunnel is reported by the runtime, and the report is read.
+    ///
+    /// The seam this feature turns on, and the one place a unit test cannot
+    /// reach: the flag is asserted above, the parsing is asserted above, and
+    /// what neither can say is whether a runtime asked about this container
+    /// answers at all. Needs a runtime and a network, and no credential — it
+    /// overrides the entry point rather than running an agent.
+    #[tokio::test]
+    #[ignore = "needs a container runtime and the network; run `just image-handshake`"]
+    async fn a_published_tunnel_is_reported_by_the_runtime() {
+        let runtime = located_runtime();
+        let name = "stageman-job-tunnel-probe";
+        discard(&runtime, name).await.expect("a clean slate");
+        let anything = build(&runtime, Agent::Claude, Role::Foreman)
+            .await
+            .expect("the image builds");
+
+        let created = std::process::Command::new(runtime.path())
+            .args([
+                "run",
+                "--detach",
+                "--name",
+                name,
+                "--label",
+                &format!("{OWNER_LABEL}={name}"),
+                // The same mapping `retained_arguments` emits, asserted there
+                // as a string and exercised here as a mapping.
+                "--publish",
+                &format!("127.0.0.1::{TUNNEL_PORT}"),
+                "--entrypoint",
+                "sh",
+                anything.as_argument(),
+                "-c",
+                "sleep 30",
+            ])
+            .output()
+            .expect("the runtime runs");
+        assert!(
+            created.status.success(),
+            "{}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+
+        let port = tunnel_port(&runtime, name)
+            .await
+            .expect("the runtime answers");
+        assert!(
+            port.is_some_and(|port| port != 0),
+            "a published mapping has a host port: {port:?}",
+        );
+
+        discard(&runtime, name).await.expect("it is removable");
+        assert!(
+            tunnel_port(&runtime, name).await.is_err(),
+            "a container that is gone cannot be reached, and says so",
+        );
     }
 
     mod costs_a_credential {

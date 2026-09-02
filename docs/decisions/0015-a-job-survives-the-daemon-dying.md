@@ -5,6 +5,14 @@ Accepted. Supersedes the "no retry and no resume" clause in
 `docs/conventions.md` §2, and narrows the bar in §4 from *nothing behind* to
 *nothing running and nothing untracked*.
 
+Its **mechanism** is amended by
+`docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`: a
+turn is no longer a stopped container being started but an agent run inside one
+that is already up, and a container is no longer stopped by the turn inside it
+ending. What survives here is the decision — that a job outlives the process
+supervising it, and that resuming is not retrying. What does not is the
+measurement below, which was taken against a mechanism that no longer exists.
+
 ## Context
 
 §2 said a job happens once, with no retry and no resume, and that a second
