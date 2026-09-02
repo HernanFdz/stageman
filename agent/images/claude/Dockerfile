@@ -38,10 +38,31 @@ RUN npm install --global --no-fund --no-audit \
 # it costs nothing to leave here, where both stages can see it.
 WORKDIR /workspace
 
-# The protocol is JSON-RPC over standard input and output, so a container is
-# driven exactly as a subprocess is: no ports, and no network needed for the
-# channel itself.
-ENTRYPOINT ["claude-agent-acp"]
+# Something that does nothing and does not exit, so that the container outlives
+# any one turn. The agent is run *inside* this container rather than being it —
+# see `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`,
+# which needs a container able to keep serving after the agent that started
+# something has stopped.
+#
+# Deliberately not a program this project writes, which is
+# `docs/decisions/0034-tools-are-served-not-shipped.md`'s property and would
+# have been the easy thing to give up here: a supervisor deciding the lifetime
+# from inside would need the tunnel's port number, and a port number in an
+# image is a port number that can be older than the instance driving it.
+#
+# It is not process one — the container is created with the runtime's own init,
+# which reaps what an agent orphans and, just as usefully, passes on the signal
+# that stops a container. Without that this ignores it, because process one has
+# no default handlers, and every stop would wait for a timeout before being
+# killed.
+#
+# `CMD` rather than `ENTRYPOINT`, and the difference is load-bearing rather
+# than stylistic. A command named on the command line *replaces* this and is
+# *appended* to an entry point — so with an entry point, the one-shot paths
+# that still run the agent as the container would ask for `sleep infinity
+# claude-agent-acp` and get a container that sleeps. Which is a container that
+# starts perfectly and never speaks.
+CMD ["sleep", "infinity"]
 
 # -------------------------------------------------------------------- a job
 #

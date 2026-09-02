@@ -520,6 +520,7 @@ pub async fn supervise(
     }
 
     record(store, job, progress.clone());
+    settled(runtime, job).await;
     // Said whichever way it went. The agent has already reported for itself if
     // it could; this says the one thing the agent cannot, which is that it has
     // stopped and a reply now reaches it — and it is the only thing said at all
@@ -651,6 +652,7 @@ pub async fn deliver(
         tracing::warn!(%job, %why, "the reply did not reach the job");
     }
     record(store, job, progress.clone());
+    settled(runtime, job).await;
     notice(store, job, stageman_foreman::attention_notice()).await;
     progress
 }
@@ -817,9 +819,95 @@ pub async fn reconcile(
         }
         attended.push(Attended::from(&progress));
         record(store, job, progress);
+        settled(runtime, job).await;
     }
 
+    // Last, so that it sees the containers this sweep has just finished with
+    // as well as the ones a previous process left up.
+    settle(store, runtime).await;
+
     Ok(tallied(&attended, &unplaceable))
+}
+
+/// Stops a job's container unless it is still showing something.
+///
+/// Called wherever a turn ends and wherever a container is found up, which is
+/// the three moments
+/// `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`
+/// names. The decision is the job crate's; what belongs here is saying so,
+/// because a container left running is the one outcome an operator would
+/// otherwise have to discover from the runtime.
+/// Skipped by mutation testing: it performs an effect through the runtime and
+/// chooses a diagnostic, and there is nothing else in it.
+#[mutants::skip]
+async fn settled(runtime: &ContainerRuntime, job: JobId) {
+    if stageman_job::rest(runtime, job).await == stageman_job::Showing::Still {
+        tracing::info!(
+            %job,
+            "its container is left running, because something is still answering on its tunnel"
+        );
+    }
+}
+
+/// Stops every container left up by a job that is no longer working.
+///
+/// The sweep half of the rule. A container held open because its tunnel
+/// answered does not stop when that server does, so something has to ask
+/// again — and this is also what a start does with whatever the last process
+/// left behind, since a hard kill leaves containers running and cannot do
+/// otherwise.
+///
+/// Jobs believed to be working are passed over: their container is up because
+/// a turn is in it, which is the other half of the same rule.
+#[mutants::skip]
+pub async fn settle(store: &Store, runtime: &ContainerRuntime) {
+    let up = match stageman_job::still_running(runtime).await {
+        Ok(up) => up,
+        Err(why) => {
+            tracing::warn!(%why, "could not ask which containers are running");
+            return;
+        }
+    };
+
+    // Decided under one read rather than one per job, and before any of it is
+    // acted on: asking again between two containers would be reading a state
+    // that a turn finishing had moved underneath the loop.
+    let asking = {
+        let state = store.read();
+        let asking = resting(&up, &state);
+        drop(state);
+        asking
+    };
+
+    for job in asking {
+        settled(runtime, job).await;
+    }
+}
+
+/// Which of the containers that are up should be asked to stop.
+///
+/// Pure, so the rule can be tested without a runtime — and it is the rule
+/// rather than the plumbing, which is the half worth pinning.
+///
+/// **A job believed to be working is passed over**, because its container is
+/// up for the other reason in
+/// `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`:
+/// there is a turn in it. Stopping that container would end an agent
+/// mid-turn, which is the one outcome this sweep must never produce.
+///
+/// A job the instance has no record of is deliberately *not* passed over on
+/// those grounds. It cannot be working, because nothing is driving a turn for
+/// a job that is not there, so the only question left is whether it is showing
+/// something — and that is answered by asking rather than by assuming.
+fn resting(up: &[JobId], state: &stageman_core::State) -> Vec<JobId> {
+    up.iter()
+        .filter(|job| {
+            !state
+                .job(**job)
+                .is_some_and(|recorded| matches!(recorded.progress, Progress::Working))
+        })
+        .copied()
+        .collect()
 }
 
 /// What a sweep did about one job.
@@ -1181,8 +1269,8 @@ async fn notice_in(store: &Store, project: ProjectId, thread: &Thread, text: &st
 #[cfg(test)]
 mod tests {
     use super::{
-        Attended, LoadError, Store, Swept, Unplaceable, has_container, outcome, reconcile, run,
-        tallied, unplaceable,
+        Attended, LoadError, Store, Swept, Unplaceable, has_container, outcome, reconcile, resting,
+        run, tallied, unplaceable,
     };
     use stageman_agent::{Answer, ContainerRuntime, StopReason};
     use stageman_core::{
@@ -1243,6 +1331,39 @@ mod tests {
 
     fn only_claude() -> BTreeSet<Agent> {
         BTreeSet::from([Agent::Claude])
+    }
+
+    /// A container holding a turn is never asked to stop; every other one is.
+    ///
+    /// Both halves, because the two failures are opposite and neither is
+    /// visible from the other side. A sweep asking about a working job ends its
+    /// agent mid-turn; one asking about nothing lets every container that was
+    /// ever held open run until the process dies.
+    #[test]
+    fn a_sweep_asks_about_everything_up_except_a_job_still_working() {
+        let (mut state, working) = an_instance_with_a_job();
+        let idle = JobId::from_uuid(Uuid::from_u128(13));
+        let unknown = JobId::from_uuid(Uuid::from_u128(99));
+        let project = ProjectId::from_uuid(Uuid::from_u128(11));
+
+        let mut resting_job = state.job(working).expect("the running job").clone();
+        resting_job.progress = Progress::Idle;
+        state
+            .projects
+            .get_mut(&project)
+            .expect("the project")
+            .jobs
+            .insert(idle, resting_job);
+
+        assert_eq!(
+            resting(&[working, idle, unknown], &state),
+            vec![idle, unknown],
+            "a job mid-turn is passed over, and one this instance never heard of is not",
+        );
+        assert!(
+            resting(&[working], &state).is_empty(),
+            "nothing is asked about when the only container up holds a turn",
+        );
     }
 
     /// A recorded failure carries the reason, not just the category.

@@ -49,6 +49,73 @@ fn job_of(container: &str) -> Option<JobId> {
         .map(JobId::from_uuid)
 }
 
+/// How long to wait for a job's tunnel to answer before deciding it is not
+/// showing anything.
+///
+/// Generous for a connection to this machine's own loopback, where the answer
+/// arrives in microseconds or not at all, and deliberately so: the cost of
+/// waiting is a moment at the end of a turn, and the cost of being impatient
+/// is stopping a container somebody is looking at.
+const ANSWERING_WITHIN: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Whether a job is still showing something, and so whether it stays up.
+///
+/// Named for what it says rather than for what a caller does about it, because
+/// the two are different questions and only the first is a fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Showing {
+    /// Something answered on its tunnel, so the container was left running.
+    Still,
+    /// Nothing answered, so the container was stopped.
+    Nothing,
+}
+
+/// Stops a job's container unless its tunnel is still answering.
+///
+/// The whole of
+/// `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`
+/// in one function, called at each of the three moments that record names: a
+/// turn ending, a sweep of what was left up, and startup.
+///
+/// **Answering is asked of the tunnel, not of the container.** A connection is
+/// opened to the port the runtime published, from here, and something has to
+/// accept it. That is deliberately stricter than looking for a process bound
+/// inside: a server an agent bound to its container's own loopback holds the
+/// port and is reachable by nobody, and treating it as showing something would
+/// keep a container alive for ever to serve no one.
+///
+/// **Total, and that is the honest signature rather than a convenience.** Every
+/// way this can go wrong means the same thing and admits the same response: a
+/// container that is gone, one that never had a mapping, and one the runtime
+/// will not answer questions about are all showing nothing, and there is
+/// nothing else a caller would do about any of them. A runtime broken badly
+/// enough to matter fails loudly everywhere else in the same breath.
+pub async fn rest(runtime: &ContainerRuntime, job: JobId) -> Showing {
+    let name = container(job);
+    if let Ok(Some(port)) = stageman_agent::tunnel_port(runtime, &name).await
+        && answering(port).await
+    {
+        return Showing::Still;
+    }
+    drop(stageman_agent::halt(runtime, &name).await);
+    Showing::Nothing
+}
+
+/// Whether anything accepts a connection on a published port.
+///
+/// Pure of everything but the socket, and separate so that the decision above
+/// reads as one sentence. Loopback, because that is where a tunnel is
+/// published — see
+/// `docs/decisions/0042-a-job-shows-its-work-on-a-subdomain.md`.
+async fn answering(port: u16) -> bool {
+    let reached = tokio::time::timeout(
+        ANSWERING_WITHIN,
+        tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)),
+    )
+    .await;
+    matches!(reached, Ok(Ok(_)))
+}
+
 /// A container this project started and has not removed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Abandoned {
@@ -140,6 +207,32 @@ pub async fn left_behind(runtime: &ContainerRuntime) -> Result<Vec<Abandoned>, J
         .collect())
 }
 
+/// Every job whose container is running right now.
+///
+/// The set [`left_behind`] narrows to, and a different question since
+/// `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`:
+/// a container is no longer stopped by the turn inside it ending, so what is
+/// up and what exists have come apart. Only jobs are returned — a container
+/// whose name says nothing this version understands has no job to rest, and a
+/// foreman's is not a job's to stop.
+///
+/// # Errors
+///
+/// Fails if the runtime cannot be run, or refuses the query.
+///
+/// Skipped by mutation testing: it asks the runtime and maps the answer
+/// through the private inverse of [`container`], which is total, reversible
+/// and tested directly.
+#[mutants::skip]
+pub async fn still_running(runtime: &ContainerRuntime) -> Result<Vec<JobId>, JobError> {
+    Ok(stageman_agent::running(runtime)
+        .await
+        .map_err(JobError::Agent)?
+        .iter()
+        .filter_map(|container| job_of(container))
+        .collect())
+}
+
 /// Removes a job's container and everything in it.
 ///
 /// # Errors
@@ -153,8 +246,32 @@ pub async fn discard(runtime: &ContainerRuntime, job: JobId) -> Result<(), JobEr
 
 #[cfg(test)]
 mod tests {
-    use super::{Abandoned, ContainerRuntime, container, discard, job_of, left_behind};
+    use super::{Abandoned, ContainerRuntime, answering, container, discard, job_of, left_behind};
     use stageman_core::{JobId, Uuid};
+
+    /// Something listening answers; nothing listening does not.
+    ///
+    /// The whole of what decides a container's lifetime, and it needs no
+    /// container: a port is a port, and what makes this worth a test is that
+    /// both answers have to be right. One that never answered would stop every
+    /// container the moment its turn ended, which is the behaviour this
+    /// replaces; one that always answered would keep every container running
+    /// for ever, which is the behaviour it exists to avoid.
+    #[tokio::test]
+    async fn a_port_answers_only_while_something_is_listening() {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("a port");
+        let port = listener.local_addr().expect("an address").port();
+
+        assert!(answering(port).await, "something is listening on {port}");
+
+        drop(listener);
+        assert!(
+            !answering(port).await,
+            "nothing is listening on {port} any more",
+        );
+    }
 
     fn a_job() -> JobId {
         JobId::from_uuid(Uuid::from_u128(42))

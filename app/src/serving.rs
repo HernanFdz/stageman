@@ -88,6 +88,14 @@ const INSTANCE_DIRECTORY: &str = "stageman";
 /// What the instance's file is called.
 const INSTANCE_FILE: &str = "instance.json";
 
+/// How often to ask whether a container held open is still worth holding.
+///
+/// A minute, which is slow for a poll and correct for this: what it is waiting
+/// for is a person losing interest in a page, and the cost of noticing late is
+/// a container running for another minute. Anything faster would spend a
+/// subprocess per running job to learn nothing.
+const SETTLING_INTERVAL: std::time::Duration = std::time::Duration::from_mins(1);
+
 /// How much is reported, when the environment does not say.
 const DEFAULT_VERBOSITY: &str = "warn";
 
@@ -492,6 +500,8 @@ async fn start() -> Result<(), StartupError> {
     // and awaiting one would mean the dashboard never starts.
     crate::listen(&store, runtime);
 
+    settling(&store);
+
     // Where a foreman asks for a job. Its own listener, on its own port and
     // every interface — the dashboard stays on loopback, and this cannot,
     // because a container reaches nothing else on every platform. See
@@ -530,6 +540,27 @@ async fn start() -> Result<(), StartupError> {
     axum::serve(listener, router)
         .await
         .map_err(StartupError::Serving)
+}
+
+/// Asks, for as long as this process runs, whether a container held open still
+/// deserves to be.
+///
+/// A server an agent left running does not tell this instance when it stops,
+/// so the only way to notice is to look — see
+/// `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`.
+///
+/// Spawned rather than awaited, like everything else started here, and off the
+/// request path for the reason `docs/conventions.md` §3 gives.
+#[mutants::skip]
+fn settling(store: &Arc<crate::Store>) {
+    let resting = Arc::clone(store);
+    tokio::spawn(async move {
+        let mut every = tokio::time::interval(SETTLING_INTERVAL);
+        loop {
+            every.tick().await;
+            crate::settle(&resting, &RUNTIME).await;
+        }
+    });
 }
 
 /// Whether this build has no browser half anywhere.

@@ -44,12 +44,19 @@ feature only some jobs use.
 tunnel answers.** Neither holds for a job that never showed anything, so those
 behave exactly as they do today.
 
-- **The entry point stops being the agent** and becomes something that does not
-  exit and is not this project's to write — the image already has one. Each
-  turn runs the agent *inside* the container that is already up, rather than by
-  starting a stopped one. Containers are created with the runtime's own init,
-  so that process one reaps what an agent orphans; without it a long job
-  accumulates zombies.
+- **The image stops running the agent by default** and instead runs something
+  that does not exit and is not this project's to write — the image already has
+  one. Each turn runs the agent *inside* the container that is already up,
+  rather than by starting a stopped one. Containers are created with the
+  runtime's own init, so that process one reaps what an agent orphans; without
+  it a long job accumulates zombies.
+
+  **The image's default *command*, not its entry point**, and the difference is
+  worth the sentence because getting it wrong fails silently. A command named
+  on the command line replaces a default command and is *appended* to an entry
+  point — so with an entry point, the paths that still want the container to be
+  one agent would ask for the holding command and the agent's name together,
+  and get a container that starts perfectly, sleeps, and never speaks.
 
 - **Answering is a connection the daemon makes to the published port**, from
   outside, and not a check for something bound inside. Those differ in one case
@@ -135,6 +142,18 @@ its session intact, and starting it again resumes. Neither half describes what
 happens here, so the claim has to be re-established for a container that is
 never stopped and an agent that is run inside it — on both runtimes, since
 `docs/open-questions.md` already records that the original was taken on one.
+
+**A foreman's container persists too, and that was not the aim.** One image
+carries both, so an entry point that does not exit changes both — and nothing
+stops a foreman's, because the rule above is a job's and a foreman has no
+tunnel to answer on. It is the right direction rather than a regression:
+`docs/decisions/0012-agents-run-in-containers.md` asks for the foreman's agent
+to live in one long-lived container and the built thing started one per
+question, which that record's own reading calls a gap. This closes the half
+that is about a *container*. It does not touch the half
+`docs/open-questions.md` is actually about, which is holding a *connection*
+open across turns — that is still a task owning it and a channel to speak
+through, and still unbuilt.
 
 **A forgotten server is immortal.** An agent that leaves something bound keeps
 its container alive indefinitely, and nothing reclaims it. That is the accepted

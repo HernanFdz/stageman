@@ -87,7 +87,8 @@ been restarted. Your instructions have not changed.
 
 Something you had begun may have finished, half-finished, or never started — \
 including work outside this workspace, such as a branch pushed or a comment \
-posted. Check how things actually stand before you act. Do not assume your \
+posted, and including anything you left running, such as whatever you were \
+showing. Check how things actually stand before you act. Do not assume your \
 last step completed, and do not assume it did not.
 
 Then carry on with the work you were given.";
@@ -551,8 +552,9 @@ mod tests {
 restarted. Your instructions have not changed.
 
 Something you had begun may have finished, half-finished, or never started — including work \
-outside this workspace, such as a branch pushed or a comment posted. Check how things actually \
-stand before you act. Do not assume your last step completed, and do not assume it did not.
+outside this workspace, such as a branch pushed or a comment posted, and including anything you \
+left running, such as whatever you were showing. Check how things actually stand before you act. \
+Do not assume your last step completed, and do not assume it did not.
 
 Then carry on with the work you were given."
         );
