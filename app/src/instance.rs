@@ -385,8 +385,14 @@ pub fn begin(
     } else {
         stageman_foreman::Voice::Silent
     };
-    let kickoff = stageman_foreman::kickoff(&repository, work, voice);
+    // Minted before the instruction rather than after it, because the
+    // instruction names where this job can be reached and that address is
+    // built from the identifier — see
+    // `docs/decisions/0042-a-job-shows-its-work-on-a-subdomain.md`, where a
+    // job's own identifier being the hostname is what lets nothing about a
+    // tunnel be stored.
     let job = JobId::from_uuid(uuid::Uuid::new_v4());
+    let kickoff = stageman_foreman::kickoff(&repository, work, voice, &crate::tunnel::showing(job));
     let announcement = stageman_foreman::announcement(&repository, reason, job);
 
     {

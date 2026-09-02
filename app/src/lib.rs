@@ -29,6 +29,8 @@ pub mod release;
 mod serving;
 #[cfg(feature = "server")]
 pub(crate) mod tooling;
+#[cfg(feature = "server")]
+pub(crate) mod tunnel;
 
 pub mod dashboard;
 pub mod ui;

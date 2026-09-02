@@ -3687,6 +3687,8 @@ dependencies = [
  "dioxus",
  "etcetera",
  "futures-util",
+ "hyper",
+ "hyper-util",
  "mutants",
  "parking_lot",
  "rand 0.10.2",

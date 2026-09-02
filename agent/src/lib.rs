@@ -924,6 +924,21 @@ const TOOLS_SERVER: &str = "stageman";
 /// for.
 const OWNER_LABEL: &str = "stageman.job";
 
+/// The port inside a job's container that a tunnel reaches.
+///
+/// One constant rather than a choice, because a mapping cannot be added to a
+/// container that already exists — measured in
+/// `docs/decisions/0042-a-job-shows-its-work-on-a-subdomain.md`, and the whole
+/// reason nothing asks for a tunnel. Every job's container publishes this one,
+/// at creation, whether or not anything ever listens on it.
+///
+/// **Unusual rather than familiar, on purpose.** Publishing a port does not
+/// bind it inside the container, so the risk this number avoids is not a
+/// collision: it is an agent that starts a dev server on 3000 to check its own
+/// work and finds it published to whoever can reach this instance. A number
+/// nobody reaches for by habit is only ever bound deliberately.
+pub const TUNNEL_PORT: u16 = 47_201;
+
 /// The arguments that start a container meant to outlive this process.
 ///
 /// The one difference from [`session_arguments`] that matters is the absence
@@ -948,6 +963,17 @@ fn retained_arguments(
         // all.
         "--add-host".to_owned(),
         "host.docker.internal:host-gateway".to_owned(),
+        // The tunnel, published here because there is nowhere later: the
+        // mapping is fixed when the container is created and no runtime can
+        // add one afterwards.
+        //
+        // Loopback on the host, and an empty host port so the runtime picks a
+        // free one atomically — choosing one here by binding and releasing it
+        // is a race, and this project has already lost a port that way. What
+        // it picked is asked for rather than recorded, because Docker assigns
+        // a new one on every start and Podman does not.
+        "--publish".to_owned(),
+        format!("127.0.0.1::{TUNNEL_PORT}"),
         "--name".to_owned(),
         name.to_owned(),
         "--label".to_owned(),
@@ -1128,6 +1154,73 @@ pub async fn abandoned(runtime: &ContainerRuntime) -> Result<Vec<String>, AgentE
         .filter(|name| !name.is_empty())
         .map(str::to_owned)
         .collect())
+}
+
+/// Which host port a container's tunnel is reachable on, right now.
+///
+/// **Asked for rather than remembered, and that is the whole point.** The two
+/// runtimes disagree about what happens to an ephemeral published port when a
+/// container is stopped and started again — Docker assigns a new one, Podman
+/// keeps the old — so anything storing this is correct on one and silently
+/// wrong on the other, in the resume path, which is the least observed code
+/// here. The runtime is the only thing that knows, so the runtime is asked.
+/// Measured in `docs/decisions/0042-a-job-shows-its-work-on-a-subdomain.md`.
+///
+/// `None` for a container that exists and has no mapping — one created before
+/// this project published anything, which is an ordinary thing to meet after
+/// an upgrade rather than a failure.
+///
+/// # Errors
+///
+/// Fails if the runtime cannot be run, or refuses the query. A container that
+/// is not there refuses, which is correct: nothing can be reached on it.
+///
+/// Skipped by mutation testing, like everything else here that drives the
+/// runtime: what it does is spawn a process and hand the output to
+/// the private parser beside it, which is where the deciding is and is tested
+/// directly. The
+/// container behaviour it wraps is pinned by an ignored test below, and an
+/// ignored test kills no mutant.
+#[mutants::skip]
+pub async fn tunnel_port(
+    runtime: &ContainerRuntime,
+    name: &str,
+) -> Result<Option<u16>, AgentError> {
+    let reported = tokio::process::Command::new(runtime.path())
+        .args(["port", name, &TUNNEL_PORT.to_string()])
+        .kill_on_drop(true)
+        .output()
+        .await
+        .map_err(|source| AgentError::Runtime {
+            path: runtime.path().to_owned(),
+            source,
+        })?;
+
+    if !reported.status.success() {
+        return Err(AgentError::Unusable {
+            path: runtime.path().to_owned(),
+            message: String::from_utf8_lossy(&reported.stderr).trim().to_owned(),
+        });
+    }
+    Ok(published(&String::from_utf8_lossy(&reported.stdout)))
+}
+
+/// The host port in what the runtime reported, if it reported one.
+///
+/// Pure, so every shape either runtime prints can be tested without a
+/// container. It takes the port from the *last* colon onwards rather than
+/// splitting on colons, because a mapping published on IPv6 is printed as
+/// `[::]:64383` and splitting would find the address instead — and both
+/// runtimes will print a v6 line alongside the v4 one on a dual-stack host.
+///
+/// The first line that yields a port wins. Nothing here prefers one family
+/// over the other: both reach the same container, and this connects over
+/// loopback where both work.
+fn published(reported: &str) -> Option<u16> {
+    reported
+        .lines()
+        .filter_map(|line| line.trim().rsplit(':').next())
+        .find_map(|port| port.trim().parse().ok())
 }
 
 /// Removes a container and everything inside it.
@@ -2062,6 +2155,58 @@ mod tests {
         assert!(arguments.iter().any(|a| a == "--interactive"), "{line}");
     }
 
+    /// The tunnel is published here or nowhere: no runtime adds one later.
+    ///
+    /// Asserted on the exact string rather than on the flag alone, because the
+    /// two halves that matter are both in the value. Without the `127.0.0.1`
+    /// the runtime publishes on every interface, which would put a server an
+    /// agent wrote onto whatever network this machine has joined. Without the
+    /// empty host port this would be picking one itself, which is a race.
+    #[test]
+    fn a_retained_container_publishes_its_tunnel_on_loopback() {
+        let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
+        let handout = Handout::for_foreman(&state, project).expect("a watched project");
+
+        let arguments = retained_arguments("stageman-job-abc", &built(), &variables(&handout));
+        let line = arguments.join(" ");
+
+        assert!(
+            line.contains(&format!("--publish 127.0.0.1::{TUNNEL_PORT}")),
+            "{line}"
+        );
+    }
+
+    /// Both runtimes print an address and a port, and the address may be v6.
+    #[test]
+    fn a_published_port_is_read_from_the_last_colon() {
+        assert_eq!(published("127.0.0.1:64383\n"), Some(64_383));
+        assert_eq!(
+            published("[::]:64383\n"),
+            Some(64_383),
+            "splitting on colons would find the address in a v6 mapping",
+        );
+        assert_eq!(
+            published("0.0.0.0:42539\n[::]:42539\n"),
+            Some(42_539),
+            "a dual-stack host reports both families and either reaches it",
+        );
+    }
+
+    /// A container with no mapping is not a failure, and says so as `None`.
+    ///
+    /// What one created before this project published anything reports, which
+    /// is an ordinary thing to meet after an upgrade rather than a fault.
+    #[test]
+    fn a_container_with_no_mapping_reports_no_port() {
+        assert_eq!(published(""), None);
+        assert_eq!(published("\n  \n"), None);
+        assert_eq!(
+            published("127.0.0.1:not-a-port\n"),
+            None,
+            "unparseable is absent rather than a wrong number",
+        );
+    }
+
     /// Starting a container that exists names it, attaches, and nothing else.
     ///
     /// The shared tail beginning and resuming both end with, since the thread
@@ -2129,6 +2274,64 @@ mod tests {
         assert!(!after.iter().any(|left| left == name), "{after:?}");
         // Removing what is already gone is the outcome asked for, not a failure.
         discard(&runtime, name).await.expect("idempotent");
+    }
+
+    /// A published tunnel is reported by the runtime, and the report is read.
+    ///
+    /// The seam this feature turns on, and the one place a unit test cannot
+    /// reach: the flag is asserted above, the parsing is asserted above, and
+    /// what neither can say is whether a runtime asked about this container
+    /// answers at all. Needs a runtime and a network, and no credential — it
+    /// overrides the entry point rather than running an agent.
+    #[tokio::test]
+    #[ignore = "needs a container runtime and the network; run `just image-handshake`"]
+    async fn a_published_tunnel_is_reported_by_the_runtime() {
+        let runtime = located_runtime();
+        let name = "stageman-job-tunnel-probe";
+        discard(&runtime, name).await.expect("a clean slate");
+        let anything = build(&runtime, Agent::Claude, Role::Foreman)
+            .await
+            .expect("the image builds");
+
+        let created = std::process::Command::new(runtime.path())
+            .args([
+                "run",
+                "--detach",
+                "--name",
+                name,
+                "--label",
+                &format!("{OWNER_LABEL}={name}"),
+                // The same mapping `retained_arguments` emits, asserted there
+                // as a string and exercised here as a mapping.
+                "--publish",
+                &format!("127.0.0.1::{TUNNEL_PORT}"),
+                "--entrypoint",
+                "sh",
+                anything.as_argument(),
+                "-c",
+                "sleep 30",
+            ])
+            .output()
+            .expect("the runtime runs");
+        assert!(
+            created.status.success(),
+            "{}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+
+        let port = tunnel_port(&runtime, name)
+            .await
+            .expect("the runtime answers");
+        assert!(
+            port.is_some_and(|port| port != 0),
+            "a published mapping has a host port: {port:?}",
+        );
+
+        discard(&runtime, name).await.expect("it is removable");
+        assert!(
+            tunnel_port(&runtime, name).await.is_err(),
+            "a container that is gone cannot be reached, and says so",
+        );
     }
 
     mod costs_a_credential {

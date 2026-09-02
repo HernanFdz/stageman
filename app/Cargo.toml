@@ -46,6 +46,8 @@ server = [
     "dep:parking_lot",
     "dep:rand",
     "dep:futures-util",
+    "dep:hyper",
+    "dep:hyper-util",
     "dep:reqwest",
     "dep:tokio-tungstenite",
     "dep:serde_json",
@@ -117,6 +119,18 @@ tokio-tungstenite = { version = "0.29.0", default-features = false, features = [
     "connect",
     "rustls-tls-webpki-roots",
 ], optional = true }
+# The tunnel's own half. A job's container publishes a port and this forwards
+# to it, which needs a client speaking the same HTTP the framework's server
+# does — including the upgrade handshake, because watching work evolve means a
+# dev server with a websocket and a proxy that only forwards request and
+# response produces a page that renders once and never moves.
+#
+# Versions match what the framework already serves with, deliberately: these
+# are hyper's own types crossing between its server and its client, and two
+# majors in one process do not interoperate. They are in the lockfile through
+# the framework either way, so this adds direct names and no new audited code.
+hyper = { version = "1.11.1", features = ["client", "http1"], optional = true }
+hyper-util = { version = "0.1.20", features = ["tokio"], optional = true }
 reqwest = { version = "0.12.28", default-features = false, features = [
     "json",
     "rustls-tls",
@@ -127,6 +141,7 @@ stageman-core = { workspace = true, optional = true }
 stageman-job = { workspace = true, optional = true }
 stageman-foreman = { workspace = true, optional = true }
 tokio = { version = "1.53.1", features = [
+    "io-util",
     "macros",
     "net",
     "rt-multi-thread",

@@ -91,11 +91,27 @@ person who operates it and keeps its instance in that account's home, so a run
 as root would install a service for root and put the instance somewhere you
 cannot reach, which looks exactly like it worked.
 
+**Give it a domain if it has one.** Each job serves whatever it is working on
+at `<job-id>.<domain>`, and the dashboard answers at the domain itself, so one
+wildcard forwarded here reaches both:
+
+```sh
+curl -fsSL https://github.com/HernanFdz/stageman/releases/latest/download/install.sh | sh -s -- --domain stageman.example.com
+```
+
+Point whatever terminates `*.<domain>` at this machine, **and have it
+authenticate every host under that domain** — stageman authenticates nothing,
+so an unprotected instance is one anybody who finds the name can operate, and a
+job's tunnel carries whatever its agent put there. Without a domain, jobs are
+shown at `<job-id>.localhost`, which works in a browser on this machine and
+nowhere else. Either way the domain in use is printed when the daemon starts.
+
 **Re-running it is how you update.** There is no separate update command and no
 `self-update` subcommand: the address above always serves the newest script,
 that script is pinned to the release it was published with, and it replaces
 whatever is installed and restarts the service. It tells you which version it
-found and which one it is installing.
+found and which one it is installing. A domain already set is kept unless
+`--domain` says otherwise, so an update does not have to repeat it.
 
 **Removing it** keeps your instance, which is the whole of what stageman knows:
 

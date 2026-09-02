@@ -450,7 +450,31 @@ pub enum Voice {
 /// question goes, not whether the job stops. Both forms end the same way,
 /// because with outbound alone nobody answers this session.
 #[must_use]
-pub fn kickoff(repository: &str, work: &str, voice: Voice) -> String {
+pub fn kickoff(repository: &str, work: &str, voice: Voice, tunnel: &str) -> String {
+    let port = stageman_agent::TUNNEL_PORT;
+    // Two things this has to get across, and the second is the one that fails
+    // silently. A server bound inside the container to loopback is reachable
+    // from nowhere else, and an agent checking its own work with curl sees it
+    // answering perfectly — so the instruction is repeated rather than
+    // mentioned, because being wrong about it costs a whole session.
+    let showing = match voice {
+        Voice::Channel => format!(
+            "\
+You can show people what you are doing. Anything you serve inside this container on port \
+{port} is reachable at {tunnel} — a dev server while you work, or a built result for somebody \
+to look at before you propose it. Bind it to 0.0.0.0 and not to localhost: a server on \
+localhost answers you from inside this container and is reachable from nowhere else. Say where \
+to look with the `say` tool, because nobody finds that address on their own."
+        ),
+        Voice::Silent => format!(
+            "\
+You can show what you are doing. Anything you serve inside this container on port {port} is \
+reachable at {tunnel} — a dev server while you work, or a built result for somebody to look at \
+before you propose it. Bind it to 0.0.0.0 and not to localhost: a server on localhost answers \
+you from inside this container and is reachable from nowhere else."
+        ),
+    };
+
     let tools = match voice {
         Voice::Channel => {
             "You have git and gh, and the `say` tool for talking to people; \
@@ -491,6 +515,8 @@ The work:
 
 {work}
 
+{showing}
+
 When you have a change to propose, open a pull request and stop there. Do not \
 merge it, do not deploy anything, and do not push to the default branch. \
 Somebody reads what you propose before it counts for anything, which is what \
@@ -503,6 +529,15 @@ lets you work unattended.
 #[cfg(test)]
 mod tests {
     use super::{JobId, ProjectId, Voice, resumption_notice};
+
+    /// Where a job of this project would be reachable.
+    ///
+    /// A literal rather than a value built from a domain, because this crate
+    /// composes the text and does not decide the address — the app does, and
+    /// asserts its own half separately. Using a real-looking one anyway: a
+    /// placeholder that does not read like a URL would let the surrounding
+    /// sentence be wrong without a snapshot noticing.
+    const A_TUNNEL: &str = "https://00000000-0000-0000-0000-000000000001.example.com";
 
     /// Asserted as literal text, per `docs/conventions.md` §4. Prompt text is
     /// the only kind of code here that changes behaviour without changing
@@ -532,7 +567,8 @@ Then carry on with the work you were given."
             super::kickoff(
                 "https://example.invalid/repo",
                 "Fix the flaky test in the parser.",
-                Voice::Silent
+                Voice::Silent,
+                A_TUNNEL,
             ),
             "You are working on https://example.invalid/repo.
 
@@ -543,6 +579,12 @@ work belongs to.
 The work:
 
 Fix the flaky test in the parser.
+
+You can show what you are doing. Anything you serve inside this container on port 47201 is \
+reachable at https://00000000-0000-0000-0000-000000000001.example.com — a dev server while you \
+work, or a built result for somebody to look at before you propose it. Bind it to 0.0.0.0 and \
+not to localhost: a server on localhost answers you from inside this container and is reachable \
+from nowhere else.
 
 When you have a change to propose, open a pull request and stop there. Do not merge it, do not \
 deploy anything, and do not push to the default branch. Somebody reads what you propose before \
@@ -564,7 +606,8 @@ guess, and do not wait — nobody is watching this terminal."
             super::kickoff(
                 "https://example.invalid/repo",
                 "Fix the flaky test in the parser.",
-                Voice::Channel
+                Voice::Channel,
+                A_TUNNEL,
             ),
             "You are working on https://example.invalid/repo.
 
@@ -575,6 +618,13 @@ is already signed in as the account this work belongs to.
 The work:
 
 Fix the flaky test in the parser.
+
+You can show people what you are doing. Anything you serve inside this container on port 47201 \
+is reachable at https://00000000-0000-0000-0000-000000000001.example.com — a dev server while \
+you work, or a built result for somebody to look at before you propose it. Bind it to 0.0.0.0 \
+and not to localhost: a server on localhost answers you from inside this container and is \
+reachable from nowhere else. Say where to look with the `say` tool, because nobody finds that \
+address on their own.
 
 When you have a change to propose, open a pull request and stop there. Do not merge it, do not \
 deploy anything, and do not push to the default branch. Somebody reads what you propose before \
@@ -599,8 +649,18 @@ so do not wait for one and do not guess."
     /// unbound project.
     #[test]
     fn a_kickoff_names_the_tool_only_when_there_is_a_channel() {
-        let bound = super::kickoff("https://example.invalid/repo", "anything", Voice::Channel);
-        let silent = super::kickoff("https://example.invalid/repo", "anything", Voice::Silent);
+        let bound = super::kickoff(
+            "https://example.invalid/repo",
+            "anything",
+            Voice::Channel,
+            A_TUNNEL,
+        );
+        let silent = super::kickoff(
+            "https://example.invalid/repo",
+            "anything",
+            Voice::Silent,
+            A_TUNNEL,
+        );
 
         assert!(bound.contains("`say` tool"), "{bound}");
         assert!(!silent.contains("`say`"), "{silent}");
@@ -613,7 +673,8 @@ so do not wait for one and do not guess."
     #[test]
     fn no_kickoff_tells_a_job_to_wait_for_an_answer() {
         for voice in [Voice::Channel, Voice::Silent] {
-            let prompt = super::kickoff("https://example.invalid/repo", "anything", voice);
+            let prompt =
+                super::kickoff("https://example.invalid/repo", "anything", voice, A_TUNNEL);
 
             assert!(prompt.contains("do not wait"), "{prompt}");
             assert!(prompt.contains("stop"), "{prompt}");
@@ -673,7 +734,12 @@ Whatever it has to say appears in this thread. Job \
     /// no opinion about which sentence mattered.
     #[test]
     fn a_kickoff_with_a_channel_makes_reporting_the_ending() {
-        let prompt = super::kickoff("https://example.invalid/repo", "anything", Voice::Channel);
+        let prompt = super::kickoff(
+            "https://example.invalid/repo",
+            "anything",
+            Voice::Channel,
+            A_TUNNEL,
+        );
 
         let reporting = prompt
             .find("Finish by saying")
@@ -1056,6 +1122,7 @@ inferred is one a person will act on, and you have no way to check it."
             "https://example.invalid/repo",
             "anything at all",
             Voice::Channel,
+            A_TUNNEL,
         );
 
         assert!(prompt.contains("open a pull request"), "{prompt}");
