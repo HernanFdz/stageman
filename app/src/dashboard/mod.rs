@@ -252,34 +252,16 @@ const fn wire_platform(platform: stageman_core::Platform) -> &'static str {
     }
 }
 
-/// The platform named by a wire identifier.
-///
-/// The same arrangement as agents: the vocabulary is the dashboard's, so the
-/// match is here, and adding a platform to the domain stops this compiling
-/// until somebody decides what the browser calls it.
-///
-/// # Errors
-///
-/// Fails if nothing is called that.
-#[cfg(feature = "server")]
-fn named_platform(identifier: &str) -> DashboardResult<stageman_core::Platform> {
-    match identifier {
-        "github" => Ok(stageman_core::Platform::GitHub),
-        _ => Err(DashboardError::UnknownPlatform {
-            name: identifier.to_owned(),
-        }),
-    }
-}
-
 /// What a screen calls a channel.
 ///
-/// Deliberately without the counterpart a platform has. `named_platform` exists
-/// because a browser sends a platform identifier back when it sets a
-/// credential; nothing sends a channel back, because the form binds the one
-/// there is rather than choosing among them. A parser with no caller would be
-/// a guess about a route that does not exist yet, and adding a second channel
-/// stops this compiling until somebody names it — which is the property worth
-/// having.
+/// Deliberately one-directional, as every name on this screen now is. Nothing
+/// sends a channel or a platform identifier back: the form binds the one
+/// channel there is and sets the one platform there is, rather than choosing
+/// among them. A platform once had a parser, for a route that set a credential
+/// on its own; `amend` replaced that route and the parser went with it, which
+/// is the rule this comment always stated — a parser with no caller is a guess
+/// about a route that does not exist. Adding a second channel stops this
+/// compiling until somebody names it, which is the property worth having.
 #[cfg(feature = "server")]
 const fn wire_channel(channel: stageman_core::Channel) -> &'static str {
     match channel {
@@ -294,11 +276,18 @@ fn projected(id: stageman_core::ProjectId, project: &stageman_core::Project) -> 
         id: id.to_string(),
         name: project.name.clone(),
         repository: project.repository.clone(),
-        foreman: wire_name(project.foreman_agent).1.to_owned(),
+        // Identifiers rather than the names a person reads, and the difference
+        // is load-bearing rather than cosmetic. These are what a browser sends
+        // back when a project is changed, and `named` accepts only the
+        // identifier — so carrying the display name here would produce a form
+        // that renders perfectly, selects nothing, and is refused on submit
+        // with "no agent called Claude". Rendering is the screen's job, and it
+        // already holds the list that maps one to the other.
+        foreman: wire_name(project.foreman_agent).0.to_owned(),
         job_agents: project
             .job_agents
             .iter()
-            .map(|agent| wire_name(*agent).1.to_owned())
+            .map(|agent| wire_name(*agent).0.to_owned())
             .collect(),
         // Which platforms have one, never what it is. There is nowhere on this
         // type to put a credential, which is the point.
@@ -356,8 +345,8 @@ fn listed(state: &stageman_core::State) -> Vec<Agent> {
 #[cfg(all(test, feature = "server"))]
 mod tests {
     use super::{
-        DashboardError, dependents, identify, listed, named, named_platform, shown, wire_channel,
-        wire_name, wire_platform,
+        DashboardError, dependents, identify, listed, named, shown, wire_channel, wire_name,
+        wire_platform,
     };
     use stageman_core::{Agent, AgentConfig, Project, ProjectId, Secret, State};
     use std::collections::{BTreeMap, BTreeSet};
@@ -398,18 +387,27 @@ mod tests {
 
     /// The set is closed, so anything else is a stale page or a hand-made
     /// request rather than something an operator can fix.
-    /// One platform, so this is written out rather than looped.
+    /// What a platform is called on the wire, asserted as the literal text.
     ///
-    /// It becomes a loop over the set when there is a second, in the same way
-    /// the agent tests above already are — and until then a loop over one
-    /// element is noise the linter is right to object to.
+    /// This was a round trip until `amend` subsumed the route that parsed one
+    /// back. With no parser left, the literal is the whole of the contract —
+    /// the same position `wire_channel` below has always been in, and asserted
+    /// the same way so that emptying it or replacing it with nonsense fails.
+    ///
+    /// Note it is an identifier and not a display name, which is the one place
+    /// this differs from a channel: nothing renders a platform, so nothing
+    /// ever needed the other half. Asserting the literal is what says which of
+    /// the two it is.
+    ///
+    /// One platform, so written out rather than looped. It becomes a loop over
+    /// the set when there is a second, in the same way the agent tests above
+    /// already are.
     #[test]
-    fn a_platform_identifier_round_trips_too() {
-        let platform = stageman_core::Platform::GitHub;
-        let id = wire_platform(platform);
+    fn a_platform_is_named_on_the_wire_by_something_that_says_something() {
+        let id = wire_platform(stageman_core::Platform::GitHub);
 
         assert!(!id.is_empty());
-        assert_eq!(named_platform(id), Ok(platform));
+        assert_eq!(id, "github");
     }
 
     /// What a channel is called on a screen, asserted as the literal text.
@@ -429,16 +427,6 @@ mod tests {
 
         assert!(!name.is_empty());
         assert_eq!(name, "Slack");
-    }
-
-    #[test]
-    fn an_identifier_naming_no_platform_is_refused() {
-        assert_eq!(
-            named_platform("gitlab"),
-            Err(DashboardError::UnknownPlatform {
-                name: "gitlab".to_owned()
-            })
-        );
     }
 
     /// What a screen calls an agent is what a refusal has to name.

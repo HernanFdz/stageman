@@ -398,16 +398,19 @@ and wrong within a day.
   and stays where it is. Roughly half of the ignored tests are in each group,
   so this is a move for some and not a reorganisation of all.
 
-- Then an edit modal for a project, which closes a gap this created rather
-  than adding a feature. The projects list is read-only, and everything a
-  project is gets decided in one form — which is the right shape, and means
-  there is currently no way to change a repository's credential after it is
-  set. A token that expires therefore costs the project and its job history,
-  which is a worse answer than the one it replaced.
+- Next, a project's variables, per
+  `docs/decisions/0046-a-projects-variables-are-carried-never-read.md`. The
+  domain and its delivery first, because the name rule and the refusal of a
+  name this project already delivers are what make everything downstream
+  total; then the paragraph of kickoff naming them, which
+  `docs/conventions.md` §4 makes a reviewable diff; then the one form, which
+  both callers now share.
 
-  The form already takes the values it should start with and hands back what it
-  ended with, knowing nothing about where that goes, so editing is a second
-  caller rather than a second form. The route it needs mostly exists: setting a
-  credential is already a route, and what is missing is changing a name, a
-  repository, or the agents.
+  One thing the form work inherits and should not rediscover. A variable's
+  value is a credential like any other, so it never reaches the browser and its
+  box is therefore always empty — which means an empty box has to mean *keep*,
+  exactly as it now does for a repository's credential. What differs is that a
+  project has a *set* of variables rather than one, so *keep* and *remove* stop
+  being distinguishable by emptiness alone and the form needs a way to say
+  remove. That is the one genuinely new question in the screen half.
 
