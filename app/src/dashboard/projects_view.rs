@@ -178,6 +178,7 @@ pub async fn create(
             )]),
             channels,
             jobs: std::collections::BTreeMap::new(),
+            variables: std::collections::BTreeMap::new(),
             attending: stageman_core::Attending::default(),
         },
     );
@@ -1116,6 +1117,7 @@ mod server_tests {
             job_agents: BTreeSet::from([Agent::Claude]),
             credentials: BTreeMap::new(),
             channels: BTreeMap::new(),
+            variables: BTreeMap::new(),
             attending: stageman_core::Attending::default(),
             // Freshly minted rather than derived from a position, which would
             // need a conversion that can fail — and the gate is right that
@@ -1318,6 +1320,7 @@ mod server_tests {
                     },
                 )]),
                 jobs: BTreeMap::new(),
+                variables: BTreeMap::new(),
                 attending: stageman_core::Attending::default(),
             },
         );

@@ -653,6 +653,7 @@ mod unheard_tests {
                 },
             )]),
             jobs: BTreeMap::new(),
+            variables: BTreeMap::new(),
             attending: stageman_core::Attending::default(),
         }
     }

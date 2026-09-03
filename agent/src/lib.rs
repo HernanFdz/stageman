@@ -470,6 +470,25 @@ impl From<InitializeResponse> for Greeting {
 /// An agent in a container could not be reached, or would not answer.
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
+    /// A project's variable claims a name this project delivers itself.
+    ///
+    /// Refused rather than resolved, because both ways of resolving it are
+    /// silently wrong: discarding the operator's variable loses something they
+    /// set, and honouring it can change which account an agent bills — see
+    /// `docs/decisions/0008-one-credential-per-agent.md` and
+    /// `docs/decisions/0046-a-projects-variables-are-carried-never-read.md`.
+    ///
+    /// The dashboard refuses such a name as it is entered, so this is what a
+    /// hand-edited snapshot reaches. It fails the job rather than the
+    /// instance, which is the distinction `docs/conventions.md` §3 draws:
+    /// an operator can act on it, and everything else still works.
+    ///
+    /// Carries the name and never a value. A name is not a credential.
+    #[error("the variable {name} is one stageman delivers itself")]
+    ReservedVariable {
+        /// The name that collided.
+        name: String,
+    },
     /// The container runtime itself could not be started.
     ///
     /// The one failure that makes an instance unusable rather than one job:
@@ -692,10 +711,10 @@ const WORKSPACE: &str = "/workspace";
 /// pure question about configuration and lives in the domain crate; what they
 /// are called here is knowledge about one agent and lives in its adapter. See
 /// `docs/conventions.md` §3.
-fn variables(handout: &Handout) -> Vec<(&'static str, Secret)> {
-    let mut set = vec![match handout.agent() {
+fn delivered(handout: &Handout) -> Result<Vec<(String, Secret)>, AgentError> {
+    let mut set: Vec<(String, Secret)> = vec![match handout.agent() {
         Agent::Claude => (
-            claude_credential_variable(handout.agent_credential()),
+            claude_credential_variable(handout.agent_credential()).to_owned(),
             handout.agent_credential().clone(),
         ),
     }];
@@ -706,10 +725,30 @@ fn variables(handout: &Handout) -> Vec<(&'static str, Secret)> {
                 // What the platform's own command-line tool reads, which is how
                 // a job reaches it at all — see
                 // `docs/decisions/0009-jobs-hold-their-own-platform-credentials.md`.
-                Platform::GitHub => "GH_TOKEN",
+                Platform::GitHub => "GH_TOKEN".to_owned(),
             },
             credential.clone(),
         ));
+    }
+
+    // The project's own, last and refused on collision. Refused rather than
+    // ordered around, because either order is a silent wrong answer: ours
+    // winning discards a variable the operator set and said nothing, and
+    // theirs winning changes who pays — which is
+    // `docs/decisions/0008-one-credential-per-agent.md`'s failure arriving
+    // through a door that record could not see.
+    //
+    // The dashboard refuses such a name when it is typed, so reaching this is
+    // a snapshot that was hand-edited. Failing the job loudly is what
+    // `docs/conventions.md` §3 asks for in that case: an operator can act on
+    // it, and nothing else about the instance is broken.
+    for (name, value) in handout.variables() {
+        if RESERVED.contains(&name.as_str()) {
+            return Err(AgentError::ReservedVariable {
+                name: name.to_string(),
+            });
+        }
+        set.push((name.to_string(), value.clone()));
     }
 
     // A channel's credential is deliberately absent. It used to travel here,
@@ -722,8 +761,28 @@ fn variables(handout: &Handout) -> Vec<(&'static str, Secret)> {
     // `docs/open-questions.md` is still weighing for the credentials a job
     // does need.
 
-    set
+    Ok(set)
 }
+
+/// Every name this project may deliver on its own account.
+///
+/// A project's variables may not claim one of these — see
+/// `docs/decisions/0046-a-projects-variables-are-carried-never-read.md`. It
+/// lives here rather than in the domain because what a credential is *called*
+/// is knowledge about one agent, which is the rule `docs/conventions.md` §3
+/// states; **app** is the crate allowed to see both halves and is what asks.
+///
+/// It names every variable any compiled-in adapter *could* deliver rather than
+/// the ones a given handout will, and the difference matters: an agent added to
+/// a project later must not turn a name that was accepted into a collision.
+/// Both of Claude's are here for the same reason — which one is used depends on
+/// the shape of the credential, so reserving only the one in force would make
+/// the rule depend on a token an operator has not supplied yet.
+///
+/// Adding an agent means adding its names here. Nothing makes that automatic,
+/// and the test below is what notices: it asserts that everything a real
+/// handout delivers is in this list.
+pub const RESERVED: &[&str] = &["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "GH_TOKEN"];
 
 /// Which variable this agent's credential belongs in.
 ///
@@ -762,7 +821,7 @@ fn claude_credential_variable(credential: &Secret) -> &'static str {
 /// the two drift apart, and a runtime told to forward a variable that is not
 /// set says nothing at all — leaving a job that cannot authenticate and no line
 /// anywhere explaining why.
-fn session_arguments(image: &Image, delivering: &[(&'static str, Secret)]) -> Vec<String> {
+fn session_arguments(image: &Image, delivering: &[(String, Secret)]) -> Vec<String> {
     let mut arguments = vec![
         "run".to_owned(),
         "--rm".to_owned(),
@@ -782,11 +841,11 @@ fn session_arguments(image: &Image, delivering: &[(&'static str, Secret)]) -> Ve
 /// — the previous shape built one list and edited it into the other by
 /// removing a flag and splicing at an index, which the gate is right to call a
 /// panic waiting for somebody to reorder the head.
-fn carrying(image: &Image, delivering: &[(&'static str, Secret)]) -> Vec<String> {
+fn carrying(image: &Image, delivering: &[(String, Secret)]) -> Vec<String> {
     let mut arguments = Vec::new();
     for (name, _) in delivering {
         arguments.push("--env".to_owned());
-        arguments.push((*name).to_owned());
+        arguments.push(name.clone());
     }
     // Deliberately no `--network none` here, unlike the handshake: reaching a
     // model needs the network, and so does cloning. Which hosts it *ought* to
@@ -839,7 +898,7 @@ pub async fn ask(
     tools: Option<&Tools>,
     question: &str,
 ) -> Result<Answer, AgentError> {
-    let delivering = variables(handout);
+    let delivering = delivered(handout)?;
     let image = build(runtime, handout.agent(), handout.role()).await?;
     let container = spawn(
         runtime,
@@ -964,11 +1023,7 @@ pub const TUNNEL_PORT: u16 = 47_201;
 /// and therefore its agent's session — intact. Both were measured, and
 /// `docs/decisions/0015-a-job-survives-the-daemon-dying.md` records which one
 /// this system needs and why.
-fn retained_arguments(
-    name: &str,
-    image: &Image,
-    delivering: &[(&'static str, Secret)],
-) -> Vec<String> {
+fn retained_arguments(name: &str, image: &Image, delivering: &[(String, Secret)]) -> Vec<String> {
     // Created rather than run, and never removed: the thread has to be put in
     // place before anything starts, and the container outlives this process.
     let mut arguments = vec![
@@ -1029,7 +1084,7 @@ pub async fn begin(
     tools: Option<&Tools>,
     question: &str,
 ) -> Result<Answer, AgentError> {
-    let delivering = variables(handout);
+    let delivering = delivered(handout)?;
     // Which image is decided by the handout rather than passed in beside it.
     // That is what stops a container holding a foreman's credentials from
     // being started on a job's image — see
@@ -1043,7 +1098,7 @@ pub async fn begin(
         .envs(
             delivering
                 .iter()
-                .map(|(named, value)| ((*named).to_owned(), value.expose().to_owned())),
+                .map(|(named, value)| (named.clone(), value.expose().to_owned())),
         )
         .kill_on_drop(true)
         .output()
@@ -1384,7 +1439,7 @@ enum Opening {
 fn spawn(
     runtime: &ContainerRuntime,
     arguments: &[String],
-    delivering: &[(&'static str, Secret)],
+    delivering: &[(String, Secret)],
 ) -> Result<tokio::process::Child, AgentError> {
     tokio::process::Command::new(runtime.path())
         .args(arguments)
@@ -1395,7 +1450,7 @@ fn spawn(
         .envs(
             delivering
                 .iter()
-                .map(|(name, secret)| (*name, secret.expose())),
+                .map(|(name, secret)| (name, secret.expose())),
         )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -2070,6 +2125,7 @@ mod tests {
                 job_agents: only_claude(),
                 credentials,
                 channels: BTreeMap::new(),
+                variables: BTreeMap::new(),
                 jobs: BTreeMap::<_, Job>::new(),
                 attending: stageman_core::Attending::default(),
             },
@@ -2108,6 +2164,19 @@ mod tests {
     /// value constant for its whole life. A job's thread is; a foreman's is
     /// not, and one long-lived container answering every message would have
     /// answered all of them in the first message's thread.
+    /// The names one handout is delivered, in order.
+    ///
+    /// Shared because several tests assert names and not values, and because
+    /// the delivery helper is fallible now — unwrapping it in six places would
+    /// say less than naming the expectation once.
+    fn names_of(handout: &Handout) -> Vec<String> {
+        delivered(handout)
+            .expect("a handout with no reserved name")
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect()
+    }
+
     #[test]
     fn a_thread_is_never_delivered_as_a_variable() {
         let (state, project) = instance_with_a_channel("sk-ant-oat01-xyz");
@@ -2118,22 +2187,28 @@ mod tests {
                 id: "1728312345.678901".to_owned(),
             });
 
-        let delivered = variables(&handout);
-        let named: Vec<&str> = delivered.iter().map(|(name, _)| *name).collect();
+        let delivering = delivered(&handout).expect("a handout with no reserved name");
+        let named = names_of(&handout);
 
         assert!(
             !named.iter().any(|name| name.contains("THREAD")),
             "the thread goes in a file, not the environment: {named:?}"
         );
         // And nothing carries its value under another name either.
-        for (_, value) in &delivered {
+        for (_, value) in &delivering {
             assert_ne!(value.expose(), "1728312345.678901");
         }
         // Nor the channel's credential, since 0034: the daemon posts, so a
         // container has no use for one and holding less is the whole
         // mitigation.
-        assert!(!named.contains(&"STAGEMAN_SLACK_CHANNEL"), "{named:?}");
-        assert!(!named.contains(&"STAGEMAN_SLACK_TOKEN"), "{named:?}");
+        assert!(
+            !named.iter().any(|name| name == "STAGEMAN_SLACK_CHANNEL"),
+            "{named:?}"
+        );
+        assert!(
+            !named.iter().any(|name| name == "STAGEMAN_SLACK_TOKEN"),
+            "{named:?}"
+        );
     }
 
     /// A container is given its agent's credential and nothing else it does
@@ -2155,16 +2230,22 @@ mod tests {
             Handout::for_foreman(&state, project).expect("a watched project"),
             Handout::for_job(&state, Agent::Claude, project).expect("a watched project"),
         ] {
-            let named: Vec<&str> = variables(&handout).iter().map(|(name, _)| *name).collect();
-            assert!(!named.contains(&"STAGEMAN_SLACK_TOKEN"), "{named:?}");
-            assert!(!named.contains(&"STAGEMAN_SLACK_CHANNEL"), "{named:?}");
+            let named = names_of(&handout);
+            assert!(
+                !named.iter().any(|name| name == "STAGEMAN_SLACK_TOKEN"),
+                "{named:?}"
+            );
+            assert!(
+                !named.iter().any(|name| name == "STAGEMAN_SLACK_CHANNEL"),
+                "{named:?}"
+            );
         }
 
         // And the asymmetry 0027 turns on is unchanged: a foreman watches a
         // channel and still acts on no platform.
         let foreman = Handout::for_foreman(&state, project).expect("a watched project");
-        let named: Vec<&str> = variables(&foreman).iter().map(|(name, _)| *name).collect();
-        assert!(!named.contains(&"GH_TOKEN"), "{named:?}");
+        let named = names_of(&foreman);
+        assert!(!named.iter().any(|name| name == "GH_TOKEN"), "{named:?}");
     }
 
     /// A project with nothing bound is delivered nothing to speak with, rather
@@ -2175,7 +2256,7 @@ mod tests {
         let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
         let handout = Handout::for_job(&state, Agent::Claude, project).expect("a watched project");
 
-        let named: Vec<&str> = variables(&handout).iter().map(|(name, _)| *name).collect();
+        let named = names_of(&handout);
 
         assert!(
             !named.iter().any(|name| name.starts_with("STAGEMAN_SLACK")),
@@ -2200,7 +2281,7 @@ mod tests {
         let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
         let handout = Handout::for_foreman(&state, project).expect("a watched project");
 
-        let delivered = variables(&handout);
+        let delivered = delivered(&handout).expect("a handout with no reserved name");
 
         assert_eq!(delivered.len(), 1, "{delivered:?}");
         assert_eq!(delivered[0].0, "CLAUDE_CODE_OAUTH_TOKEN");
@@ -2212,11 +2293,121 @@ mod tests {
         let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
         let handout = Handout::for_job(&state, Agent::Claude, project).expect("a watched project");
 
-        let delivered = variables(&handout);
-        let named: Vec<&str> = delivered.iter().map(|(name, _)| *name).collect();
+        let named = names_of(&handout);
 
-        assert!(named.contains(&"CLAUDE_CODE_OAUTH_TOKEN"), "{named:?}");
-        assert!(named.contains(&"GH_TOKEN"), "{named:?}");
+        assert!(
+            named.iter().any(|name| name == "CLAUDE_CODE_OAUTH_TOKEN"),
+            "{named:?}"
+        );
+        assert!(named.iter().any(|name| name == "GH_TOKEN"), "{named:?}");
+    }
+
+    /// A project's own variables reach its jobs' containers.
+    ///
+    /// The whole of what the feature does, from the delivery side.
+    #[test]
+    fn a_job_is_delivered_its_projects_variables() {
+        let (mut state, project) = instance_with_a_project("sk-ant-oat01-xyz");
+        state
+            .projects
+            .get_mut(&project)
+            .expect("the project")
+            .variables
+            .insert(
+                stageman_core::VariableName::new("STRIPE_API_KEY").expect("a deliverable name"),
+                Secret::new("sk-test-not-a-real-key".to_owned()),
+            );
+        let handout = Handout::for_job(&state, Agent::Claude, project).expect("a watched project");
+
+        let delivering = delivered(&handout).expect("no reserved name here");
+        let found = delivering
+            .iter()
+            .find(|(name, _)| name == "STRIPE_API_KEY")
+            .expect("the project's variable is delivered");
+
+        assert_eq!(found.1.expose(), "sk-test-not-a-real-key");
+    }
+
+    /// And a foreman's container is given none of them.
+    #[test]
+    fn a_foreman_is_delivered_no_variable_of_its_projects() {
+        let (mut state, project) = instance_with_a_project("sk-ant-oat01-xyz");
+        state
+            .projects
+            .get_mut(&project)
+            .expect("the project")
+            .variables
+            .insert(
+                stageman_core::VariableName::new("STRIPE_API_KEY").expect("a deliverable name"),
+                Secret::new("sk-test-not-a-real-key".to_owned()),
+            );
+        let foreman = Handout::for_foreman(&state, project).expect("a watched project");
+
+        let named = names_of(&foreman);
+
+        assert!(
+            !named.iter().any(|name| name == "STRIPE_API_KEY"),
+            "{named:?}"
+        );
+    }
+
+    /// The refusal that keeps an operator from silently changing who pays.
+    ///
+    /// A variable named for the agent's own credential would otherwise be set
+    /// twice, and the last one wins — with no error and no log line, which is
+    /// exactly the failure `docs/decisions/0008-one-credential-per-agent.md`
+    /// exists to prevent. The dashboard refuses this when it is typed; this is
+    /// what a hand-edited snapshot meets.
+    #[test]
+    fn a_variable_claiming_a_name_this_project_delivers_is_refused() {
+        for claimed in RESERVED {
+            let (mut state, project) = instance_with_a_project("sk-ant-oat01-xyz");
+            state
+                .projects
+                .get_mut(&project)
+                .expect("the project")
+                .variables
+                .insert(
+                    stageman_core::VariableName::new(*claimed).expect("a deliverable name"),
+                    Secret::new("somebody-elses-account".to_owned()),
+                );
+            let handout =
+                Handout::for_job(&state, Agent::Claude, project).expect("a watched project");
+
+            let refused = delivered(&handout).expect_err("that name is ours");
+
+            assert!(
+                matches!(refused, AgentError::ReservedVariable { ref name } if name == claimed),
+                "{refused:?}"
+            );
+        }
+    }
+
+    /// What keeps [`RESERVED`] honest as agents are added.
+    ///
+    /// The list is written by hand, so nothing makes it follow the adapters it
+    /// describes. This is what notices: everything a real handout delivers on
+    /// this project's own account has to be in it, so an agent whose credential
+    /// goes in a new variable fails here until somebody adds it — rather than
+    /// silently letting an operator claim that name.
+    ///
+    /// Both of Claude's credential variables are covered because the two
+    /// fixtures below differ in the shape of the token, which is what chooses
+    /// between them.
+    #[test]
+    fn every_name_this_project_delivers_is_one_it_reserves() {
+        for credential in ["sk-ant-oat01-xyz", "sk-ant-api03-xyz"] {
+            let (state, project) = instance_with_a_project(credential);
+            let handout =
+                Handout::for_job(&state, Agent::Claude, project).expect("a watched project");
+
+            for name in names_of(&handout) {
+                assert!(
+                    RESERVED.contains(&name.as_str()),
+                    "{name} is delivered but not reserved, so an operator could claim it",
+                );
+            }
+        }
     }
 
     /// The one that matters most in this module. A secret on a command line is
@@ -2227,7 +2418,10 @@ mod tests {
         let (state, project) = instance_with_a_channel("sk-ant-oat01-secret-value");
         let handout = Handout::for_job(&state, Agent::Claude, project).expect("a watched project");
 
-        let arguments = session_arguments(&built(), &variables(&handout));
+        let arguments = session_arguments(
+            &built(),
+            &delivered(&handout).expect("a handout with no reserved name"),
+        );
         let line = arguments.join(" ");
 
         assert!(!line.contains("sk-ant-oat01-secret-value"), "{line}");
@@ -2248,7 +2442,10 @@ mod tests {
         let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
         let handout = Handout::for_foreman(&state, project).expect("a watched project");
 
-        let arguments = session_arguments(&built(), &variables(&handout));
+        let arguments = session_arguments(
+            &built(),
+            &delivered(&handout).expect("a handout with no reserved name"),
+        );
 
         assert!(!arguments.iter().any(|a| a == "none"), "{arguments:?}");
         assert_eq!(
@@ -2273,7 +2470,11 @@ mod tests {
         let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
         let handout = Handout::for_foreman(&state, project).expect("a watched project");
 
-        let arguments = retained_arguments("stageman-job-abc", &built(), &variables(&handout));
+        let arguments = retained_arguments(
+            "stageman-job-abc",
+            &built(),
+            &delivered(&handout).expect("a handout with no reserved name"),
+        );
         let line = arguments.join(" ");
 
         assert!(line.contains("--name stageman-job-abc"), "{line}");
@@ -2311,7 +2512,11 @@ mod tests {
         let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
         let handout = Handout::for_foreman(&state, project).expect("a watched project");
 
-        let arguments = retained_arguments("stageman-job-abc", &built(), &variables(&handout));
+        let arguments = retained_arguments(
+            "stageman-job-abc",
+            &built(),
+            &delivered(&handout).expect("a handout with no reserved name"),
+        );
         let line = arguments.join(" ");
 
         assert!(
@@ -2412,7 +2617,11 @@ mod tests {
         let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
         let handout = Handout::for_foreman(&state, project).expect("a watched project");
 
-        let arguments = retained_arguments("stageman-job-abc", &built(), &variables(&handout));
+        let arguments = retained_arguments(
+            "stageman-job-abc",
+            &built(),
+            &delivered(&handout).expect("a handout with no reserved name"),
+        );
 
         assert!(arguments.iter().any(|a| a == "--init"), "{arguments:?}");
     }
@@ -2487,7 +2696,7 @@ mod tests {
 
         let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
         let handout = Handout::for_foreman(&state, project).expect("a watched project");
-        let delivering = variables(&handout);
+        let delivering = delivered(&handout).expect("a handout with no reserved name");
         let image = build(&runtime, Agent::Claude, Role::Foreman)
             .await
             .expect("the image builds");
@@ -2497,7 +2706,7 @@ mod tests {
             .envs(
                 delivering
                     .iter()
-                    .map(|(named, value)| ((*named).to_owned(), value.expose().to_owned())),
+                    .map(|(named, value)| (named.clone(), value.expose().to_owned())),
             )
             .output()
             .await
@@ -2643,6 +2852,7 @@ mod tests {
                     job_agents: only_claude(),
                     credentials: BTreeMap::new(),
                     channels: BTreeMap::new(),
+                    variables: BTreeMap::new(),
                     jobs: BTreeMap::new(),
                     attending: stageman_core::Attending::default(),
                 },

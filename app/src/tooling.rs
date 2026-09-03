@@ -934,6 +934,7 @@ mod tests {
                 channels: BTreeMap::new(),
                 jobs: BTreeMap::new(),
                 // No warrant: what a credential means is this instance's own
+                variables: BTreeMap::new(),
                 attending: Attending::default(),
             },
         );
@@ -1120,6 +1121,7 @@ mod tests {
                     credentials: BTreeMap::new(),
                     channels: BTreeMap::new(),
                     jobs: BTreeMap::new(),
+                    variables: BTreeMap::new(),
                     attending: Attending::default(),
                 },
             );
@@ -1220,6 +1222,7 @@ mod tests {
                     credentials: BTreeMap::new(),
                     channels: BTreeMap::new(),
                     jobs: BTreeMap::new(),
+                    variables: BTreeMap::new(),
                     attending: Attending::default(),
                 },
             );
@@ -1360,6 +1363,7 @@ mod tests {
             job_agents: BTreeSet::from(agents),
             credentials: BTreeMap::new(),
             channels: BTreeMap::new(),
+            variables: BTreeMap::new(),
             attending: stageman_core::Attending::default(),
             jobs: BTreeMap::new(),
         }

@@ -580,6 +580,7 @@ mod server_tests {
             credentials: BTreeMap::new(),
             channels: BTreeMap::new(),
             jobs: BTreeMap::new(),
+            variables: BTreeMap::new(),
             attending: stageman_core::Attending::default(),
         }
     }

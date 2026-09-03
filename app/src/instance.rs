@@ -1442,6 +1442,7 @@ mod tests {
                 job_agents: only_claude(),
                 credentials: BTreeMap::new(),
                 channels: BTreeMap::new(),
+                variables: BTreeMap::new(),
                 attending: stageman_core::Attending::default(),
                 jobs: BTreeMap::from([(
                     job,
@@ -1714,6 +1715,7 @@ mod tests {
                     credentials: BTreeMap::new(),
                     channels: BTreeMap::new(),
                     jobs: BTreeMap::new(),
+                    variables: BTreeMap::new(),
                     attending: stageman_core::Attending::default(),
                 },
             );
@@ -1750,6 +1752,7 @@ mod tests {
                 credentials: std::collections::BTreeMap::new(),
                 channels: std::collections::BTreeMap::new(),
                 jobs: std::collections::BTreeMap::new(),
+                variables: BTreeMap::new(),
                 attending: stageman_core::Attending::default(),
             },
         );
@@ -1856,6 +1859,7 @@ mod tests {
                 credentials: BTreeMap::new(),
                 channels: BTreeMap::new(),
                 jobs,
+                variables: BTreeMap::new(),
                 attending: stageman_core::Attending::default(),
             },
         );
@@ -2183,6 +2187,7 @@ mod tests {
                     credentials: BTreeMap::new(),
                     channels: BTreeMap::new(),
                     jobs: BTreeMap::new(),
+                    variables: BTreeMap::new(),
                     attending: stageman_core::Attending::default(),
                 },
             );
