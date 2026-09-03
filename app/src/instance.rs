@@ -392,7 +392,18 @@ pub fn begin(
     // job's own identifier being the hostname is what lets nothing about a
     // tunnel be stored.
     let job = JobId::from_uuid(uuid::Uuid::new_v4());
-    let kickoff = stageman_foreman::kickoff(&repository, work, voice, &crate::tunnel::showing(job));
+    // Asked of the handout for the reason the comment above gives: the prompt
+    // and the environment the container is started with are decided from one
+    // value, so a job cannot be told about a variable it was not given, nor
+    // given one it was never told about.
+    let variables: Vec<_> = handout.variable_names().cloned().collect();
+    let kickoff = stageman_foreman::kickoff(
+        &repository,
+        work,
+        voice,
+        &crate::tunnel::showing(job),
+        &variables,
+    );
     let announcement = stageman_foreman::announcement(&repository, reason, job);
 
     {
