@@ -467,6 +467,17 @@ it lands.
   is now three things rather than two — a container held open because its tunnel
   answers, one retained stopped because its job can be resumed, and one nothing
   can name, which is the only leak. Count anything and it passes on the last.
+
+  **Whatever asks whether a tunnel answers must ask it of a *published* port.**
+  A port this project binds itself has nobody answering for it; a published one
+  has the runtime's proxy in front, which accepts on the container's behalf
+  whether or not anything is inside. So a test that binds its own socket proves
+  the probe can tell a listener from silence and nothing about the case that
+  decides a container's life — and while that was the only test, every
+  container ran for ever with the bar above reading as satisfied. See
+  `docs/decisions/0047-a-tunnel-answers-only-when-something-behind-it-does.md`.
+  This is why the container tests earn their minutes: the gap was not in the
+  reasoning, it was in what the cheap test could reach.
 - **A field added to the sealed form is defaulted, and a literal older file
   proves it.** `docs/decisions/0011-state-is-a-snapshot-not-a-database.md`
   versions nothing and says what that costs: an added field is free *with a
