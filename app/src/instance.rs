@@ -2310,13 +2310,14 @@ mod tests {
 
         /// One job, end to end: a project configured, an agent started in a
         /// container named for its job, a kickoff it did not write, and a
-        /// repository it fetched itself.
+        /// repository checked out for it before it spoke.
         ///
-        /// The clone is the part worth proving, because
-        /// `docs/decisions/0016-the-agent-clones-the-repository.md` removed
-        /// every mechanism that would have put a repository there — so the
-        /// files being present is evidence the agent did it, and nothing else
-        /// could have.
+        /// The checkout is the part worth proving, and what it proves changed
+        /// with `docs/decisions/0050-the-repository-is-checked-out-before-the-first-turn.md`:
+        /// it used to be evidence that the agent cloned, since nothing else
+        /// could have; it is now evidence that the checkout was there for the
+        /// agent, at the workspace root where the adapter looks, and that an
+        /// agent started inside it could answer about it.
         #[tokio::test]
         #[ignore = "needs a container runtime, a built image, a credential and the network; run `just image-session`"]
         async fn a_job_runs_from_kickoff_to_a_cloned_repository() {
@@ -2332,8 +2333,8 @@ mod tests {
                 project,
                 Kit::defaults(Agent::Claude),
                 "checking that a job can run at all",
-                "Clone the repository. Then reply with one short line saying how many files are \
-                 in it. Make no changes, commit nothing, and open nothing.",
+                "Reply with one short line saying how many files are in the repository checked \
+                 out in the current directory. Make no changes, commit nothing, and open nothing.",
             )
             .await
             .expect("the job is created");
@@ -2359,8 +2360,8 @@ mod tests {
             assert!(told.contains(PUBLIC_REPOSITORY), "{told}");
             assert!(told.contains("open a pull request"), "{told}");
 
-            // The repository really is in the container, and nothing but the
-            // agent could have put it there.
+            // The repository really is in the container, at the root of the
+            // workspace — where the adapter looks for a project's settings.
             let workspace = directory.path().join("workspace");
             let copied = std::process::Command::new(runtime.path())
                 .arg("cp")
@@ -2373,11 +2374,10 @@ mod tests {
                 "{}",
                 String::from_utf8_lossy(&copied.stderr)
             );
-            let cloned = std::fs::read_dir(&workspace)
-                .expect("the workspace was copied out")
-                .filter_map(Result::ok)
-                .any(|entry| entry.path().join(".git").exists());
-            assert!(cloned, "no clone in the workspace: {workspace:?}");
+            assert!(
+                workspace.join(".git").exists(),
+                "no checkout at the workspace root: {workspace:?}"
+            );
 
             stageman_job::discard(&runtime, job)
                 .await

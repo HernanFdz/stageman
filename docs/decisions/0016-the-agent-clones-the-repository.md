@@ -5,6 +5,14 @@ Accepted. Answers the workspace-delivery question
 `docs/decisions/0012-agents-run-in-containers.md` left open, and changes what
 the word *workspace* means in `docs/conventions.md` §2.
 
+**Half reversed by
+`docs/decisions/0050-the-repository-is-checked-out-before-the-first-turn.md`**,
+which has this project make the clone before the agent's first turn. What
+stands is everything this record argued against a mount and a volume: nothing
+shares a repository across the boundary, and the checkout is made inside the
+container with the platform's own tool and the job's own credential. What was
+given up is the job without a repository, which never came.
+
 ## Context
 
 0012 settled that a job runs in a container and explicitly deferred how the
@@ -96,3 +104,14 @@ Revisit if cloning stops being cheap — a very large repository cloned per job
 is the shape of that. The answer then is a shallower clone or a cache the
 agent is pointed at, which is a change to what a prompt says rather than to
 this decision.
+
+**Amended by
+`docs/decisions/0050-the-repository-is-checked-out-before-the-first-turn.md`.**
+The paragraph above about jobs without a repository is no longer the design:
+every job now starts with the repository checked out, by this project, before
+its agent speaks. The reason is one this record could not see — a coding agent
+reads a project's instructions when its session starts, so a clone made
+inside the first turn is one the agent's own machinery never loads — and the
+reasoning here is left intact because the half of it that survives, that
+nothing delivers a repository from outside the container, is still the reason
+the clone is made where it is.
