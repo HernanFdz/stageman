@@ -761,6 +761,23 @@ pub fn ProjectsView() -> Element {
     }
 }
 
+/// What to show for an agent the browser named by its identifier.
+///
+/// A function rather than a closure inside the row, so that it can be asserted:
+/// mutation testing found the comparison inside it unguarded, which is fair —
+/// a project carries identifiers and the row shows names, and nothing else
+/// notices if the two stop lining up.
+///
+/// An identifier this build does not know is shown as it stands rather than
+/// hidden. An instance naming an agent that is gone is worth seeing, and
+/// `State::check` refuses one anyway.
+fn shown_as(available: &[Agent], identifier: &str) -> String {
+    available
+        .iter()
+        .find(|agent| agent.id == identifier)
+        .map_or_else(|| identifier.to_owned(), |agent| agent.name.clone())
+}
+
 /// One project, as the list shows it.
 ///
 /// It shows and it opens the form; it never edits. What a project *is* stays
@@ -776,17 +793,11 @@ pub fn ProjectsView() -> Element {
 /// seeing, and `State::check` refuses one anyway.
 #[component]
 fn WatchedProject(project: Project, available: Vec<Agent>, onedit: EventHandler<()>) -> Element {
-    let named = |identifier: &String| {
-        available
-            .iter()
-            .find(|agent| &agent.id == identifier)
-            .map_or_else(|| identifier.clone(), |agent| agent.name.clone())
-    };
-    let foreman = named(&project.foreman);
+    let foreman = shown_as(&available, &project.foreman);
     let jobs_on = project
         .job_agents
         .iter()
-        .map(named)
+        .map(|identifier| shown_as(&available, identifier))
         .collect::<Vec<_>>()
         .join(", ");
     rsx! {
@@ -1024,6 +1035,20 @@ impl fmt::Debug for Draft {
     }
 }
 
+impl Filling {
+    /// Whether this describes a project that does not exist yet.
+    ///
+    /// A method rather than a comparison at each site, because the form asks
+    /// this three times — for the credential's label, its placeholder, and
+    /// whether a channel is offered at all — and three copies of one question
+    /// is three places for it to be answered differently. Mutation testing is
+    /// what said so: the comparison it replaced had no test that noticed.
+    #[must_use]
+    pub const fn creating(&self) -> bool {
+        matches!(self, Self::Creating)
+    }
+}
+
 impl Draft {
     /// Whether this says everything a project needs.
     ///
@@ -1110,7 +1135,7 @@ fn ProjectForm(
     held: Vec<String>,
 ) -> Element {
     let mut draft = draft;
-    let creating = filling == Filling::Creating;
+    let creating = filling.creating();
 
     rsx! {
         div { class: "flex flex-col gap-3",
@@ -1879,7 +1904,8 @@ mod server_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChannelDraft, Draft, Filling, Project, VariableDraft};
+    use super::super::agents_view::Agent;
+    use super::{ChannelDraft, Draft, Filling, Project, VariableDraft, shown_as};
 
     /// One project, with however many jobs running.
     fn watched(working: usize, jobs: usize) -> Project {
@@ -1987,6 +2013,69 @@ mod tests {
         assert!(!without(|draft| draft.repository.clear()).is_complete(&amending(), NOTHING_HELD));
         assert!(!without(|draft| draft.foreman.clear()).is_complete(&amending(), NOTHING_HELD));
         assert!(!without(|draft| draft.job_agents.clear()).is_complete(&amending(), NOTHING_HELD));
+    }
+
+    /// A project carries identifiers and a row shows names, so something has
+    /// to map one to the other — and nothing else would notice if it stopped.
+    ///
+    /// Found by mutation testing: inverting the comparison inside the row's
+    /// lookup broke nothing any test could see, which is exactly the shape of
+    /// a screen that renders confidently and wrongly.
+    #[test]
+    fn an_agent_is_shown_by_its_name_and_not_the_identifier_it_arrived_as() {
+        let available = vec![Agent {
+            id: "claude".to_owned(),
+            name: "Claude".to_owned(),
+            description: "does the work".to_owned(),
+            configured: true,
+            used_by: Vec::new(),
+        }];
+
+        assert_eq!(shown_as(&available, "claude"), "Claude");
+    }
+
+    /// An agent this build does not know is shown as it stands.
+    ///
+    /// The other half, and the reason the lookup falls back rather than
+    /// hiding: an instance naming an agent that is gone is worth seeing.
+    #[test]
+    fn an_agent_this_build_does_not_know_is_shown_as_it_arrived() {
+        assert_eq!(shown_as(&[], "something-else"), "something-else");
+    }
+
+    /// The one question the form asks three times.
+    ///
+    /// Mutation testing found the comparison it replaced unguarded, which is
+    /// how a form could have started offering a channel while amending and
+    /// calling a credential optional while creating.
+    #[test]
+    fn only_creating_is_creating() {
+        assert!(Filling::Creating.creating());
+        assert!(!amending().creating());
+    }
+
+    /// `docs/conventions.md` §4, for the row that holds a value.
+    ///
+    /// Its own test rather than a line in the draft's, because the draft's
+    /// formatter delegates here — so a derived `Debug` on this type would
+    /// leak through a test that reads as though it covered it. Mutation
+    /// testing found exactly that: emptying this formatter changed nothing
+    /// any assertion noticed.
+    #[test]
+    fn a_variable_row_does_not_leak_its_value_when_formatted() {
+        let shown = format!(
+            "{:?}",
+            VariableDraft {
+                name: "STRIPE_API_KEY".to_owned(),
+                value: "sk-test-not-a-real-key".to_owned(),
+            }
+        );
+
+        assert!(!shown.contains("sk-test-not-a-real-key"), "{shown}");
+        assert!(
+            shown.contains("STRIPE_API_KEY"),
+            "it should still say which variable it is: {shown}"
+        );
     }
 
     /// A row for a variable the project does not hold needs a value, whichever
@@ -2121,6 +2210,10 @@ mod tests {
 
         assert!(!shown.contains("ghp-not-a-real-token"), "{shown}");
         assert!(!shown.contains("xoxb-not-a-real-token"), "{shown}");
+        // A variable's value is the third credential a draft holds, and it
+        // reaches this formatter through the row's own — so a derive on either
+        // one leaks here.
+        assert!(!shown.contains("sk-test-not-a-real-key"), "{shown}");
         assert!(
             shown.contains("aviary"),
             "it should still say what it holds"
