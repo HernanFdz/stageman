@@ -393,9 +393,20 @@ mod tests {
             .await
             .expect("the runtime answers")
             .expect("a mapping was published");
+        // Reported rather than asserted, and only if this fails. Whether a
+        // bare connection succeeds is a property of the host: both runtimes
+        // proxy a published port by default and it does, which is the trap
+        // this test exists for, but Docker with `userland-proxy` disabled
+        // refuses instead and the assertion below then holds for a simpler
+        // reason. Saying which makes a failure here diagnosable rather than
+        // puzzling.
+        let trapped = tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
+            .await
+            .is_ok();
         assert!(
             !answering(port).await,
-            "nothing is listening inside, so the proxy on {port} answers for nobody"
+            "nothing is listening inside, so the proxy on {port} answers for nobody \
+             (a bare connection to it succeeds here: {trapped})"
         );
 
         discard(&runtime, job).await.expect("it is removable");
@@ -425,7 +436,7 @@ mod tests {
                 anything.as_argument(),
                 "-e",
                 &format!(
-                    "require('net').createServer().listen({}, '0.0.0.0')",
+                    "require('net').createServer().listen({}, '0.0.0.0',                      () => console.log('listening'))",
                     stageman_agent::TUNNEL_PORT
                 ),
             ])
@@ -437,6 +448,15 @@ mod tests {
             String::from_utf8_lossy(&serving.stderr)
         );
 
+        // Waited for, and waited for by asking the container rather than the
+        // port. `--detach` returns once the container is started, which is
+        // before node has bound anything — so probing straight away finds the
+        // proxy with nothing behind it yet and reads exactly like the empty
+        // case above. That is what failed in continuous integration and passed
+        // on the machine that wrote it, which is the shape of every race worth
+        // the name.
+        ready(&runtime, &name, "listening").await;
+
         let port = stageman_agent::tunnel_port(&runtime, &name)
             .await
             .expect("the runtime answers")
@@ -447,6 +467,36 @@ mod tests {
         );
 
         discard(&runtime, job).await.expect("it is removable");
+    }
+
+    /// Waits until a container has said the thing that means it is ready.
+    ///
+    /// **Asks the container, never the port.** Waiting on `answering` would
+    /// make the assertion that follows pass whenever that function said yes,
+    /// which is the bug it is there to catch — a readiness check must not be
+    /// the thing under test.
+    async fn ready(runtime: &ContainerRuntime, name: &str, marker: &str) {
+        // Thirty seconds, counted in polls rather than measured against a
+        // deadline: adding a duration to an instant is arithmetic that can
+        // overflow, the gate rightly refuses it, and there is nothing here
+        // that needs a clock.
+        let mut printed = String::new();
+        for _ in 0..300 {
+            let said = std::process::Command::new(runtime.path())
+                .args(["logs", name])
+                .output()
+                .expect("the runtime reports what a container printed");
+            printed = format!(
+                "{}{}",
+                String::from_utf8_lossy(&said.stdout),
+                String::from_utf8_lossy(&said.stderr)
+            );
+            if printed.contains(marker) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        panic!("{name} never said {marker:?}; it said: {printed}");
     }
 
     fn a_job() -> JobId {
