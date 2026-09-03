@@ -40,7 +40,8 @@ pub use dashboard::Dashboard;
 #[cfg(feature = "server")]
 pub use instance::{
     Accepted, Arrived, LoadError, RunError, SaveError, Started, StateGuard, StateRef, Store, Swept,
-    accepting_reply, arriving, attend, begin, deliver, reconcile, run, settle, supervise,
+    accepting_reply, arriving, attend, begin, deliver, interrupted, reconcile, resumed, run,
+    settle, supervise,
 };
 #[cfg(feature = "server")]
 pub use listening::{listen, listen_to, listening_on};

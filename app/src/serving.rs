@@ -502,6 +502,8 @@ async fn start() -> Result<(), StartupError> {
 
     settling(&store);
 
+    resuming(&store, runtime);
+
     // Where a foreman asks for a job. Its own listener, on its own port and
     // every interface — the dashboard stays on loopback, and this cannot,
     // because a container reaches nothing else on every platform. See
@@ -540,6 +542,39 @@ async fn start() -> Result<(), StartupError> {
     axum::serve(listener, router)
         .await
         .map_err(StartupError::Serving)
+}
+
+/// Puts back to work every foreman that was mid-turn when this last stopped.
+///
+/// The counterpart of `crate::reconcile` for the deciding half rather than the
+/// doing one — see
+/// `docs/decisions/0045-a-foremans-turn-survives-the-daemon-dying.md`. Without
+/// it a project whose foreman was working when the process died stays that way
+/// for ever: only an arrival that finds a foreman idle drives its loop, and no
+/// arrival ever will again.
+///
+/// One task per project rather than one for all of them, because each waits on
+/// an agent and a project's turn is nobody else's to wait for. Spawned rather
+/// than awaited, for the reason everything else started here is: several
+/// foremen thinking is several minutes, and `docs/conventions.md` §3 keeps
+/// that off the path that serves the dashboard.
+///
+/// After the sweep, and after the listeners, because both are true of it: a
+/// turn it resumes may look at a job the sweep has just placed, and a message
+/// arriving meanwhile is queued behind what it picks up rather than racing it.
+#[mutants::skip]
+fn resuming(store: &Arc<crate::Store>, runtime: &'static ContainerRuntime) {
+    let waiting = crate::interrupted(&store.read());
+    for project in waiting {
+        // Said because it is not the ordinary case and an operator reading a
+        // startup has no other way to know a turn is being picked up rather
+        // than begun.
+        tracing::info!(%project, "its foreman was interrupted mid-turn; picking it up");
+        let store = Arc::clone(store);
+        tokio::spawn(async move {
+            crate::resumed(&store, runtime, project).await;
+        });
+    }
 }
 
 /// Asks, for as long as this process runs, whether a container held open still

@@ -81,6 +81,13 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   anybody keeps. Not a *queue*, which names the structure instead of what is in
   it, and would invite a second one somewhere else.
 
+  It outlives this process, the way a job does. A message in hand when the
+  daemon is killed is still in hand when it starts again, and startup is what
+  puts that foreman back to work — see
+  `docs/decisions/0045-a-foremans-turn-survives-the-daemon-dying.md`, which
+  exists because for a while nothing did, and a foreman that had been
+  interrupted accepted messages for ever and answered none of them.
+
 - **turn** — one message, handled from being handed to a foreman or a job until
   its agent stops. The protocol's own word, and the unit everything else is
   scoped to: a turn is what an inbox entry buys, what a thread collects, and
