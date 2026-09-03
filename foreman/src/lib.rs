@@ -147,7 +147,7 @@ pub async fn attend(
     repository: &str,
     tools: &stageman_agent::Tools,
     agents: &[(&str, &str)],
-    said: &str,
+    turn: Turn<'_>,
 ) -> Result<Answer, ForemanError> {
     let name = container(project);
     let existing = stageman_agent::abandoned(runtime)
@@ -161,14 +161,14 @@ pub async fn attend(
         // on the session declaration `resume` sends, which is what lets a
         // restarted instance name a different port — see
         // `docs/decisions/0034-tools-are-served-not-shipped.md`.
-        stageman_agent::resume(runtime, &name, Some(tools), &asked(said, agents))
+        stageman_agent::resume(runtime, &name, Some(tools), &asked(turn, agents))
             .await
             .map_err(ForemanError::Agent)
     } else {
         // The opening and the first message together, because a session that
         // was told who it is and then asked nothing would have spent a turn
         // saying hello.
-        let first = format!("{}\n\n{}", opening(repository), asked(said, agents));
+        let first = format!("{}\n\n{}", opening(repository), asked(turn, agents));
         stageman_agent::begin(runtime, handout, &name, Some(tools), &first)
             .await
             .map_err(ForemanError::Agent)
@@ -244,6 +244,70 @@ have already been told."
     )
 }
 
+/// How a turn on a message is starting.
+///
+/// **Not a detail of delivery.** A foreman's inbox is part of the snapshot, so
+/// a message in hand when this process stopped is still in hand when it comes
+/// back — and the turn that picks it up has to be told, because everything it
+/// may already have done happened outside this process and cannot be asked
+/// about afterwards. The same reasoning as
+/// `docs/decisions/0015-a-job-survives-the-daemon-dying.md`, applied to the
+/// half that record did not cover; see
+/// `docs/decisions/0045-a-foremans-turn-survives-the-daemon-dying.md`.
+///
+/// Deliberately not called an attempt. `docs/conventions.md` §2 keeps that
+/// word out of this project because it implies a count and a retry, and this
+/// is neither: it is one turn, continuing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Starting {
+    /// Nothing has been said to the agent about this message yet.
+    Fresh,
+    /// A turn on this message was cut short by this process stopping.
+    Interrupted,
+}
+
+/// One turn: the message being handled, and how the handling is starting.
+///
+/// The two things that differ from one turn to the next — everything else a
+/// foreman is handed describes its project or its session and is the same
+/// every time. Named for `docs/conventions.md` §2's word, which says a turn is
+/// one message handled until its agent stops, because that is exactly what
+/// this is the description of.
+#[derive(Debug, Clone, Copy)]
+pub struct Turn<'a> {
+    /// What the person said, as they wrote it.
+    pub said: &'a str,
+    /// Whether a turn on it was already begun and cut short.
+    pub starting: Starting,
+}
+
+/// What a foreman is told when a turn is picking up an interrupted one.
+///
+/// Its own paragraph rather than a clause in the message, and prepended rather
+/// than woven in, so that the message underneath is byte-for-byte the one the
+/// person wrote. The middle sentence is the load-bearing one, for the reason
+/// [`RESUMPTION`] gives about a job: a foreman may already have started a job
+/// or spoken on the channel, and one that assumes otherwise does it twice.
+const INTERRUPTION: &str = "\
+You were interrupted: the process running you stopped part-way through \
+handling the message below, and you have just been restarted.
+
+You may have finished it, half-finished it, or never begun — including \
+things that outlive you, such as a job you started or something you said \
+on the channel. Check how things actually stand before you act. Do not \
+assume your last step completed, and do not assume it did not.";
+
+/// What a thread is told when the message it is waiting on was interrupted.
+///
+/// Said because only the instance can say it. The person has already been told
+/// their message was received, and then heard nothing for as long as this
+/// instance was down — which is indistinguishable from having been forgotten,
+/// and forgotten is the thing it must not be mistaken for.
+#[must_use]
+pub const fn resumed_notice() -> &'static str {
+    "This instance restarted while it was working on that. It is picking it up again now."
+}
+
 /// What a foreman is told when a person sends it a message.
 ///
 /// Framed rather than passed through, for the reason a job's reply is: what
@@ -256,16 +320,25 @@ have already been told."
 /// start, the list would be right until somebody changed it and wrong
 /// thereafter, with nothing to notice.
 #[must_use]
-pub fn asked(said: &str, agents: &[(&str, &str)]) -> String {
+pub fn asked(turn: Turn<'_>, agents: &[(&str, &str)]) -> String {
+    let Turn { said, starting } = turn;
     let choices = agents
         .iter()
         .map(|(named, described)| format!("  {named} — {described}"))
         .collect::<Vec<_>>()
         .join("\n");
 
+    // First, and on its own, because it changes what every line after it
+    // means. An interrupted turn that read its instructions before hearing it
+    // was interrupted has already decided what to do.
+    let interruption = match starting {
+        Starting::Fresh => String::new(),
+        Starting::Interrupted => format!("{INTERRUPTION}\n\n"),
+    };
+
     format!(
         "\
-A person said this to you on the channel:
+{interruption}A person said this to you on the channel:
 
 {said}
 
@@ -782,6 +855,63 @@ say so at the root of the channel instead: it does not read replies here."
             "This job is still working, so that did not reach it. Wait until it stops, then say \
 it again."
         );
+        assert_eq!(
+            super::resumed_notice(),
+            "This instance restarted while it was working on that. It is picking it up again now."
+        );
+    }
+
+    /// An interrupted turn is told so, and told before it is told anything
+    /// else.
+    ///
+    /// Asserted as literal text, per `docs/conventions.md` §4, and asserted
+    /// *in order* because the order is the whole of it: an agent that read its
+    /// instructions before hearing it was interrupted has already decided what
+    /// to do about them.
+    #[test]
+    fn an_interrupted_turn_is_told_first_that_it_was_interrupted() {
+        let picked = super::asked(
+            super::Turn {
+                said: "look at the parser",
+                starting: super::Starting::Interrupted,
+            },
+            &[("claude", "General-purpose.")],
+        );
+
+        assert!(picked.starts_with(super::INTERRUPTION), "{picked}");
+        assert!(picked.contains("look at the parser"), "{picked}");
+    }
+
+    /// The message underneath is untouched, whichever way the turn starts.
+    ///
+    /// The notice is prepended rather than woven in, so that what a person
+    /// wrote reaches the agent as they wrote it — and so that adding the
+    /// notice cannot change a prompt that was already snapshot-tested.
+    #[test]
+    fn an_interrupted_turn_is_the_fresh_one_with_a_paragraph_in_front() {
+        let agents = [("claude", "General-purpose.")];
+        let first = super::asked(fresh("look at the parser"), &agents);
+        let again = super::asked(
+            super::Turn {
+                said: "look at the parser",
+                starting: super::Starting::Interrupted,
+            },
+            &agents,
+        );
+
+        assert_eq!(again, format!("{}\n\n{first}", super::INTERRUPTION));
+    }
+
+    /// What an interrupted turn must not be told: that anything failed.
+    ///
+    /// The same trap `RESUMPTION` names for a job, and worse here — a foreman
+    /// that assumes its last step did not happen starts a second job for a
+    /// message that already has one, and says so on the channel twice.
+    #[test]
+    fn an_interrupted_turn_is_told_to_check_rather_than_to_assume() {
+        assert!(super::INTERRUPTION.contains("Do not assume your last step completed"));
+        assert!(super::INTERRUPTION.contains("do not assume it did not"));
+        assert!(super::INTERRUPTION.contains("a job you started"));
     }
 
     /// Every acknowledgement teaches the follow-up rule, whatever its standing.
@@ -973,11 +1103,22 @@ told."
         );
     }
 
+    /// A turn on a message nothing has begun, which is nearly every turn.
+    fn fresh(said: &str) -> super::Turn<'_> {
+        super::Turn {
+            said,
+            starting: super::Starting::Fresh,
+        }
+    }
+
     /// Asserted whole, and framed as somebody speaking.
     #[test]
     fn a_message_to_a_foreman_reads_exactly_as_written() {
         assert_eq!(
-            super::asked("look at the parser", &[("claude", "General-purpose.")]),
+            super::asked(
+                fresh("look at the parser"),
+                &[("claude", "General-purpose.")]
+            ),
             "A person said this to you on the channel:
 
 look at the parser
@@ -1038,7 +1179,7 @@ inferred is one a person will act on, and you have no way to check it."
     /// explanation, because it stops the person looking.
     #[test]
     fn a_foreman_is_told_to_report_a_failure_rather_than_explain_it() {
-        let every = super::asked("do the thing", &[("claude", "General-purpose.")]);
+        let every = super::asked(fresh("do the thing"), &[("claude", "General-purpose.")]);
 
         assert!(every.contains("say what it printed"), "{every}");
         assert!(every.contains("no way to check it"), "{every}");
@@ -1054,7 +1195,7 @@ inferred is one a person will act on, and you have no way to check it."
     #[test]
     fn the_agents_a_job_may_run_on_are_said_every_turn() {
         let each = super::asked(
-            "do the thing",
+            fresh("do the thing"),
             &[("claude", "General-purpose."), ("other", "Narrow.")],
         );
 

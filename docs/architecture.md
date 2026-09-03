@@ -173,6 +173,23 @@ nobody is a wish.
   having: construction is what a later field would change, and a redacting
   `Debug` would not notice — `docs/conventions.md` §4's rule is about
   formatting, and this is about the wire.
+- **A channel's connection is never unattended.** The task that reads a
+  channel reads it, acknowledges, and hands over; it never waits for what it
+  handed over to finish. A turn takes minutes and a socket is answered in
+  milliseconds, so a task doing both stops answering the platform's pings,
+  cannot see its warning that a connection is about to close, and loses
+  whatever is said between that close and a replacement — with nothing said
+  anywhere, because an ordinary ending is what it looks like from inside. See
+  `docs/decisions/0044-a-listener-only-listens.md`. *Defended by* the handing
+  over being a synchronous function, so that everything it starts must be
+  started on a task of its own, and by a reviewer — an `await` added there
+  would compile and would pass every test, since nothing under test is slow
+  enough to matter.
+
+  One thing deliberately stays on that task: the state change each recipient
+  makes as a message *arrives*. Order is the whole of what a foreman's inbox
+  promises, and spawning that would fill it in the order tasks were polled
+  rather than the order messages were read.
 - **No job blocks on a terminal.** A job that needs a human emits the question
   on a channel and stays alive. It never writes to standard output expecting an
   answer on standard input, because nobody is watching that terminal — that is

@@ -588,15 +588,30 @@ fn accepting(state: &mut State, job: JobId) -> Accepted {
     Accepted::Taken
 }
 
-/// What [`accepting`] decided.
+/// What [`accepting_reply`] decided when a reply arrived.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Accepted {
+pub enum Accepted {
     /// The job was idle and is now running.
     Taken,
     /// It was already working, so nothing was taken.
     Busy,
     /// This instance has no such job.
     Unknown,
+}
+
+/// Takes a reply for a job if it can take one, and says which.
+///
+/// **Synchronous, and called on the task that reads the channel**, which is
+/// what fixes the order two replies arriving together are considered in. The
+/// work each authorises happens elsewhere and may overlap; deciding which of
+/// them the job accepts may not, or the loser would be whichever task the
+/// runtime happened to poll first rather than whichever message arrived
+/// second. See `docs/decisions/0044-a-listener-only-listens.md`.
+pub fn accepting_reply(store: &Store, job: JobId) -> Accepted {
+    let mut state = store.update();
+    let taken = accepting(&mut state, job);
+    drop(state);
+    taken
 }
 
 /// Hands a reply to the job whose thread it arrived in.
@@ -608,6 +623,13 @@ enum Accepted {
 /// person gets for replying to a job that is genuinely still working — because
 /// from the outside it is the same situation.
 ///
+/// That decision is [`accepting_reply`]'s and arrives here as an argument,
+/// because it belongs to the moment the message was read and this function
+/// runs long after it — see
+/// `docs/decisions/0044-a-listener-only-listens.md`. What is *refused* is
+/// still said from here, so a refusal and an acceptance leave by the same
+/// door.
+///
 /// Answering a job this instance does not have, or one with nothing to resume,
 /// is deliberately not this function's problem to hide: both come back as a
 /// refusal the caller says on the thread.
@@ -616,13 +638,8 @@ pub async fn deliver(
     runtime: &ContainerRuntime,
     job: JobId,
     said: &str,
+    taken: Accepted,
 ) -> Progress {
-    let taken = {
-        let mut state = store.update();
-        let taken = accepting(&mut state, job);
-        drop(state);
-        taken
-    };
     match taken {
         Accepted::Unknown => return Progress::Failed("no such job".to_owned()),
         Accepted::Busy => {
@@ -1041,8 +1058,62 @@ fn record(store: &Store, job: JobId, progress: Progress) {
     }
 }
 
-/// Hands a message to a project's foreman, and keeps it working until its
-/// inbox is empty.
+/// A message that is already in a foreman's inbox, and what that arrival was.
+///
+/// Carried from the reading task to the working one because all three answers
+/// belong to the moment the message arrived rather than to the moment it is
+/// acted on: whether this arrival is the one that has to drive the loop, how
+/// many were ahead of it when it landed, and which thread the answer belongs
+/// under.
+pub struct Arrived {
+    /// What became of it, and `None` when there is no such project to take it.
+    taken: Option<Taken>,
+    /// How many were waiting ahead of it as it landed.
+    ahead: usize,
+    /// Where its answer belongs.
+    thread: Thread,
+}
+
+/// Puts a message in a project's foreman's inbox.
+///
+/// **Synchronous, and called on the task that reads the channel.** The inbox
+/// is ordered and that order is the whole of what it promises, so the taking
+/// has to happen where messages are still in the order they arrived — see
+/// `docs/decisions/0044-a-listener-only-listens.md`. Everything the message
+/// then causes is [`attend`]'s, and runs elsewhere.
+#[must_use]
+pub fn arriving(store: &Store, project: ProjectId, said: Errand) -> Arrived {
+    // Kept before the message is moved into the inbox, because the answer to
+    // it belongs under the message that asked.
+    let thread = said.thread.clone();
+    let mut state = store.update();
+    let attending = state
+        .projects
+        .get_mut(&project)
+        .map(|watched| &mut watched.attending);
+    let outcome = attending.map(|attending| {
+        let taken = attending.take(said);
+        // Counting the one in hand: from outside, everything not yet
+        // answered is ahead of this.
+        let ahead = match taken {
+            Taken::Started => 0,
+            Taken::Waiting => attending.waiting(),
+        };
+        (taken, ahead)
+    });
+    drop(state);
+    let (taken, ahead) = match outcome {
+        Some((taken, ahead)) => (Some(taken), ahead),
+        None => (None, 0),
+    };
+    Arrived {
+        taken,
+        ahead,
+        thread,
+    }
+}
+
+/// Works a project's foreman until its inbox is empty.
 ///
 /// Skipped by mutation testing because it decides nothing: whether this call
 /// drives the loop, what to work on next, and what happens when a turn ends
@@ -1059,39 +1130,26 @@ fn record(store: &Store, job: JobId, progress: Progress) {
 /// message has been put in its inbox by then, and whichever call is running
 /// the loop will reach it. That is the same one-operation rule the inbox is
 /// built on — two messages arriving together cannot both start a loop, because
-/// only one of them finds it idle.
+/// only one of them finds it idle. Which of them did is [`arriving`]'s answer
+/// and arrives here as an argument, so that it is settled by arrival order
+/// rather than by polling order.
 #[mutants::skip]
-pub async fn attend(store: &Store, runtime: &ContainerRuntime, project: ProjectId, said: Errand) {
-    // Kept before the message is moved into the inbox, because the answer to
-    // it belongs under the message that asked.
-    let thread = said.thread.clone();
-    let (started, ahead) = {
-        let mut state = store.update();
-        let attending = state
-            .projects
-            .get_mut(&project)
-            .map(|watched| &mut watched.attending);
-        let outcome = attending.map(|attending| {
-            let taken = attending.take(said);
-            // Counting the one in hand: from outside, everything not yet
-            // answered is ahead of this.
-            let ahead = match taken {
-                Taken::Started => 0,
-                Taken::Waiting => attending.waiting(),
-            };
-            (taken, ahead)
-        });
-        drop(state);
-        match outcome {
-            Some((taken, ahead)) => (Some(taken), ahead),
-            None => (None, 0),
-        }
-    };
+pub async fn attend(
+    store: &Store,
+    runtime: &ContainerRuntime,
+    project: ProjectId,
+    arrived: Arrived,
+) {
+    let Arrived {
+        taken,
+        ahead,
+        thread,
+    } = arrived;
 
     // Said at once, before any work. A foreman three messages behind is silent
     // for a while, and somebody who hears nothing cannot tell queued from
     // ignored.
-    if started.is_some() {
+    if taken.is_some() {
         notice_in(
             store,
             project,
@@ -1101,10 +1159,77 @@ pub async fn attend(store: &Store, runtime: &ContainerRuntime, project: ProjectI
         .await;
     }
 
-    if !drives(started) {
+    if !drives(taken) {
         return;
     }
 
+    working(store, runtime, project, stageman_foreman::Starting::Fresh).await;
+}
+
+/// Puts a foreman that was interrupted mid-turn back to work.
+///
+/// The foreman's half of
+/// `docs/decisions/0015-a-job-survives-the-daemon-dying.md`, and it arrived
+/// late: a project's inbox is in the snapshot, so a message in hand when this
+/// process stopped is still in hand — and nothing was driving it, because only
+/// an arrival that finds a foreman idle does that and this one is not idle.
+/// See `docs/decisions/0045-a-foremans-turn-survives-the-daemon-dying.md`.
+///
+/// **No message is taken and none is acknowledged**, which is the whole
+/// difference from [`attend`]: the arrival already happened, and was already
+/// answered on the thread when it did. What the thread is told instead is that
+/// the wait had a reason.
+#[mutants::skip]
+pub async fn resumed(store: &Store, runtime: &ContainerRuntime, project: ProjectId) {
+    let thread = {
+        let state = store.read();
+        let found = waiting_on(&state, project).map(|errand| errand.thread);
+        drop(state);
+        found
+    };
+    let Some(thread) = thread else {
+        return;
+    };
+    notice_in(store, project, &thread, stageman_foreman::resumed_notice()).await;
+
+    working(
+        store,
+        runtime,
+        project,
+        stageman_foreman::Starting::Interrupted,
+    )
+    .await;
+}
+
+/// Every project whose foreman was working when this process last stopped.
+///
+/// Over a state rather than a store, like every other decision in this crate
+/// that could otherwise only be reached through I/O. A foreman that is idle is
+/// not here, and a foreman that is idle *while something waits* is a state the
+/// domain has no way to write down — see `Attending`.
+#[must_use]
+pub fn interrupted(state: &State) -> Vec<ProjectId> {
+    state
+        .projects
+        .iter()
+        .filter(|(_, watched)| watched.attending.on().is_some())
+        .map(|(project, _)| *project)
+        .collect()
+}
+
+/// Runs a foreman's turns until its inbox is empty.
+///
+/// The half [`attend`] and [`resumed`] share. `starting` describes the *first*
+/// turn only: whatever this picks up afterwards was never begun, so it is
+/// fresh however this loop was entered.
+#[mutants::skip]
+async fn working(
+    store: &Store,
+    runtime: &ContainerRuntime,
+    project: ProjectId,
+    starting: stageman_foreman::Starting,
+) {
+    let mut starting = starting;
     loop {
         // Read and released before the turn, never held across it. Kept in the
         // `while let` scrutinee this lock lived until the end of the body —
@@ -1120,7 +1245,8 @@ pub async fn attend(store: &Store, runtime: &ContainerRuntime, project: ProjectI
         let Some(errand) = waiting else {
             break;
         };
-        let outcome = turn(store, runtime, project, &errand).await;
+        let outcome = turn(store, runtime, project, &errand, starting).await;
+        starting = stageman_foreman::Starting::Fresh;
         if let Err(why) = outcome {
             // Logged and moved past rather than retried. A message that cannot
             // be handled must not become a message that is handled for ever,
@@ -1182,6 +1308,7 @@ async fn turn(
     runtime: &ContainerRuntime,
     project: ProjectId,
     errand: &Errand,
+    starting: stageman_foreman::Starting,
 ) -> Result<(), RunError> {
     let (repository, handout) = {
         let state = store.read();
@@ -1234,7 +1361,10 @@ async fn turn(
         &repository,
         &stageman_agent::Tools::new(crate::tooling::endpoint(*crate::endpoint::PORT), credential),
         &agents,
-        &errand.said,
+        stageman_foreman::Turn {
+            said: &errand.said,
+            starting,
+        },
     )
     .await
     .map(drop)
@@ -1269,8 +1399,8 @@ async fn notice_in(store: &Store, project: ProjectId, thread: &Thread, text: &st
 #[cfg(test)]
 mod tests {
     use super::{
-        Attended, LoadError, Store, Swept, Unplaceable, has_container, outcome, reconcile, resting,
-        run, tallied, unplaceable,
+        Attended, LoadError, Store, Swept, Unplaceable, has_container, interrupted, outcome,
+        reconcile, resting, run, tallied, unplaceable,
     };
     use stageman_agent::{Answer, ContainerRuntime, StopReason};
     use stageman_core::{
@@ -1331,6 +1461,70 @@ mod tests {
 
     fn only_claude() -> BTreeSet<Agent> {
         BTreeSet::from([Agent::Claude])
+    }
+
+    fn a_message() -> stageman_core::Errand {
+        stageman_core::Errand {
+            said: "look at the parser".to_owned(),
+            thread: Thread {
+                channel: stageman_core::Channel::Slack,
+                id: "1700000000.000100".to_owned(),
+            },
+        }
+    }
+
+    /// A foreman holding a message is found; an idle one is not.
+    ///
+    /// Both halves, because the two failures are opposite and both are silent.
+    /// Missing a foreman that was working leaves it wedged for ever — no
+    /// arrival drives a loop that is already running, and after a restart none
+    /// is. Naming an idle one starts a turn on a message that does not exist.
+    #[test]
+    fn a_foreman_holding_a_message_is_the_one_put_back_to_work() {
+        let (mut state, _) = an_instance_with_a_job();
+        let project = *state
+            .projects
+            .keys()
+            .next()
+            .expect("the helper watches one project");
+
+        assert_eq!(
+            interrupted(&state),
+            Vec::new(),
+            "an idle foreman has nothing to pick up"
+        );
+
+        let watched = state
+            .projects
+            .get_mut(&project)
+            .expect("the project just read");
+        assert_eq!(watched.attending.take(a_message()), Taken::Started);
+
+        assert_eq!(interrupted(&state), vec![project]);
+    }
+
+    /// What waits behind the message in hand does not make a second project.
+    ///
+    /// One entry per project, because what is resumed is a foreman rather than
+    /// a message: the loop it is put back into drains everything behind the
+    /// one it is holding.
+    #[test]
+    fn a_foreman_with_several_waiting_is_named_once() {
+        let (mut state, _) = an_instance_with_a_job();
+        let project = *state
+            .projects
+            .keys()
+            .next()
+            .expect("the helper watches one project");
+        let watched = state
+            .projects
+            .get_mut(&project)
+            .expect("the project just read");
+        assert_eq!(watched.attending.take(a_message()), Taken::Started);
+        assert_eq!(watched.attending.take(a_message()), Taken::Waiting);
+        assert_eq!(watched.attending.take(a_message()), Taken::Waiting);
+
+        assert_eq!(interrupted(&state), vec![project]);
     }
 
     /// A container holding a turn is never asked to stop; every other one is.

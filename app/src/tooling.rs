@@ -1163,9 +1163,12 @@ mod tests {
                 "https://example.invalid/aviary",
                 &stageman_agent::Tools::new(super::super::endpoint(port), credential),
                 &[("claude", "a general-purpose coding agent")],
-                "Do not start anything. List the names of every tool you have whose name \
-                 contains 'stageman', exactly as they are spelled. If you have none, reply \
-                 with exactly NO STAGEMAN TOOLS.",
+                stageman_foreman::Turn {
+                    said: "Do not start anything. List the names of every tool you have whose \
+                           name contains 'stageman', exactly as they are spelled. If you have \
+                           none, reply with exactly NO STAGEMAN TOOLS.",
+                    starting: stageman_foreman::Starting::Fresh,
+                },
             )
             .await;
 
@@ -1256,7 +1259,10 @@ mod tests {
                 "https://example.invalid/aviary",
                 &stageman_agent::Tools::new(super::super::endpoint(port), credential),
                 &[("claude", "a general-purpose coding agent")],
-                "The README has a broken link in it. Please get that fixed.",
+                stageman_foreman::Turn {
+                    said: "The README has a broken link in it. Please get that fixed.",
+                    starting: stageman_foreman::Starting::Fresh,
+                },
             )
             .await;
 
