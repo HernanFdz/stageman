@@ -237,30 +237,56 @@ async fn open_socket(
         .ok_or(crate::channel::ChannelError::NoIdentifier)
 }
 
-/// Opens one connection and reads it until it ends.
+/// The socket one connection is read from.
+#[cfg(feature = "server")]
+type Socket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// One live connection, and who this instance is on it.
 ///
-/// **Skipped by mutation testing, and thin enough to justify it.** Every
-/// decision is in [`decode`] and in `State::recipient`, both pure and both
-/// tested; what is here is a request, a socket, and a loop that hands over.
-///
-/// Returns when the platform asks for a new connection or the socket closes,
-/// which are the same thing to a caller: open another.
+/// The two travel together because neither is usable without the other: the
+/// identity is what a mention resolves against, and it is asked for with a
+/// different credential from the one that opens the socket. Fetched once per
+/// connection rather than once per message.
+#[cfg(feature = "server")]
+struct Connected {
+    /// What frames arrive on.
+    socket: Socket,
+    /// Who this instance is on it.
+    us: Identity,
+}
+
+/// Why one connection stopped being read.
+#[cfg(feature = "server")]
+enum Ended {
+    /// The platform asked for a replacement, and left this one open.
+    ///
+    /// Handed back rather than dropped, which is the whole of how a
+    /// replacement is opened without a gap: the platform keeps this readable
+    /// for about ten seconds after saying so, so it goes on carrying messages
+    /// until the next one is up. See
+    /// `docs/decisions/0044-a-listener-only-listens.md`.
+    ///
+    /// Boxed because a socket is large and the other variant is empty, so the
+    /// unboxed form would cost every ending the size of a connection to say
+    /// that there is not one.
+    Refresh(Box<Connected>),
+    /// It closed. There is nothing left to read and nothing to hand back, so
+    /// from here until a replacement is up this project hears nothing.
+    Closed,
+}
+
+/// Opens one connection, and finds out who this instance is on it.
 ///
 /// # Errors
 ///
-/// Fails if the connection cannot be opened or the socket breaks.
+/// Fails if either credential is refused, or the socket cannot be opened.
 #[cfg(feature = "server")]
 #[mutants::skip]
-pub async fn attend(
-    store: &crate::Store,
-    runtime: &stageman_agent::ContainerRuntime,
-    listening: &Listening,
-    us: &Identity,
-) -> Result<(), crate::channel::ChannelError> {
-    use futures_util::{SinkExt as _, StreamExt as _};
-
+async fn connect(listening: &Listening) -> Result<Connected, crate::channel::ChannelError> {
+    let us = introduce(listening).await?;
     let url = open_socket(&listening.opening).await?;
-    let (mut socket, _) = tokio_tungstenite::connect_async(&url)
+    let (socket, _) = tokio_tungstenite::connect_async(&url)
         .await
         .map_err(|failure| crate::channel::ChannelError::Unreachable(failure.to_string()))?;
     // Said at all because the alternative was silence. A listener that
@@ -274,6 +300,38 @@ pub async fn attend(
         as_user = %us.user,
         "listening"
     );
+    Ok(Connected { socket, us })
+}
+
+/// Reads one connection until it ends.
+///
+/// **Nothing here waits for work to be done**, and that is the property the
+/// whole file is arranged around: a turn takes minutes, this socket is
+/// answered in milliseconds, and a loop that did both would spend those
+/// minutes answering no pings, reading no frames and missing the platform's
+/// warning that it is about to close — see
+/// `docs/decisions/0044-a-listener-only-listens.md`. So [`act`] is
+/// synchronous, and what it starts finishes on tasks of its own.
+///
+/// **Skipped by mutation testing, and thin enough to justify it.** Every
+/// decision is in [`decode`], in `State::recipient` and in the two transitions
+/// [`act`] performs, all tested; what is here is a socket and a loop that
+/// hands over.
+///
+/// # Errors
+///
+/// Fails if the socket breaks in a way that is not an ordinary ending.
+#[cfg(feature = "server")]
+#[mutants::skip]
+async fn read(
+    store: &std::sync::Arc<crate::Store>,
+    runtime: &'static stageman_agent::ContainerRuntime,
+    listening: &std::sync::Arc<Listening>,
+    connected: Connected,
+) -> Result<Ended, crate::channel::ChannelError> {
+    use futures_util::{SinkExt as _, StreamExt as _};
+
+    let Connected { mut socket, us } = connected;
 
     while let Some(frame) = socket.next().await {
         let frame = match frame {
@@ -285,7 +343,7 @@ pub async fn attend(
             // ignore what this reports.
             Err(why) if ordinary_end(&why) => {
                 tracing::info!(%why, "the connection ended; opening another");
-                return Ok(());
+                return Ok(Ended::Closed);
             }
             Err(why) => {
                 return Err(crate::channel::ChannelError::Unreachable(why.to_string()));
@@ -295,7 +353,7 @@ pub async fn attend(
             continue;
         };
 
-        let heard = decode(text.as_str(), us);
+        let heard = decode(text.as_str(), &us);
         // Every frame, at a level nobody runs by default. It is the only place
         // that can say whether the platform is sending anything at all, which
         // is the first question when a reply does not arrive.
@@ -315,7 +373,12 @@ pub async fn attend(
         }
 
         match heard {
-            Incoming::Reconnect => return Ok(()),
+            // Handed back still open, because it is: the platform says this
+            // about ten seconds before it closes, and those ten seconds are
+            // what a replacement is opened inside of.
+            Incoming::Reconnect => {
+                return Ok(Ended::Refresh(Box::new(Connected { socket, us })));
+            }
             Incoming::Said {
                 ref text,
                 ref address,
@@ -339,12 +402,37 @@ pub async fn attend(
                     );
                 }
                 let text = text.clone();
-                act(store, runtime, listening, &heard, &text).await;
+                act(store, runtime, listening, &heard, &text);
             }
             Incoming::Ready | Incoming::Acknowledge(_) | Incoming::Ignore => {}
         }
     }
-    Ok(())
+    Ok(Ended::Closed)
+}
+
+/// Reads a connection the platform has replaced, until it closes.
+///
+/// The other half of opening a replacement early: the old socket is still
+/// carrying messages, and dropping it to open the new one would lose whatever
+/// arrives in between. It is read on a task of its own so that opening the
+/// replacement does not wait for it, and it ends when the platform closes it.
+#[cfg(feature = "server")]
+#[mutants::skip]
+fn drain(
+    store: &std::sync::Arc<crate::Store>,
+    runtime: &'static stageman_agent::ContainerRuntime,
+    listening: &std::sync::Arc<Listening>,
+    replaced: Box<Connected>,
+) {
+    let store = std::sync::Arc::clone(store);
+    let listening = std::sync::Arc::clone(listening);
+    tokio::spawn(async move {
+        if let Err(why) = read(&store, runtime, &listening, *replaced).await {
+            // Not a warning. This connection has already been replaced, so
+            // whatever it does on its way out costs nothing.
+            tracing::debug!(project = %listening.project, %why, "a replaced connection ended badly");
+        }
+    });
 }
 
 /// Whether a socket ending this way is the ordinary case.
@@ -388,12 +476,24 @@ fn acknowledging(heard: &Incoming) -> Option<&str> {
 }
 
 /// Hands one message to whoever it is for.
+///
+/// **Synchronous, and every await it would have made happens on a task of its
+/// own.** This runs on the task reading the socket, so anything it waited for
+/// would be time that socket spent unattended — which is what
+/// `docs/decisions/0044-a-listener-only-listens.md` exists to prevent.
+///
+/// What it does *not* hand off is the one state change each recipient makes
+/// on arrival: the foreman's inbox taking the message, and a job accepting or
+/// refusing a reply. Both are already one operation under one lock, and doing
+/// them here is what keeps them in the order the messages arrived — spawned,
+/// two frames read back to back would race, and the runtime polls the most
+/// recently spawned task first, so the usual outcome would be the wrong one.
 #[cfg(feature = "server")]
 #[mutants::skip]
-async fn act(
-    store: &crate::Store,
-    runtime: &stageman_agent::ContainerRuntime,
-    listening: &Listening,
+fn act(
+    store: &std::sync::Arc<crate::Store>,
+    runtime: &'static stageman_agent::ContainerRuntime,
+    listening: &std::sync::Arc<Listening>,
     heard: &Incoming,
     said: &str,
 ) {
@@ -411,7 +511,13 @@ async fn act(
         stageman_core::Recipient::Job(job) => {
             tracing::info!(%job, "handing a reply to the job whose thread it is in");
             let framed = stageman_foreman::reply(said);
-            drop(crate::deliver(store, runtime, job, &framed).await);
+            // Decided here and carried across, because whether this job is
+            // busy is a fact about the moment the reply arrived.
+            let taken = crate::accepting_reply(store, job);
+            let store = std::sync::Arc::clone(store);
+            tokio::spawn(async move {
+                drop(crate::deliver(&store, runtime, job, &framed, taken).await);
+            });
         }
         stageman_core::Recipient::Foreman(project) => {
             // A message at the root is the parent of the thread its answer
@@ -424,16 +530,18 @@ async fn act(
                 id: arriving.thread.unwrap_or(arriving.id).to_owned(),
             };
             tracing::info!(%project, "a message for the foreman");
-            crate::attend(
+            let arrived = crate::arriving(
                 store,
-                runtime,
                 project,
                 stageman_core::Errand {
                     said: said.to_owned(),
                     thread,
                 },
-            )
-            .await;
+            );
+            let store = std::sync::Arc::clone(store);
+            tokio::spawn(async move {
+                crate::attend(&store, runtime, project, arrived).await;
+            });
         }
         // Answered rather than ignored. They addressed this instance, so
         // silence would read as broken — and this is where somebody lands by
@@ -446,15 +554,18 @@ async fn act(
                 return;
             };
             tracing::info!(%project, "a message in a thread belonging to no job");
-            if let Err(why) = crate::channel::say_in(
-                &listening.speaking,
-                &thread,
-                stageman_foreman::no_such_job_notice(),
-            )
-            .await
-            {
-                tracing::warn!(%why, "the thread could not be answered");
-            }
+            let listening = std::sync::Arc::clone(listening);
+            tokio::spawn(async move {
+                if let Err(why) = crate::channel::say_in(
+                    &listening.speaking,
+                    &thread,
+                    stageman_foreman::no_such_job_notice(),
+                )
+                .await
+                {
+                    tracing::warn!(%why, "the thread could not be answered");
+                }
+            });
         }
         // Ordinary — most of what is said in a project's channel is people
         // talking to each other. Said at debug so that "nothing happened" can
@@ -501,11 +612,30 @@ pub fn listen(
     }
 }
 
+/// How long to wait before trying a connection that failed again.
+///
+/// A fixed wait rather than a backoff. Reconnecting is the ordinary case here,
+/// so the common path must not grow a delay that compounds; a credential that
+/// is simply wrong retries at this rate for ever, which is cheap and visible
+/// in the log. It is only ever waited *after* something went wrong — a
+/// connection the platform replaced on schedule does not pass through it.
+#[cfg(feature = "server")]
+const BEFORE_TRYING_AGAIN: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Listens on one project's channel, reopening its connection for ever.
 ///
 /// Split out so that binding a channel can start listening on it immediately.
 /// The platform ends a connection on a schedule of its own, so reopening is
 /// the ordinary case rather than error handling.
+///
+/// **A replacement is opened before the connection it replaces is let go.**
+/// The platform warns about ten seconds ahead and allows an app several
+/// connections at once, which together are what make a scheduled refresh cost
+/// nothing — see `docs/decisions/0044-a-listener-only-listens.md`. An
+/// *unscheduled* end has no such warning, so it does leave a gap, and that gap
+/// is the one thing here worth an operator's attention: it is measured and
+/// reported, because a message said into it reaches nobody and the platform
+/// does not send it again.
 #[cfg(feature = "server")]
 #[mutants::skip]
 pub fn listen_to(
@@ -514,24 +644,60 @@ pub fn listen_to(
     one: Listening,
 ) {
     let store = std::sync::Arc::clone(store);
+    let one = std::sync::Arc::new(one);
     tokio::spawn(async move {
         let project = one.project;
+        // When this project stopped having a connection, and `None` while it
+        // has one. The instance is the only thing that knows it went deaf, and
+        // until this it was the only thing that never said so.
+        let mut deaf_since: Option<std::time::Instant> = None;
         loop {
-            match introduce(&one).await {
-                Ok(us) => {
-                    if let Err(why) = attend(&store, runtime, &one, &us).await {
-                        tracing::warn!(%project, %why, "the channel stopped being readable");
+            match connect(&one).await {
+                Ok(connected) => {
+                    // Warned rather than logged, and only when there was
+                    // genuinely nothing listening. `docs/conventions.md` §3
+                    // puts in front of an operator what they can act on, and
+                    // this is the whole of what a lost message looks like from
+                    // in here: a window, its length, and nothing else.
+                    if let Some(since) = deaf_since.take() {
+                        tracing::warn!(
+                            %project,
+                            deaf_for = ?since.elapsed(),
+                            "nothing was listening on this project's channel for that long; \
+                             anything said in the window was not heard, and the platform does \
+                             not send it again"
+                        );
+                    }
+                    match read(&store, runtime, &one, connected).await {
+                        // The platform is replacing this one and has left it
+                        // open. It goes on being read while the loop opens the
+                        // replacement, so there is no moment with none — and
+                        // no wait, because nothing went wrong.
+                        Ok(Ended::Refresh(replaced)) => {
+                            drain(&store, runtime, &one, replaced);
+                            continue;
+                        }
+                        Ok(Ended::Closed) => deaf_since = Some(std::time::Instant::now()),
+                        Err(why) => {
+                            tracing::warn!(%project, %why, "the channel stopped being readable");
+                            deaf_since = Some(std::time::Instant::now());
+                        }
                     }
                 }
                 Err(why) => {
                     tracing::warn!(%project, %why, "the channel could not be listened to");
+                    // Kept rather than replaced, so that a run of failed
+                    // attempts is reported as the one window it is rather than
+                    // as the last attempt's share of it.
+                    //
+                    // Slightly early when the previous connection is still
+                    // draining, which is the safe direction: the platform said
+                    // it was closing that one, so the window is coming either
+                    // way and only its reported start is generous.
+                    deaf_since.get_or_insert_with(std::time::Instant::now);
                 }
             }
-            // A fixed wait rather than a backoff. Reconnecting is the ordinary
-            // case here, so the common path must not grow a delay that
-            // compounds; a credential that is simply wrong retries at this
-            // rate for ever, which is cheap and visible in the log.
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            tokio::time::sleep(BEFORE_TRYING_AGAIN).await;
         }
     });
 }

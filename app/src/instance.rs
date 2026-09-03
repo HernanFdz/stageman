@@ -588,15 +588,30 @@ fn accepting(state: &mut State, job: JobId) -> Accepted {
     Accepted::Taken
 }
 
-/// What [`accepting`] decided.
+/// What [`accepting_reply`] decided when a reply arrived.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Accepted {
+pub enum Accepted {
     /// The job was idle and is now running.
     Taken,
     /// It was already working, so nothing was taken.
     Busy,
     /// This instance has no such job.
     Unknown,
+}
+
+/// Takes a reply for a job if it can take one, and says which.
+///
+/// **Synchronous, and called on the task that reads the channel**, which is
+/// what fixes the order two replies arriving together are considered in. The
+/// work each authorises happens elsewhere and may overlap; deciding which of
+/// them the job accepts may not, or the loser would be whichever task the
+/// runtime happened to poll first rather than whichever message arrived
+/// second. See `docs/decisions/0044-a-listener-only-listens.md`.
+pub fn accepting_reply(store: &Store, job: JobId) -> Accepted {
+    let mut state = store.update();
+    let taken = accepting(&mut state, job);
+    drop(state);
+    taken
 }
 
 /// Hands a reply to the job whose thread it arrived in.
@@ -608,6 +623,13 @@ enum Accepted {
 /// person gets for replying to a job that is genuinely still working — because
 /// from the outside it is the same situation.
 ///
+/// That decision is [`accepting_reply`]'s and arrives here as an argument,
+/// because it belongs to the moment the message was read and this function
+/// runs long after it — see
+/// `docs/decisions/0044-a-listener-only-listens.md`. What is *refused* is
+/// still said from here, so a refusal and an acceptance leave by the same
+/// door.
+///
 /// Answering a job this instance does not have, or one with nothing to resume,
 /// is deliberately not this function's problem to hide: both come back as a
 /// refusal the caller says on the thread.
@@ -616,13 +638,8 @@ pub async fn deliver(
     runtime: &ContainerRuntime,
     job: JobId,
     said: &str,
+    taken: Accepted,
 ) -> Progress {
-    let taken = {
-        let mut state = store.update();
-        let taken = accepting(&mut state, job);
-        drop(state);
-        taken
-    };
     match taken {
         Accepted::Unknown => return Progress::Failed("no such job".to_owned()),
         Accepted::Busy => {
@@ -1041,8 +1058,62 @@ fn record(store: &Store, job: JobId, progress: Progress) {
     }
 }
 
-/// Hands a message to a project's foreman, and keeps it working until its
-/// inbox is empty.
+/// A message that is already in a foreman's inbox, and what that arrival was.
+///
+/// Carried from the reading task to the working one because all three answers
+/// belong to the moment the message arrived rather than to the moment it is
+/// acted on: whether this arrival is the one that has to drive the loop, how
+/// many were ahead of it when it landed, and which thread the answer belongs
+/// under.
+pub struct Arrived {
+    /// What became of it, and `None` when there is no such project to take it.
+    taken: Option<Taken>,
+    /// How many were waiting ahead of it as it landed.
+    ahead: usize,
+    /// Where its answer belongs.
+    thread: Thread,
+}
+
+/// Puts a message in a project's foreman's inbox.
+///
+/// **Synchronous, and called on the task that reads the channel.** The inbox
+/// is ordered and that order is the whole of what it promises, so the taking
+/// has to happen where messages are still in the order they arrived — see
+/// `docs/decisions/0044-a-listener-only-listens.md`. Everything the message
+/// then causes is [`attend`]'s, and runs elsewhere.
+#[must_use]
+pub fn arriving(store: &Store, project: ProjectId, said: Errand) -> Arrived {
+    // Kept before the message is moved into the inbox, because the answer to
+    // it belongs under the message that asked.
+    let thread = said.thread.clone();
+    let mut state = store.update();
+    let attending = state
+        .projects
+        .get_mut(&project)
+        .map(|watched| &mut watched.attending);
+    let outcome = attending.map(|attending| {
+        let taken = attending.take(said);
+        // Counting the one in hand: from outside, everything not yet
+        // answered is ahead of this.
+        let ahead = match taken {
+            Taken::Started => 0,
+            Taken::Waiting => attending.waiting(),
+        };
+        (taken, ahead)
+    });
+    drop(state);
+    let (taken, ahead) = match outcome {
+        Some((taken, ahead)) => (Some(taken), ahead),
+        None => (None, 0),
+    };
+    Arrived {
+        taken,
+        ahead,
+        thread,
+    }
+}
+
+/// Works a project's foreman until its inbox is empty.
 ///
 /// Skipped by mutation testing because it decides nothing: whether this call
 /// drives the loop, what to work on next, and what happens when a turn ends
@@ -1059,39 +1130,26 @@ fn record(store: &Store, job: JobId, progress: Progress) {
 /// message has been put in its inbox by then, and whichever call is running
 /// the loop will reach it. That is the same one-operation rule the inbox is
 /// built on — two messages arriving together cannot both start a loop, because
-/// only one of them finds it idle.
+/// only one of them finds it idle. Which of them did is [`arriving`]'s answer
+/// and arrives here as an argument, so that it is settled by arrival order
+/// rather than by polling order.
 #[mutants::skip]
-pub async fn attend(store: &Store, runtime: &ContainerRuntime, project: ProjectId, said: Errand) {
-    // Kept before the message is moved into the inbox, because the answer to
-    // it belongs under the message that asked.
-    let thread = said.thread.clone();
-    let (started, ahead) = {
-        let mut state = store.update();
-        let attending = state
-            .projects
-            .get_mut(&project)
-            .map(|watched| &mut watched.attending);
-        let outcome = attending.map(|attending| {
-            let taken = attending.take(said);
-            // Counting the one in hand: from outside, everything not yet
-            // answered is ahead of this.
-            let ahead = match taken {
-                Taken::Started => 0,
-                Taken::Waiting => attending.waiting(),
-            };
-            (taken, ahead)
-        });
-        drop(state);
-        match outcome {
-            Some((taken, ahead)) => (Some(taken), ahead),
-            None => (None, 0),
-        }
-    };
+pub async fn attend(
+    store: &Store,
+    runtime: &ContainerRuntime,
+    project: ProjectId,
+    arrived: Arrived,
+) {
+    let Arrived {
+        taken,
+        ahead,
+        thread,
+    } = arrived;
 
     // Said at once, before any work. A foreman three messages behind is silent
     // for a while, and somebody who hears nothing cannot tell queued from
     // ignored.
-    if started.is_some() {
+    if taken.is_some() {
         notice_in(
             store,
             project,
@@ -1101,7 +1159,7 @@ pub async fn attend(store: &Store, runtime: &ContainerRuntime, project: ProjectI
         .await;
     }
 
-    if !drives(started) {
+    if !drives(taken) {
         return;
     }
 
