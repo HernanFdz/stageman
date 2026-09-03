@@ -212,6 +212,13 @@ watch jobs and read their logs, and pause or kill one that has gone wrong. A
 single instance manages several projects, and a job belongs to exactly one of
 them: it cannot see another project's repository, credentials or channels.
 
+A project can also carry **variables** of its own — names and values you choose,
+set in every container its jobs run in. That is how a job reaches something
+stageman has never heard of: a payment provider in test mode, a private
+registry, a staging database. stageman never reads one and never infers anything
+from its name; it stores each encrypted, hands them over, and tells the agent
+which are there. What they mean is the repository's business.
+
 All state lives in one human-readable file, rewritten whenever anything changes,
 with credentials encrypted under the key described above. Back up that file and
 you have backed up the instance; take it to another machine without the key and

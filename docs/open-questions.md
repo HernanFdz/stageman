@@ -398,19 +398,4 @@ and wrong within a day.
   and stays where it is. Roughly half of the ignored tests are in each group,
   so this is a move for some and not a reorganisation of all.
 
-- Next, a project's variables, per
-  `docs/decisions/0046-a-projects-variables-are-carried-never-read.md`. The
-  domain and its delivery first, because the name rule and the refusal of a
-  name this project already delivers are what make everything downstream
-  total; then the paragraph of kickoff naming them, which
-  `docs/conventions.md` §4 makes a reviewable diff; then the one form, which
-  both callers now share.
-
-  One thing the form work inherits and should not rediscover. A variable's
-  value is a credential like any other, so it never reaches the browser and its
-  box is therefore always empty — which means an empty box has to mean *keep*,
-  exactly as it now does for a repository's credential. What differs is that a
-  project has a *set* of variables rather than one, so *keep* and *remove* stop
-  being distinguishable by emptiness alone and the form needs a way to say
-  remove. That is the one genuinely new question in the screen half.
 

@@ -305,6 +305,14 @@ fn projected(id: stageman_core::ProjectId, project: &stageman_core::Project) -> 
             .keys()
             .map(|channel| wire_channel(*channel).to_owned())
             .collect(),
+        // Names, never values — there is nowhere on this type to put one. The
+        // names are what an edit form shows, which is why they cross the wire
+        // and a channel's address does not.
+        variables: project
+            .variables
+            .keys()
+            .map(std::string::ToString::to_string)
+            .collect(),
         working: project
             .jobs
             .values()
