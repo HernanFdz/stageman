@@ -46,7 +46,7 @@ pub use agents_view::{Agent, AgentsView};
 pub use error::{DashboardError, DashboardResult};
 pub use instance_view::{Instance, InstanceView};
 pub use jobs_view::{Job, ProjectJobsView, Standing, Working};
-pub use projects_view::{Project, ProjectsView};
+pub use projects_view::{Choice, Fitted, KitDraft, ModelChoice, Project, ProjectsView, Shape};
 
 /// The dashboard's stylesheet.
 ///
@@ -200,6 +200,193 @@ pub(crate) const fn wire_name(agent: stageman_core::Agent) -> (&'static str, &'s
     }
 }
 
+/// What the browser calls one of Claude's models, and what to show for it.
+///
+/// The browser's vocabulary rather than the adapter's, which spells the same
+/// models for the wire in the agent crate. The two happen to agree today and
+/// are separate contracts: one is what a page sends back, the other is what a
+/// pinned adapter accepts, and a change to either is a change to one.
+#[cfg(feature = "server")]
+const fn wire_model(model: stageman_core::ClaudeModel) -> (&'static str, &'static str) {
+    match model {
+        stageman_core::ClaudeModel::Default { .. } => ("default", "Default"),
+        stageman_core::ClaudeModel::Sonnet { .. } => ("sonnet", "Sonnet"),
+        stageman_core::ClaudeModel::Opus { .. } => ("opus", "Opus"),
+        stageman_core::ClaudeModel::Haiku => ("haiku", "Haiku"),
+    }
+}
+
+/// What the browser calls an effort level, and what to show for it.
+#[cfg(feature = "server")]
+const fn wire_effort(effort: stageman_core::ClaudeEffort) -> (&'static str, &'static str) {
+    match effort {
+        stageman_core::ClaudeEffort::Default => ("default", "Default"),
+        stageman_core::ClaudeEffort::Low => ("low", "Low"),
+        stageman_core::ClaudeEffort::Medium => ("medium", "Medium"),
+        stageman_core::ClaudeEffort::High => ("high", "High"),
+        stageman_core::ClaudeEffort::XHigh => ("xhigh", "Extra high"),
+        stageman_core::ClaudeEffort::Max => ("max", "Max"),
+    }
+}
+
+/// One of each of Claude's models, for enumerating what a browser may choose.
+///
+/// The effort on the ones that carry one is a placeholder: what this list is
+/// for is the *kind* of model, and [`kit_of`] puts the effort a browser asked
+/// for in its place.
+#[cfg(feature = "server")]
+const CLAUDE_MODELS: [stageman_core::ClaudeModel; 4] = [
+    stageman_core::ClaudeModel::Default {
+        effort: stageman_core::ClaudeEffort::Default,
+    },
+    stageman_core::ClaudeModel::Sonnet {
+        effort: stageman_core::ClaudeEffort::Default,
+    },
+    stageman_core::ClaudeModel::Opus {
+        effort: stageman_core::ClaudeEffort::Default,
+    },
+    stageman_core::ClaudeModel::Haiku,
+];
+
+/// A kit, as a browser edits it: identifiers for the agent, the model, and
+/// the effort where the model has one.
+#[cfg(feature = "server")]
+pub(crate) fn fitted(kit: &stageman_core::Kit) -> Fitted {
+    match kit {
+        stageman_core::Kit::Claude { model } => Fitted {
+            agent: wire_name(stageman_core::Agent::Claude).0.to_owned(),
+            model: wire_model(*model).0.to_owned(),
+            effort: model
+                .effort()
+                .map_or_else(String::new, |effort| wire_effort(effort).0.to_owned()),
+        },
+    }
+}
+
+/// The kit a browser described, if every part of it is one this build knows.
+///
+/// Refuses rather than mends: a model this build does not know is not mapped
+/// onto the nearest one, and an effort asked of a model that has none is not
+/// dropped, because the domain cannot hold that combination and a form saying
+/// one thing while the kit does another is the failure
+/// `docs/decisions/0048-a-job-runs-on-a-kit.md` exists to rule out.
+///
+/// # Errors
+///
+/// Fails if the agent, the model or the effort is not one this build knows,
+/// if a model that takes an effort was given none, or if one that takes none
+/// was given one.
+#[cfg(feature = "server")]
+pub(crate) fn kit_of(fitted: &Fitted) -> DashboardResult<stageman_core::Kit> {
+    match named(&fitted.agent)? {
+        stageman_core::Agent::Claude => {
+            let kind = CLAUDE_MODELS
+                .iter()
+                .copied()
+                .find(|model| wire_model(*model).0 == fitted.model)
+                .ok_or_else(|| DashboardError::UnknownSetting {
+                    field: "model".to_owned(),
+                    value: fitted.model.clone(),
+                })?;
+            let effort = || -> DashboardResult<stageman_core::ClaudeEffort> {
+                if fitted.effort.is_empty() {
+                    return Err(DashboardError::Incomplete {
+                        field: "effort".to_owned(),
+                    });
+                }
+                stageman_core::ClaudeEffort::ALL
+                    .iter()
+                    .copied()
+                    .find(|effort| wire_effort(*effort).0 == fitted.effort)
+                    .ok_or_else(|| DashboardError::UnknownSetting {
+                        field: "effort".to_owned(),
+                        value: fitted.effort.clone(),
+                    })
+            };
+            let model = match kind {
+                stageman_core::ClaudeModel::Haiku => {
+                    if !fitted.effort.is_empty() {
+                        return Err(DashboardError::EffortNotOnModel {
+                            model: wire_model(kind).1.to_owned(),
+                        });
+                    }
+                    stageman_core::ClaudeModel::Haiku
+                }
+                stageman_core::ClaudeModel::Default { .. } => {
+                    stageman_core::ClaudeModel::Default { effort: effort()? }
+                }
+                stageman_core::ClaudeModel::Sonnet { .. } => {
+                    stageman_core::ClaudeModel::Sonnet { effort: effort()? }
+                }
+                stageman_core::ClaudeModel::Opus { .. } => {
+                    stageman_core::ClaudeModel::Opus { effort: effort()? }
+                }
+            };
+            Ok(stageman_core::Kit::Claude { model })
+        }
+    }
+}
+
+/// What one agent can be set to, as the choices a form offers.
+///
+/// Built here from the domain's closed sets because the browser's half cannot
+/// name them — `docs/decisions/0022-the-browser-never-sees-the-domain.md` —
+/// and a form that hard-coded them would be a second copy of the enumeration
+/// that nothing holds to the first. The first model and the first effort are
+/// the agent's defaults, which is what a new kit starts on.
+#[cfg(feature = "server")]
+pub(crate) fn shape_of(agent: stageman_core::Agent) -> Shape {
+    match agent {
+        stageman_core::Agent::Claude => Shape {
+            agent: wire_name(agent).0.to_owned(),
+            models: CLAUDE_MODELS
+                .iter()
+                .map(|model| {
+                    let (id, name) = wire_model(*model);
+                    ModelChoice {
+                        id: id.to_owned(),
+                        name: name.to_owned(),
+                        has_effort: model.effort().is_some(),
+                    }
+                })
+                .collect(),
+            efforts: stageman_core::ClaudeEffort::ALL
+                .iter()
+                .map(|effort| {
+                    let (id, name) = wire_effort(*effort);
+                    Choice {
+                        id: id.to_owned(),
+                        name: name.to_owned(),
+                    }
+                })
+                .collect(),
+        },
+    }
+}
+
+/// A kit in the words a person reads on a job's row: the agent, and whatever
+/// differs from the agent's own defaults.
+///
+/// The defaults are left unsaid so that the ordinary job reads as it always
+/// did, and a job on something other than the defaults says so.
+#[cfg(feature = "server")]
+pub(crate) fn described(kit: &stageman_core::Kit) -> String {
+    match kit {
+        stageman_core::Kit::Claude { model } => {
+            let mut parts = vec![wire_name(stageman_core::Agent::Claude).1.to_owned()];
+            if !matches!(model, stageman_core::ClaudeModel::Default { .. }) {
+                parts.push(wire_model(*model).1.to_owned());
+            }
+            if let Some(effort) = model.effort()
+                && effort != stageman_core::ClaudeEffort::Default
+            {
+                parts.push(wire_effort(effort).1.to_lowercase());
+            }
+            parts.join(" · ")
+        }
+    }
+}
+
 /// The identifier a browser sent back, as this instance knows it.
 ///
 /// Compared as text rather than parsed, so that a malformed identifier and an
@@ -283,11 +470,18 @@ fn projected(id: stageman_core::ProjectId, project: &stageman_core::Project) -> 
         // that renders perfectly, selects nothing, and is refused on submit
         // with "no agent called Claude". Rendering is the screen's job, and it
         // already holds the list that maps one to the other.
-        foreman: wire_name(project.foreman_agent).0.to_owned(),
-        job_agents: project
-            .job_agents
+        foreman: fitted(&project.foreman_kit),
+        // Whole, name and description and settings, because this is what the
+        // form edits and it has to open showing what is true. A kit holds no
+        // credential, so there is nothing here to withhold.
+        kits: project
+            .kits
             .iter()
-            .map(|agent| wire_name(*agent).0.to_owned())
+            .map(|(name, offered)| KitDraft {
+                name: name.to_string(),
+                description: offered.description.clone(),
+                fitted: fitted(&offered.kit),
+            })
             .collect(),
         // Which platforms have one, never what it is. There is nowhere on this
         // type to put a credential, which is the point.
@@ -353,13 +547,159 @@ fn listed(state: &stageman_core::State) -> Vec<Agent> {
 #[cfg(all(test, feature = "server"))]
 mod tests {
     use super::{
-        DashboardError, dependents, identify, listed, named, shown, wire_channel, wire_name,
-        wire_platform,
+        DashboardError, Fitted, dependents, described, fitted, identify, kit_of, listed, named,
+        shape_of, shown, wire_channel, wire_name, wire_platform,
     };
-    use stageman_core::{Agent, AgentConfig, Project, ProjectId, Secret, State};
-    use std::collections::{BTreeMap, BTreeSet};
+    use stageman_core::{
+        Agent, AgentConfig, ClaudeEffort, ClaudeModel, Kit, KitConfig, KitName, Project, ProjectId,
+        Secret, State,
+    };
+    use std::collections::BTreeMap;
+
+    /// Every kit the domain can spell for Claude.
+    fn every_claude_kit() -> Vec<Kit> {
+        let mut kits = vec![Kit::Claude {
+            model: ClaudeModel::Haiku,
+        }];
+        for effort in ClaudeEffort::ALL.iter().copied() {
+            for model in [
+                ClaudeModel::Default { effort },
+                ClaudeModel::Sonnet { effort },
+                ClaudeModel::Opus { effort },
+            ] {
+                kits.push(Kit::Claude { model });
+            }
+        }
+        kits
+    }
+
+    /// Every kit crosses to the browser and back as itself.
+    ///
+    /// The whole grid rather than a sample, because a spelling that did not
+    /// round-trip would send a job on a kit other than the one the operator
+    /// saw on the form — the failure the read-back on the adapter's side
+    /// exists to catch, arriving from the other direction.
+    #[test]
+    fn every_kit_survives_the_trip_to_the_browser_and_back() {
+        let kits = every_claude_kit();
+        assert_eq!(
+            kits.len(),
+            1 + 3 * ClaudeEffort::ALL.len(),
+            "the whole grid, or the loop below proves nothing"
+        );
+        for kit in kits {
+            assert_eq!(kit_of(&fitted(&kit)), Ok(kit.clone()), "{kit:?}");
+        }
+    }
+
+    /// The form's shape says which models take an effort, and only Haiku
+    /// does not.
+    #[test]
+    fn the_shape_of_claude_offers_an_effort_on_every_model_but_haiku() {
+        let shape = shape_of(Agent::Claude);
+        assert_eq!(shape.agent, "claude");
+        let without: Vec<&str> = shape
+            .models
+            .iter()
+            .filter(|model| !model.has_effort)
+            .map(|model| model.id.as_str())
+            .collect();
+        assert_eq!(without, vec!["haiku"]);
+        assert_eq!(
+            shape.models.first().map(|model| model.id.as_str()),
+            Some("default"),
+            "a new kit starts on the agent's defaults, which come first"
+        );
+        assert_eq!(
+            shape.efforts.first().map(|effort| effort.id.as_str()),
+            Some("default")
+        );
+        assert_eq!(shape.efforts.len(), ClaudeEffort::ALL.len());
+    }
+
+    /// What the domain cannot hold is refused rather than mended.
+    #[test]
+    fn a_kit_a_browser_describes_badly_is_refused_rather_than_mended() {
+        let claude = |model: &str, effort: &str| Fitted {
+            agent: "claude".to_owned(),
+            model: model.to_owned(),
+            effort: effort.to_owned(),
+        };
+
+        assert_eq!(
+            kit_of(&claude("haiku", "high")),
+            Err(DashboardError::EffortNotOnModel {
+                model: "Haiku".to_owned()
+            }),
+            "haiku offers no effort, so one asked of it is refused, not dropped"
+        );
+        assert_eq!(
+            kit_of(&claude("opus", "")),
+            Err(DashboardError::Incomplete {
+                field: "effort".to_owned()
+            }),
+            "a model that takes an effort must be given one"
+        );
+        assert_eq!(
+            kit_of(&claude("gpt-5", "high")),
+            Err(DashboardError::UnknownSetting {
+                field: "model".to_owned(),
+                value: "gpt-5".to_owned()
+            })
+        );
+        assert_eq!(
+            kit_of(&claude("opus", "ultra")),
+            Err(DashboardError::UnknownSetting {
+                field: "effort".to_owned(),
+                value: "ultra".to_owned()
+            })
+        );
+        assert_eq!(
+            kit_of(&Fitted {
+                agent: "gpt".to_owned(),
+                model: "default".to_owned(),
+                effort: "default".to_owned(),
+            }),
+            Err(DashboardError::UnknownAgent {
+                name: "gpt".to_owned()
+            })
+        );
+    }
+
+    /// A job's row names the agent and only what differs from its defaults.
+    #[test]
+    fn a_kit_is_described_by_what_differs_from_the_defaults() {
+        assert_eq!(described(&Kit::defaults(Agent::Claude)), "Claude");
+        assert_eq!(
+            described(&Kit::Claude {
+                model: ClaudeModel::Opus {
+                    effort: ClaudeEffort::XHigh,
+                },
+            }),
+            "Claude · Opus · extra high"
+        );
+        assert_eq!(
+            described(&Kit::Claude {
+                model: ClaudeModel::Haiku,
+            }),
+            "Claude · Haiku"
+        );
+        assert_eq!(
+            described(&Kit::Claude {
+                model: ClaudeModel::Default {
+                    effort: ClaudeEffort::Low,
+                },
+            }),
+            "Claude · low",
+            "the default model is unsaid even when the effort is not"
+        );
+    }
 
     /// An instance watching one project, which names Claude for everything.
+    #[expect(
+        clippy::expect_used,
+        reason = "a fixture kit that cannot be named is a broken test, and should say so"
+    )]
     fn watching(name: &str) -> State {
         State {
             agents: BTreeMap::from([(
@@ -373,8 +713,11 @@ mod tests {
                 Project {
                     name: name.to_owned(),
                     repository: "https://example.invalid/repo".to_owned(),
-                    foreman_agent: Agent::Claude,
-                    job_agents: BTreeSet::from([Agent::Claude]),
+                    foreman_kit: Kit::defaults(Agent::Claude),
+                    kits: BTreeMap::from([(
+                        KitName::new("Claude").expect("a name"),
+                        KitConfig::defaults(Agent::Claude),
+                    )]),
                     credentials: BTreeMap::new(),
                     channels: BTreeMap::new(),
                     jobs: BTreeMap::new(),

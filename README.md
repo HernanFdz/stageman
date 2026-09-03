@@ -51,7 +51,8 @@ wherever you happen to be, and only its result goes into stageman.
 **It asks you nothing to start.** A fresh instance has no agents and no
 projects, and that is a perfectly good instance — it simply has nothing to do
 yet. You give it those in the dashboard, in that order, because a project needs
-an agent to think with and at least one its jobs can run on.
+an agent to think with and at least one **kit** its jobs can run on — an agent,
+set a particular way: which model, and how hard it thinks.
 
 **It needs nothing named in the environment either.** Its file is encrypted
 under a key, and a key cannot live in the file it protects — so on a first run
@@ -202,13 +203,16 @@ where the browser's half came from. A build without one still serves the
 dashboard — the page is rendered on the server and arrives complete, it just
 does not update itself afterwards.
 
-Which agents are configured is yours to decide, the foreman picks one per
-job from what you have set up, and the dashboard shows which agent ran each
-job. Where an agent can be paid for by a subscription rather than by the token,
-that is the path stageman prefers.
+Which agents are configured is yours to decide, and so is which kits each
+project offers: an agent, set the way you want jobs on that project to run it,
+under a name and a line saying what it is for. The foreman picks one per job
+from those and nothing else, and the dashboard shows which kit ran each job.
+Where an agent can be paid for by a subscription rather than by the token, that
+is the path stageman prefers.
 
-The dashboard is where you add projects and set the credentials each one needs,
-watch jobs and read their logs, and pause or kill one that has gone wrong. A
+The dashboard is where you add projects, name the kits each one offers and set
+the credentials each one needs, watch jobs and read their logs, and pause or
+kill one that has gone wrong. A
 single instance manages several projects, and a job belongs to exactly one of
 them: it cannot see another project's repository, credentials or channels.
 

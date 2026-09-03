@@ -32,7 +32,7 @@
               from what it managed to say first"
 )]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io::{self, BufRead as _, BufReader, Read as _, Write as _};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -42,8 +42,8 @@ use std::time::Duration;
 
 use stageman::Store;
 use stageman_core::{
-    Agent, AgentConfig, Channel, ChannelConfig, Job, JobId, Key, Progress, Project, ProjectId,
-    Secret, State, Timestamp,
+    Agent, AgentConfig, Channel, ChannelConfig, Job, JobId, Key, Kit, KitConfig, KitName, Progress,
+    Project, ProjectId, Secret, State, Timestamp,
 };
 
 /// A key, as an operator would supply it: thirty-two bytes of base64.
@@ -294,14 +294,14 @@ fn watch(stdout: ChildStdout) -> Result<(String, String), String> {
 
 /// One job, in whatever state the caller needs it.
 fn job(progress: Progress) -> Job {
-    Job {
-        agent: Agent::Claude,
-        reason: "because a test said so".to_owned(),
-        kickoff: "do the thing".to_owned(),
-        created_at: Timestamp::UNIX_EPOCH,
-        progress,
-        thread: None,
-    }
+    let mut job = Job::new(
+        Kit::defaults(Agent::Claude),
+        "because a test said so".to_owned(),
+        "do the thing".to_owned(),
+        Timestamp::UNIX_EPOCH,
+    );
+    job.progress = progress;
+    job
 }
 
 /// A channel credential, distinct from the agent's so that a test finding one
@@ -345,8 +345,11 @@ fn watching(name: &str, repository: &str) -> State {
             Project {
                 name: name.to_owned(),
                 repository: repository.to_owned(),
-                foreman_agent: Agent::Claude,
-                job_agents: BTreeSet::from([Agent::Claude]),
+                foreman_kit: Kit::defaults(Agent::Claude),
+                kits: BTreeMap::from([(
+                    KitName::new("Claude").expect("a name"),
+                    KitConfig::defaults(Agent::Claude),
+                )]),
                 credentials: BTreeMap::new(),
                 channels: BTreeMap::from([(
                     Channel::Slack,

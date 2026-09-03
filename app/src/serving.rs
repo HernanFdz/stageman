@@ -634,15 +634,18 @@ fn unheard(state: &stageman_core::State) -> Vec<String> {
 mod unheard_tests {
     use super::unheard;
     use stageman_core::{Agent, Channel, ChannelConfig, Project, ProjectId, Secret, State, Uuid};
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeMap;
 
     /// A project with a channel, and a credential to listen with or not.
     fn watching(name: &str, listens: bool) -> Project {
         Project {
             name: name.to_owned(),
             repository: "https://example.invalid/repo".to_owned(),
-            foreman_agent: Agent::Claude,
-            job_agents: BTreeSet::from([Agent::Claude]),
+            foreman_kit: stageman_core::Kit::defaults(Agent::Claude),
+            kits: BTreeMap::from([(
+                stageman_core::KitName::new("Claude").expect("a name"),
+                stageman_core::KitConfig::defaults(Agent::Claude),
+            )]),
             credentials: BTreeMap::new(),
             channels: BTreeMap::from([(
                 Channel::Slack,

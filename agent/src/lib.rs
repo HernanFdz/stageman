@@ -28,6 +28,7 @@
 //! the reason a container's arguments are a value this crate builds rather
 //! than a command line it hands to somebody else.
 
+use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -37,13 +38,14 @@ use agent_client_protocol::schema::v1::{
     ContentBlock, HttpHeader, InitializeRequest, InitializeResponse, ListSessionsRequest,
     LoadSessionRequest, McpServer, McpServerHttp, NewSessionRequest, PromptRequest,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionId, SessionNotification, SessionUpdate, TextContent,
+    SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionId,
+    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, TextContent,
 };
 use agent_client_protocol::{ByteStreams, Client, ConnectionTo};
 use parking_lot::Mutex;
 #[cfg(test)]
 use stageman_core::Channel;
-use stageman_core::{Agent, Handout, Platform, Role, Secret};
+use stageman_core::{Agent, ClaudeEffort, ClaudeModel, Handout, Kit, Platform, Role, Secret};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
 
@@ -554,6 +556,38 @@ pub enum AgentError {
     /// resume into an empty context would be the worst of the three.
     #[error("that container holds no session to continue")]
     NothingToResume,
+    /// The agent refused a setting its kit asked for.
+    ///
+    /// Before the first prompt, and in the adapter's own words, which name the
+    /// option and the value. Every spelling this crate sends is held to what
+    /// the pinned adapter accepts by a container test, so reaching this means
+    /// the pin moved without the spelling following — see
+    /// `docs/decisions/0048-a-job-runs-on-a-kit.md`. It fails the job rather
+    /// than the instance: nothing else is wrong, and an operator can act on it.
+    #[error("the agent refused to set {option} to {value}: {message}")]
+    Refused {
+        /// The option, as the adapter names it.
+        option: String,
+        /// The value asked for, as this crate spells it.
+        value: String,
+        /// What the adapter said.
+        message: String,
+    },
+    /// The agent accepted a setting and then reported it unchanged.
+    ///
+    /// The failure the read-back exists to catch. An adapter that says yes and
+    /// does nothing would run every job on whatever it defaults to, with every
+    /// reply reading as success — the shape
+    /// `docs/decisions/0047-a-tunnel-answers-only-when-something-behind-it-does.md`
+    /// was written about. Not this adapter, which was measured to change what
+    /// it reports; the next one need not be so honest.
+    #[error("the agent accepted {option} = {value} and then reported it unchanged")]
+    Ignored {
+        /// The option, as the adapter names it.
+        option: String,
+        /// The value asked for, as this crate spells it.
+        value: String,
+    },
     /// The container ran and spoke, but the exchange did not complete.
     #[error("the agent did not complete the protocol handshake")]
     Protocol(#[source] agent_client_protocol::Error),
@@ -805,6 +839,175 @@ fn claude_credential_variable(credential: &Secret) -> &'static str {
     }
 }
 
+/// The option the adapter calls its permission mode, and the value it is
+/// pinned to.
+///
+/// Pinned rather than chosen, per
+/// `docs/decisions/0049-the-permission-mode-is-pinned-not-chosen.md`: no mode
+/// the adapter offers allows everything, the two that never prompt both deny,
+/// and a value inherited from the adapter's own default is one an adapter
+/// release can move underneath every job at once. Approval stays in the
+/// client's answer to each request; this keeps the requests coming.
+const MODE_OPTION: (&str, &str) = ("mode", "default");
+
+/// What one kit is spelled as on the wire: each option the adapter names, the
+/// value to set it to, and the order to set them in.
+///
+/// The delivery half of a kit, and the counterpart to the deciding
+/// [`stageman_core::Kit`] does — the same seam [`delivered`] sits on for
+/// credentials. Pure, so that every spelling can be asserted without a
+/// container, and so that the container test holding these to the pinned
+/// adapter has one list to walk.
+///
+/// The mode comes first and is not the kit's; see [`MODE_OPTION`]. The model
+/// comes before the effort because the effort exists only on some models —
+/// measured, and the reason it lives inside the model's variant rather than
+/// beside it.
+fn wired(kit: &Kit) -> Vec<(&'static str, &'static str)> {
+    let mut set = vec![MODE_OPTION];
+    match kit {
+        Kit::Claude { model } => {
+            set.push(("model", claude_model(*model)));
+            if let Some(effort) = model.effort() {
+                set.push(("effort", claude_effort(effort)));
+            }
+        }
+    }
+    set
+}
+
+/// The alias the adapter knows a model by.
+///
+/// Aliases rather than dated identifiers, because the adapter refuses the
+/// latter outright — measured in `docs/decisions/0048-a-job-runs-on-a-kit.md`.
+const fn claude_model(model: ClaudeModel) -> &'static str {
+    match model {
+        ClaudeModel::Default { .. } => "default",
+        ClaudeModel::Sonnet { .. } => "sonnet",
+        ClaudeModel::Opus { .. } => "opus",
+        ClaudeModel::Haiku => "haiku",
+    }
+}
+
+/// The name the adapter knows an effort level by.
+const fn claude_effort(effort: ClaudeEffort) -> &'static str {
+    match effort {
+        ClaudeEffort::Default => "default",
+        ClaudeEffort::Low => "low",
+        ClaudeEffort::Medium => "medium",
+        ClaudeEffort::High => "high",
+        ClaudeEffort::XHigh => "xhigh",
+        ClaudeEffort::Max => "max",
+    }
+}
+
+/// What a session reports one option to be, as text.
+///
+/// `None` when the option is not in the list, and when it is of a kind this
+/// version of the protocol library cannot read — an option that cannot be read
+/// back is one that did not demonstrably take, which is what the caller needs
+/// to know.
+fn current(options: &[SessionConfigOption], id: &str) -> Option<String> {
+    let option = options.iter().find(|option| &*option.id.0 == id)?;
+    match &option.kind {
+        SessionConfigKind::Select(select) => Some(select.current_value.0.to_string()),
+        SessionConfigKind::Boolean(toggle) => Some(toggle.current_value.to_string()),
+        _ => None,
+    }
+}
+
+/// Whether a set took, given what was reported before it and after it.
+///
+/// By change rather than by spelling. The adapter was measured to report an
+/// alias back with a suffix where an account is entitled to a larger context,
+/// so requiring the reply to spell the value as it was asked would fail a set
+/// that worked. What can be required is that the reading moved — unless what
+/// was asked for is what was already reported, in which case nothing had to.
+/// Not reported back at all is never having taken: the option just set has to
+/// be in the reply.
+fn took(asked: &str, before: Option<&str>, after: Option<&str>) -> bool {
+    after.is_some_and(|after| before == Some(asked) || Some(after) != before)
+}
+
+/// What an adapter said when it refused a setting, as one line.
+///
+/// The detail travels in the error's data rather than its message — the
+/// message is the protocol's generic *internal error*, measured — so the data
+/// is read first and the message is the fallback.
+fn refused(error: &agent_client_protocol::Error) -> String {
+    error
+        .data
+        .as_ref()
+        .and_then(|data| data.get("details"))
+        .and_then(|details| details.as_str())
+        .map_or_else(|| error.message.clone(), str::to_owned)
+}
+
+/// Sets every option a kit spells, in order, and reads each one back.
+///
+/// The door of every turn, per `docs/decisions/0048-a-job-runs-on-a-kit.md`,
+/// and every turn rather than the first because a loaded session was measured
+/// to forget its options: without this, a job put back to work after the
+/// daemon died would run on whatever the agent defaults to, and nothing in any
+/// reply would say so.
+///
+/// `advertised` is what the session currently reports, which is where the
+/// value *before* each set comes from. Each reply carries the whole list again,
+/// so it is updated in place and is current when this returns. What comes back
+/// is what the session reported after each set, in the adapter's own spelling,
+/// for the job's record.
+///
+/// Skipped by mutation testing, and the reason is worth stating rather than
+/// assumed: every path through this needs a container answering the protocol,
+/// so it is covered only by the container test that settles every kit the
+/// domain can spell through it. What it decides that *can* be checked cheaply
+/// is pure and has its own test — the spelling in [`wired`], whether a set
+/// took in [`took`], the reading in [`current`], and a refusal's words in
+/// [`refused`].
+///
+/// # Errors
+///
+/// Fails with [`AgentError::Refused`] when the adapter will not take a value,
+/// and with [`AgentError::Ignored`] when it takes one and reports nothing
+/// changed. Both stop the turn before its first prompt.
+#[mutants::skip]
+async fn settle(
+    connection: &ConnectionTo<AgentRole>,
+    session_id: &SessionId,
+    advertised: &mut Vec<SessionConfigOption>,
+    kit: &Kit,
+) -> Result<BTreeMap<String, String>, AgentError> {
+    let mut reported = BTreeMap::new();
+    for (option, value) in wired(kit) {
+        let before = current(advertised, option);
+        let reply = connection
+            .send_request(SetSessionConfigOptionRequest::new(
+                session_id.clone(),
+                option,
+                value,
+            ))
+            .block_task()
+            .await
+            .map_err(|refusal| AgentError::Refused {
+                option: option.to_owned(),
+                value: value.to_owned(),
+                message: refused(&refusal),
+            })?;
+        *advertised = reply.config_options;
+        let after = current(advertised, option);
+        if !took(value, before.as_deref(), after.as_deref()) {
+            return Err(AgentError::Ignored {
+                option: option.to_owned(),
+                value: value.to_owned(),
+            });
+        }
+        if let Some(after) = after {
+            reported.insert(option.to_owned(), after);
+        }
+    }
+    Ok(reported)
+}
+
 /// The arguments that start a container able to reach a model.
 ///
 /// Pure, so what a container is started with can be asserted without starting
@@ -870,6 +1073,14 @@ pub struct Answer {
     /// by a token limit and one the agent finished are both text and only this
     /// tells them apart.
     pub stop_reason: StopReason,
+    /// What the session reported each setting to be, after being set.
+    ///
+    /// In the adapter's own spelling and keyed by its option identifier. It was
+    /// measured to differ from what was asked — an account entitled to a larger
+    /// context has the same alias reported back with a suffix — so this is what
+    /// actually ran, where the kit is what was asked for. Recorded on the job
+    /// by whoever ran the turn; see `docs/decisions/0048-a-job-runs-on-a-kit.md`.
+    pub reported: BTreeMap<String, String>,
 }
 
 /// Puts one question to an agent and returns what it says.
@@ -905,7 +1116,7 @@ pub async fn ask(
         &session_arguments(&image, &delivering),
         &delivering,
     )?;
-    converse(container, Opening::Fresh, tools, question).await
+    converse(container, Opening::Fresh, tools, handout.kit(), question).await
 }
 
 /// Where an agent reaches the tools this instance serves, and what it presents.
@@ -1000,6 +1211,75 @@ const AGENT_PROGRAM: &str = "claude-agent-acp";
 /// for.
 const OWNER_LABEL: &str = "stageman.job";
 
+/// The label saying which agent a container was made for.
+///
+/// Read at a foreman's turn boundary and nowhere else: a job's kit cannot
+/// change, so a job's container is never asked. See [`made_for`].
+const AGENT_LABEL: &str = "stageman.agent";
+
+/// How an agent is spelled in a container's label.
+///
+/// This crate's spelling and nobody else's — the dashboard has its own for the
+/// browser, and the two are separate contracts that happen to agree today.
+const fn agent_label(agent: Agent) -> &'static str {
+    match agent {
+        Agent::Claude => "claude",
+    }
+}
+
+/// The agent a label names, if it names one this build knows.
+fn labelled(text: &str) -> Option<Agent> {
+    Agent::ALL
+        .iter()
+        .copied()
+        .find(|agent| agent_label(*agent) == text)
+}
+
+/// The arguments that ask a runtime which agent a container was made for.
+///
+/// Pure, so the query can be asserted without a container. Both runtimes take
+/// the same template.
+fn made_for_arguments(name: &str) -> Vec<String> {
+    vec![
+        "inspect".to_owned(),
+        "--format".to_owned(),
+        format!("{{{{index .Config.Labels \"{AGENT_LABEL}\"}}}}"),
+        name.to_owned(),
+    ]
+}
+
+/// Which agent a container was made for, if it says.
+///
+/// `None` for a container carrying no such label — one made before the label
+/// existed, or by something else — and for a label naming an agent this build
+/// does not know. Both mean the same to the one caller: it cannot tell, and
+/// has to decide what that means rather than have it decided here.
+///
+/// # Errors
+///
+/// Fails if the runtime cannot be run, or refuses — a container that does not
+/// exist being the ordinary refusal.
+#[mutants::skip]
+pub async fn made_for(runtime: &ContainerRuntime, name: &str) -> Result<Option<Agent>, AgentError> {
+    let asked = tokio::process::Command::new(runtime.path())
+        .args(made_for_arguments(name))
+        .kill_on_drop(true)
+        .output()
+        .await
+        .map_err(|source| AgentError::Runtime {
+            path: runtime.path().to_owned(),
+            source,
+        })?;
+
+    if !asked.status.success() {
+        return Err(AgentError::Container {
+            status: asked.status.to_string(),
+            message: String::from_utf8_lossy(&asked.stderr).trim().to_owned(),
+        });
+    }
+    Ok(labelled(String::from_utf8_lossy(&asked.stdout).trim()))
+}
+
 /// The port inside a job's container that a tunnel reaches.
 ///
 /// One constant rather than a choice, because a mapping cannot be added to a
@@ -1023,7 +1303,12 @@ pub const TUNNEL_PORT: u16 = 47_201;
 /// and therefore its agent's session — intact. Both were measured, and
 /// `docs/decisions/0015-a-job-survives-the-daemon-dying.md` records which one
 /// this system needs and why.
-fn retained_arguments(name: &str, image: &Image, delivering: &[(String, Secret)]) -> Vec<String> {
+fn retained_arguments(
+    name: &str,
+    image: &Image,
+    agent: Agent,
+    delivering: &[(String, Secret)],
+) -> Vec<String> {
     // Created rather than run, and never removed: the thread has to be put in
     // place before anything starts, and the container outlives this process.
     let mut arguments = vec![
@@ -1058,6 +1343,15 @@ fn retained_arguments(name: &str, image: &Image, delivering: &[(String, Secret)]
         name.to_owned(),
         "--label".to_owned(),
         format!("{OWNER_LABEL}={name}"),
+        // Which agent this container was made for, so that a turn boundary
+        // can ask. A foreman's container is long-lived and its project's kit
+        // can change underneath it; the same agent on other settings keeps
+        // the container, because settings are settled again every turn, and a
+        // different agent is a different image — see
+        // `docs/decisions/0048-a-job-runs-on-a-kit.md`. The image's identity
+        // cannot answer this, since nothing is tagged.
+        "--label".to_owned(),
+        format!("{AGENT_LABEL}={}", agent_label(agent)),
     ];
     arguments.extend(carrying(image, delivering));
     arguments
@@ -1094,7 +1388,12 @@ pub async fn begin(
     // starting in which the thread can be put in place. `run` would have
     // started it immediately and left nowhere to do that.
     let created = tokio::process::Command::new(runtime.path())
-        .args(retained_arguments(name, &image, &delivering))
+        .args(retained_arguments(
+            name,
+            &image,
+            handout.agent(),
+            &delivering,
+        ))
         .envs(
             delivering
                 .iter()
@@ -1116,7 +1415,7 @@ pub async fn begin(
 
     hold(runtime, name).await?;
     let container = spawn(runtime, &agent_arguments(name), &[])?;
-    converse(container, Opening::Fresh, tools, question).await
+    converse(container, Opening::Fresh, tools, handout.kit(), question).await
 }
 
 /// What makes sure a container is up, without attaching to it.
@@ -1182,6 +1481,13 @@ async fn hold(runtime: &ContainerRuntime, name: &str) -> Result<(), AgentError> 
 /// credential now sits in the runtime's records for as long as the container is
 /// kept, where `--rm` used to take it away with everything else.
 ///
+/// It does take the kit, and the asymmetry is measured rather than untidy: a
+/// loaded session comes back with every option at the agent's default, so what
+/// the container keeps is the credential and the conversation, and what it
+/// forgets is what it was set to. The kit is the job's own record of that, and
+/// settling it again is what keeps a resumed job the same job — see
+/// `docs/decisions/0048-a-job-runs-on-a-kit.md`.
+///
 /// `question` is what the resumed agent is told. The measurement in
 /// `docs/decisions/0015-a-job-survives-the-daemon-dying.md` says it works out
 /// that it was interrupted unaided; telling it is nearly free, and the
@@ -1195,6 +1501,7 @@ async fn hold(runtime: &ContainerRuntime, name: &str) -> Result<(), AgentError> 
 pub async fn resume(
     runtime: &ContainerRuntime,
     name: &str,
+    kit: &Kit,
     tools: Option<&Tools>,
     question: &str,
 ) -> Result<Answer, AgentError> {
@@ -1211,7 +1518,7 @@ pub async fn resume(
     // see `docs/decisions/0034-tools-are-served-not-shipped.md`.
     hold(runtime, name).await?;
     let container = spawn(runtime, &agent_arguments(name), &[])?;
-    converse(container, Opening::Resumed, tools, question).await
+    converse(container, Opening::Resumed, tools, kit, question).await
 }
 
 /// Stops a container, leaving it and everything in it where it is.
@@ -1474,25 +1781,30 @@ fn spawn(
 /// `None` means there was nothing to pick up, which is a container stopped
 /// before its agent said anything: sessions are written when something is
 /// said, not when one is created.
+///
+/// Answers with what the session advertises it can be set to as well as its
+/// identifier, because that list is where [`settle`] reads each value *before*
+/// setting it — and a loaded session advertises its options afresh, at their
+/// defaults, which is the measurement that makes settling a per-turn affair.
+/// An agent that advertises nothing omits the list, and an empty one is the
+/// true reading of that rather than a substitute.
 #[mutants::skip]
 async fn open_session(
     connection: &ConnectionTo<AgentRole>,
     opening: Opening,
     tools: Option<&Tools>,
-) -> Result<Option<SessionId>, agent_client_protocol::Error> {
+) -> Result<Option<(SessionId, Vec<SessionConfigOption>)>, agent_client_protocol::Error> {
     match opening {
         Opening::Fresh => {
             let mut request = NewSessionRequest::new(PathBuf::from(WORKSPACE));
             if let Some(tools) = tools {
                 request.mcp_servers.push(declaration(tools));
             }
-            Ok(Some(
-                connection
-                    .send_request(request)
-                    .block_task()
-                    .await?
-                    .session_id,
-            ))
+            let made = connection.send_request(request).block_task().await?;
+            Ok(Some((
+                made.session_id,
+                made.config_options.unwrap_or_default(),
+            )))
         }
         Opening::Resumed => {
             let known = connection
@@ -1515,17 +1827,41 @@ async fn open_session(
             if let Some(tools) = tools {
                 request.mcp_servers.push(declaration(tools));
             }
-            connection.send_request(request).block_task().await?;
-            Ok(Some(found.session_id))
+            let loaded = connection.send_request(request).block_task().await?;
+            Ok(Some((
+                found.session_id,
+                loaded.config_options.unwrap_or_default(),
+            )))
         }
     }
 }
 
+/// How one conversation ended, seen from inside the connection.
+///
+/// Carried out of the protocol closure as a value rather than mapped into its
+/// error, because a refused setting is this crate's failure and not the
+/// protocol's, and the closure's error type is the protocol's.
+enum Spoken {
+    /// The turn ran: why it ended, and what the session reported it was set to.
+    Answered {
+        stop_reason: StopReason,
+        reported: BTreeMap<String, String>,
+    },
+    /// There was no session to pick up.
+    Nothing,
+    /// A setting was refused or ignored, before the first prompt.
+    Unsettled(AgentError),
+}
+
 /// Speaks the protocol to a started container and puts one question to it.
+///
+/// The kit is settled between opening the session and the prompt, on every
+/// turn — see [`settle`] for why every turn.
 async fn converse(
     mut container: tokio::process::Child,
     opening: Opening,
     tools: Option<&Tools>,
+    kit: &Kit,
     question: &str,
 ) -> Result<Answer, AgentError> {
     let (Some(to_agent), Some(from_agent), Some(complaints)) = (
@@ -1591,9 +1927,16 @@ async fn converse(
                         .block_task()
                         .await?;
 
-                    let Some(session_id) = open_session(&connection, opening, tools).await? else {
-                        return Ok(None);
+                    let Some((session_id, mut advertised)) =
+                        open_session(&connection, opening, tools).await?
+                    else {
+                        return Ok(Spoken::Nothing);
                     };
+                    let reported =
+                        match settle(&connection, &session_id, &mut advertised, kit).await {
+                            Ok(reported) => reported,
+                            Err(unsettled) => return Ok(Spoken::Unsettled(unsettled)),
+                        };
                     let reply = connection
                         .send_request(PromptRequest::new(
                             session_id,
@@ -1601,7 +1944,10 @@ async fn converse(
                         ))
                         .block_task()
                         .await?;
-                    Ok(Some(reply.stop_reason))
+                    Ok(Spoken::Answered {
+                        stop_reason: reply.stop_reason,
+                        reported,
+                    })
                 },
             ),
         printed(complaints),
@@ -1611,11 +1957,16 @@ async fn converse(
     let status = container.wait().await.map_err(AgentError::Exit)?;
 
     match spoken {
-        Ok(Some(stop_reason)) => Ok(Answer {
+        Ok(Spoken::Answered {
+            stop_reason,
+            reported,
+        }) => Ok(Answer {
             text: heard.lock().clone(),
             stop_reason,
+            reported,
         }),
-        Ok(None) => Err(AgentError::NothingToResume),
+        Ok(Spoken::Nothing) => Err(AgentError::NothingToResume),
+        Ok(Spoken::Unsettled(why)) => Err(why),
         // A container that failed on its own terms explains itself better than
         // the protocol error its silence produced, so it wins when both exist.
         Err(_) if !status.success() => Err(AgentError::Container {
@@ -1687,6 +2038,252 @@ mod tests {
             printed.contains("47113"),
             "the address is not a secret and is what a failure to reach it needs: {printed}",
         );
+    }
+
+    /// Every kit is spelled with the mode first and the model before the
+    /// effort, and a model with no effort sends none.
+    ///
+    /// The order is load-bearing: the effort exists only on some models, so a
+    /// spelling that set it first could set it on a model about to be changed
+    /// to one that refuses it.
+    #[test]
+    fn a_kit_is_spelled_mode_first_and_effort_only_where_there_is_one() {
+        assert_eq!(
+            wired(&Kit::Claude {
+                model: ClaudeModel::Opus {
+                    effort: ClaudeEffort::XHigh,
+                },
+            }),
+            vec![("mode", "default"), ("model", "opus"), ("effort", "xhigh")],
+        );
+        assert_eq!(
+            wired(&Kit::Claude {
+                model: ClaudeModel::Haiku
+            }),
+            vec![("mode", "default"), ("model", "haiku")],
+        );
+        assert_eq!(
+            wired(&Kit::defaults(Agent::Claude)),
+            vec![
+                ("mode", "default"),
+                ("model", "default"),
+                ("effort", "default")
+            ],
+            "the agent's own default is a value it spells, and is sent as one",
+        );
+    }
+
+    /// A container's label names its agent both ways, and an unknown label
+    /// names nobody.
+    #[test]
+    fn an_agents_label_reads_back_as_that_agent() {
+        for agent in Agent::ALL {
+            assert_eq!(labelled(agent_label(*agent)), Some(*agent));
+        }
+        // The literal, because containers already made carry it: a label
+        // spelled differently by a later build would read every existing
+        // foreman's container as made for nobody.
+        assert_eq!(agent_label(Agent::Claude), "claude");
+        assert_eq!(labelled(""), None, "no label is no agent");
+        assert_eq!(labelled("gpt"), None, "a label this build does not know");
+        assert_eq!(
+            made_for_arguments("stageman-foreman-x"),
+            vec![
+                "inspect",
+                "--format",
+                "{{index .Config.Labels \"stageman.agent\"}}",
+                "stageman-foreman-x",
+            ],
+        );
+    }
+
+    /// No two levels, and no two models, share a spelling.
+    ///
+    /// A shared one would set the wrong thing and read back as having taken.
+    #[test]
+    fn every_model_and_every_effort_has_a_spelling_of_its_own() {
+        let efforts: std::collections::BTreeSet<&str> = ClaudeEffort::ALL
+            .iter()
+            .map(|effort| claude_effort(*effort))
+            .collect();
+        assert_eq!(efforts.len(), ClaudeEffort::ALL.len());
+
+        let effort = ClaudeEffort::Default;
+        let models: std::collections::BTreeSet<&str> = [
+            ClaudeModel::Default { effort },
+            ClaudeModel::Sonnet { effort },
+            ClaudeModel::Opus { effort },
+            ClaudeModel::Haiku,
+        ]
+        .into_iter()
+        .map(claude_model)
+        .collect();
+        assert_eq!(models.len(), 4);
+    }
+
+    /// Whether a set took is decided by the reading moving, not by spelling.
+    ///
+    /// The first case is the measured one that rules out exact comparison: an
+    /// account entitled to a larger context has `opus` reported back as
+    /// `opus[1m]`, and that set worked.
+    #[test]
+    fn a_setting_took_when_the_reading_moved_or_was_already_what_was_asked() {
+        assert!(
+            took("opus", Some("default"), Some("opus[1m]")),
+            "a different spelling is still a change"
+        );
+        assert!(
+            took("default", Some("default"), Some("default")),
+            "already what was asked, so nothing had to move"
+        );
+        assert!(
+            took("high", None, Some("high")),
+            "an option that was not advertised before it was set"
+        );
+        assert!(
+            !took("opus", Some("default"), Some("default")),
+            "accepted and unchanged is the failure this exists to catch"
+        );
+        assert!(
+            !took("opus", Some("default"), None),
+            "not reported back at all is not having taken"
+        );
+    }
+
+    /// A refusal's detail is in the error's data, and the message is only the
+    /// fallback.
+    ///
+    /// Measured: the message is the protocol's generic *internal error*, and
+    /// the sentence naming the option and the value travels as data.
+    #[test]
+    fn a_refusal_is_read_from_the_errors_data_before_its_message() {
+        let detailed = agent_client_protocol::Error::new(-32603, "Internal error")
+            .data(serde_json::json!({"details": "Invalid value for config option model: nope"}));
+        assert_eq!(
+            refused(&detailed),
+            "Invalid value for config option model: nope"
+        );
+
+        let bare = agent_client_protocol::Error::new(-32603, "Internal error");
+        assert_eq!(refused(&bare), "Internal error");
+    }
+
+    /// The current value of an option, read off the kinds this crate knows.
+    #[test]
+    fn an_options_current_value_is_read_as_text() {
+        let advertised: Vec<SessionConfigOption> = serde_json::from_value(serde_json::json!([
+            {"id": "model", "name": "Model", "type": "select", "currentValue": "opus[1m]",
+             "options": [{"value": "opus[1m]", "name": "Opus"}]},
+            {"id": "fast", "name": "Fast", "type": "boolean", "currentValue": false}
+        ]))
+        .expect("the protocol's own shape parses");
+
+        assert_eq!(current(&advertised, "model").as_deref(), Some("opus[1m]"));
+        assert_eq!(current(&advertised, "fast").as_deref(), Some("false"));
+        assert_eq!(current(&advertised, "effort"), None, "not advertised");
+    }
+
+    /// Every kit the domain can spell for Claude.
+    fn every_claude_kit() -> Vec<Kit> {
+        let mut kits = vec![Kit::Claude {
+            model: ClaudeModel::Haiku,
+        }];
+        for effort in ClaudeEffort::ALL.iter().copied() {
+            for model in [
+                ClaudeModel::Default { effort },
+                ClaudeModel::Sonnet { effort },
+                ClaudeModel::Opus { effort },
+            ] {
+                kits.push(Kit::Claude { model });
+            }
+        }
+        kits
+    }
+
+    /// Every spelling this crate sends is one the pinned adapter accepts, and
+    /// the one option it does not offer is the one the domain cannot ask for.
+    ///
+    /// The test `docs/decisions/0048-a-job-runs-on-a-kit.md` promises: a pin
+    /// bump that removes or renames a value fails here rather than in a job
+    /// at three in the morning. Every kit is settled on one session through
+    /// the same function every turn uses, so what is checked is what runs.
+    /// It needs no credential and no network — a session opens without
+    /// either, measured — which is why it sits with the handshake tests
+    /// rather than with the ones that cost a credential.
+    ///
+    /// The last assertion is about the domain's shape rather than a spelling:
+    /// Haiku has no effort in the domain because the adapter offers none, and
+    /// if the adapter started offering one this is what would say so.
+    #[tokio::test]
+    #[ignore = "needs a container runtime and the network; run `just image-handshake`"]
+    async fn every_spelling_is_one_the_pinned_adapter_accepts() {
+        let runtime = located_runtime();
+        let image = build(&runtime, Agent::Claude, Role::Foreman)
+            .await
+            .expect("the image builds");
+        let arguments: Vec<String> = handshake_arguments(&image)
+            .iter()
+            .map(|argument| (*argument).to_owned())
+            .collect();
+        let mut container = spawn(&runtime, &arguments, &[]).expect("the runtime starts");
+        let (Some(to_agent), Some(from_agent), Some(complaints)) = (
+            container.stdin.take(),
+            container.stdout.take(),
+            container.stderr.take(),
+        ) else {
+            panic!("the streams are piped");
+        };
+
+        let (checked, _printed) = futures::future::join(
+            Client.builder().connect_with(
+                ByteStreams::new(to_agent.compat_write(), from_agent.compat()),
+                async |connection: ConnectionTo<AgentRole>| {
+                    connection
+                        .send_request(InitializeRequest::new(ProtocolVersion::V1))
+                        .block_task()
+                        .await?;
+                    let Some((session_id, mut advertised)) =
+                        open_session(&connection, Opening::Fresh, None).await?
+                    else {
+                        panic!("a fresh session always opens");
+                    };
+
+                    for kit in every_claude_kit() {
+                        if let Err(why) = settle(&connection, &session_id, &mut advertised, &kit).await {
+                            panic!("{kit:?} is not accepted by the pinned adapter: {why}");
+                        }
+                    }
+
+                    settle(
+                        &connection,
+                        &session_id,
+                        &mut advertised,
+                        &Kit::Claude {
+                            model: ClaudeModel::Haiku,
+                        },
+                    )
+                    .await
+                    .expect("haiku settles");
+                    let effort_on_haiku = connection
+                        .send_request(SetSessionConfigOptionRequest::new(
+                            session_id.clone(),
+                            "effort",
+                            "default",
+                        ))
+                        .block_task()
+                        .await;
+                    assert!(
+                        effort_on_haiku.is_err(),
+                        "the adapter offers no effort on haiku, which is why the domain cannot ask for one",
+                    );
+                    Ok(())
+                },
+            ),
+            printed(complaints),
+        )
+        .await;
+        checked.expect("the exchange completes");
+        drop(container.wait().await);
     }
 
     /// An identifier standing in for one a runtime would have answered with.
@@ -2102,8 +2699,12 @@ mod tests {
         }
     }
 
-    fn only_claude() -> std::collections::BTreeSet<Agent> {
-        std::collections::BTreeSet::from([Agent::Claude])
+    fn only_claude() -> std::collections::BTreeMap<stageman_core::KitName, stageman_core::KitConfig>
+    {
+        std::collections::BTreeMap::from([(
+            stageman_core::KitName::new("Claude").expect("a name"),
+            stageman_core::KitConfig::defaults(Agent::Claude),
+        )])
     }
 
     /// An instance with one project, so a handout can carry a platform
@@ -2121,8 +2722,8 @@ mod tests {
             Project {
                 name: "example".to_owned(),
                 repository: "https://example.invalid/repo".to_owned(),
-                foreman_agent: Agent::Claude,
-                job_agents: only_claude(),
+                foreman_kit: Kit::defaults(Agent::Claude),
+                kits: only_claude(),
                 credentials,
                 channels: BTreeMap::new(),
                 variables: BTreeMap::new(),
@@ -2180,7 +2781,7 @@ mod tests {
     #[test]
     fn a_thread_is_never_delivered_as_a_variable() {
         let (state, project) = instance_with_a_channel("sk-ant-oat01-xyz");
-        let handout = Handout::for_job(&state, Agent::Claude, project)
+        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project)
             .expect("a watched project")
             .speaking_in(stageman_core::Thread {
                 channel: Channel::Slack,
@@ -2228,7 +2829,8 @@ mod tests {
 
         for handout in [
             Handout::for_foreman(&state, project).expect("a watched project"),
-            Handout::for_job(&state, Agent::Claude, project).expect("a watched project"),
+            Handout::for_job(&state, Kit::defaults(Agent::Claude), project)
+                .expect("a watched project"),
         ] {
             let named = names_of(&handout);
             assert!(
@@ -2254,7 +2856,8 @@ mod tests {
     #[test]
     fn a_job_with_no_channel_is_delivered_no_channel_variables() {
         let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
-        let handout = Handout::for_job(&state, Agent::Claude, project).expect("a watched project");
+        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project)
+            .expect("a watched project");
 
         let named = names_of(&handout);
 
@@ -2291,7 +2894,8 @@ mod tests {
     #[test]
     fn a_job_is_delivered_the_variable_its_platform_tool_reads() {
         let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
-        let handout = Handout::for_job(&state, Agent::Claude, project).expect("a watched project");
+        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project)
+            .expect("a watched project");
 
         let named = names_of(&handout);
 
@@ -2317,7 +2921,8 @@ mod tests {
                 stageman_core::VariableName::new("STRIPE_API_KEY").expect("a deliverable name"),
                 Secret::new("sk-test-not-a-real-key".to_owned()),
             );
-        let handout = Handout::for_job(&state, Agent::Claude, project).expect("a watched project");
+        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project)
+            .expect("a watched project");
 
         let delivering = delivered(&handout).expect("no reserved name here");
         let found = delivering
@@ -2371,8 +2976,8 @@ mod tests {
                     stageman_core::VariableName::new(*claimed).expect("a deliverable name"),
                     Secret::new("somebody-elses-account".to_owned()),
                 );
-            let handout =
-                Handout::for_job(&state, Agent::Claude, project).expect("a watched project");
+            let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project)
+                .expect("a watched project");
 
             let refused = delivered(&handout).expect_err("that name is ours");
 
@@ -2398,8 +3003,8 @@ mod tests {
     fn every_name_this_project_delivers_is_one_it_reserves() {
         for credential in ["sk-ant-oat01-xyz", "sk-ant-api03-xyz"] {
             let (state, project) = instance_with_a_project(credential);
-            let handout =
-                Handout::for_job(&state, Agent::Claude, project).expect("a watched project");
+            let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project)
+                .expect("a watched project");
 
             for name in names_of(&handout) {
                 assert!(
@@ -2416,7 +3021,8 @@ mod tests {
     #[test]
     fn no_credential_ever_appears_in_a_containers_arguments() {
         let (state, project) = instance_with_a_channel("sk-ant-oat01-secret-value");
-        let handout = Handout::for_job(&state, Agent::Claude, project).expect("a watched project");
+        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project)
+            .expect("a watched project");
 
         let arguments = session_arguments(
             &built(),
@@ -2473,6 +3079,7 @@ mod tests {
         let arguments = retained_arguments(
             "stageman-job-abc",
             &built(),
+            Agent::Claude,
             &delivered(&handout).expect("a handout with no reserved name"),
         );
         let line = arguments.join(" ");
@@ -2515,6 +3122,7 @@ mod tests {
         let arguments = retained_arguments(
             "stageman-job-abc",
             &built(),
+            Agent::Claude,
             &delivered(&handout).expect("a handout with no reserved name"),
         );
         let line = arguments.join(" ");
@@ -2620,6 +3228,7 @@ mod tests {
         let arguments = retained_arguments(
             "stageman-job-abc",
             &built(),
+            Agent::Claude,
             &delivered(&handout).expect("a handout with no reserved name"),
         );
 
@@ -2702,7 +3311,7 @@ mod tests {
             .expect("the image builds");
 
         let created = tokio::process::Command::new(runtime.path())
-            .args(retained_arguments(name, &image, &delivering))
+            .args(retained_arguments(name, &image, Agent::Claude, &delivering))
             .envs(
                 delivering
                     .iter()
@@ -2715,6 +3324,13 @@ mod tests {
             created.status.success(),
             "{}",
             String::from_utf8_lossy(&created.stderr)
+        );
+        // The label a foreman's turn boundary reads, asserted on a container
+        // made the way every retained container is made.
+        assert_eq!(
+            made_for(&runtime, name).await.expect("the runtime answers"),
+            Some(Agent::Claude),
+            "a created container says which agent it was made for",
         );
 
         hold(&runtime, name).await.expect("it starts");
@@ -2848,8 +3464,8 @@ mod tests {
                 Project {
                     name: "probe".to_owned(),
                     repository: "https://example.invalid/repo".to_owned(),
-                    foreman_agent: Agent::Claude,
-                    job_agents: only_claude(),
+                    foreman_kit: Kit::defaults(Agent::Claude),
+                    kits: only_claude(),
                     credentials: BTreeMap::new(),
                     channels: BTreeMap::new(),
                     variables: BTreeMap::new(),
@@ -2919,6 +3535,7 @@ mod tests {
             let second = resume(
                 &runtime,
                 name,
+                handout.kit(),
                 None,
                 "What was the word I asked you to remember? Reply with it alone.",
             )
@@ -2960,6 +3577,7 @@ mod tests {
             let picked_up = resume(
                 &runtime,
                 name,
+                handout.kit(),
                 None,
                 "You were interrupted. In one short line, what were you doing?",
             )

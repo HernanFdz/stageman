@@ -161,12 +161,27 @@ impl Agent {
     /// without a derive this crate would otherwise have no use for.
     pub const ALL: &'static [Self] = &[Self::Claude];
 
+    /// What to call this agent, for a person.
+    ///
+    /// In the domain rather than only on a screen because the domain needs it
+    /// once: a project written before kits existed named agents, and each
+    /// becomes a kit named after its agent when that file is opened — see
+    /// [`KitConfig::defaults`].
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Claude => "Claude",
+        }
+    }
+
     /// What this agent is good for, in prose.
     ///
-    /// Not decoration and not operator-editable: the foreman chooses which
-    /// agent runs a job, and this is what it reasons over — see
-    /// `docs/decisions/0006-agents-are-pluggable.md`. It lives in code because
-    /// it describes the agent rather than the installation.
+    /// Not decoration and not operator-editable: it describes the agent rather
+    /// than the installation, so it lives in code — see
+    /// `docs/decisions/0006-agents-are-pluggable.md`. What the foreman reasons
+    /// over when it chooses is a kit's description, which is the operator's
+    /// and describes what one project wants that kit for; this is what a kit
+    /// made of an agent's defaults says until somebody writes that.
     #[must_use]
     pub const fn description(self) -> &'static str {
         match self {
@@ -192,6 +207,241 @@ pub struct AgentConfig {
     /// job running the same agent use the same one. See
     /// `docs/decisions/0008-one-credential-per-agent.md`.
     pub auth_token: Secret,
+}
+
+/// One agent, set the way one job runs it.
+///
+/// The variants are the agents and each payload is that agent's own settings,
+/// so a job holding settings for an agent other than the one it ran on is not
+/// a state to check for but a sentence that cannot be written — there is no
+/// second field to disagree with the first. See
+/// `docs/decisions/0048-a-job-runs-on-a-kit.md`. This crate owns the *shape*
+/// of each agent's settings and the adapter owns their *spelling* on the wire,
+/// which is the seam [`Handout`] already draws for credentials: deciding is a
+/// pure question about configuration, and what a value is called is knowledge
+/// about one agent.
+///
+/// Each payload is a closed set because the adapter it is spelled for is
+/// pinned in the image compiled into the binary, so what that adapter accepts
+/// is a fact about this build rather than about the world. The adapter crate
+/// holds every spelling here to what the pinned adapter accepts, in a test
+/// that runs a container, so a pin bump that removes or renames a value fails
+/// there instead of rotting.
+///
+/// Read back through [`Job`], which also accepts the bare agent name every job
+/// recorded before kits existed was written with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Kit {
+    /// Anthropic's coding agent, on one of the models its adapter offers.
+    Claude {
+        /// Which model, and — where the model has one — how hard it thinks.
+        model: ClaudeModel,
+    },
+}
+
+impl Kit {
+    /// An agent exactly as it comes: every setting left to the agent's own
+    /// default.
+    ///
+    /// What every job ran on before kits existed, which is why reading an
+    /// older record produces this rather than a guess — a job written with a
+    /// bare agent name genuinely ran on that agent's defaults, so this is the
+    /// true answer, per `docs/conventions.md` §4.
+    #[must_use]
+    pub const fn defaults(agent: Agent) -> Self {
+        match agent {
+            Agent::Claude => Self::Claude {
+                model: ClaudeModel::Default {
+                    effort: ClaudeEffort::Default,
+                },
+            },
+        }
+    }
+
+    /// Which agent this is a kit for.
+    ///
+    /// Derived from the variant rather than stored beside it, which is the
+    /// whole point of the shape: there is no way for the two to disagree.
+    #[must_use]
+    pub const fn agent(&self) -> Agent {
+        match self {
+            Self::Claude { .. } => Agent::Claude,
+        }
+    }
+}
+
+/// Which of Claude's models a kit runs on, and how hard it thinks where that
+/// is a choice at all.
+///
+/// The effort lives *inside* the variants that have one rather than beside
+/// the model, because the pinned adapter offers no effort on Haiku and refuses
+/// one asked of it as an unknown option — measured in
+/// `docs/decisions/0048-a-job-runs-on-a-kit.md`. Two fields side by side would
+/// let that combination be written down; this shape cannot.
+///
+/// The variants are the adapter's *aliases*: it refuses a dated model
+/// identifier outright, and an alias follows the vendor's releases on its own,
+/// so this set is small and moves only when the pinned adapter does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClaudeModel {
+    /// Whatever the adapter recommends, which it describes as Sonnet.
+    Default {
+        /// How hard it thinks.
+        effort: ClaudeEffort,
+    },
+    /// Efficient for routine work, in the adapter's words.
+    Sonnet {
+        /// How hard it thinks.
+        effort: ClaudeEffort,
+    },
+    /// Best for complex work, in the adapter's words, and the most expensive.
+    Opus {
+        /// How hard it thinks.
+        effort: ClaudeEffort,
+    },
+    /// Fastest for quick answers, and the one with no effort to choose.
+    Haiku,
+}
+
+impl ClaudeModel {
+    /// How hard this model is asked to think, if that is a choice on it.
+    #[must_use]
+    pub const fn effort(self) -> Option<ClaudeEffort> {
+        match self {
+            Self::Default { effort } | Self::Sonnet { effort } | Self::Opus { effort } => {
+                Some(effort)
+            }
+            Self::Haiku => None,
+        }
+    }
+}
+
+/// How hard one of Claude's models is asked to think.
+///
+/// The adapter's own levels, `Default` included: "no preference" is a value
+/// the agent spells and means something by, not an absence this crate would
+/// add on top — see `docs/decisions/0048-a-job-runs-on-a-kit.md` on why this
+/// is not an `Option`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum ClaudeEffort {
+    /// Whatever the adapter picks for the model.
+    Default,
+    /// The least.
+    Low,
+    /// Between.
+    Medium,
+    /// More.
+    High,
+    /// More still.
+    XHigh,
+    /// The most the adapter offers.
+    Max,
+}
+
+impl ClaudeEffort {
+    /// Every level, the default first and then rising.
+    ///
+    /// A list rather than a derive, for the reason [`Agent::ALL`] gives:
+    /// forgetting to add a level here costs a missing menu entry, which is the
+    /// cheapest failure available.
+    pub const ALL: &'static [Self] = &[
+        Self::Default,
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::XHigh,
+        Self::Max,
+    ];
+}
+
+/// The name an operator gives one of a project's kits.
+///
+/// Trimmed and non-empty, and nothing more: it is what a foreman says back in
+/// order to choose a kit and what a person reads on a form, so the only rule is
+/// that there is something to say. A project keys its kits on it, so two kits
+/// under one name on one project is unrepresentable rather than checked.
+///
+/// Like [`VariableName`] it implements no deserialisation. A name a file
+/// carries is checked as that file is opened rather than trusted because
+/// something once checked it — the boundary a credential crosses through
+/// [`SealedSecret`], applied to text.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct KitName(String);
+
+impl KitName {
+    /// Accepts a name if there is one, with the whitespace around it removed.
+    ///
+    /// Trimmed rather than refused for the space, because the difference
+    /// between `deep` and `deep ` is one nobody typed on purpose, and a form
+    /// refusing it would be refusing a name it could plainly see.
+    ///
+    /// # Errors
+    ///
+    /// Fails if nothing is left once the whitespace is gone.
+    pub fn new(name: impl Into<String>) -> Result<Self, KitNameError> {
+        let name = name.into();
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err(KitNameError::Empty);
+        }
+        Ok(Self(trimmed.to_owned()))
+    }
+
+    /// The name, as a person or a foreman would say it.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for KitName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A kit was given no name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum KitNameError {
+    /// Nothing but whitespace, or nothing at all.
+    #[error("a kit needs a name")]
+    Empty,
+}
+
+/// What an operator supplies in order to offer one kit on a project.
+///
+/// The kit, and what this project wants it for. The description is the
+/// operator's rather than code's, and the difference is the one
+/// `docs/decisions/0006-agents-are-pluggable.md` draws for an agent's: that
+/// one describes the agent and so lives in code, while this one describes what
+/// *this project* wants the kit for, which nothing in code could know. It is
+/// what the foreman reasons over when it chooses a kit — see
+/// `docs/decisions/0048-a-job-runs-on-a-kit.md`.
+///
+/// Holds no credential, so it crosses the snapshot boundary as itself, the way
+/// a [`Job`] does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KitConfig {
+    /// What this project wants the kit for, in the operator's words.
+    pub description: String,
+    /// The kit itself.
+    pub kit: Kit,
+}
+
+impl KitConfig {
+    /// An agent's defaults, described as the agent describes itself.
+    ///
+    /// What a project written before kits existed is read as offering, one per
+    /// agent it named — the default that is the true answer, per
+    /// `docs/conventions.md` §4, since nothing else existed to run on — and
+    /// what a project offers for an agent nobody has yet written a kit for.
+    #[must_use]
+    pub fn defaults(agent: Agent) -> Self {
+        Self {
+            description: agent.description().to_owned(),
+            kit: Kit::defaults(agent),
+        }
+    }
 }
 
 /// A platform a project's jobs act on.
@@ -397,12 +647,26 @@ pub struct Thread {
 /// unchanged while the types around it need a sealed counterpart.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Job {
-    /// Which agent ran it.
+    /// What it runs on: which agent, set how.
+    ///
+    /// The one field nothing may change once the record exists, and the only
+    /// private one here for that reason. A resumed job is the same job
+    /// continuing, so what it runs on is part of what it *is*, and the record
+    /// of it has to stay true for "why did this go badly?" to have an answer
+    /// — see `docs/decisions/0048-a-job-runs-on-a-kit.md`. Everything else on
+    /// this type is written to as the job goes; this is read through
+    /// [`Job::kit`] and set only by [`Job::new`].
     ///
     /// Stored by value, so this stays true after an operator removes that
-    /// agent's configuration. Recorded at all because once more than one agent
-    /// can run a job, "why did this go badly?" has no answer without it.
-    pub agent: Agent,
+    /// agent's configuration.
+    ///
+    /// Written as `kit`, and read as the bare agent name too. Every job
+    /// recorded before kits existed says `"agent": "Claude"`, and such a job
+    /// genuinely ran on that agent's defaults, so that is what it reads as —
+    /// the default that is the true answer, per `docs/conventions.md` §4,
+    /// rather than the substituted one it forbids.
+    #[serde(alias = "agent", deserialize_with = "kit_or_agent")]
+    kit: Kit,
     /// Why the foreman started it, in prose.
     ///
     /// The whole of a job's provenance, deliberately — see
@@ -437,6 +701,73 @@ pub struct Job {
     /// defaulted, per `docs/conventions.md` §4.
     #[serde(default)]
     pub thread: Option<Thread>,
+    /// What the agent's session reported it was set to, after being set.
+    ///
+    /// Beside the kit rather than derived from it, because the two are
+    /// different facts: the kit is what was asked, and this is what the
+    /// adapter said in reply, in its own spelling. The two were measured to
+    /// differ — an account entitled to a larger context has the same alias
+    /// reported back with a suffix — so this is the only record of what
+    /// actually ran, and the kit alone is not it. See
+    /// `docs/decisions/0048-a-job-runs-on-a-kit.md`.
+    ///
+    /// Keyed by the adapter's own option identifier, so an entry means nothing
+    /// without knowing the agent, which the kit says. Overwritten on every
+    /// turn, since every turn sets and reads back. Empty for a job that has not
+    /// had a turn, and for every job recorded before this existed, which is why
+    /// it is defaulted.
+    #[serde(default)]
+    pub reported: BTreeMap<String, String>,
+}
+
+impl Job {
+    /// A job as it is created: working, on `kit`, with nowhere yet to speak.
+    ///
+    /// The only way to give a job its kit, which is what makes "fixed when the
+    /// job is created" a property of the type rather than a rule — see
+    /// `docs/decisions/0048-a-job-runs-on-a-kit.md`. Takes the timestamp
+    /// rather than reading a clock, like everything else here.
+    #[must_use]
+    pub const fn new(kit: Kit, reason: String, kickoff: String, created_at: Timestamp) -> Self {
+        Self {
+            kit,
+            reason,
+            kickoff,
+            created_at,
+            progress: Progress::Working,
+            thread: None,
+            reported: BTreeMap::new(),
+        }
+    }
+
+    /// What this job runs on, for its whole life.
+    #[must_use]
+    pub const fn kit(&self) -> &Kit {
+        &self.kit
+    }
+}
+
+/// Reads a kit, or the bare agent name a job was recorded with before kits
+/// existed.
+///
+/// The current spelling is tried first. The older one is a string naming an
+/// agent, which no kit deserialises as — a kit's variants all carry a payload
+/// — so the two cannot be confused.
+fn kit_or_agent<'de, D>(deserializer: D) -> Result<Kit, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Written {
+        Kit(Kit),
+        Agent(Agent),
+    }
+
+    Ok(match Written::deserialize(deserializer)? {
+        Written::Kit(kit) => kit,
+        Written::Agent(agent) => Kit::defaults(agent),
+    })
 }
 
 /// Where a job has got to.
@@ -627,20 +958,34 @@ pub struct Project {
     ///
     /// Every kickoff embeds this, because an agent has no other way to find it.
     pub repository: String,
-    /// The agent this project's foreman thinks with.
+    /// The kit this project's foreman thinks with.
     ///
     /// Per project rather than per instance, because watching a project's
     /// channels needs that project's credentials and a shared foreman
     /// would hold every project's at once — see
     /// `docs/decisions/0020-the-orchestrator-belongs-to-a-project.md`.
-    pub foreman_agent: Agent,
-    /// The agents this project's jobs may run on.
+    ///
+    /// A kit rather than an agent since
+    /// `docs/decisions/0048-a-job-runs-on-a-kit.md`, and a change to it lands
+    /// at the next turn boundary rather than during a turn. Its settings are
+    /// settled again at the start of every turn regardless, so a change of
+    /// model or effort keeps the container and the session; a change of agent
+    /// is a change of image, and only that replaces the container.
+    pub foreman_kit: Kit,
+    /// The kits this project's jobs may run on, each under the name the
+    /// operator gave it.
     ///
     /// Never empty in a valid instance, and checked rather than made
     /// unrepresentable — see [`State::check`], which is the one definition of
     /// what valid means and is consulted wherever a state could have stopped
     /// being it.
-    pub job_agents: BTreeSet<Agent>,
+    ///
+    /// Named kits rather than a set of agents, per
+    /// `docs/decisions/0048-a-job-runs-on-a-kit.md`: a job is started on one
+    /// of these and on nothing else, whether the foreman starts it or a person
+    /// does, and the operator's judgement about what this project wants each
+    /// one *for* is the description the foreman reasons over when it chooses.
+    pub kits: BTreeMap<KitName, KitConfig>,
     /// What its jobs are handed, one credential per platform.
     ///
     /// A map rather than a list so that two credentials for one platform is
@@ -747,7 +1092,11 @@ impl State {
         self.projects
             .iter()
             .filter(move |(_, project)| {
-                project.foreman_agent == agent || project.job_agents.contains(&agent)
+                project.foreman_kit.agent() == agent
+                    || project
+                        .kits
+                        .values()
+                        .any(|offered| offered.kit.agent() == agent)
             })
             .map(|(id, _)| *id)
     }
@@ -777,11 +1126,11 @@ impl State {
     /// repairing a file needs to know which one.
     pub fn check(&self) -> Result<(), Inconsistent> {
         for (id, project) in &self.projects {
-            if project.job_agents.is_empty() {
-                return Err(Inconsistent::NoJobAgents(*id));
+            if project.kits.is_empty() {
+                return Err(Inconsistent::NoKits(*id));
             }
-            for named in
-                std::iter::once(project.foreman_agent).chain(project.job_agents.iter().copied())
+            for named in std::iter::once(project.foreman_kit.agent())
+                .chain(project.kits.values().map(|offered| offered.kit.agent()))
             {
                 if !self.agents.contains_key(&named) {
                     return Err(Inconsistent::UnconfiguredProjectAgent {
@@ -981,8 +1330,19 @@ impl State {
                     SealedProject {
                         name: project.name.clone(),
                         repository: project.repository.clone(),
-                        foreman_agent: project.foreman_agent,
-                        job_agents: project.job_agents.clone(),
+                        foreman_kit: project.foreman_kit.clone(),
+                        // Never written. The field exists to read files from
+                        // before kits, and writing it would carry both shapes
+                        // for ever.
+                        job_agents: BTreeSet::new(),
+                        // Names in the clear beside their kits, on the terms a
+                        // variable's name travels: a name is not a credential,
+                        // and the operator typed it in order to read it back.
+                        kits: project
+                            .kits
+                            .iter()
+                            .map(|(name, offered)| (name.to_string(), offered.clone()))
+                            .collect(),
                         credentials,
                         channels,
                         variables,
@@ -1089,12 +1449,12 @@ pub enum SealError {
 /// the one nobody was reading.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum Inconsistent {
-    /// A project has no agent its jobs can run on.
+    /// A project has no kit its jobs can run on.
     ///
     /// A project whose jobs cannot run cannot do the one thing a project is
     /// for, which is why this is a broken instance rather than an unusual one.
-    #[error("project {0} has no agent its jobs can run on")]
-    NoJobAgents(ProjectId),
+    #[error("project {0} has no kit its jobs can run on")]
+    NoKits(ProjectId),
     /// A project names an agent this instance does not configure.
     #[error("project {project} names agent {agent:?}, which is not configured")]
     UnconfiguredProjectAgent {
@@ -1136,6 +1496,12 @@ pub enum OpenError {
     /// escape.
     #[error("the snapshot names a variable that could not be delivered")]
     VariableName(#[source] VariableNameError),
+    /// A project offers a kit under a name that is not one.
+    ///
+    /// The same boundary as the variable above: a name in a file is checked
+    /// as the file is opened, because a file may have been edited by hand.
+    #[error("the snapshot names a kit under a name that is not one")]
+    KitName(#[source] KitNameError),
 }
 
 /// A credential as it appears on disk.
@@ -1227,17 +1593,43 @@ pub struct SealedProject {
     pub name: String,
     /// Where the repository lives.
     pub repository: String,
-    /// The agent its foreman thinks with.
+    /// The kit its foreman thinks with.
     ///
-    /// Aliased because this field is on disk under its old name in every
-    /// snapshot written before
-    /// `docs/decisions/0030-the-orchestrator-is-a-foreman.md`. A rename of a
-    /// serialised name is never free — see `docs/conventions.md` §4, which
-    /// gained that rule from this exact field failing to open a real instance.
-    #[serde(alias = "orchestrator_agent")]
-    pub foreman_agent: Agent,
-    /// The agents its jobs may run on.
+    /// Read under three spellings. The oldest files say `orchestrator_agent`,
+    /// from before `docs/decisions/0030-the-orchestrator-is-a-foreman.md`;
+    /// the ones after say `foreman_agent`; and both hold a bare agent name,
+    /// which reads as that agent's defaults through the same reader a job's
+    /// kit uses and for the same reason — nothing else existed to think with.
+    /// A rename of a serialised name is never free, per `docs/conventions.md`
+    /// §4, which gained that rule from this exact field failing to open a
+    /// real instance. Written under this name from now on, so a file upgrades
+    /// itself on its first change.
+    #[serde(
+        alias = "orchestrator_agent",
+        alias = "foreman_agent",
+        deserialize_with = "kit_or_agent"
+    )]
+    pub foreman_kit: Kit,
+    /// The agents its jobs ran on, in a file written before kits existed.
+    ///
+    /// Read and never written. `kits` below replaced it, and a file that says
+    /// this and not that is opened as one kit per agent named, on that
+    /// agent's defaults. A field replaced by one of another shape is a rename
+    /// with a conversion attached, and the conversion lives in the open path
+    /// rather than in a default — because the true answer depends on what the
+    /// old field said.
+    #[serde(default, skip_serializing)]
     pub job_agents: BTreeSet<Agent>,
+    /// The kits its jobs may run on, keyed by plain text.
+    ///
+    /// Plain text rather than the validated name, for the reason the
+    /// variables below are: a file is untrusted input, so a name is checked as
+    /// the snapshot is opened rather than trusted because something once
+    /// checked it. Defaulted because it was added after snapshots existed,
+    /// and empty is the true answer for a file that carries `job_agents`
+    /// instead — the open path reads one from the other.
+    #[serde(default)]
+    pub kits: BTreeMap<String, KitConfig>,
     /// Its sealed credentials.
     pub credentials: BTreeMap<Platform, SealedSecret>,
     /// Its channel bindings, each with its credential sealed.
@@ -1358,13 +1750,37 @@ impl Snapshot {
                         Ok((name, sealed.open(key)?))
                     })
                     .collect::<Result<BTreeMap<_, _>, OpenError>>()?;
+                // Where a kit's name stops being believed, on the same terms.
+                // A file from before kits existed names agents instead, and
+                // each becomes a kit named after its agent, on that agent's
+                // defaults: the true answer, since nothing else existed to run
+                // on, rather than a substitute for one.
+                let kits = if project.kits.is_empty() {
+                    project
+                        .job_agents
+                        .into_iter()
+                        .map(|agent| {
+                            let name = KitName::new(agent.name()).map_err(OpenError::KitName)?;
+                            Ok((name, KitConfig::defaults(agent)))
+                        })
+                        .collect::<Result<BTreeMap<_, _>, OpenError>>()?
+                } else {
+                    project
+                        .kits
+                        .into_iter()
+                        .map(|(name, offered)| {
+                            let name = KitName::new(name).map_err(OpenError::KitName)?;
+                            Ok((name, offered))
+                        })
+                        .collect::<Result<BTreeMap<_, _>, OpenError>>()?
+                };
                 Ok((
                     id,
                     Project {
                         name: project.name,
                         repository: project.repository,
-                        foreman_agent: project.foreman_agent,
-                        job_agents: project.job_agents,
+                        foreman_kit: project.foreman_kit,
+                        kits,
                         credentials,
                         channels,
                         variables,
@@ -1514,7 +1930,7 @@ pub enum Role {
 /// disk.
 #[derive(Clone)]
 pub struct Handout {
-    agent: Agent,
+    kit: Kit,
     role: Role,
     agent_credential: Secret,
     platforms: BTreeMap<Platform, Secret>,
@@ -1561,13 +1977,13 @@ impl Handout {
             .projects
             .get(&project)
             .ok_or(HandoutError::UnknownProject(project))?;
-        let agent = watching.foreman_agent;
+        let agent = watching.foreman_kit.agent();
         let config = state
             .agents
             .get(&agent)
             .ok_or(HandoutError::UnconfiguredAgent(agent))?;
         Ok(Self {
-            agent,
+            kit: watching.foreman_kit.clone(),
             role: Role::Foreman,
             agent_credential: config.auth_token.clone(),
             platforms: BTreeMap::new(),
@@ -1600,7 +2016,8 @@ impl Handout {
     /// process started with nothing to authenticate with fails later, further
     /// from the cause, and `docs/conventions.md` §3 would rather that be a
     /// visible job failure than a mystery.
-    pub fn for_job(state: &State, agent: Agent, project: ProjectId) -> Result<Self, HandoutError> {
+    pub fn for_job(state: &State, kit: Kit, project: ProjectId) -> Result<Self, HandoutError> {
+        let agent = kit.agent();
         let config = state
             .agents
             .get(&agent)
@@ -1610,7 +2027,7 @@ impl Handout {
             .get(&project)
             .ok_or(HandoutError::UnknownProject(project))?;
         Ok(Self {
-            agent,
+            kit,
             role: Role::Job,
             agent_credential: config.auth_token.clone(),
             platforms: project.credentials.clone(),
@@ -1629,7 +2046,15 @@ impl Handout {
     /// value that cannot be checked defends nothing.
     #[must_use]
     pub const fn agent(&self) -> Agent {
-        self.agent
+        self.kit.agent()
+    }
+
+    /// How that agent is to be set, which an adapter spells out and applies
+    /// at the start of every turn — see
+    /// `docs/decisions/0048-a-job-runs-on-a-kit.md`.
+    #[must_use]
+    pub const fn kit(&self) -> &Kit {
+        &self.kit
     }
 
     /// Which of the two things that run an agent this was built for.
@@ -1725,7 +2150,7 @@ impl fmt::Debug for Handout {
     /// worth taking.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Handout")
-            .field("agent", &self.agent)
+            .field("kit", &self.kit)
             .field("role", &self.role)
             .field("agent_credential", &"<redacted>")
             .field("platforms", &self.platforms.keys().collect::<Vec<_>>())
@@ -1765,14 +2190,14 @@ pub enum HandoutError {
 #[cfg(test)]
 mod tests {
     use super::{
-        Agent, AgentConfig, Arriving, Attending, BASE64, Channel, ChannelConfig, Errand, Handout,
-        HandoutError, Inconsistent, Job, JobId, Key, NONCE_LEN, Nonce, OpenError, Platform,
-        Progress, Project, ProjectId, Recipient, Secret, Snapshot, State, Taken, Thread,
-        VariableName, VariableNameError,
+        Agent, AgentConfig, Arriving, Attending, BASE64, Channel, ChannelConfig, ClaudeEffort,
+        ClaudeModel, Errand, Handout, HandoutError, Inconsistent, Job, JobId, Key, Kit, KitConfig,
+        KitName, KitNameError, NONCE_LEN, Nonce, OpenError, Platform, Progress, Project, ProjectId,
+        Recipient, Secret, Snapshot, State, Taken, Thread, VariableName, VariableNameError,
     };
     use base64::Engine as _;
     use jiff::Timestamp;
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeMap;
     use uuid::Uuid;
 
     const TOKEN: &str = "ghp-not-a-real-token";
@@ -1811,9 +2236,14 @@ mod tests {
         }
     }
 
-    /// The agents a project's jobs may run on, for a project that only has one.
-    fn only_claude() -> BTreeSet<Agent> {
-        BTreeSet::from([Agent::Claude])
+    /// The kits a project's jobs may run on, for a project offering one: its
+    /// agent's defaults, under the agent's name — which is exactly what a
+    /// project written before kits existed opens as.
+    fn default_kits() -> BTreeMap<KitName, KitConfig> {
+        BTreeMap::from([(
+            KitName::new("Claude").expect("a name"),
+            KitConfig::defaults(Agent::Claude),
+        )])
     }
 
     fn a_project_with_a_job() -> Project {
@@ -1823,20 +2253,18 @@ mod tests {
         let mut jobs = BTreeMap::new();
         jobs.insert(
             JobId::from_uuid(Uuid::from_u128(9)),
-            Job {
-                agent: Agent::Claude,
-                reason: "an issue was opened".to_owned(),
-                kickoff: "work on it".to_owned(),
-                created_at: Timestamp::UNIX_EPOCH,
-                progress: Progress::Working,
-                thread: None,
-            },
+            Job::new(
+                Kit::defaults(Agent::Claude),
+                "an issue was opened".to_owned(),
+                "work on it".to_owned(),
+                Timestamp::UNIX_EPOCH,
+            ),
         );
         Project {
             name: "example".to_owned(),
             repository: "https://example.invalid/repo".to_owned(),
-            foreman_agent: Agent::Claude,
-            job_agents: only_claude(),
+            foreman_kit: Kit::defaults(Agent::Claude),
+            kits: default_kits(),
             credentials,
             channels,
             variables: BTreeMap::from([(
@@ -1902,8 +2330,13 @@ mod tests {
         let state = populated();
         let project = state.projects.values().next().expect("one project");
 
-        assert!(state.agents.contains_key(&project.foreman_agent));
-        assert!(project.job_agents.contains(&Agent::Claude));
+        assert!(state.agents.contains_key(&project.foreman_kit.agent()));
+        assert!(
+            project
+                .kits
+                .values()
+                .any(|offered| offered.kit.agent() == Agent::Claude)
+        );
     }
 
     /// The rule a dashboard has to enforce, and the query it enforces it with.
@@ -1930,13 +2363,142 @@ mod tests {
     }
 
     #[test]
-    fn a_project_with_no_agent_for_its_jobs_is_not_consistent() {
+    fn a_project_with_no_kit_for_its_jobs_is_not_consistent() {
         let mut state = populated();
         for project in state.projects.values_mut() {
-            project.job_agents.clear();
+            project.kits.clear();
         }
 
-        assert!(matches!(state.check(), Err(Inconsistent::NoJobAgents(_))));
+        assert!(matches!(state.check(), Err(Inconsistent::NoKits(_))));
+    }
+
+    /// A kit's name is what was typed, less the space around it, or nothing.
+    #[test]
+    fn a_kits_name_is_trimmed_and_never_empty() {
+        assert_eq!(KitName::new("  deep ").expect("a name").as_str(), "deep");
+        assert_eq!(KitName::new("   "), Err(KitNameError::Empty));
+        assert_eq!(KitName::new(""), Err(KitNameError::Empty));
+    }
+
+    /// A project written before kits existed opens with one kit per agent it
+    /// named, on that agent's defaults, and is written back as kits.
+    ///
+    /// Literal text, for the reason every older-file test here is: the writer
+    /// no longer emits `job_agents` at all, so only a file from before the
+    /// change can produce the input that has to keep opening. Both spellings
+    /// of the foreman's field are covered, since both are on disk somewhere.
+    #[test]
+    fn a_project_recorded_with_agents_opens_with_a_kit_per_agent() {
+        for foreman_field in ["orchestrator_agent", "foreman_agent"] {
+            let older = format!(
+                r#"{{
+                  "agents": {{ "Claude": {{ "auth_token": {} }} }},
+                  "projects": {{
+                    "00000000-0000-0000-0000-000000000003": {{
+                      "name": "example",
+                      "repository": "https://example.invalid/repo",
+                      "{foreman_field}": "Claude",
+                      "job_agents": ["Claude"],
+                      "credentials": {{}},
+                      "jobs": {{}}
+                    }}
+                  }}
+                }}"#,
+                serde_json::to_string(
+                    &Secret::new("agent-token".to_owned())
+                        .seal(&key(), [1; NONCE_LEN])
+                        .expect("sealing a well-formed secret")
+                )
+                .expect("a sealed secret serialises")
+            );
+
+            let parsed: Snapshot =
+                serde_json::from_str(&older).expect("an older file still parses");
+            let state = parsed.open(&key()).expect("and still opens");
+            let project = state.projects.values().next().expect("the project");
+
+            assert_eq!(project.foreman_kit, Kit::defaults(Agent::Claude));
+            assert_eq!(project.kits, default_kits(), "under {foreman_field}");
+
+            let written = serde_json::to_value(
+                state
+                    .seal(&key(), &mut counting_nonces())
+                    .expect("sealing cannot fail"),
+            )
+            .expect("a snapshot serialises");
+            let on_disk = &written["projects"]["00000000-0000-0000-0000-000000000003"];
+            assert!(
+                on_disk.get("job_agents").is_none(),
+                "the old shape is not written"
+            );
+            assert!(on_disk.get("foreman_agent").is_none());
+            assert_eq!(
+                on_disk["kits"]["Claude"]["kit"],
+                serde_json::json!({ "Claude": { "model": { "Default": { "effort": "Default" } } } }),
+            );
+            assert_eq!(
+                on_disk["foreman_kit"],
+                serde_json::json!({ "Claude": { "model": { "Default": { "effort": "Default" } } } }),
+            );
+        }
+    }
+
+    /// A kit an operator wrote survives the snapshot boundary as itself: its
+    /// name, its description and every setting.
+    #[test]
+    fn a_named_kit_survives_the_snapshot_boundary() {
+        let mut state = populated();
+        let deep = KitConfig {
+            description: "for refactors touching many files; costs several times more".to_owned(),
+            kit: Kit::Claude {
+                model: ClaudeModel::Opus {
+                    effort: ClaudeEffort::XHigh,
+                },
+            },
+        };
+        for project in state.projects.values_mut() {
+            project
+                .kits
+                .insert(KitName::new("deep").expect("a name"), deep.clone());
+            project.foreman_kit = Kit::Claude {
+                model: ClaudeModel::Haiku,
+            };
+        }
+
+        let json = serde_json::to_string(
+            &state
+                .seal(&key(), &mut counting_nonces())
+                .expect("sealing cannot fail"),
+        )
+        .expect("a snapshot serialises");
+        let reopened: Snapshot = serde_json::from_str(&json).expect("and parses back");
+        let reopened = reopened.open(&key()).expect("and opens");
+        let project = reopened.projects.values().next().expect("the project");
+
+        assert_eq!(
+            project.kits.get(&KitName::new("deep").expect("a name")),
+            Some(&deep)
+        );
+        assert_eq!(project.kits.len(), 2, "the default kit is still there too");
+        assert_eq!(
+            project.foreman_kit,
+            Kit::Claude {
+                model: ClaudeModel::Haiku
+            }
+        );
+    }
+
+    /// A name that is not one is refused as the file is opened.
+    #[test]
+    fn a_kit_under_a_blank_name_is_refused_as_the_file_is_opened() {
+        let mut sealed = sealed();
+        for project in sealed.projects.values_mut() {
+            project
+                .kits
+                .insert("   ".to_owned(), KitConfig::defaults(Agent::Claude));
+        }
+
+        assert!(matches!(sealed.open(&key()), Err(OpenError::KitName(_))));
     }
 
     /// A project with nowhere to escalate is a working project.
@@ -1978,7 +2540,7 @@ mod tests {
             .projects
             .values()
             .flat_map(|project| project.jobs.values())
-            .all(|job| job.agent == Agent::Claude);
+            .all(|job| job.kit().agent() == Agent::Claude);
         assert!(still_recorded);
     }
 
@@ -2422,6 +2984,120 @@ mod tests {
         assert_eq!(written, r#""Working""#);
     }
 
+    /// A job recorded before kits existed still opens, on its agent's defaults.
+    ///
+    /// The bare agent name is what every such job was written with, and the
+    /// default is the true answer rather than a substituted one: nothing else
+    /// existed to run on. Literal text for the reason the tests around it are —
+    /// the writer always emits the new spelling, so only a file from before the
+    /// change can produce the input that breaks.
+    #[test]
+    fn a_job_recorded_with_a_bare_agent_still_opens_on_that_agents_defaults() {
+        let older = r#"{
+          "agent": "Claude",
+          "reason": "an issue was opened",
+          "kickoff": "work on it",
+          "created_at": "1970-01-01T00:00:00Z",
+          "progress": "Working"
+        }"#;
+
+        let job: Job = serde_json::from_str(older).expect("the bare spelling still parses");
+        assert_eq!(*job.kit(), Kit::defaults(Agent::Claude));
+        assert!(
+            job.reported.is_empty(),
+            "nothing was ever read back from a job this old"
+        );
+
+        // And what is written back is a kit, so a file upgrades itself the
+        // first time anything changes rather than carrying both for ever.
+        let written = serde_json::to_value(&job).expect("a job serialises");
+        assert!(
+            written.get("agent").is_none(),
+            "the old spelling is not written"
+        );
+        assert_eq!(
+            written["kit"],
+            serde_json::json!({ "Claude": { "model": { "Default": { "effort": "Default" } } } }),
+        );
+    }
+
+    /// A kit that says more than the defaults survives the snapshot boundary
+    /// as itself, and so does what the agent reported back.
+    #[test]
+    fn a_jobs_kit_and_what_was_reported_survive_the_snapshot_boundary() {
+        let mut state = populated();
+        let project = *state.projects.keys().next().expect("a project");
+        let job = JobId::from_uuid(Uuid::from_u128(11));
+        let mut recorded = Job::new(
+            Kit::Claude {
+                model: ClaudeModel::Opus {
+                    effort: ClaudeEffort::XHigh,
+                },
+            },
+            "a refactor touching many files".to_owned(),
+            "do it carefully".to_owned(),
+            Timestamp::UNIX_EPOCH,
+        );
+        recorded
+            .reported
+            .insert("model".to_owned(), "opus[1m]".to_owned());
+        state
+            .projects
+            .get_mut(&project)
+            .expect("the project")
+            .jobs
+            .insert(job, recorded);
+
+        let json = serde_json::to_string(
+            &state
+                .seal(&key(), &mut counting_nonces())
+                .expect("sealing cannot fail"),
+        )
+        .expect("a snapshot serialises");
+        let reopened: Snapshot = serde_json::from_str(&json).expect("and parses back");
+        let reopened = reopened.open(&key()).expect("and opens");
+        let survived = reopened.job(job).expect("the job survived");
+
+        assert_eq!(
+            *survived.kit(),
+            Kit::Claude {
+                model: ClaudeModel::Opus {
+                    effort: ClaudeEffort::XHigh,
+                },
+            }
+        );
+        assert_eq!(
+            survived.reported.get("model").map(String::as_str),
+            Some("opus[1m]"),
+            "what the adapter said is kept in its own spelling",
+        );
+    }
+
+    /// The model that has no effort says so, and the ones that do say which.
+    ///
+    /// Small, and worth having because the adapter's spelling is built from
+    /// this answer: a model reporting an effort it does not have would send
+    /// an option the adapter refuses as unknown.
+    #[test]
+    fn only_the_models_with_an_effort_report_one() {
+        assert_eq!(ClaudeModel::Haiku.effort(), None);
+        for effort in ClaudeEffort::ALL {
+            assert_eq!(
+                ClaudeModel::Default { effort: *effort }.effort(),
+                Some(*effort)
+            );
+            assert_eq!(
+                ClaudeModel::Sonnet { effort: *effort }.effort(),
+                Some(*effort)
+            );
+            assert_eq!(
+                ClaudeModel::Opus { effort: *effort }.effort(),
+                Some(*effort)
+            );
+        }
+        assert_eq!(Kit::defaults(Agent::Claude).agent(), Agent::Claude);
+    }
+
     /// A job recorded before threads existed still opens, with none.
     ///
     /// The same rule as the channel map below, and the reason
@@ -2767,7 +3443,8 @@ mod tests {
     #[test]
     fn a_job_is_handed_its_own_projects_credentials() {
         let (state, mine, _) = two_projects();
-        let handout = Handout::for_job(&state, Agent::Claude, mine).expect("a watched project");
+        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine)
+            .expect("a watched project");
 
         assert_eq!(handout.agent_credential().expose(), "agent-token");
         assert_eq!(
@@ -2783,7 +3460,8 @@ mod tests {
     #[test]
     fn a_job_is_handed_the_channel_it_speaks_on() {
         let (state, mine, _) = two_projects();
-        let handout = Handout::for_job(&state, Agent::Claude, mine).expect("a watched project");
+        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine)
+            .expect("a watched project");
 
         let speaking = handout
             .channel(Channel::Slack)
@@ -2800,8 +3478,10 @@ mod tests {
     fn a_jobs_handout_carries_nothing_belonging_to_another_project() {
         let (state, mine, theirs) = two_projects();
 
-        let ours = Handout::for_job(&state, Agent::Claude, mine).expect("a watched project");
-        let alien = Handout::for_job(&state, Agent::Claude, theirs).expect("a watched project");
+        let ours = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine)
+            .expect("a watched project");
+        let alien = Handout::for_job(&state, Kit::defaults(Agent::Claude), theirs)
+            .expect("a watched project");
 
         let leaked = alien.platform(Platform::GitHub).map(Secret::expose);
         assert_eq!(leaked, Some("not-yours-and-never-was"));
@@ -2842,7 +3522,8 @@ mod tests {
     fn a_job_is_handed_its_projects_variables() {
         let (state, mine, _) = two_projects();
 
-        let handout = Handout::for_job(&state, Agent::Claude, mine).expect("a watched project");
+        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine)
+            .expect("a watched project");
         let delivered: Vec<(&str, &str)> = handout
             .variables()
             .map(|(name, value)| (name.as_str(), value.expose()))
@@ -2874,7 +3555,8 @@ mod tests {
     fn a_handouts_variable_names_can_be_read_without_their_values() {
         let (state, mine, _) = two_projects();
 
-        let handout = Handout::for_job(&state, Agent::Claude, mine).expect("a watched project");
+        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine)
+            .expect("a watched project");
         let named: Vec<&str> = handout.variable_names().map(VariableName::as_str).collect();
 
         assert_eq!(named, vec![VARIABLE]);
@@ -2888,7 +3570,8 @@ mod tests {
     fn a_handout_does_not_leak_a_variables_value_when_formatted() {
         let (state, mine, _) = two_projects();
 
-        let handout = Handout::for_job(&state, Agent::Claude, mine).expect("a watched project");
+        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine)
+            .expect("a watched project");
         let shown = format!("{handout:?}");
 
         assert!(!shown.contains(VARIABLE_VALUE), "{shown}");
@@ -2903,7 +3586,8 @@ mod tests {
     fn a_handout_speaks_at_the_root_until_it_is_given_a_thread() {
         let (state, mine, _) = two_projects();
 
-        let job = Handout::for_job(&state, Agent::Claude, mine).expect("a watched project");
+        let job = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine)
+            .expect("a watched project");
         assert!(job.thread().is_none());
         assert!(
             Handout::for_foreman(&state, mine)
@@ -2942,7 +3626,8 @@ mod tests {
         let (state, mine, _) = two_projects();
 
         for handout in [
-            Handout::for_job(&state, Agent::Claude, mine).expect("a watched project"),
+            Handout::for_job(&state, Kit::defaults(Agent::Claude), mine)
+                .expect("a watched project"),
             Handout::for_foreman(&state, mine).expect("a watched project"),
         ] {
             let bound = handout.channel(Channel::Slack).expect("a binding");
@@ -2980,7 +3665,7 @@ mod tests {
         let (state, _, _) = two_projects();
         let stranger = ProjectId::from_uuid(Uuid::from_u128(99));
 
-        let refused = Handout::for_job(&state, Agent::Claude, stranger);
+        let refused = Handout::for_job(&state, Kit::defaults(Agent::Claude), stranger);
 
         assert!(matches!(refused, Err(HandoutError::UnknownProject(id)) if id == stranger));
     }
@@ -2990,7 +3675,7 @@ mod tests {
         let (mut state, mine, _) = two_projects();
         state.agents.clear();
 
-        let refused = Handout::for_job(&state, Agent::Claude, mine);
+        let refused = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine);
 
         assert!(matches!(
             refused,
@@ -3002,7 +3687,8 @@ mod tests {
     #[test]
     fn a_handout_does_not_leak_a_credential_when_formatted() {
         let (state, mine, _) = two_projects();
-        let handout = Handout::for_job(&state, Agent::Claude, mine).expect("a watched project");
+        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine)
+            .expect("a watched project");
 
         let shown = format!("{handout:?}");
 
@@ -3314,15 +4000,15 @@ mod tests {
     /// A file describing an instance that cannot exist is refused where it is
     /// read, rather than believed and acted on.
     #[test]
-    fn a_snapshot_giving_a_project_no_job_agents_is_refused() {
+    fn a_snapshot_giving_a_project_no_kits_is_refused() {
         let mut snapshot = sealed();
         for project in snapshot.projects.values_mut() {
-            project.job_agents.clear();
+            project.kits.clear();
         }
 
         assert!(matches!(
             snapshot.open(&key()),
-            Err(OpenError::Inconsistent(Inconsistent::NoJobAgents(_)))
+            Err(OpenError::Inconsistent(Inconsistent::NoKits(_)))
         ));
     }
 }
