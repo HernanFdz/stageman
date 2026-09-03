@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use super::agents_view::Agent;
 use super::error::{DashboardError, DashboardResult};
-use crate::ui::{Badge, BadgeTone, Button, Card, EmptyState, Modal};
+use crate::ui::{Badge, BadgeTone, Button, ButtonVariant, Card, EmptyState, Modal};
 
 /// One project, as much of it as a page is allowed to know.
 ///
@@ -36,9 +36,11 @@ pub struct Project {
     pub name: String,
     /// Where its jobs work.
     pub repository: String,
-    /// The agent its foreman thinks with.
+    /// The agent its foreman thinks with, as the identifier a browser sends
+    /// back — not the name a person reads. See `projected`, which says why.
     pub foreman: String,
-    /// The agents its jobs may run on. Never empty in a valid instance.
+    /// The agents its jobs may run on, by identifier. Never empty in a valid
+    /// instance.
     pub job_agents: Vec<String>,
     /// The platforms it has a credential for.
     pub platforms: Vec<String>,
@@ -46,6 +48,14 @@ pub struct Project {
     /// escalate can still run work that never needs to ask — see
     /// `docs/decisions/0005-conversation-happens-on-channels.md`.
     pub channels: Vec<String>,
+    /// The variables its jobs are given, by name.
+    ///
+    /// Names and never values, on the same terms as `platforms` above: a value
+    /// is a credential, and there is nowhere on this type to put one. The
+    /// names are what lets an edit form show what a project carries — which is
+    /// why they are here and a channel's address is not, since nothing on a
+    /// screen needed that.
+    pub variables: Vec<String>,
     /// How many of its jobs are still running.
     pub working: usize,
     /// How many jobs it has had, running or finished.
@@ -118,26 +128,23 @@ pub async fn projects() -> DashboardResult<Watching> {
     )
 )]
 #[post("/api/projects/create", instance: Extension<std::sync::Arc<crate::Store>>)]
-pub async fn create(
-    name: String,
-    repository: String,
-    foreman: String,
-    job_agents: Vec<String>,
-    credential: String,
-    channel: ChannelDraft,
-) -> DashboardResult<Watching> {
-    let name = required("name", &name)?;
-    let repository = required("repository", &repository)?;
-    let foreman_agent = super::named(&foreman)?;
-    let credential = required("credential", &credential)?;
-    if job_agents.is_empty() {
+pub async fn create(draft: Draft) -> DashboardResult<Watching> {
+    let name = required("name", &draft.name)?;
+    let repository = required("repository", &draft.repository)?;
+    let foreman_agent = super::named(&draft.foreman)?;
+    let credential = required("credential", &draft.credential)?;
+    if draft.job_agents.is_empty() {
         return Err(DashboardError::JobAgentsMissing);
     }
-    let job_agents = job_agents
+    let job_agents = draft
+        .job_agents
         .iter()
         .map(|agent| super::named(agent))
         .collect::<DashboardResult<_>>()?;
-    let channels = binding(&channel)?;
+    let channels = binding(&draft.channel)?;
+    // Nothing is held yet, so every row here has to carry its own value —
+    // which `resolved` says by refusing a new name with an empty one.
+    let variables = resolved(&std::collections::BTreeMap::new(), &draft.variables)?;
 
     let mut state = instance.0.update();
 
@@ -175,6 +182,7 @@ pub async fn create(
                 stageman_core::Secret::new(credential),
             )]),
             channels,
+            variables,
             jobs: std::collections::BTreeMap::new(),
             attending: stageman_core::Attending::default(),
         },
@@ -199,11 +207,39 @@ pub async fn create(
     Ok(watching)
 }
 
-/// Gives a project the credential it needs to reach a platform.
+/// Changes what a project is, leaving what it has done alone.
+///
+/// The second caller of the one form, and the reason [`Draft`] exists rather
+/// than five parameters. It replaces a narrower route that set a platform
+/// credential and nothing else: that route had no caller on any screen, so an
+/// expiring token could not in fact be replaced from the dashboard, which is
+/// the whole gap this closes. Folding it in here rather than leaving both is
+/// the same instinct as `State::check` — two ways to change one field
+/// eventually disagree, and the one nobody is reading is the one that lets
+/// something through.
+///
+/// **A blank credential means the one it already has, never none.** There is
+/// nowhere on the wire for the current value — `Project` has no field for a
+/// credential and must not grow one — so the box an operator sees always
+/// starts empty, and treating empty as *clear it* would silently disarm a
+/// project every time somebody corrected its name.
+///
+/// Its jobs, its channel binding and its inbox are untouched. The channel is
+/// deliberate rather than pending: a binding's address never reaches the
+/// browser, so an edit form cannot show what it would be replacing, and three
+/// empty boxes that mean *unchanged* are indistinguishable from three that
+/// mean *unbind*.
+///
+/// Nothing here refuses a project with work in flight, unlike [`forget`]. A
+/// running job already holds everything it was given — its container's
+/// environment was fixed when it was created — so amending changes what the
+/// *next* job gets and cannot reach into one that is going.
 ///
 /// # Errors
 ///
-/// Fails if the project or platform is unknown, or the credential is empty.
+/// Fails if the project is unknown, if anything required is missing, if an
+/// agent named is not one this instance runs, or if the result would not be a
+/// valid instance.
 #[cfg_attr(
     feature = "server",
     expect(
@@ -211,27 +247,52 @@ pub async fn create(
         reason = "the shape a server function is required to have"
     )
 )]
-#[post("/api/projects/credential", instance: Extension<std::sync::Arc<crate::Store>>)]
-pub async fn credential(
-    project: String,
-    platform: String,
-    secret: String,
-) -> DashboardResult<Watching> {
-    let platform = super::named_platform(&platform)?;
-    let secret = secret.trim();
-    if secret.is_empty() {
-        return Err(DashboardError::CredentialMissing);
+#[post("/api/projects/amend", instance: Extension<std::sync::Arc<crate::Store>>)]
+pub async fn amend(project: String, draft: Draft) -> DashboardResult<Watching> {
+    let name = required("name", &draft.name)?;
+    let repository = required("repository", &draft.repository)?;
+    let foreman_agent = super::named(&draft.foreman)?;
+    if draft.job_agents.is_empty() {
+        return Err(DashboardError::JobAgentsMissing);
     }
+    let job_agents = draft
+        .job_agents
+        .iter()
+        .map(|agent| super::named(agent))
+        .collect::<DashboardResult<_>>()?;
+    let credential = draft.credential.trim();
+    // The channel arrives and is ignored, because amending does not offer one
+    // — see this route's own note on why an empty box could not mean
+    // *unchanged* there the way it does for a credential.
 
     let mut state = instance.0.update();
     let identifier = super::identify(&state, &project)?;
-    let Some(watched) = state.projects.get_mut(&identifier) else {
+
+    // Asked of a copy before it is asked of the instance, for the reason
+    // `create` gives: the store consults `State::check` on write and *logs* a
+    // refusal rather than returning one, so mutating first would leave an
+    // instance invalid in memory and correct on disk.
+    let mut candidate = state.clone();
+    let Some(watched) = candidate.projects.get_mut(&identifier) else {
         drop(state);
         return Err(DashboardError::UnknownProject { id: project });
     };
-    watched
-        .credentials
-        .insert(platform, stageman_core::Secret::new(secret.to_owned()));
+    // Decided against what the project already holds, which is what lets an
+    // empty box mean *keep this one* rather than *clear it*.
+    watched.variables = resolved(&watched.variables, &draft.variables)?;
+    amended(
+        watched,
+        name,
+        repository,
+        foreman_agent,
+        job_agents,
+        credential,
+    );
+    candidate
+        .check()
+        .map_err(|reason| DashboardError::from_inconsistent(&reason, super::shown))?;
+
+    *state = candidate;
     let watching = watching_now(&state);
     drop(state);
 
@@ -270,6 +331,103 @@ pub async fn forget(project: String) -> DashboardResult<Watching> {
     drop(state);
 
     Ok(watching)
+}
+
+/// What a project's variables become, from the rows the form came back with.
+///
+/// A function rather than lines inside two routes, for the reason `binding` is
+/// one: every rule worth having lives here, and both callers get the same
+/// answer by construction rather than by being written twice.
+///
+/// Four refusals, and each is a silent wrong answer avoided. A name a
+/// container could not be given would reach an argument list — see
+/// `docs/decisions/0046-a-projects-variables-are-carried-never-read.md` on
+/// what an equals sign does there. A name stageman delivers itself would
+/// change which account an agent bills, with nothing anywhere saying so. Two
+/// rows with one name have no resolution that does not throw away something
+/// somebody typed. And a *new* variable with no value would store an empty
+/// credential, which reads as configured and authenticates as nothing.
+///
+/// Everything not named in `rows` is dropped, which is how removal is said —
+/// there is no other way to say it, because an empty value already means
+/// *keep*.
+///
+/// # Errors
+///
+/// Any of the four above, each naming the row rather than its contents. That
+/// is deliberate: the mistake this most often catches is a credential pasted
+/// into a name box, and an error repeating it would put it in a log.
+#[cfg(feature = "server")]
+fn resolved(
+    held: &std::collections::BTreeMap<stageman_core::VariableName, stageman_core::Secret>,
+    rows: &[VariableDraft],
+) -> DashboardResult<std::collections::BTreeMap<stageman_core::VariableName, stageman_core::Secret>>
+{
+    let mut wanted = std::collections::BTreeMap::new();
+
+    // Counted from one, because the operator is looking at a list rather than
+    // at an index — and counted by the range rather than by adding to an
+    // index, so there is no arithmetic here to be wrong about.
+    for (position, row) in (1..).zip(rows) {
+        let name = stageman_core::VariableName::new(row.name.trim()).map_err(|rule| {
+            DashboardError::VariableNameRefused {
+                position,
+                rule: rule.to_string(),
+            }
+        })?;
+        if stageman_agent::RESERVED.contains(&name.as_str()) {
+            return Err(DashboardError::VariableReserved {
+                name: name.to_string(),
+            });
+        }
+        if wanted.contains_key(&name) {
+            return Err(DashboardError::VariableRepeated { position });
+        }
+
+        let given = row.value.trim();
+        let value = if given.is_empty() {
+            held.get(&name)
+                .cloned()
+                .ok_or(DashboardError::VariableValueMissing)?
+        } else {
+            stageman_core::Secret::new(given.to_owned())
+        };
+        wanted.insert(name, value);
+    }
+
+    Ok(wanted)
+}
+
+/// Applies what the form came back with to the project it names.
+///
+/// A function rather than six lines inside the route, for the same reason
+/// `busy` is one: the rule worth testing is what a **blank credential** means,
+/// and a server function cannot be reached without a request. Leaving it
+/// inline would make the one rule here that could quietly disarm a project the
+/// only one with no test.
+///
+/// Blank means the credential already held, never none — see [`amend`], which
+/// is where that is argued. A project that had none and is amended with a
+/// blank box still has none, which is the same rule and not a special case.
+#[cfg(feature = "server")]
+fn amended(
+    watched: &mut stageman_core::Project,
+    name: String,
+    repository: String,
+    foreman_agent: stageman_core::Agent,
+    job_agents: std::collections::BTreeSet<stageman_core::Agent>,
+    credential: &str,
+) {
+    watched.name = name;
+    watched.repository = repository;
+    watched.foreman_agent = foreman_agent;
+    watched.job_agents = job_agents;
+    if !credential.is_empty() {
+        watched.credentials.insert(
+            stageman_core::Platform::GitHub,
+            stageman_core::Secret::new(credential.to_owned()),
+        );
+    }
 }
 
 /// How many of a project's jobs are still going, if any are.
@@ -390,13 +548,35 @@ fn watching_now(state: &stageman_core::State) -> Watching {
 pub fn ProjectsView() -> Element {
     let mut reading = use_server_future(projects)?;
     let mut failure = use_signal(|| None::<DashboardError>);
-    let mut adding = use_signal(|| false);
+    // What the form is open for, if it is open at all. One signal rather than
+    // a flag per purpose — see [`Filling`].
+    let mut filling = use_signal(|| None::<Filling>);
     let mut draft = use_signal(Draft::default);
 
     rsx! {
         div { class: "flex flex-col gap-4",
             match reading.cloned() {
-                Some(Ok(watching)) => rsx! {
+                Some(Ok(watching)) => {
+                    // What the project being amended holds now, which is what
+                    // decides whether an empty value box means *keep*. Derived
+                    // once, so the hint on a box and the control that submits
+                    // cannot disagree about the same question — and outside
+                    // the markup below, because that is the one place a `let`
+                    // cannot go.
+                    //
+                    // Empty while creating, and that is the true answer rather
+                    // than a missing one: a project that does not exist yet
+                    // holds nothing.
+                    let held: Vec<String> = match filling() {
+                        Some(Filling::Amending(ref id)) => watching
+                            .projects
+                            .iter()
+                            .find(|project| &project.id == id)
+                            .map(|project| project.variables.clone())
+                            .unwrap_or_default(),
+                        _ => Vec::new(),
+                    };
+                    rsx! {
                     Card {
                         title: "Projects",
                         note: "A project is a repository, the agents that work on it, and the \
@@ -434,7 +614,7 @@ pub fn ProjectsView() -> Element {
                                             ..Draft::default()
                                         });
                                         failure.set(None);
-                                        adding.set(true);
+                                        filling.set(Some(Filling::Creating));
                                     }
                                 },
                                 "+"
@@ -453,16 +633,55 @@ pub fn ProjectsView() -> Element {
                             }
                         } else {
                             ul { class: "divide-y divide-border",
-                                for project in watching.projects {
-                                    li { key: "{project.id}", WatchedProject { project } }
+                                for project in watching.projects.iter().cloned() {
+                                    li { key: "{project.id}",
+                                        WatchedProject {
+                                            project: project.clone(),
+                                            available: watching.available.clone(),
+                                            // Seeded from what the row already
+                                            // holds, so the form opens showing
+                                            // what is true rather than blank.
+                                            // The credential and the channel
+                                            // cannot be among them: neither
+                                            // ever reaches a browser.
+                                            onedit: {
+                                                move |()| {
+                                                    draft
+                                                        .set(Draft {
+                                                            name: project.name.clone(),
+                                                            repository: project.repository.clone(),
+                                                            foreman: project.foreman.clone(),
+                                                            job_agents: project.job_agents.clone(),
+                                                            credential: String::new(),
+                                                            channel: ChannelDraft::default(),
+                                                            // Names with empty
+                                                            // values: the row
+                                                            // says keep, and
+                                                            // deleting it says
+                                                            // remove.
+                                                            variables: project
+                                                                .variables
+                                                                .iter()
+                                                                .map(|name| VariableDraft {
+                                                                    name: name.clone(),
+                                                                    value: String::new(),
+                                                                })
+                                                                .collect(),
+                                                        });
+                                                    failure.set(None);
+                                                    filling.set(Some(Filling::Amending(project.id.clone())));
+                                                }
+                                            },
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
-                    if adding() {
+                    if let Some(open) = filling() {
                         Modal {
-                            title: "New project",
-                            onclose: move |()| adding.set(false),
+                            title: if open == Filling::Creating { "New project" } else { "Edit project" },
+                            onclose: move |()| filling.set(None),
                             actions: rsx! {
                                 Button {
                                     // Unavailable until pressing it would
@@ -471,31 +690,41 @@ pub fn ProjectsView() -> Element {
                                     // per-field messages are the better
                                     // answer and are not this change.
                                     class: "px-2.5 text-base leading-none",
-                                    aria_label: "Add",
-                                    title: "Add",
-                                    disabled: !draft().is_complete(),
-                                    onclick: move |_| async move {
-                                        let asked = draft();
-                                        match create(
-                                                asked.name,
-                                                asked.repository,
-                                                asked.foreman,
-                                                asked.job_agents,
-                                                asked.credential,
-                                                asked.channel,
-                                            )
-                                            .await
-                                        {
-                                            Ok(fresh) => {
-                                                failure.set(None);
-                                                reading.set(Some(Ok(fresh)));
-                                                adding.set(false);
+                                    aria_label: "Save",
+                                    title: "Save",
+                                    disabled: !draft().is_complete(&open, &held),
+                                    onclick: {
+                                        let open = open.clone();
+                                        move |_| {
+                                            let open = open.clone();
+                                            async move {
+                                                let asked = draft();
+                                                // The one place the two callers
+                                                // differ: same draft, same
+                                                // failure handling, different
+                                                // route.
+                                                let answered = match open {
+                                                    Filling::Creating => {
+                                                        create(asked).await
+                                                    }
+                                                    Filling::Amending(project) => {
+                                                        amend(project, asked).await
+                                                    }
+                                                };
+                                                match answered {
+                                                    Ok(fresh) => {
+                                                        failure.set(None);
+                                                        reading.set(Some(Ok(fresh)));
+                                                        filling.set(None);
+                                                    }
+                                                    // Left open, deliberately:
+                                                    // closing would throw away
+                                                    // what was typed, and what
+                                                    // is wrong is almost always
+                                                    // in one field of it.
+                                                    Err(reason) => failure.set(Some(reason)),
+                                                }
                                             }
-                                            // Left open, deliberately: closing
-                                            // would throw away what was typed,
-                                            // and what is wrong is almost
-                                            // always in one field of it.
-                                            Err(reason) => failure.set(Some(reason)),
                                         }
                                     },
                                     "✓"
@@ -509,9 +738,15 @@ pub fn ProjectsView() -> Element {
                             if let Some(reason) = failure() {
                                 p { class: "mb-3 text-sm text-failed", "{reason}" }
                             }
-                            ProjectForm { draft, available: watching.available }
+                            ProjectForm {
+                                draft,
+                                available: watching.available,
+                                filling: open,
+                                held,
+                            }
                         }
                     }
+                }
                 },
                 Some(Err(reason)) => rsx! {
                     Card { title: "The projects could not be read",
@@ -526,15 +761,45 @@ pub fn ProjectsView() -> Element {
     }
 }
 
+/// What to show for an agent the browser named by its identifier.
+///
+/// A function rather than a closure inside the row, so that it can be asserted:
+/// mutation testing found the comparison inside it unguarded, which is fair —
+/// a project carries identifiers and the row shows names, and nothing else
+/// notices if the two stop lining up.
+///
+/// An identifier this build does not know is shown as it stands rather than
+/// hidden. An instance naming an agent that is gone is worth seeing, and
+/// `State::check` refuses one anyway.
+fn shown_as(available: &[Agent], identifier: &str) -> String {
+    available
+        .iter()
+        .find(|agent| agent.id == identifier)
+        .map_or_else(|| identifier.to_owned(), |agent| agent.name.clone())
+}
+
 /// One project, as the list shows it.
 ///
-/// Read-only, and that is a decision rather than a gap. What a project *is* is
-/// decided in one place — the form — and a list that also edited would be a
-/// second place, disagreeing about which fields matter and which are required.
-/// Changing one is the same form with different initial values, which is what
-/// [`ProjectForm`] takes.
+/// It shows and it opens the form; it never edits. What a project *is* stays
+/// decided in one place, and a row that edited in place would be a second
+/// place, disagreeing about which fields matter and which are required.
+/// Changing one is that same form over different initial values, which is what
+/// [`ProjectForm`] has always taken and what [`Filling`] now selects between.
+///
+/// It takes the available agents in order to *render*: a project carries the
+/// identifiers a browser sends back, and this is where they become the names a
+/// person reads. An identifier this build does not know is shown as it stands
+/// rather than hidden — an instance naming an agent that is gone is worth
+/// seeing, and `State::check` refuses one anyway.
 #[component]
-fn WatchedProject(project: Project) -> Element {
+fn WatchedProject(project: Project, available: Vec<Agent>, onedit: EventHandler<()>) -> Element {
+    let foreman = shown_as(&available, &project.foreman);
+    let jobs_on = project
+        .job_agents
+        .iter()
+        .map(|identifier| shown_as(&available, identifier))
+        .collect::<Vec<_>>()
+        .join(", ");
     rsx! {
         // Roomier than the rows on the agents screen, and deliberately: an
         // agent is one line and a project is three, so the same padding reads
@@ -556,16 +821,46 @@ fn WatchedProject(project: Project) -> Element {
                 span { class: "truncate font-mono text-xs text-faint-foreground",
                     "{project.repository}"
                 }
-                span { class: "ml-auto shrink-0",
+                span { class: "ml-auto flex shrink-0 items-center gap-2",
                     if project.working > 0 {
                         Badge { tone: BadgeTone::Working, "{project.working} of {project.jobs} working" }
                     } else {
                         Badge { "{project.jobs} job(s)" }
                     }
+                    // Offered whatever the project is doing, unlike forgetting
+                    // one: amending changes what the next job is given and
+                    // cannot reach into a container that already exists.
+                    //
+                    // A glyph on the same terms as the `+` that adds a project
+                    // — the row already says which project this is, so a word
+                    // here would be the longest thing on it saying the least.
+                    // Named for anyone not looking at it, and named with the
+                    // project, because a screen of these reads out as a column
+                    // of identical "Edit"s otherwise.
+                    //
+                    // U+270E and deliberately not U+270F, which is the pencil
+                    // most editors offer: that one has an emoji presentation
+                    // and most platforms take it, so it would arrive in colour
+                    // beside the monochrome `×`, `+` and `✓` this dashboard
+                    // already uses. The glyph vocabulary here is text, and one
+                    // emoji in it looks like a mistake rather than a choice.
+                    Button {
+                        // Secondary, because this sits beside a badge on every
+                        // row: the enum's own word for it is "an ordinary
+                        // action sitting beside others", and a solid accent
+                        // repeated down the list would out-shout the one
+                        // primary action the screen has.
+                        variant: ButtonVariant::Secondary,
+                        class: "px-2 py-1 text-sm leading-none",
+                        aria_label: "Edit {project.name}",
+                        title: "Edit",
+                        onclick: move |_| onedit.call(()),
+                        "✎"
+                    }
                 }
             }
             p { class: "text-xs text-muted-foreground",
-                "thinks with {project.foreman} · runs jobs on {project.job_agents.join(\", \")}"
+                "thinks with {foreman} · runs jobs on {jobs_on}"
                 if project.platforms.is_empty() {
                     " · no credential"
                 }
@@ -574,6 +869,14 @@ fn WatchedProject(project: Project) -> Element {
                 // changes what the project can be asked to do.
                 if project.channels.is_empty() {
                     " · no channel"
+                }
+                // Presence, unlike the two above, and the asymmetry is the
+                // point: a project with no variables is the ordinary case and
+                // says nothing, while one carrying third-party credentials is
+                // worth seeing at a glance. Counted rather than named, because
+                // the row is already three facts long.
+                if !project.variables.is_empty() {
+                    " · {project.variables.len()} variable(s)"
                 }
             }
         }
@@ -621,13 +924,74 @@ impl fmt::Debug for ChannelDraft {
     }
 }
 
+/// What the form on this screen is currently for.
+///
+/// One value rather than two flags, so that *adding and amending at once* is a
+/// sentence that cannot be said — the shape `Attending` uses in the domain for
+/// the same reason. Closed is the absence of one, so the screen holds an
+/// `Option` and never a third variant meaning nothing.
+///
+/// It carries the project being amended, because the handler needs it and
+/// nothing else on the screen knows it by then. [`ProjectForm`] reads only
+/// which of the two this is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Filling {
+    /// A project that does not exist yet. Everything is required.
+    Creating,
+    /// One that already does, named by the identifier it is known by. A blank
+    /// credential means the one it already has — see [`amend`].
+    Amending(String),
+}
+
+/// One row of the variables table, as the browser sends it back.
+///
+/// **An empty value means the one the project already holds**, exactly as the
+/// credential box does and for the same reason: no value ever reaches a
+/// browser, so the box always starts empty and the other reading would wipe a
+/// project's variables every time somebody corrected its name.
+///
+/// Removal is therefore not an empty value — it is the row being absent. The
+/// form sends the complete list of names a project should end up with, so
+/// leaving one out is what takes it away. That is the question
+/// `docs/open-questions.md` recorded as the one genuinely new thing in this
+/// screen, and this is the answer: emptiness says *keep*, absence says *drop*.
+#[derive(Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct VariableDraft {
+    /// What the variable is called in the container.
+    pub name: String,
+    /// What it is set to, or empty to keep what the project holds.
+    pub value: String,
+}
+
+impl fmt::Debug for VariableDraft {
+    /// Names it and never says what it is set to.
+    ///
+    /// `docs/conventions.md` §4. The value is a bare `String` on its way in
+    /// from a form, so nothing underneath redacts and this is the whole of the
+    /// defence — the same position [`ChannelDraft`] is in.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VariableDraft")
+            .field("name", &self.name)
+            .field("value", &"<redacted>")
+            .finish()
+    }
+}
+
 /// Everything the form collects, which is everything a project is.
 ///
 /// A struct rather than five handlers, because the form's whole purpose is to
 /// be filled in twice — once to create and once to change — and a caller
 /// should differ in what it *does* with the answer rather than in how it
 /// receives it.
-#[derive(Clone, PartialEq, Eq, Default)]
+///
+/// **It crosses the wire whole**, which it did not always. Both routes took
+/// this apart into one parameter per field, and adding variables pushed
+/// [`create`] to eight — past what the gate allows, which is the lint noticing
+/// what [`ChannelDraft`]'s own reasoning already said: a value that is only
+/// meaningful together should travel together. Passing the draft is also what
+/// makes the two routes differ in what they *do* rather than in what they
+/// take, which is what this type was for.
+#[derive(Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Draft {
     /// What to call it.
     pub name: String,
@@ -642,6 +1006,12 @@ pub struct Draft {
     /// Where this project's conversation happens, if anywhere. Optional, and
     /// the only part of a draft that may be left blank.
     pub channel: ChannelDraft,
+    /// What its jobs are given that this project never reads.
+    ///
+    /// A list rather than a fixed set of boxes, because unlike a platform or a
+    /// channel there is no closed set to draw from — an operator names these
+    /// themselves, which is the whole of what makes them a separate concept.
+    pub variables: Vec<VariableDraft>,
 }
 
 impl fmt::Debug for Draft {
@@ -660,7 +1030,22 @@ impl fmt::Debug for Draft {
             .field("job_agents", &self.job_agents)
             .field("credential", &"<redacted>")
             .field("channel", &self.channel)
+            .field("variables", &self.variables)
             .finish()
+    }
+}
+
+impl Filling {
+    /// Whether this describes a project that does not exist yet.
+    ///
+    /// A method rather than a comparison at each site, because the form asks
+    /// this three times — for the credential's label, its placeholder, and
+    /// whether a channel is offered at all — and three copies of one question
+    /// is three places for it to be answered differently. Mutation testing is
+    /// what said so: the comparison it replaced had no test that noticed.
+    #[must_use]
+    pub const fn creating(&self) -> bool {
+        matches!(self, Self::Creating)
     }
 }
 
@@ -683,17 +1068,52 @@ impl Draft {
     /// [`binding`] enforces on the far side. A pair where one box is filled is
     /// the mistake this catches, and it is worth catching on the screen
     /// because the operator is looking at the empty box.
+    ///
+    /// It takes the [`Filling`] because the two routes genuinely require
+    /// different things, and one function saying so is better than two that
+    /// could drift: creating needs a credential and may bind a channel,
+    /// amending needs neither, because a blank credential there means the one
+    /// already held and the channel is not offered at all.
     #[must_use]
-    pub fn is_complete(&self) -> bool {
-        !self.name.trim().is_empty()
+    pub fn is_complete(&self, filling: &Filling, held: &[String]) -> bool {
+        let described = !self.name.trim().is_empty()
             && !self.repository.trim().is_empty()
             && !self.foreman.is_empty()
-            && !self.job_agents.is_empty()
-            && !self.credential.trim().is_empty()
-            && self.channel.address.trim().is_empty() == self.channel.credential.trim().is_empty()
-            // Listening needs somewhere to listen. The reverse is fine.
-            && (self.channel.listen_credential.trim().is_empty()
-                || !self.channel.address.trim().is_empty())
+            && !self.job_agents.is_empty();
+
+        // Every row needs a name, whichever caller this is, and a row needs a
+        // value unless the project already holds that name — which is exactly
+        // what `resolved` asks on the far side. Not a `Filling` split any
+        // more: amending a project can add a variable, and that new row has
+        // nothing to keep either.
+        //
+        // The screen can answer this and cannot answer whether a name is
+        // *deliverable*, and the difference is not arbitrary. Which names a
+        // project holds crosses the wire; the rule about what an environment
+        // can carry lives in the domain, which the browser's half deliberately
+        // cannot name — see
+        // `docs/decisions/0022-the-browser-never-sees-the-domain.md`. So this
+        // one is caught before the operator presses anything, and that one is
+        // a refusal naming the row.
+        let named = self.variables.iter().all(|row| !row.name.trim().is_empty());
+        let valued = self.variables.iter().all(|row| {
+            !row.value.trim().is_empty() || held.iter().any(|had| had == row.name.trim())
+        });
+
+        match filling {
+            Filling::Creating => {
+                described
+                    && named
+                    && valued
+                    && !self.credential.trim().is_empty()
+                    && self.channel.address.trim().is_empty()
+                        == self.channel.credential.trim().is_empty()
+                    // Listening needs somewhere to listen. The reverse is fine.
+                    && (self.channel.listen_credential.trim().is_empty()
+                        || !self.channel.address.trim().is_empty())
+            }
+            Filling::Amending(_) => described && named && valued,
+        }
     }
 }
 
@@ -708,8 +1128,14 @@ impl Draft {
 /// would have to be told where its button goes, which is the caller's business
 /// and not its own.
 #[component]
-fn ProjectForm(draft: Signal<Draft>, available: Vec<Agent>) -> Element {
+fn ProjectForm(
+    draft: Signal<Draft>,
+    available: Vec<Agent>,
+    filling: Filling,
+    held: Vec<String>,
+) -> Element {
     let mut draft = draft;
+    let creating = filling.creating();
 
     rsx! {
         div { class: "flex flex-col gap-3",
@@ -767,11 +1193,19 @@ fn ProjectForm(draft: Signal<Draft>, available: Vec<Agent>) -> Element {
                     }
                 }
             }
-            Field { label: "GitHub credential",
+            Field { label: if creating { "GitHub credential" } else { "GitHub credential (optional)" },
                 input {
                     r#type: "password",
                     class: FIELD,
-                    placeholder: "a token scoped to this repository",
+                    // The one place this form tells the operator what an empty
+                    // box means, because it is the one place where empty is not
+                    // the same as absent. There is nothing to prefill it with:
+                    // no credential ever reaches the browser.
+                    placeholder: if creating {
+                        "a token scoped to this repository"
+                    } else {
+                        "leave empty to keep the current one"
+                    },
                     value: "{draft().credential}",
                     oninput: move |event| draft.with_mut(|draft| draft.credential = event.value()),
                 }
@@ -780,6 +1214,11 @@ fn ProjectForm(draft: Signal<Draft>, available: Vec<Agent>) -> Element {
                 "Scoped to this repository, with contents and pull requests write. A token that \
                  reaches more than this project is a token every job on it could misuse."
             }
+            // Only when creating. A binding's address never reaches the
+            // browser, so there is nothing to show here for a project that has
+            // one — and an empty box that meant *unbind* would disconnect a
+            // project every time somebody corrected its name.
+            if creating {
             Field { label: "Slack channel (optional)",
                 input {
                     class: FIELD,
@@ -817,6 +1256,84 @@ fn ProjectForm(draft: Signal<Draft>, available: Vec<Agent>) -> Element {
                  this project can only run work that never needs to ask. Give one without the \
                  other and it is refused: neither half works alone."
             }
+            }
+            Field { label: "Variables (optional)",
+                div { class: "flex flex-col gap-2",
+                    for (position, row) in draft().variables.iter().enumerate() {
+                        div { key: "{position}", class: "flex items-center gap-2",
+                            input {
+                                class: "{FIELD} font-mono",
+                                placeholder: "STRIPE_API_KEY",
+                                value: "{row.name}",
+                                oninput: move |event| {
+                                    draft
+                                        .with_mut(|draft| {
+                                            if let Some(row) = draft.variables.get_mut(position) {
+                                                row.name = event.value();
+                                            }
+                                        });
+                                },
+                            }
+                            input {
+                                r#type: "password",
+                                class: FIELD,
+                                // Per row rather than per form, because *this
+                                // row* is what decides it: a box says "keep"
+                                // only where there is something to keep, which
+                                // is a name the project already holds. A row
+                                // just added holds nothing, and neither does
+                                // one whose name has been typed over — and
+                                // both change the moment the name does, which
+                                // is the behaviour an operator expects from a
+                                // hint about the box beside it.
+                                placeholder: if held.iter().any(|had| had == row.name.trim()) {
+                                    "leave empty to keep"
+                                } else {
+                                    "its value"
+                                },
+                                value: "{row.value}",
+                                oninput: move |event| {
+                                    draft
+                                        .with_mut(|draft| {
+                                            if let Some(row) = draft.variables.get_mut(position) {
+                                                row.value = event.value();
+                                            }
+                                        });
+                                },
+                            }
+                            // Removing the row is how a variable is taken
+                            // away: an empty value already means keep, so
+                            // absence is the only thing left to mean drop.
+                            Button {
+                                variant: ButtonVariant::Secondary,
+                                class: "shrink-0 px-2 py-1 text-sm leading-none",
+                                aria_label: "Remove variable {position + 1}",
+                                title: "Remove",
+                                onclick: move |_| {
+                                    draft.with_mut(|draft| { draft.variables.remove(position); });
+                                },
+                                "×"
+                            }
+                        }
+                    }
+                    Button {
+                        variant: ButtonVariant::Secondary,
+                        class: "self-start px-2.5 py-1 text-sm leading-none",
+                        aria_label: "Add a variable",
+                        title: "Add a variable",
+                        onclick: move |_| {
+                            draft.with_mut(|draft| draft.variables.push(VariableDraft::default()));
+                        },
+                        "+"
+                    }
+                }
+            }
+            p { class: "text-xs text-faint-foreground",
+                "Set in every container this project's jobs run in, and named to the agent so it \
+                 knows they are there. stageman never reads one, so what they mean is the \
+                 repository's business. Removing a row takes the variable away; leaving its value \
+                 empty keeps the one already stored."
+            }
         }
     }
 }
@@ -843,7 +1360,7 @@ fn Field(label: String, children: Element) -> Element {
 
 #[cfg(all(test, feature = "server"))]
 mod server_tests {
-    use super::{ChannelDraft, DashboardError, binding, busy};
+    use super::{ChannelDraft, DashboardError, VariableDraft, amended, binding, busy, resolved};
     use stageman_core::{ProjectId, State};
 
     /// The two boxes that bind a channel, plus the optional third.
@@ -878,6 +1395,7 @@ mod server_tests {
             job_agents: BTreeSet::from([Agent::Claude]),
             credentials: BTreeMap::new(),
             channels: BTreeMap::new(),
+            variables: BTreeMap::new(),
             attending: stageman_core::Attending::default(),
             // Freshly minted rather than derived from a position, which would
             // need a conversion that can fail — and the gate is right that
@@ -893,6 +1411,305 @@ mod server_tests {
                 })
                 .collect(),
         }
+    }
+
+    /// One row of the variables table.
+    fn row(name: &str, value: &str) -> VariableDraft {
+        VariableDraft {
+            name: name.to_owned(),
+            value: value.to_owned(),
+        }
+    }
+
+    /// What a project already carries.
+    ///
+    /// The suppression is needed here and not in the sibling `tests` module
+    /// below, which writes the same call happily. `clippy.toml` sets
+    /// `allow-expect-in-tests`, and that allowance does not reach this module
+    /// because it is gated on `cfg(all(test, feature = "server"))` rather than
+    /// on `test` alone. Written out rather than worked around: the alternative
+    /// is a fixture that swallows a bad name and yields an empty map, which
+    /// would make every test here pass vacuously.
+    #[expect(
+        clippy::expect_used,
+        reason = "a fixture name that is not deliverable is a broken test, and should say so"
+    )]
+    fn holding_variables(pairs: &[(&str, &str)]) -> BTreeMap<stageman_core::VariableName, Secret> {
+        pairs
+            .iter()
+            .map(|(name, value)| {
+                (
+                    stageman_core::VariableName::new(*name).expect("a deliverable name"),
+                    Secret::new((*value).to_owned()),
+                )
+            })
+            .collect()
+    }
+
+    /// What came out, as plain pairs, so an assertion reads as one line.
+    fn settled(map: &BTreeMap<stageman_core::VariableName, Secret>) -> Vec<(String, String)> {
+        map.iter()
+            .map(|(name, value)| (name.to_string(), value.expose().to_owned()))
+            .collect()
+    }
+
+    /// The rule an empty box follows, and the reason the whole feature is safe
+    /// to edit: no value ever reaches a browser, so blank has to mean keep.
+    #[test]
+    fn a_blank_value_keeps_what_the_project_holds() {
+        let held = holding_variables(&[("STRIPE_API_KEY", "sk-test-not-a-real-key")]);
+
+        let kept = resolved(&held, &[row("STRIPE_API_KEY", "")]).expect("a name it already has");
+
+        assert_eq!(
+            settled(&kept),
+            vec![(
+                "STRIPE_API_KEY".to_owned(),
+                "sk-test-not-a-real-key".to_owned()
+            )]
+        );
+    }
+
+    /// And a value that was typed replaces it, which is how one gets rotated.
+    #[test]
+    fn a_value_that_was_typed_replaces_what_is_held() {
+        let held = holding_variables(&[("STRIPE_API_KEY", "sk-test-the-old-one")]);
+
+        let now = resolved(&held, &[row("STRIPE_API_KEY", "sk-test-the-new-one")])
+            .expect("a name it already has");
+
+        assert_eq!(
+            settled(&now),
+            vec![(
+                "STRIPE_API_KEY".to_owned(),
+                "sk-test-the-new-one".to_owned()
+            )]
+        );
+    }
+
+    /// Removal is a row that is not there.
+    ///
+    /// The question `docs/open-questions.md` recorded as the new one in this
+    /// screen, answered: emptiness already means keep, so absence is the only
+    /// thing left to mean drop.
+    #[test]
+    fn a_variable_left_out_is_taken_away() {
+        let held = holding_variables(&[
+            ("STRIPE_API_KEY", "sk-test-not-a-real-key"),
+            ("DATABASE_URL", "postgres://nowhere"),
+        ]);
+
+        let now = resolved(&held, &[row("DATABASE_URL", "")]).expect("a name it already has");
+
+        assert_eq!(
+            settled(&now),
+            vec![("DATABASE_URL".to_owned(), "postgres://nowhere".to_owned())]
+        );
+    }
+
+    /// A new name with no value has nothing to keep, and storing an empty
+    /// credential would read as configured and authenticate as nothing.
+    #[test]
+    fn a_new_variable_with_no_value_is_refused() {
+        let refused = resolved(&BTreeMap::new(), &[row("STRIPE_API_KEY", "")])
+            .expect_err("nothing is held under that name");
+
+        assert_eq!(refused, DashboardError::VariableValueMissing);
+    }
+
+    /// The refusal that keeps a credential out of the process table.
+    ///
+    /// A runtime reads a name containing an equals sign as an inline
+    /// assignment, so the value would travel on the command line. The domain
+    /// refuses the name; this is that refusal reaching a screen, and it names
+    /// the row rather than the name — the mistake it most often catches is a
+    /// credential pasted into the wrong box.
+    #[test]
+    fn a_name_a_container_could_not_be_given_is_refused_by_position() {
+        let refused = resolved(&BTreeMap::new(), &[row("NOT A NAME=oops", "anything")])
+            .expect_err("that is not a name");
+
+        assert!(
+            matches!(
+                refused,
+                DashboardError::VariableNameRefused { position: 1, .. }
+            ),
+            "{refused:?}"
+        );
+        assert!(
+            !format!("{refused}").contains("oops"),
+            "a refusal must not repeat what was typed: {refused}"
+        );
+    }
+
+    /// A name stageman delivers itself is refused before it can change which
+    /// account an agent bills — `docs/decisions/0008-one-credential-per-agent.md`.
+    ///
+    /// Over the whole reserved set, so an agent added later is covered here
+    /// the moment its name joins that list.
+    #[test]
+    fn a_name_stageman_delivers_itself_is_refused() {
+        for claimed in stageman_agent::RESERVED {
+            let refused = resolved(&BTreeMap::new(), &[row(claimed, "somebody-elses-account")])
+                .expect_err("that name is stageman's");
+
+            assert_eq!(
+                refused,
+                DashboardError::VariableReserved {
+                    name: (*claimed).to_owned()
+                }
+            );
+        }
+    }
+
+    /// Two rows with one name have no resolution that keeps both, so neither
+    /// is chosen.
+    #[test]
+    fn the_same_name_twice_is_refused() {
+        let refused = resolved(
+            &BTreeMap::new(),
+            &[row("STRIPE_API_KEY", "one"), row("STRIPE_API_KEY", "two")],
+        )
+        .expect_err("one name, two rows");
+
+        assert_eq!(refused, DashboardError::VariableRepeated { position: 2 });
+    }
+
+    /// Whitespace is not a name and not a value.
+    ///
+    /// The route trims before judging, so a form that accepted spaces would
+    /// offer a control the instance then refuses.
+    #[test]
+    fn whitespace_is_neither_a_name_nor_a_value() {
+        assert!(resolved(&BTreeMap::new(), &[row("  ", "anything")]).is_err());
+
+        let held = holding_variables(&[("STRIPE_API_KEY", "sk-test-not-a-real-key")]);
+        let kept = resolved(&held, &[row(" STRIPE_API_KEY ", "   ")])
+            .expect("a name it already has, spaces and all");
+
+        assert_eq!(
+            settled(&kept),
+            vec![(
+                "STRIPE_API_KEY".to_owned(),
+                "sk-test-not-a-real-key".to_owned()
+            )],
+            "a value of spaces is an empty box, so it keeps"
+        );
+    }
+
+    /// A project holding one GitHub credential, to amend against.
+    fn credentialled(token: &str) -> Project {
+        let mut project = holding(&[]);
+        project.credentials.insert(
+            stageman_core::Platform::GitHub,
+            Secret::new(token.to_owned()),
+        );
+        project
+    }
+
+    /// What a project's GitHub credential is now, if it has one.
+    fn token_of(project: &Project) -> Option<String> {
+        project
+            .credentials
+            .get(&stageman_core::Platform::GitHub)
+            .map(|secret| secret.expose().to_owned())
+    }
+
+    /// The rule that could quietly disarm a project, asserted directly.
+    ///
+    /// No credential ever reaches the browser, so the box an operator sees is
+    /// always empty — which means *keep it* rather than *clear it*. Were this
+    /// the other way round, correcting a project's name would silently remove
+    /// the token every one of its jobs needs, and nothing on any screen would
+    /// say so until the next job failed to clone.
+    #[test]
+    fn a_blank_credential_keeps_the_one_already_held() {
+        let mut project = credentialled("ghp-not-a-real-token");
+
+        amended(
+            &mut project,
+            "renamed".to_owned(),
+            "https://example.invalid/renamed".to_owned(),
+            Agent::Claude,
+            BTreeSet::from([Agent::Claude]),
+            "",
+        );
+
+        assert_eq!(token_of(&project).as_deref(), Some("ghp-not-a-real-token"));
+    }
+
+    /// And a credential that was typed replaces it, which is the whole point
+    /// of offering the box — an expiring token was the gap this closes.
+    #[test]
+    fn a_credential_that_was_typed_replaces_the_one_held() {
+        let mut project = credentialled("ghp-the-old-one");
+
+        amended(
+            &mut project,
+            "aviary".to_owned(),
+            "https://example.invalid/aviary".to_owned(),
+            Agent::Claude,
+            BTreeSet::from([Agent::Claude]),
+            "ghp-the-new-one",
+        );
+
+        assert_eq!(token_of(&project).as_deref(), Some("ghp-the-new-one"));
+    }
+
+    /// The same rule where there is nothing to keep. Worth its own test
+    /// because the obvious implementation of *keep* — insert whatever came in
+    /// — would put an empty credential here, which reads as configured and
+    /// authenticates as nothing.
+    #[test]
+    fn a_blank_credential_leaves_a_project_that_had_none_with_none() {
+        let mut project = holding(&[]);
+
+        amended(
+            &mut project,
+            "aviary".to_owned(),
+            "https://example.invalid/aviary".to_owned(),
+            Agent::Claude,
+            BTreeSet::from([Agent::Claude]),
+            "",
+        );
+
+        assert_eq!(token_of(&project), None);
+    }
+
+    /// Everything an amendment is actually for, and the things it must not
+    /// touch. A project's jobs are its history, and its channel binding cannot
+    /// be shown on the form that produced this — so both have to survive.
+    #[test]
+    fn amending_replaces_what_a_project_is_and_leaves_what_it_has_done() {
+        let mut project = credentialled("ghp-not-a-real-token");
+        project.channels.insert(
+            Channel::Slack,
+            stageman_core::ChannelConfig {
+                address: "C0123456789".to_owned(),
+                credential: Secret::new("xoxb-not-a-real-token".to_owned()),
+                listen_credential: None,
+            },
+        );
+        project
+            .jobs
+            .insert(JobId::from_uuid(uuid::Uuid::new_v4()), job(Progress::Idle));
+
+        amended(
+            &mut project,
+            "renamed".to_owned(),
+            "https://example.invalid/renamed".to_owned(),
+            Agent::Claude,
+            BTreeSet::from([Agent::Claude]),
+            "",
+        );
+
+        assert_eq!(project.name, "renamed");
+        assert_eq!(project.repository, "https://example.invalid/renamed");
+        assert_eq!(project.jobs.len(), 1, "its history is not an amendment");
+        assert!(
+            project.channels.contains_key(&Channel::Slack),
+            "a binding the form could not show must survive one",
+        );
     }
 
     /// Nothing running is what lets a project be forgotten.
@@ -965,6 +1782,7 @@ mod server_tests {
                     },
                 )]),
                 jobs: BTreeMap::new(),
+                variables: BTreeMap::new(),
                 attending: stageman_core::Attending::default(),
             },
         );
@@ -1086,7 +1904,8 @@ mod server_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChannelDraft, Draft, Project};
+    use super::super::agents_view::Agent;
+    use super::{ChannelDraft, Draft, Filling, Project, VariableDraft, shown_as};
 
     /// One project, with however many jobs running.
     fn watched(working: usize, jobs: usize) -> Project {
@@ -1098,6 +1917,7 @@ mod tests {
             job_agents: vec!["Claude".to_owned()],
             platforms: Vec::new(),
             channels: Vec::new(),
+            variables: Vec::new(),
             working,
             jobs,
         }
@@ -1117,6 +1937,10 @@ mod tests {
                 credential: "xoxb-not-a-real-token".to_owned(),
                 listen_credential: "xapp-not-a-real-token".to_owned(),
             },
+            variables: vec![VariableDraft {
+                name: "STRIPE_API_KEY".to_owned(),
+                value: "sk-test-not-a-real-key".to_owned(),
+            }],
         }
     }
 
@@ -1127,9 +1951,19 @@ mod tests {
         draft
     }
 
+    /// A project carrying no variables yet, which is what a draft is judged
+    /// against unless a test says otherwise.
+    const NOTHING_HELD: &[String] = &[];
+
+    /// The project an amendment names. Its value never matters to
+    /// [`Draft::is_complete`]; which variant it is, does.
+    fn amending() -> Filling {
+        Filling::Amending("a-project".to_owned())
+    }
+
     #[test]
     fn a_draft_with_every_answer_is_complete() {
-        assert!(filled().is_complete());
+        assert!(filled().is_complete(&Filling::Creating, NOTHING_HELD));
     }
 
     /// Every field is required, and the test says so one at a time.
@@ -1138,11 +1972,175 @@ mod tests {
     /// loop over closures would say it less clearly than five lines do.
     #[test]
     fn a_draft_missing_any_answer_is_not() {
-        assert!(!without(|draft| draft.name.clear()).is_complete());
-        assert!(!without(|draft| draft.repository.clear()).is_complete());
-        assert!(!without(|draft| draft.foreman.clear()).is_complete());
-        assert!(!without(|draft| draft.job_agents.clear()).is_complete());
-        assert!(!without(|draft| draft.credential.clear()).is_complete());
+        assert!(!without(|draft| draft.name.clear()).is_complete(&Filling::Creating, NOTHING_HELD));
+        assert!(
+            !without(|draft| draft.repository.clear())
+                .is_complete(&Filling::Creating, NOTHING_HELD)
+        );
+        assert!(
+            !without(|draft| draft.foreman.clear()).is_complete(&Filling::Creating, NOTHING_HELD)
+        );
+        assert!(
+            !without(|draft| draft.job_agents.clear())
+                .is_complete(&Filling::Creating, NOTHING_HELD)
+        );
+        assert!(
+            !without(|draft| draft.credential.clear())
+                .is_complete(&Filling::Creating, NOTHING_HELD)
+        );
+    }
+
+    /// The one field the two callers disagree about.
+    ///
+    /// Creating needs a credential because a project with none can reach
+    /// nothing; amending does not, because there is no way to show the one
+    /// already held and an empty box therefore means *keep it*. A single rule
+    /// for both would have to pick one of those, and either choice is wrong
+    /// half the time.
+    #[test]
+    fn amending_does_not_require_a_credential_and_creating_does() {
+        let blank = without(|draft| draft.credential.clear());
+
+        assert!(blank.is_complete(&amending(), NOTHING_HELD));
+        assert!(!blank.is_complete(&Filling::Creating, NOTHING_HELD));
+    }
+
+    /// Everything else is required of both, which is what stops the exception
+    /// above from being read as *amending checks nothing*.
+    #[test]
+    fn amending_still_requires_everything_a_project_is() {
+        assert!(!without(|draft| draft.name.clear()).is_complete(&amending(), NOTHING_HELD));
+        assert!(!without(|draft| draft.repository.clear()).is_complete(&amending(), NOTHING_HELD));
+        assert!(!without(|draft| draft.foreman.clear()).is_complete(&amending(), NOTHING_HELD));
+        assert!(!without(|draft| draft.job_agents.clear()).is_complete(&amending(), NOTHING_HELD));
+    }
+
+    /// A project carries identifiers and a row shows names, so something has
+    /// to map one to the other — and nothing else would notice if it stopped.
+    ///
+    /// Found by mutation testing: inverting the comparison inside the row's
+    /// lookup broke nothing any test could see, which is exactly the shape of
+    /// a screen that renders confidently and wrongly.
+    #[test]
+    fn an_agent_is_shown_by_its_name_and_not_the_identifier_it_arrived_as() {
+        let available = vec![Agent {
+            id: "claude".to_owned(),
+            name: "Claude".to_owned(),
+            description: "does the work".to_owned(),
+            configured: true,
+            used_by: Vec::new(),
+        }];
+
+        assert_eq!(shown_as(&available, "claude"), "Claude");
+    }
+
+    /// An agent this build does not know is shown as it stands.
+    ///
+    /// The other half, and the reason the lookup falls back rather than
+    /// hiding: an instance naming an agent that is gone is worth seeing.
+    #[test]
+    fn an_agent_this_build_does_not_know_is_shown_as_it_arrived() {
+        assert_eq!(shown_as(&[], "something-else"), "something-else");
+    }
+
+    /// The one question the form asks three times.
+    ///
+    /// Mutation testing found the comparison it replaced unguarded, which is
+    /// how a form could have started offering a channel while amending and
+    /// calling a credential optional while creating.
+    #[test]
+    fn only_creating_is_creating() {
+        assert!(Filling::Creating.creating());
+        assert!(!amending().creating());
+    }
+
+    /// `docs/conventions.md` §4, for the row that holds a value.
+    ///
+    /// Its own test rather than a line in the draft's, because the draft's
+    /// formatter delegates here — so a derived `Debug` on this type would
+    /// leak through a test that reads as though it covered it. Mutation
+    /// testing found exactly that: emptying this formatter changed nothing
+    /// any assertion noticed.
+    #[test]
+    fn a_variable_row_does_not_leak_its_value_when_formatted() {
+        let shown = format!(
+            "{:?}",
+            VariableDraft {
+                name: "STRIPE_API_KEY".to_owned(),
+                value: "sk-test-not-a-real-key".to_owned(),
+            }
+        );
+
+        assert!(!shown.contains("sk-test-not-a-real-key"), "{shown}");
+        assert!(
+            shown.contains("STRIPE_API_KEY"),
+            "it should still say which variable it is: {shown}"
+        );
+    }
+
+    /// A row for a variable the project does not hold needs a value, whichever
+    /// caller this is — including an amendment, which is where it was wrong.
+    ///
+    /// The screen used to require values only when creating, so adding a
+    /// variable to an existing project offered a control that the route then
+    /// refused. Being told off for something the screen could see is exactly
+    /// what [`Draft::is_complete`] exists to prevent.
+    #[test]
+    fn a_variable_the_project_does_not_hold_needs_a_value() {
+        let added = without(|draft| {
+            draft.variables = vec![VariableDraft {
+                name: "DATABASE_URL".to_owned(),
+                value: String::new(),
+            }];
+        });
+
+        assert!(!added.is_complete(&amending(), NOTHING_HELD));
+        assert!(!added.is_complete(&Filling::Creating, NOTHING_HELD));
+    }
+
+    /// And one the project does hold does not, because an empty box there
+    /// means keep — which is the whole reason the held names reach the screen.
+    #[test]
+    fn a_variable_the_project_already_holds_may_be_left_empty() {
+        let kept = without(|draft| {
+            draft.variables = vec![VariableDraft {
+                name: "STRIPE_API_KEY".to_owned(),
+                value: String::new(),
+            }];
+        });
+
+        assert!(kept.is_complete(&amending(), &["STRIPE_API_KEY".to_owned()]));
+    }
+
+    /// Typing over the name of a held variable makes it a new one again.
+    ///
+    /// The case that makes this per row rather than per form: the row was
+    /// seeded from the project, so it began as something with a value to keep,
+    /// and renaming it leaves nothing behind that name at all.
+    #[test]
+    fn renaming_a_held_variable_makes_it_need_a_value_again() {
+        let renamed = without(|draft| {
+            draft.variables = vec![VariableDraft {
+                name: "STRIPE_API_KEY_V2".to_owned(),
+                value: String::new(),
+            }];
+        });
+
+        assert!(!renamed.is_complete(&amending(), &["STRIPE_API_KEY".to_owned()]));
+    }
+
+    /// A half-bound channel cannot block an amendment, because amending never
+    /// offers one. The form hides those boxes, so a draft carrying whatever
+    /// was left in them must not make the control unavailable.
+    #[test]
+    fn amending_ignores_the_channel_boxes_entirely() {
+        assert!(
+            without(|draft| draft.channel.address.clear()).is_complete(&amending(), NOTHING_HELD)
+        );
+        assert!(
+            without(|draft| draft.channel.credential.clear())
+                .is_complete(&amending(), NOTHING_HELD)
+        );
     }
 
     /// The channel is the one thing a project may go without.
@@ -1156,7 +2154,7 @@ mod tests {
             without(|draft| {
                 draft.channel = ChannelDraft::default();
             })
-            .is_complete()
+            .is_complete(&Filling::Creating, NOTHING_HELD)
         );
     }
 
@@ -1167,8 +2165,14 @@ mod tests {
     /// the instance refusing after the fact.
     #[test]
     fn a_draft_binding_half_a_channel_is_not_complete() {
-        assert!(!without(|draft| draft.channel.address.clear()).is_complete());
-        assert!(!without(|draft| draft.channel.credential.clear()).is_complete());
+        assert!(
+            !without(|draft| draft.channel.address.clear())
+                .is_complete(&Filling::Creating, NOTHING_HELD)
+        );
+        assert!(
+            !without(|draft| draft.channel.credential.clear())
+                .is_complete(&Filling::Creating, NOTHING_HELD)
+        );
     }
 
     /// Whitespace is not an answer.
@@ -1180,18 +2184,18 @@ mod tests {
     fn whitespace_does_not_count_as_an_answer() {
         let mut draft = filled();
         draft.name = "   ".to_owned();
-        assert!(!draft.is_complete());
+        assert!(!draft.is_complete(&Filling::Creating, NOTHING_HELD));
 
         let mut draft = filled();
         draft.credential = "\t ".to_owned();
-        assert!(!draft.is_complete());
+        assert!(!draft.is_complete(&Filling::Creating, NOTHING_HELD));
 
         // And a channel half-filled with spaces is half-filled, which is what
         // the route decides after trimming. A screen that judged before
         // trimming would offer a control the instance then refuses.
         let mut draft = filled();
         draft.channel.address = "  ".to_owned();
-        assert!(!draft.is_complete());
+        assert!(!draft.is_complete(&Filling::Creating, NOTHING_HELD));
     }
 
     /// `docs/conventions.md` §4, for the two credentials a draft holds.
@@ -1206,6 +2210,10 @@ mod tests {
 
         assert!(!shown.contains("ghp-not-a-real-token"), "{shown}");
         assert!(!shown.contains("xoxb-not-a-real-token"), "{shown}");
+        // A variable's value is the third credential a draft holds, and it
+        // reaches this formatter through the row's own — so a derive on either
+        // one leaks here.
+        assert!(!shown.contains("sk-test-not-a-real-key"), "{shown}");
         assert!(
             shown.contains("aviary"),
             "it should still say what it holds"
@@ -1236,13 +2244,16 @@ mod tests {
                 draft.channel.address.clear();
                 draft.channel.credential.clear();
             })
-            .is_complete(),
+            .is_complete(&Filling::Creating, NOTHING_HELD),
             "a token to listen with and no channel is not a complete draft"
         );
 
         // And dropping only the listening token is fine, since speaking
         // without listening is an ordinary project.
-        assert!(without(|draft| draft.channel.listen_credential.clear()).is_complete());
+        assert!(
+            without(|draft| draft.channel.listen_credential.clear())
+                .is_complete(&Filling::Creating, NOTHING_HELD)
+        );
     }
 
     /// The screen must not offer what the route would refuse.

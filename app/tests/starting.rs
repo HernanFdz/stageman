@@ -316,13 +316,22 @@ const CHANNEL_CREDENTIAL: &str = "not-a-real-channel-credential";
 /// `docs/decisions/0029-a-reply-is-routed-by-its-thread.md`.
 const LISTEN_CREDENTIAL: &str = "not-a-real-listening-credential";
 
+/// The value of one of the project's own variables.
+///
+/// The third kind of credential a project holds, and the one with the least
+/// structure — this project never reads it, so nothing but the browser test
+/// below would notice it escaping. See
+/// `docs/decisions/0046-a-projects-variables-are-carried-never-read.md`.
+const VARIABLE_VALUE: &str = "not-a-real-third-party-key";
+
 /// An instance with one project in it, which is the smallest state that puts
 /// anything on the dashboard.
 ///
-/// It binds a channel, which nothing on the dashboard reads. That is the point:
-/// the project below is the fixture the credential test runs against, and a
-/// project holding only an agent credential would stop covering the second kind
-/// the moment channels arrived.
+/// It binds a channel and holds a variable, neither of which the dashboard
+/// reads. That is the point: the project below is the fixture the credential
+/// test runs against, and one holding only an agent credential would have
+/// stopped covering the second kind the moment channels arrived and the third
+/// the moment variables did.
 fn watching(name: &str, repository: &str) -> State {
     State {
         agents: BTreeMap::from([(
@@ -346,6 +355,10 @@ fn watching(name: &str, repository: &str) -> State {
                         credential: Secret::new(CHANNEL_CREDENTIAL.to_owned()),
                         listen_credential: Some(Secret::new(LISTEN_CREDENTIAL.to_owned())),
                     },
+                )]),
+                variables: BTreeMap::from([(
+                    stageman_core::VariableName::new("STRIPE_API_KEY").expect("a deliverable name"),
+                    Secret::new(VARIABLE_VALUE.to_owned()),
                 )]),
                 jobs: BTreeMap::new(),
                 attending: stageman_core::Attending::default(),
@@ -652,6 +665,7 @@ fn nothing_served_carries_a_credential() {
 
     for served in [running.get("/"), running.get("/api/instance")] {
         for secret in [
+            VARIABLE_VALUE,
             "not-a-real-credential",
             CHANNEL_CREDENTIAL,
             LISTEN_CREDENTIAL,

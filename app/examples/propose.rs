@@ -100,6 +100,7 @@ async fn propose() -> Result<(), String> {
             job_agents: std::collections::BTreeSet::from([Agent::Claude]),
             credentials,
             channels: std::collections::BTreeMap::new(),
+            variables: std::collections::BTreeMap::new(),
             jobs: std::collections::BTreeMap::new(),
             attending: stageman_core::Attending::default(),
         },

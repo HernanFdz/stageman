@@ -24,7 +24,7 @@
 //! held to a test.
 
 use stageman_agent::{AgentError, Answer, ContainerRuntime};
-use stageman_core::{Handout, JobId, ProjectId};
+use stageman_core::{Handout, JobId, ProjectId, VariableName};
 
 /// What every foreman's container is named for.
 ///
@@ -524,7 +524,13 @@ pub enum Voice {
 /// question goes, not whether the job stops. Both forms end the same way,
 /// because with outbound alone nobody answers this session.
 #[must_use]
-pub fn kickoff(repository: &str, work: &str, voice: Voice, tunnel: &str) -> String {
+pub fn kickoff(
+    repository: &str,
+    work: &str,
+    voice: Voice,
+    tunnel: &str,
+    variables: &[VariableName],
+) -> String {
     let port = stageman_agent::TUNNEL_PORT;
     // Two things this has to get across, and the second is the one that fails
     // silently. A server bound inside the container to loopback is reachable
@@ -578,6 +584,36 @@ and stop. Do not guess, and do not wait — nobody is watching this terminal."
         }
     };
 
+    // Named and never valued, and the type is what enforces it: a
+    // `VariableName` cannot hold a credential, so there is no call site at
+    // which a value could be passed here by accident. It matters more than it
+    // looks — a kickoff is stored on the job and crosses the snapshot boundary
+    // in the clear, because a job holds no credential.
+    //
+    // Empty when there are none, on the same reasoning `Voice` is decided
+    // rather than assumed: naming nothing would teach an agent to go looking
+    // in an empty environment, and saying nothing where there *are* variables
+    // leaves them set and unmentioned, which is the same as not setting them.
+    //
+    // The leading blank lines live inside this value rather than in the
+    // template below, so that a project with no variables gets a prompt that
+    // is byte-for-byte what it was before they existed.
+    let supplied = if variables.is_empty() {
+        String::new()
+    } else {
+        let named = variables
+            .iter()
+            .map(VariableName::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "\n\nSome of what this project needs is already in your environment: {named}. \
+Nothing here knows what any of them is for, so follow whatever the repository says about them. \
+Treat each as a credential — do not print one, do not write one into a file, and never include \
+one in a change you propose."
+        )
+    };
+
     format!(
         "\
 You are working on {repository}.
@@ -589,7 +625,7 @@ The work:
 
 {work}
 
-{showing}
+{showing}{supplied}
 
 When you have a change to propose, open a pull request and stop there. Do not \
 merge it, do not deploy anything, and do not push to the default branch. \
@@ -602,7 +638,7 @@ lets you work unattended.
 
 #[cfg(test)]
 mod tests {
-    use super::{JobId, ProjectId, Voice, resumption_notice};
+    use super::{JobId, ProjectId, VariableName, Voice, resumption_notice};
 
     /// Where a job of this project would be reachable.
     ///
@@ -612,6 +648,13 @@ mod tests {
     /// placeholder that does not read like a URL would let the surrounding
     /// sentence be wrong without a snapshot noticing.
     const A_TUNNEL: &str = "https://00000000-0000-0000-0000-000000000001.example.com";
+
+    /// A project that gives its jobs no variables, which is most of them.
+    ///
+    /// Named rather than written as an empty slice at each call, because what
+    /// these assertions are pinning is that such a project's prompt is
+    /// byte-for-byte what it was before variables existed at all.
+    const NONE: &[VariableName] = &[];
 
     /// Asserted as literal text, per `docs/conventions.md` §4. Prompt text is
     /// the only kind of code here that changes behaviour without changing
@@ -644,6 +687,7 @@ Then carry on with the work you were given."
                 "Fix the flaky test in the parser.",
                 Voice::Silent,
                 A_TUNNEL,
+                NONE,
             ),
             "You are working on https://example.invalid/repo.
 
@@ -670,6 +714,112 @@ guess, and do not wait — nobody is watching this terminal."
         );
     }
 
+    /// A kickoff naming what a project put in the environment, as literal text.
+    ///
+    /// `docs/conventions.md` §4: prompt text is the only kind that changes
+    /// behaviour without changing control flow, so it is asserted whole rather
+    /// than probed for substrings.
+    ///
+    /// Note the three things the paragraph does, each load-bearing. Naming the
+    /// variables is what makes an agent reach for one at all. Saying nothing
+    /// here knows what they are for is honest — this project never reads one —
+    /// and points at the repository, which is where
+    /// `docs/decisions/0019-a-projects-tooling-is-the-projects-business.md`
+    /// puts that knowledge. And the last sentence is the only thing standing
+    /// between a credential and a pull request description.
+    #[test]
+    fn a_kickoff_with_variables_reads_exactly_as_written() {
+        let variables = [
+            VariableName::new("STRIPE_API_KEY").expect("a deliverable name"),
+            VariableName::new("DATABASE_URL").expect("a deliverable name"),
+        ];
+
+        assert_eq!(
+            super::kickoff(
+                "https://example.invalid/repo",
+                "Fix the flaky test in the parser.",
+                Voice::Silent,
+                A_TUNNEL,
+                &variables,
+            ),
+            "You are working on https://example.invalid/repo.
+
+Nothing has been checked out for you. If the work needs the repository, clone it into the \
+current directory yourself. You have git and gh, and gh is already signed in as the account this \
+work belongs to.
+
+The work:
+
+Fix the flaky test in the parser.
+
+You can show what you are doing. Anything you serve inside this container on port 47201 is \
+reachable at https://00000000-0000-0000-0000-000000000001.example.com — a dev server while you \
+work, or a built result for somebody to look at before you propose it. Bind it to 0.0.0.0 and \
+not to localhost: a server on localhost answers you from inside this container and is reachable \
+from nowhere else.
+
+Some of what this project needs is already in your environment: STRIPE_API_KEY, DATABASE_URL. \
+Nothing here knows what any of them is for, so follow whatever the repository says about them. \
+Treat each as a credential — do not print one, do not write one into a file, and never include \
+one in a change you propose.
+
+When you have a change to propose, open a pull request and stop there. Do not merge it, do not \
+deploy anything, and do not push to the default branch. Somebody reads what you propose before \
+it counts for anything, which is what lets you work unattended.
+
+If you need an answer from a person before you can continue, say so plainly and stop. Do not \
+guess, and do not wait — nobody is watching this terminal."
+        );
+    }
+
+    /// A project with no variables gets the prompt it always got.
+    ///
+    /// Worth pinning separately from the snapshots, because it is what makes
+    /// this change safe to land: most projects have none, and a paragraph that
+    /// appeared as an empty gap — or left a stray blank line — would change
+    /// every one of their prompts for nothing.
+    #[test]
+    fn a_project_with_no_variables_is_told_nothing_about_them() {
+        for voice in [Voice::Channel, Voice::Silent] {
+            let prompt = super::kickoff(
+                "https://example.invalid/repo",
+                "anything",
+                voice,
+                A_TUNNEL,
+                NONE,
+            );
+
+            assert!(!prompt.contains("in your environment"), "{prompt}");
+            assert!(
+                !prompt.contains("\n\n\n"),
+                "an absent paragraph must leave no gap behind: {prompt:?}",
+            );
+        }
+    }
+
+    /// Names travel; values have nowhere to travel in.
+    ///
+    /// The type is the defence — a `VariableName` cannot hold a credential —
+    /// and this says so out loud, because a kickoff is stored on the job and
+    /// written to the snapshot in the clear.
+    #[test]
+    fn a_kickoff_names_a_variable_and_says_it_is_a_credential() {
+        let variables = [VariableName::new("STRIPE_API_KEY").expect("a deliverable name")];
+        let prompt = super::kickoff(
+            "https://example.invalid/repo",
+            "anything",
+            Voice::Channel,
+            A_TUNNEL,
+            &variables,
+        );
+
+        assert!(prompt.contains("STRIPE_API_KEY"), "{prompt}");
+        assert!(
+            prompt.contains("Treat each as a credential"),
+            "an agent told about a credential has to be told it is one: {prompt}",
+        );
+    }
+
     /// The other half of the same text, and asserted whole for the same reason.
     ///
     /// Two variants means two snapshots. A single one would leave the paragraph
@@ -683,6 +833,7 @@ guess, and do not wait — nobody is watching this terminal."
                 "Fix the flaky test in the parser.",
                 Voice::Channel,
                 A_TUNNEL,
+                NONE,
             ),
             "You are working on https://example.invalid/repo.
 
@@ -729,12 +880,14 @@ so do not wait for one and do not guess."
             "anything",
             Voice::Channel,
             A_TUNNEL,
+            NONE,
         );
         let silent = super::kickoff(
             "https://example.invalid/repo",
             "anything",
             Voice::Silent,
             A_TUNNEL,
+            NONE,
         );
 
         assert!(bound.contains("`say` tool"), "{bound}");
@@ -748,8 +901,13 @@ so do not wait for one and do not guess."
     #[test]
     fn no_kickoff_tells_a_job_to_wait_for_an_answer() {
         for voice in [Voice::Channel, Voice::Silent] {
-            let prompt =
-                super::kickoff("https://example.invalid/repo", "anything", voice, A_TUNNEL);
+            let prompt = super::kickoff(
+                "https://example.invalid/repo",
+                "anything",
+                voice,
+                A_TUNNEL,
+                NONE,
+            );
 
             assert!(prompt.contains("do not wait"), "{prompt}");
             assert!(prompt.contains("stop"), "{prompt}");
@@ -814,6 +972,7 @@ Whatever it has to say appears in this thread. Job \
             "anything",
             Voice::Channel,
             A_TUNNEL,
+            NONE,
         );
 
         let reporting = prompt
@@ -1266,6 +1425,7 @@ inferred is one a person will act on, and you have no way to check it."
             "anything at all",
             Voice::Channel,
             A_TUNNEL,
+            NONE,
         );
 
         assert!(prompt.contains("open a pull request"), "{prompt}");

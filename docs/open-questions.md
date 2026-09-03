@@ -398,16 +398,4 @@ and wrong within a day.
   and stays where it is. Roughly half of the ignored tests are in each group,
   so this is a move for some and not a reorganisation of all.
 
-- Then an edit modal for a project, which closes a gap this created rather
-  than adding a feature. The projects list is read-only, and everything a
-  project is gets decided in one form — which is the right shape, and means
-  there is currently no way to change a repository's credential after it is
-  set. A token that expires therefore costs the project and its job history,
-  which is a worse answer than the one it replaced.
-
-  The form already takes the values it should start with and hands back what it
-  ended with, knowing nothing about where that goes, so editing is a second
-  caller rather than a second form. The route it needs mostly exists: setting a
-  credential is already a route, and what is missing is changing a name, a
-  repository, or the agents.
 

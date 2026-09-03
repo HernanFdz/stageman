@@ -55,8 +55,9 @@ wrong thing — and review does not catch it precisely because it reads correctl
 Record the near-miss too: the term you rejected, and what it would have implied.
 
 - **project** — one repository, together with the channels bound to it, the
-  credentials those channels need, and the agents it runs on: one for its
-  foreman to think with, and a non-empty set its jobs may use. One
+  credentials those channels need, the variables its jobs are given, and the
+  agents it runs on: one for its foreman to think with, and a non-empty set its
+  jobs may use. One
   instance manages several. Everything else in this list belongs to exactly one
   project, always — including the foreman, which is a project's rather
   than an instance's, per
@@ -203,17 +204,44 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   used bare. This is the one place in the codebase where the wrong meaning of
   this word type-checks.
 
+- **variable** — one name and one value an operator gives a project, set in the
+  environment of every container that project's jobs run in. What makes it a
+  concept of its own rather than a loose platform credential is that **this
+  project never reads it**: nothing here parses the value, infers anything from
+  the name, or needs code in order to support one — which is precisely what a
+  platform and a channel do need, and why both of those are closed sets. See
+  `docs/decisions/0046-a-projects-variables-are-carried-never-read.md`.
+
+  The word names the mechanism, which this section usually rejects — the
+  argument against *checkout*. It survives for the reason **tunnel** does, and
+  for one more that is particular to it: an environment variable genuinely is
+  the concept here, because the operator is the one choosing the mechanism.
+  Everything else in a handout is delivered however its adapter sees fit — a
+  variable for one agent, a file at a path for another — and this is the only
+  thing a handout carries whose delivery is the operator's decision rather than
+  the adapter's.
+
+  The near-miss to record is inside this repository rather than beside it. The
+  adapter has a wider set under the same word: everything a container is started
+  with, including the credentials this project decides on its own. A project's
+  variables are the subset it knows nothing about, and the two must not be
+  allowed to blur. Not *setting* or *configuration*, both of which imply
+  something here reads one.
+
 - **handout** — exactly what one agent process is allowed to see: its agent's
   own credential, and — of the one project it works for — that project's
-  platform credentials and the *speaking* half of its channel bindings. Half,
+  platform credentials, its variables, and the *speaking* half of its channel
+  bindings. Half,
   because a binding holds a second credential that opens an event stream, and
   a job has no use for one: the handout carries a narrower type with nowhere
   to put it, so that is a property rather than a rule somebody applies. Nothing else, and nothing
-  inherited. The two project halves are not interchangeable and a handout can
-  carry one without the other: a foreman's gets the channels and no
-  platform credential at all, because watching a channel is its remit and
-  acting on a platform is not. See
-  `docs/decisions/0027-a-channel-is-not-a-platform.md`. It is *decided* in the domain crate as a
+  inherited. The three project parts are not interchangeable and a handout can
+  carry one without the others: a foreman's gets the channels and neither a
+  platform credential nor a variable, because watching a channel is its remit
+  and acting on anything else is not. See
+  `docs/decisions/0027-a-channel-is-not-a-platform.md`, and
+  `docs/decisions/0046-a-projects-variables-are-carried-never-read.md` for the
+  third. It is *decided* in the domain crate as a
   pure function and *delivered* by an adapter, because which secrets a process
   may see is a question about configuration while what they are called is
   knowledge about one agent. Not *environment*, and that near-miss is the whole
@@ -258,6 +286,15 @@ justify is usually obsolete.
   where is a pure function in the core crate so it can be tested without
   spawning anything; delivering it belongs to the adapter. Reasoning in
   `docs/decisions/0008-one-credential-per-agent.md`.
+
+  **A project's variables can reach that same failure from the other side, and
+  are refused for it.** An operator naming one `ANTHROPIC_API_KEY` would change
+  who pays exactly as an inherited variable would, so a name this project
+  already delivers is rejected when it is entered. Which names those are is the
+  adapter's knowledge and not the domain's — the sentence above is why — so the
+  question is put to the adapter and asked by **app**, which is the only crate
+  allowed to see both halves. See
+  `docs/decisions/0046-a-projects-variables-are-carried-never-read.md`.
 - **The container runtime's location is configuration, never a PATH lookup.**
   This rule used to be about agents; agents now live in images, so it retargets
   rather than retires — see

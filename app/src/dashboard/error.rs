@@ -147,12 +147,77 @@ pub enum DashboardError {
         project: String,
     },
 
-    /// Nothing by that name is a platform this knows about.
-    #[error("no platform is called {name}")]
-    UnknownPlatform {
-        /// What was asked for.
+    /// A variable was given a name a container could not be given.
+    ///
+    /// **Says which row and never what was in it**, and that is the whole
+    /// reason this carries a position rather than the name. The mistake this
+    /// most often catches is a credential pasted into the name box — a token
+    /// with an equals sign in it is exactly the shape that fails here — so an
+    /// error repeating the name would be an error repeating a secret, and
+    /// `docs/conventions.md` §4 does not care that it arrived in the wrong
+    /// field.
+    ///
+    /// The reason comes from the domain, which is written to the same rule.
+    #[error("variable {position} has a name an environment cannot carry: {rule}")]
+    VariableNameRefused {
+        /// Which row, counting from one, as the screen shows them.
+        position: usize,
+        /// Which rule it broke. Named `rule` rather than `reason` because this
+        /// enum is serialised with `reason` as its tag, and a field of that
+        /// name is refused by the derive.
+        rule: String,
+    },
+
+    /// A variable claims a name stageman delivers itself.
+    ///
+    /// Refused here rather than at delivery, so an operator finds out while
+    /// looking at the box rather than when a job fails. The name is safe to
+    /// repeat, unlike the one above: it is necessarily one of a handful of
+    /// compiled-in constants, so it cannot be anything an operator typed
+    /// except by naming it exactly.
+    ///
+    /// It matters more than a name clash usually would. One of these would
+    /// change which account an agent bills, with no error anywhere — see
+    /// `docs/decisions/0008-one-credential-per-agent.md`.
+    #[error("{name} is a variable stageman sets itself, so a project cannot")]
+    VariableReserved {
+        /// The reserved name that was claimed.
         name: String,
     },
+
+    /// Two rows give the same name.
+    ///
+    /// Refused rather than resolved, because either resolution is a silent
+    /// wrong answer: taking the last discards a value the operator typed, and
+    /// taking the first discards the one they typed second and probably meant.
+    ///
+    /// By position, for the reason above — a valid name can still be a pasted
+    /// credential, since a token of letters and underscores passes every rule
+    /// there is.
+    #[error("variable {position} repeats a name given earlier")]
+    VariableRepeated {
+        /// Which row, counting from one.
+        position: usize,
+    },
+
+    /// A variable that does not exist yet was given no value.
+    ///
+    /// An empty box means *keep what is there* — there is no way to show an
+    /// operator the value a project already holds, so blank has to mean
+    /// unchanged. That reading has nothing to fall back on for a name the
+    /// project has never had, and storing an empty credential would leave
+    /// something that reads as configured and authenticates as nothing.
+    ///
+    /// **Says no row, unlike its neighbours above, and the difference is not
+    /// an inconsistency.** Which names a project holds crosses the wire, so
+    /// the screen answers this one itself and the control that submits stays
+    /// unavailable until every new row has a value — nobody reading this
+    /// sentence is looking at a form. The two above cannot be answered there:
+    /// the rules they enforce live in the domain, which the browser's half
+    /// deliberately cannot name, so a row number is the only way they have to
+    /// point at anything.
+    #[error("a new variable needs a value")]
+    VariableValueMissing,
 
     /// A project cannot be forgotten while its jobs are still running.
     ///
@@ -192,9 +257,7 @@ impl DashboardError {
             // Nothing was asked for that does not exist; this process is
             // wrong.
             Self::NoInstance | Self::Failed => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::UnknownAgent { .. }
-            | Self::UnknownProject { .. }
-            | Self::UnknownPlatform { .. } => StatusCode::NOT_FOUND,
+            Self::UnknownAgent { .. } | Self::UnknownProject { .. } => StatusCode::NOT_FOUND,
             // Well-formed requests that describe something invalid. The
             // operator can fix all of these by typing something different,
             // which is what separates them from the two above.
@@ -203,6 +266,10 @@ impl DashboardError {
             | Self::JobAgentsMissing
             | Self::AgentNotConfigured { .. }
             | Self::AgentNotOnProject { .. }
+            | Self::VariableNameRefused { .. }
+            | Self::VariableReserved { .. }
+            | Self::VariableRepeated { .. }
+            | Self::VariableValueMissing
             | Self::ChannelIncomplete => StatusCode::BAD_REQUEST,
             // The request is well formed and the instance is in a state that
             // forbids it, which is what a conflict means.

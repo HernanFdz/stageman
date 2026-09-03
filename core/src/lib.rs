@@ -207,6 +207,92 @@ pub enum Platform {
     GitHub,
 }
 
+/// The name of one variable a project gives its jobs.
+///
+/// Validated on the way in, so that everything downstream is total: an adapter
+/// receiving one of these never has to ask whether it can be delivered, and
+/// there is no path by which an undeliverable name reaches a container's
+/// argument list. See
+/// `docs/decisions/0046-a-projects-variables-are-carried-never-read.md`.
+///
+/// **The rule is not cosmetic, and the equals sign is why.** A container
+/// runtime told to forward a variable whose *name* contains one sets it inline
+/// instead — measured on Docker and on Podman, which agree — so the value stops
+/// travelling through an environment and starts travelling through the command
+/// line, where any user on the machine can read it out of the process table.
+/// Refusing the name here is what keeps that from being possible to type.
+///
+/// Lowercase is allowed deliberately. The rule is what an environment can
+/// carry rather than a house style, and the proxy variables an operator will
+/// reach for first are spelled in lower case.
+///
+/// **It implements no deserialisation, and that is the point.** A snapshot is
+/// untrusted input, so a name arriving from one is checked as the file is
+/// opened rather than trusted because it was once checked — the same boundary
+/// [`Secret`] crosses through [`SealedSecret`].
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct VariableName(String);
+
+impl VariableName {
+    /// Accepts a name if a container could be given one.
+    ///
+    /// # Errors
+    ///
+    /// Fails if it is empty, begins with a digit, or holds anything but
+    /// letters, digits and underscores.
+    pub fn new(name: impl Into<String>) -> Result<Self, VariableNameError> {
+        let name = name.into();
+        let mut characters = name.chars();
+        let Some(first) = characters.next() else {
+            return Err(VariableNameError::Empty);
+        };
+        if first.is_ascii_digit() {
+            return Err(VariableNameError::LeadingDigit);
+        }
+        if !name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+        {
+            return Err(VariableNameError::NotAName);
+        }
+        Ok(Self(name))
+    }
+
+    /// The name, for whoever is about to deliver it.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for VariableName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A name a container could not be given.
+///
+/// Says which rule was broken rather than merely refusing, because the
+/// operator is looking at the box they typed it into. It says nothing about a
+/// *value*, which is a credential and never appears in an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum VariableNameError {
+    /// Nothing was given.
+    #[error("a variable needs a name")]
+    Empty,
+    /// It begins with a digit, which no environment accepts.
+    #[error("a variable's name cannot begin with a digit")]
+    LeadingDigit,
+    /// It holds something other than letters, digits and underscores.
+    ///
+    /// An equals sign is the one worth knowing about: a runtime reads a name
+    /// containing one as an inline assignment, which would put the value on
+    /// the command line for anybody on the machine to read.
+    #[error("a variable's name may hold only letters, digits and underscores")]
+    NotAName,
+}
+
 /// Somewhere the foreman watches and a job can speak into.
 ///
 /// Two-directional by definition, which is the whole reason this is not a
@@ -574,6 +660,21 @@ pub struct Project {
     /// ask, and refusing to start one would make the escalation path a
     /// prerequisite for work that never escalates.
     pub channels: BTreeMap<Channel, ChannelConfig>,
+    /// What its jobs are given that this project never reads.
+    ///
+    /// A third map beside the two above rather than a wider version of either,
+    /// because it differs from both in the property that matters: reaching a
+    /// platform or a channel needs code, and this needs none — nothing here
+    /// parses a value or infers anything from a name. See
+    /// `docs/decisions/0046-a-projects-variables-are-carried-never-read.md`.
+    ///
+    /// Every value is a [`Secret`], including the ones that are not secret.
+    /// The alternative was an operator marking which are, and the mistake in
+    /// that direction is unrecoverable and silent — a token marked ordinary is
+    /// written to disk in the clear and printed on a screen.
+    ///
+    /// May be empty, which is most projects.
+    pub variables: BTreeMap<VariableName, Secret>,
     /// Its jobs, past and present.
     ///
     /// Nested rather than held globally so that "a job belongs to exactly one
@@ -866,6 +967,15 @@ impl State {
                         ))
                     })
                     .collect::<Result<BTreeMap<_, _>, SealError>>()?;
+                // The name travels in the clear beside its sealed value, on
+                // the same terms a channel's address does: a name is not a
+                // credential, and sealing it would cost a nonce per write to
+                // hide something the operator typed in order to read it back.
+                let variables = project
+                    .variables
+                    .iter()
+                    .map(|(name, secret)| Ok((name.to_string(), secret.seal(key, nonces())?)))
+                    .collect::<Result<BTreeMap<_, _>, SealError>>()?;
                 Ok((
                     *id,
                     SealedProject {
@@ -875,6 +985,7 @@ impl State {
                         job_agents: project.job_agents.clone(),
                         credentials,
                         channels,
+                        variables,
                         jobs: project.jobs.clone(),
                         attending: project.attending.clone(),
                     },
@@ -1018,6 +1129,13 @@ pub enum OpenError {
     /// older version — so this is where believing it stops.
     #[error("the snapshot describes an instance that is not internally consistent")]
     Inconsistent(#[source] Inconsistent),
+    /// A project names a variable a container could not be given.
+    ///
+    /// Names the rule and never the value, for the reason every variant here
+    /// is vague about which credential: an error message is a place secrets
+    /// escape.
+    #[error("the snapshot names a variable that could not be delivered")]
+    VariableName(#[source] VariableNameError),
 }
 
 /// A credential as it appears on disk.
@@ -1137,6 +1255,22 @@ pub struct SealedProject {
     /// valid.
     #[serde(default)]
     pub channels: BTreeMap<Channel, SealedChannelConfig>,
+    /// Its variables, each with its value sealed and its name in the clear.
+    ///
+    /// Keyed by plain text rather than by the validated name, deliberately:
+    /// a file is untrusted input, so a name is checked as the snapshot is
+    /// opened rather than trusted because something once checked it. That is
+    /// the same boundary a credential crosses, and it is what lets
+    /// `VariableName` implement no deserialisation at all.
+    ///
+    /// **Defaulted, because this field was added after snapshots existed.**
+    /// `docs/decisions/0011-state-is-a-snapshot-not-a-database.md` versions
+    /// nothing: an added field is free *with* a default and loses every
+    /// existing instance without one. The empty map is the true answer rather
+    /// than a substitute for one, because a file written before variables
+    /// existed described a project that had none.
+    #[serde(default)]
+    pub variables: BTreeMap<String, SealedSecret>,
     /// Its jobs, which hold nothing needing sealing.
     pub jobs: BTreeMap<JobId, Job>,
     /// What its foreman was doing, which holds nothing needing sealing either:
@@ -1213,6 +1347,17 @@ impl Snapshot {
                         ))
                     })
                     .collect::<Result<BTreeMap<_, _>, OpenError>>()?;
+                // Where a name stops being believed. A snapshot may be
+                // hand-edited, and a name that cannot be delivered has to be
+                // refused here rather than reaching an argument list.
+                let variables = project
+                    .variables
+                    .into_iter()
+                    .map(|(name, sealed)| {
+                        let name = VariableName::new(name).map_err(OpenError::VariableName)?;
+                        Ok((name, sealed.open(key)?))
+                    })
+                    .collect::<Result<BTreeMap<_, _>, OpenError>>()?;
                 Ok((
                     id,
                     Project {
@@ -1222,6 +1367,7 @@ impl Snapshot {
                         job_agents: project.job_agents,
                         credentials,
                         channels,
+                        variables,
                         jobs: project.jobs,
                         attending: project.attending,
                     },
@@ -1372,6 +1518,7 @@ pub struct Handout {
     role: Role,
     agent_credential: Secret,
     platforms: BTreeMap<Platform, Secret>,
+    variables: BTreeMap<VariableName, Secret>,
     channels: BTreeMap<Channel, Speaking>,
     thread: Option<Thread>,
 }
@@ -1424,6 +1571,11 @@ impl Handout {
             role: Role::Foreman,
             agent_credential: config.auth_token.clone(),
             platforms: BTreeMap::new(),
+            // None, for the reason there is no platform credential here: a
+            // foreman judges signals rather than acting on them, so a
+            // project's credentials for third parties are the clearest
+            // possible example of something it has no business holding.
+            variables: BTreeMap::new(),
             channels: speaking(watching),
             // Only a foreman may ask this instance for anything, so only a
             // foreman's handout carries what proves the asking.
@@ -1462,6 +1614,7 @@ impl Handout {
             role: Role::Job,
             agent_credential: config.auth_token.clone(),
             platforms: project.credentials.clone(),
+            variables: project.variables.clone(),
             channels: speaking(project),
             // Never for a job. A job that could create jobs would have a
             // Narrowed by [`Handout::speaking_in`] once the job has a thread.
@@ -1504,6 +1657,26 @@ impl Handout {
     /// Every platform credential in this handout.
     pub fn platforms(&self) -> impl Iterator<Item = (Platform, &Secret)> {
         self.platforms.iter().map(|(p, s)| (*p, s))
+    }
+
+    /// Every variable this project gives its jobs, in the order a snapshot
+    /// holds them.
+    ///
+    /// Ordered because the map is, which is what lets an adapter's argument
+    /// list be asserted as literal text rather than as a set.
+    pub fn variables(&self) -> impl Iterator<Item = (&VariableName, &Secret)> {
+        self.variables.iter()
+    }
+
+    /// The names alone, for the instruction a job begins from.
+    ///
+    /// Separate from [`Handout::variables`] because the caller is different in
+    /// kind: a prompt names them and must never carry a value, since a kickoff
+    /// is stored on the job and crosses the snapshot boundary in the clear.
+    /// A method returning only names is what makes that impossible to get
+    /// wrong at the call site rather than merely easy to get right.
+    pub fn variable_names(&self) -> impl Iterator<Item = &VariableName> {
+        self.variables.keys()
     }
 
     /// How this process reaches one channel, if it is bound to one.
@@ -1556,6 +1729,10 @@ impl fmt::Debug for Handout {
             .field("role", &self.role)
             .field("agent_credential", &"<redacted>")
             .field("platforms", &self.platforms.keys().collect::<Vec<_>>())
+            // Names, never values. A name is not a credential — the operator
+            // typed it in order to read it back — and naming what is present
+            // is the whole use of a `Debug` on this type.
+            .field("variables", &self.variables.keys().collect::<Vec<_>>())
             .field("channels", &self.channels.keys().collect::<Vec<_>>())
             .field("thread", &self.thread)
             .finish()
@@ -1591,6 +1768,7 @@ mod tests {
         Agent, AgentConfig, Arriving, Attending, BASE64, Channel, ChannelConfig, Errand, Handout,
         HandoutError, Inconsistent, Job, JobId, Key, NONCE_LEN, Nonce, OpenError, Platform,
         Progress, Project, ProjectId, Recipient, Secret, Snapshot, State, Taken, Thread,
+        VariableName, VariableNameError,
     };
     use base64::Engine as _;
     use jiff::Timestamp;
@@ -1609,6 +1787,17 @@ mod tests {
     /// The second credential, which opens an event stream rather than posting.
     /// Distinct again, so a handout carrying it is detectable.
     const LISTEN_TOKEN: &str = "xapp-not-a-real-token";
+
+    /// One of a project's own variables, and the value in it.
+    ///
+    /// A third-party credential rather than something innocuous, because that
+    /// is what the concept is for and because the escape test below has to be
+    /// able to tell one project's from another's.
+    const VARIABLE: &str = "STRIPE_API_KEY";
+    const VARIABLE_VALUE: &str = "sk-test-not-a-real-key";
+
+    /// The same variable on the other project, holding somebody else's value.
+    const ALIEN_VARIABLE_VALUE: &str = "sk-test-belongs-to-somebody-else";
     /// An instance with an agent configured and nothing else.
     fn configured() -> State {
         State {
@@ -1650,6 +1839,10 @@ mod tests {
             job_agents: only_claude(),
             credentials,
             channels,
+            variables: BTreeMap::from([(
+                VariableName::new(VARIABLE).expect("a deliverable name"),
+                Secret::new(VARIABLE_VALUE.to_owned()),
+            )]),
             jobs,
             attending: Attending::default(),
         }
@@ -2047,6 +2240,14 @@ mod tests {
         assert!(!json.contains("agent-token"));
         assert!(!json.contains(CHANNEL_TOKEN), "{json}");
         assert!(!json.contains(LISTEN_TOKEN), "{json}");
+        // A variable's value is sealed like any other credential; its name is
+        // not, and must not be — an operator reads a name back in order to
+        // know what a project is carrying.
+        assert!(!json.contains(VARIABLE_VALUE), "{json}");
+        assert!(
+            json.contains(VARIABLE),
+            "a variable's name travels in the clear: {json}"
+        );
     }
 
     /// The other half of the sealing decision, asserted rather than assumed.
@@ -2336,6 +2537,86 @@ mod tests {
         assert_eq!(project.name, "example");
     }
 
+    /// `docs/conventions.md` §4: an added field is free *with* a default, and
+    /// only a file written before it existed can prove it.
+    ///
+    /// The current writer always emits every field, so a round trip cannot
+    /// catch this — the input that breaks has to be written out as literal
+    /// text. This one predates variables entirely, and describes a project
+    /// that had none, which is why the empty map is the true answer here
+    /// rather than a substituted default.
+    #[test]
+    fn a_snapshot_written_before_variables_existed_still_opens() {
+        let older = format!(
+            r#"{{
+              "agents": {{
+                "Claude": {{ "auth_token": {token} }}
+              }},
+              "projects": {{
+                "00000000-0000-0000-0000-000000000003": {{
+                  "name": "example",
+                  "repository": "https://example.invalid/repo",
+                  "foreman_agent": "Claude",
+                  "job_agents": ["Claude"],
+                  "credentials": {{}},
+                  "channels": {{}},
+                  "jobs": {{}}
+                }}
+              }}
+            }}"#,
+            token = serde_json::to_string(
+                &Secret::new("agent-token".to_owned())
+                    .seal(&key(), [1; NONCE_LEN])
+                    .expect("sealing a well-formed secret")
+            )
+            .expect("a sealed secret serialises")
+        );
+
+        let parsed: Snapshot = serde_json::from_str(&older).expect("an older file still parses");
+        let state = parsed.open(&key()).expect("and still opens");
+        let project = state
+            .projects
+            .values()
+            .next()
+            .expect("the project survived");
+
+        assert!(
+            project.variables.is_empty(),
+            "a file that predates variables describes a project with none"
+        );
+        assert_eq!(project.name, "example");
+    }
+
+    /// Where a name stops being believed.
+    ///
+    /// A snapshot is hand-editable by design, and its variable *names* travel
+    /// in the clear — so editing one to something a runtime would read as an
+    /// inline assignment costs nothing and needs no key. Refusing it here is
+    /// what stops it reaching an argument list, and it is refused rather than
+    /// dropped: silently discarding a variable would leave a job failing to
+    /// authenticate against something, with nothing anywhere saying why.
+    #[test]
+    fn a_snapshot_naming_a_variable_that_could_not_be_delivered_is_refused() {
+        let mut snapshot = sealed();
+        let project = snapshot
+            .projects
+            .values_mut()
+            .next()
+            .expect("a project to edit");
+        let sealed_value = project
+            .variables
+            .remove(VARIABLE)
+            .expect("the fixture has one");
+        project
+            .variables
+            .insert("NOT A NAME=oops".to_owned(), sealed_value);
+
+        assert!(matches!(
+            snapshot.open(&key()),
+            Err(OpenError::VariableName(VariableNameError::NotAName))
+        ));
+    }
+
     #[test]
     fn the_wrong_key_does_not_open_a_snapshot() {
         assert!(matches!(
@@ -2441,6 +2722,13 @@ mod tests {
                 listen_credential: None,
             },
         );
+        // The same name holding a different value, which is what makes the
+        // escape test below able to fail: two projects whose variables merely
+        // had different names would pass it by accident.
+        other.variables.insert(
+            VariableName::new(VARIABLE).expect("a deliverable name"),
+            Secret::new(ALIEN_VARIABLE_VALUE.to_owned()),
+        );
         state.projects.insert(theirs, other);
 
         (state, mine, theirs)
@@ -2533,6 +2821,78 @@ mod tests {
         for (_, bound) in ours.channels() {
             assert_ne!(bound.credential.expose(), ALIEN_CHANNEL_TOKEN);
         }
+
+        // And the third. Both projects name the same variable, so this can
+        // only pass if the selection actually happened — which is the whole of
+        // what is defensible about a value this project never reads.
+        assert!(
+            alien
+                .variables()
+                .any(|(_, value)| value.expose() == ALIEN_VARIABLE_VALUE),
+            "the other project's own value should be in its own handout"
+        );
+        for (_, value) in ours.variables() {
+            assert_ne!(value.expose(), ALIEN_VARIABLE_VALUE);
+        }
+    }
+
+    /// A job is handed what its operator gave the project for everything this
+    /// system has never heard of.
+    #[test]
+    fn a_job_is_handed_its_projects_variables() {
+        let (state, mine, _) = two_projects();
+
+        let handout = Handout::for_job(&state, Agent::Claude, mine).expect("a watched project");
+        let delivered: Vec<(&str, &str)> = handout
+            .variables()
+            .map(|(name, value)| (name.as_str(), value.expose()))
+            .collect();
+
+        assert_eq!(delivered, vec![(VARIABLE, VARIABLE_VALUE)]);
+    }
+
+    /// And a foreman is handed none, on the same terms it is handed no
+    /// platform credential: it judges signals rather than acting on them.
+    ///
+    /// Asserted rather than assumed, because the two constructors are the only
+    /// places this is decided and a field copied into the wrong one would look
+    /// exactly like the right one.
+    #[test]
+    fn a_foreman_is_handed_no_variable_at_all() {
+        let (state, mine, _) = two_projects();
+
+        let handout = Handout::for_foreman(&state, mine).expect("a watched project");
+
+        assert_eq!(handout.variables().count(), 0);
+        assert_eq!(handout.variable_names().count(), 0);
+    }
+
+    /// The names are readable on their own, because a prompt names them and
+    /// must never carry a value — a kickoff is stored on the job and crosses
+    /// the snapshot boundary in the clear.
+    #[test]
+    fn a_handouts_variable_names_can_be_read_without_their_values() {
+        let (state, mine, _) = two_projects();
+
+        let handout = Handout::for_job(&state, Agent::Claude, mine).expect("a watched project");
+        let named: Vec<&str> = handout.variable_names().map(VariableName::as_str).collect();
+
+        assert_eq!(named, vec![VARIABLE]);
+    }
+
+    /// `docs/conventions.md` §4, for the map added last.
+    ///
+    /// The name is expected to show, because naming what is present is what a
+    /// `Debug` on this type is for. The value is not.
+    #[test]
+    fn a_handout_does_not_leak_a_variables_value_when_formatted() {
+        let (state, mine, _) = two_projects();
+
+        let handout = Handout::for_job(&state, Agent::Claude, mine).expect("a watched project");
+        let shown = format!("{handout:?}");
+
+        assert!(!shown.contains(VARIABLE_VALUE), "{shown}");
+        assert!(shown.contains(VARIABLE), "{shown}");
     }
 
     /// A handout speaks at the root until it is narrowed to a thread.
@@ -2654,6 +3014,74 @@ mod tests {
             "it should still say what it holds"
         );
         assert!(shown.contains("Slack"), "{shown}");
+    }
+
+    /// What an environment can carry, which is what this rule is about.
+    ///
+    /// Lowercase is in the list deliberately: the rule is not a house style,
+    /// and the proxy variables an operator reaches for first are spelled that
+    /// way. A digit is fine anywhere but first.
+    #[test]
+    fn a_name_a_container_could_be_given_is_accepted() {
+        for name in [
+            "STRIPE_API_KEY",
+            "http_proxy",
+            "PATH",
+            "_leading_underscore",
+            "S3_BUCKET_2",
+            "a",
+        ] {
+            assert!(
+                VariableName::new(name).is_ok(),
+                "{name} is a name a container could be given"
+            );
+        }
+    }
+
+    /// The refusal that keeps a credential out of the process table.
+    ///
+    /// A runtime told to forward a variable whose name contains an equals sign
+    /// sets it inline instead — measured on Docker and on Podman — so the
+    /// value would travel through the command line rather than through an
+    /// environment. This is the only thing standing between an operator typing
+    /// that and it happening.
+    #[test]
+    fn a_name_holding_an_equals_sign_is_refused() {
+        assert_eq!(
+            VariableName::new("STRIPE_API_KEY=sk-test-not-a-real-key"),
+            Err(VariableNameError::NotAName)
+        );
+    }
+
+    /// The rest of the rule, each with the answer that says which part broke.
+    #[test]
+    fn a_name_an_environment_could_not_carry_is_refused() {
+        assert_eq!(VariableName::new(""), Err(VariableNameError::Empty));
+        assert_eq!(
+            VariableName::new("2_MANY"),
+            Err(VariableNameError::LeadingDigit)
+        );
+        for name in ["has space", "has-dash", "has.dot", "has\0nul", "é"] {
+            assert_eq!(
+                VariableName::new(name),
+                Err(VariableNameError::NotAName),
+                "{name} is not a name an environment could carry"
+            );
+        }
+    }
+
+    /// A refusal says which rule broke and never what was in the box.
+    ///
+    /// The name is not a credential, but an operator pasting a value into the
+    /// wrong box is exactly the mistake this type exists to catch — so the
+    /// error has to be safe to log even when the "name" is a token.
+    #[test]
+    fn a_refused_name_does_not_repeat_what_was_typed() {
+        let pasted = "sk-test-not-a-real-key=oops";
+        let refused = VariableName::new(pasted).expect_err("that is not a name");
+
+        assert!(!format!("{refused}").contains(pasted));
+        assert!(!format!("{refused:?}").contains(pasted));
     }
 
     #[test]

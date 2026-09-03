@@ -125,17 +125,22 @@ nobody is a wish.
 
 - **A job holds credentials for its own project, and for no other.** It gets
   what its project needs to reach the platforms that project uses, what it
-  needs to speak on that project's channels, and the credential material of the
-  one agent running it — and nothing belonging to any other project, and
-  nothing belonging to any other agent. *Defended by* construction, since
-  everything a job is handed is selected from the project it belongs to and
-  built by the pure function in **core**, and by the escape test in
+  needs to speak on that project's channels, whatever its operator gave that
+  project to reach everything else, and the credential material of the one
+  agent running it — and nothing belonging to any other project, and nothing
+  belonging to any other agent. *Defended by* construction, since everything a
+  job is handed is selected from the project it belongs to and built by the
+  pure function in **core**, and by the escape test in
   `docs/conventions.md` §4.
 
-  Platforms and channels are two selections rather than one, per
-  `docs/decisions/0027-a-channel-is-not-a-platform.md`, so this invariant has
-  two places to be broken rather than one — which is what the escape test now
-  checks separately for each.
+  Platforms, channels and variables are three selections rather than one, per
+  `docs/decisions/0027-a-channel-is-not-a-platform.md` and
+  `docs/decisions/0046-a-projects-variables-are-carried-never-read.md`, so this
+  invariant has three places to be broken rather than one — which is what the
+  escape test checks separately for each. The third is the one whose contents
+  this project cannot describe: a variable is carried and never read, so the
+  test can only assert that the selection happened, which is the whole of what
+  is defensible about it.
 
   This is the narrowed survivor of a stronger claim. The original invariant was
   that a job held no platform credential at all, which made exfiltration
