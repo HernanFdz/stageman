@@ -52,10 +52,20 @@ fn job_of(container: &str) -> Option<JobId> {
 /// How long to wait for a job's tunnel to answer before deciding it is not
 /// showing anything.
 ///
-/// Generous for a connection to this machine's own loopback, where the answer
-/// arrives in microseconds or not at all, and deliberately so: the cost of
-/// waiting is a moment at the end of a turn, and the cost of being impatient
-/// is stopping a container somebody is looking at.
+/// **This is a budget for the runtime's proxy, not for the network.** The
+/// connection itself is to this machine's own loopback and resolves in
+/// microseconds; what takes time is the proxy in front of a published port
+/// admitting that there is nothing behind it, which it does by accepting first
+/// and closing afterwards — see
+/// `docs/decisions/0047-a-tunnel-answers-only-when-something-behind-it-does.md`.
+/// Measured at about two milliseconds on Docker and about two hundred on
+/// Podman, so this is generous against the slower of the two rather than
+/// against a network.
+///
+/// Being impatient is the expensive direction, and now more so than before: a
+/// window shorter than that close takes to arrive reads every empty container
+/// as one that is showing something, which is the bug this constant's users
+/// exist to avoid.
 const ANSWERING_WITHIN: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Whether a job is still showing something, and so whether it stays up.
@@ -79,10 +89,16 @@ pub enum Showing {
 ///
 /// **Answering is asked of the tunnel, not of the container.** A connection is
 /// opened to the port the runtime published, from here, and something has to
-/// accept it. That is deliberately stricter than looking for a process bound
-/// inside: a server an agent bound to its container's own loopback holds the
-/// port and is reachable by nobody, and treating it as showing something would
-/// keep a container alive for ever to serve no one.
+/// be behind it. Asking from outside is what makes this stricter than looking
+/// for a process bound inside: a server an agent bound to its container's own
+/// loopback holds the port and is reachable by nobody, and treating it as
+/// showing something would keep a container alive for ever to serve no one.
+///
+/// **Accepting is not being behind it**, and that distinction is the whole of
+/// `docs/decisions/0047-a-tunnel-answers-only-when-something-behind-it-does.md`.
+/// A published port is not a bare one: both runtimes put a proxy on the host
+/// side, and it accepts for as long as the container runs, whether or not
+/// anything inside is listening. So this reads as well as connects.
 ///
 /// **Total, and that is the honest signature rather than a convenience.** Every
 /// way this can go wrong means the same thing and admits the same response: a
@@ -101,19 +117,49 @@ pub async fn rest(runtime: &ContainerRuntime, job: JobId) -> Showing {
     Showing::Nothing
 }
 
-/// Whether anything accepts a connection on a published port.
+/// Whether anything is behind a published port, rather than merely in front
+/// of it.
 ///
 /// Pure of everything but the socket, and separate so that the decision above
 /// reads as one sentence. Loopback, because that is where a tunnel is
 /// published — see
 /// `docs/decisions/0042-a-job-shows-its-work-on-a-subdomain.md`.
+///
+/// **Connecting proves nothing, so this also reads.** The runtime's proxy owns
+/// the host port for as long as the container runs and accepts every
+/// connection to it; what it cannot fake is the far side. So the three answers
+/// a read gives are the three states worth telling apart, and only the first
+/// means nothing is there:
+///
+/// - **closed at once** — the proxy accepted, found nothing inside to forward
+///   to, and hung up. This is every job that never showed anything.
+/// - **said something** — plainly serving.
+/// - **held open and silent** — also serving, and the case that makes reading
+///   worth the wait rather than a trick: an HTTP server says nothing at all
+///   until it is asked, so a probe that demanded bytes would stop exactly the
+///   containers this exists to keep. Nothing is written to find out, because
+///   the far side is somebody else's server and a made-up request is not ours
+///   to send.
 async fn answering(port: u16) -> bool {
-    let reached = tokio::time::timeout(
+    use tokio::io::AsyncReadExt as _;
+
+    let Ok(Ok(mut tunnel)) = tokio::time::timeout(
         ANSWERING_WITHIN,
         tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)),
     )
-    .await;
-    matches!(reached, Ok(Ok(_)))
+    .await
+    else {
+        return false;
+    };
+
+    let mut first = [0_u8; 1];
+    match tokio::time::timeout(ANSWERING_WITHIN, tunnel.read(&mut first)).await {
+        // Nothing behind the proxy. A clean close and a reset are the same
+        // event seen through different runtimes, and neither is a fault.
+        Ok(Ok(0) | Err(_)) => false,
+        // Something behind it, whether it spoke or is waiting to be asked.
+        Ok(Ok(_)) | Err(_) => true,
+    }
 }
 
 /// A container this project started and has not removed.
@@ -251,12 +297,25 @@ mod tests {
 
     /// Something listening answers; nothing listening does not.
     ///
-    /// The whole of what decides a container's lifetime, and it needs no
-    /// container: a port is a port, and what makes this worth a test is that
-    /// both answers have to be right. One that never answered would stop every
-    /// container the moment its turn ended, which is the behaviour this
-    /// replaces; one that always answered would keep every container running
-    /// for ever, which is the behaviour it exists to avoid.
+    /// **A bare port, and that is the limit of what this proves.** It once
+    /// claimed to be "the whole of what decides a container's lifetime" on the
+    /// grounds that a port is a port. That premise is false, and it is what let
+    /// every container run for ever with this test green: a *published* port
+    /// has the runtime's proxy in front of it, and the proxy accepts on the
+    /// container's behalf. See
+    /// `docs/decisions/0047-a-tunnel-answers-only-when-something-behind-it-does.md`.
+    ///
+    /// It is kept because both answers still have to be right for a socket
+    /// nobody is proxying, and it is cheap. What it cannot see is covered by
+    /// [`a_published_port_with_nothing_inside_answers_for_nobody`], which needs
+    /// a runtime.
+    ///
+    /// Worth knowing what the first assertion covers for free: this listener is
+    /// bound and never accepted on, so the handshake completes in the kernel's
+    /// backlog and the read that follows blocks. That is the *held open and
+    /// silent* case — the shape an HTTP server has before it is asked
+    /// anything — so a probe demanding bytes would fail here rather than only
+    /// in production.
     #[tokio::test]
     async fn a_port_answers_only_while_something_is_listening() {
         let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
@@ -273,8 +332,137 @@ mod tests {
         );
     }
 
+    /// A published port answers for nobody when nothing is inside.
+    ///
+    /// **The test the bug got past, and it needs a real container to exist at
+    /// all.** The one above binds a socket and asks about it; this publishes a
+    /// port the way a job's container does and asks about *that*, which is the
+    /// only version that meets the runtime's proxy. With the probe this
+    /// replaces — a connection and nothing more — the first assertion here
+    /// fails on both runtimes, which is precisely how every job container came
+    /// to run for ever.
+    ///
+    /// Both directions, because a probe that answered `false` unconditionally
+    /// would pass the half that matters and destroy the feature: it would stop
+    /// a container somebody is looking at.
+    ///
+    /// Needs a runtime and no credential and no image of ours — anything that
+    /// stays up will do, and the entry point is overridden so nothing is run.
+    #[tokio::test]
+    #[ignore = "needs a container runtime and the network; run `just image-handshake`"]
+    async fn a_published_port_with_nothing_inside_answers_for_nobody() {
+        let runtime = located_runtime();
+        let job = a_showing_job();
+        let name = container(job);
+        discard(&runtime, job).await.expect("a clean slate");
+        let anything = stageman_agent::build(
+            &runtime,
+            stageman_core::Agent::Claude,
+            stageman_core::Role::Foreman,
+        )
+        .await
+        .expect("the image builds");
+
+        // Nothing inside is listening: the proxy is the only thing on the host
+        // port, and it is what a bare connection would find.
+        let empty = std::process::Command::new(runtime.path())
+            .args([
+                "run",
+                "--detach",
+                "--name",
+                &name,
+                "--label",
+                &format!("stageman.job={name}"),
+                "--publish",
+                &format!("127.0.0.1::{}", stageman_agent::TUNNEL_PORT),
+                "--entrypoint",
+                "sh",
+                anything.as_argument(),
+                "-c",
+                "sleep 30",
+            ])
+            .output()
+            .expect("the runtime runs");
+        assert!(
+            empty.status.success(),
+            "{}",
+            String::from_utf8_lossy(&empty.stderr)
+        );
+
+        let port = stageman_agent::tunnel_port(&runtime, &name)
+            .await
+            .expect("the runtime answers")
+            .expect("a mapping was published");
+        assert!(
+            !answering(port).await,
+            "nothing is listening inside, so the proxy on {port} answers for nobody"
+        );
+
+        discard(&runtime, job).await.expect("it is removable");
+
+        // And the other direction, on a container that genuinely serves, so
+        // that this cannot pass by answering `false` to everything.
+        //
+        // Node rather than a networking tool, because the base image is
+        // node and has no `nc`, `socat` or `python3` — the same absence
+        // `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`
+        // records about `ss` and `lsof`. It binds every interface, not
+        // loopback, or the proxy would have nothing to forward to; and it
+        // never writes, which makes it the held-open-and-silent case rather
+        // than the easy one.
+        let serving = std::process::Command::new(runtime.path())
+            .args([
+                "run",
+                "--detach",
+                "--name",
+                &name,
+                "--label",
+                &format!("stageman.job={name}"),
+                "--publish",
+                &format!("127.0.0.1::{}", stageman_agent::TUNNEL_PORT),
+                "--entrypoint",
+                "node",
+                anything.as_argument(),
+                "-e",
+                &format!(
+                    "require('net').createServer().listen({}, '0.0.0.0')",
+                    stageman_agent::TUNNEL_PORT
+                ),
+            ])
+            .output()
+            .expect("the runtime runs");
+        assert!(
+            serving.status.success(),
+            "{}",
+            String::from_utf8_lossy(&serving.stderr)
+        );
+
+        let port = stageman_agent::tunnel_port(&runtime, &name)
+            .await
+            .expect("the runtime answers")
+            .expect("a mapping was published");
+        assert!(
+            answering(port).await,
+            "something is listening inside, so {port} is showing it"
+        );
+
+        discard(&runtime, job).await.expect("it is removable");
+    }
+
     fn a_job() -> JobId {
         JobId::from_uuid(Uuid::from_u128(42))
+    }
+
+    /// A different job from [`a_job`], and it has to be.
+    ///
+    /// A container's name is derived from its job's identifier and from
+    /// nothing else, which is the property `two_jobs_never_share_a_container_name`
+    /// exists for. Two tests sharing an identifier therefore share a container,
+    /// and the test runner runs them at once: the second to start is refused
+    /// the name and fails for a reason that has nothing to do with what it
+    /// asserts. Found exactly that way.
+    fn a_showing_job() -> JobId {
+        JobId::from_uuid(Uuid::from_u128(43))
     }
 
     #[test]
