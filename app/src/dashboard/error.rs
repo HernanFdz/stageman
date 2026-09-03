@@ -207,11 +207,17 @@ pub enum DashboardError {
     /// unchanged. That reading has nothing to fall back on for a name the
     /// project has never had, and storing an empty credential would leave
     /// something that reads as configured and authenticates as nothing.
-    #[error("variable {position} is new, so it needs a value")]
-    VariableValueMissing {
-        /// Which row, counting from one.
-        position: usize,
-    },
+    ///
+    /// **Says no row, unlike its neighbours above, and the difference is not
+    /// an inconsistency.** Which names a project holds crosses the wire, so
+    /// the screen answers this one itself and the control that submits stays
+    /// unavailable until every new row has a value — nobody reading this
+    /// sentence is looking at a form. The two above cannot be answered there:
+    /// the rules they enforce live in the domain, which the browser's half
+    /// deliberately cannot name, so a row number is the only way they have to
+    /// point at anything.
+    #[error("a new variable needs a value")]
+    VariableValueMissing,
 
     /// A project cannot be forgotten while its jobs are still running.
     ///
@@ -263,7 +269,7 @@ impl DashboardError {
             | Self::VariableNameRefused { .. }
             | Self::VariableReserved { .. }
             | Self::VariableRepeated { .. }
-            | Self::VariableValueMissing { .. }
+            | Self::VariableValueMissing
             | Self::ChannelIncomplete => StatusCode::BAD_REQUEST,
             // The request is well formed and the instance is in a state that
             // forbids it, which is what a conflict means.
