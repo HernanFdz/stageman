@@ -16,7 +16,7 @@ use rand::rngs::{StdRng, SysRng};
 use rand::{Rng as _, SeedableRng as _};
 use stageman_agent::{Answer, ContainerRuntime, StopReason};
 use stageman_core::{
-    Agent, Errand, Handout, Inconsistent, Job, JobId, Key, NONCE_LEN, Nonce, OpenError, Progress,
+    Errand, Handout, Inconsistent, Job, JobId, Key, Kit, NONCE_LEN, Nonce, OpenError, Progress,
     ProjectId, SealError, Snapshot, Speaking, State, Taken, Thread, Timestamp,
 };
 
@@ -356,7 +356,7 @@ fn tools_for(store: &Store, job: JobId, thread: Option<Thread>) -> Option<stagem
 pub fn begin(
     store: &Store,
     project: ProjectId,
-    agent: Agent,
+    kit: Kit,
     reason: &str,
     work: &str,
 ) -> Result<Started, RunError> {
@@ -368,7 +368,12 @@ pub fn begin(
             .ok_or(RunError::UnknownProject(project))?
             .repository
             .clone();
-        let handout = Handout::for_job(&state, agent, project).map_err(RunError::Handout)?;
+        // The kit arrives decided — by a foreman naming one of the project's,
+        // or by a person picking one on the dashboard — and is never composed
+        // here: `docs/decisions/0048-a-job-runs-on-a-kit.md` has a project's
+        // kits be the only kits, and both doors check the name against them
+        // before reaching this.
+        let handout = Handout::for_job(&state, kit, project).map_err(RunError::Handout)?;
         // Explicit, because holding a lock on the instance across the work
         // below would mean a job's whole run blocking every reader of it.
         drop(state);
@@ -409,16 +414,18 @@ pub fn begin(
     {
         let mut state = store.update();
         if let Some(project) = state.projects.get_mut(&project) {
+            // The kit is read off the handout rather than built a second time,
+            // for the reason the variables above are: the record and the
+            // container are decided from one value, so a job cannot be
+            // recorded as running on one kit and started on another.
             project.jobs.insert(
                 job,
-                Job {
-                    agent,
-                    reason: reason.to_owned(),
-                    kickoff: kickoff.clone(),
-                    created_at: Timestamp::now(),
-                    progress: Progress::Working,
-                    thread: None,
-                },
+                Job::new(
+                    handout.kit().clone(),
+                    reason.to_owned(),
+                    kickoff.clone(),
+                    Timestamp::now(),
+                ),
             );
         }
     }
@@ -520,7 +527,10 @@ pub async fn supervise(
     let tools = tools_for(store, job, thread);
     let progress = match stageman_job::start(runtime, &handout, job, tools.as_ref(), &kickoff).await
     {
-        Ok(answer) => outcome(&answer),
+        Ok(answer) => {
+            noted(store, job, answer.reported.clone());
+            outcome(&answer)
+        }
         Err(error) => Progress::Failed(because(&error)),
     };
     // Derived from the outcome rather than from a second look at the stop
@@ -664,16 +674,16 @@ pub async fn deliver(
     // each start: an environment is fixed at creation, so nothing the container
     // was given at birth can be counted on to still be there in the shape a
     // long-lived one needs. Read from the record rather than remembered.
-    let speaking = {
-        let state = store.read();
-        let thread = state.job(job).and_then(|recorded| recorded.thread.clone());
-        drop(state);
-        thread
+    let Some((speaking, kit)) = recorded(store, job) else {
+        return Progress::Failed("no such job".to_owned());
     };
 
     let tools = tools_for(store, job, speaking.clone());
-    let progress = match stageman_job::resume(runtime, job, tools.as_ref(), said).await {
-        Ok(answer) => outcome(&answer),
+    let progress = match stageman_job::resume(runtime, job, &kit, tools.as_ref(), said).await {
+        Ok(answer) => {
+            noted(store, job, answer.reported.clone());
+            outcome(&answer)
+        }
         Err(error) => Progress::Failed(because(&error)),
     };
     if let Progress::Failed(ref why) = progress {
@@ -688,9 +698,8 @@ pub async fn deliver(
 /// Creates a job on a project and runs it to completion.
 ///
 /// The whole of the doing, in the one crate allowed to name both the store and
-/// the job — `docs/architecture.md` §1. What the foreman will eventually
-/// decide (which project, which agent, why, and what work) arrives here as
-/// arguments, because nothing decides it yet.
+/// the job — `docs/architecture.md` §1. What the foreman decides (which
+/// project, which kit, why, and what work) arrives here as arguments.
 ///
 /// Both halves, for a caller that has nothing else to do until the job is
 /// over. A caller that does — a request, most obviously — uses [`begin`] and
@@ -705,11 +714,11 @@ pub async fn run(
     store: &Store,
     runtime: &ContainerRuntime,
     project: ProjectId,
-    agent: Agent,
+    kit: Kit,
     reason: &str,
     work: &str,
 ) -> Result<(JobId, Progress), RunError> {
-    let started = begin(store, project, agent, reason, work)?;
+    let started = begin(store, project, kit, reason, work)?;
 
     Ok(supervise(store, runtime, started).await)
 }
@@ -824,22 +833,30 @@ pub async fn reconcile(
             continue;
         }
 
-        let speaking = {
-            let state = store.read();
-            let thread = state.job(job).and_then(|recorded| recorded.thread.clone());
-            drop(state);
-            thread
+        // Cannot be absent — the job came from this same state a moment ago —
+        // and is refused rather than substituted anyway, for the reason the
+        // handout's constructors give: a job resumed on a kit it did not
+        // record would be exactly the silent wrong answer the kit exists to
+        // rule out.
+        let Some((speaking, kit)) = recorded(store, job) else {
+            tracing::warn!(%job, "believed to be running, but it has no record");
+            attended.push(Attended::Stranded);
+            continue;
         };
         let tools = tools_for(store, job, speaking.clone());
         let progress = match stageman_job::resume(
             runtime,
             job,
+            &kit,
             tools.as_ref(),
             stageman_foreman::resumption_notice(),
         )
         .await
         {
-            Ok(answer) => outcome(&answer),
+            Ok(answer) => {
+                noted(store, job, answer.reported.clone());
+                outcome(&answer)
+            }
             Err(error) => Progress::Failed(because(&error)),
         };
         if let Progress::Failed(ref why) = progress {
@@ -1067,6 +1084,34 @@ fn record(store: &Store, job: JobId, progress: Progress) {
     if let Some(recorded) = state.job_mut(job) {
         recorded.progress = progress;
     }
+}
+
+/// Writes down what a job's session reported it was set to, this turn.
+///
+/// Beside the kit rather than checked against it, because the two are
+/// different facts and the adapter has already done the checking — a setting
+/// that did not take fails the turn before anything is reported. See
+/// `docs/decisions/0048-a-job-runs-on-a-kit.md`.
+fn noted(store: &Store, job: JobId, reported: std::collections::BTreeMap<String, String>) {
+    let mut state = store.update();
+    if let Some(recorded) = state.job_mut(job) {
+        recorded.reported = reported;
+    }
+}
+
+/// What a job resuming needs from its record: where it speaks, and what it
+/// runs on.
+///
+/// One read rather than two, so that the thread and the kit come from the
+/// same moment of the instance. `None` for a job this instance has no record
+/// of, which every caller treats as a refusal rather than a default.
+fn recorded(store: &Store, job: JobId) -> Option<(Option<Thread>, Kit)> {
+    let state = store.read();
+    let found = state
+        .job(job)
+        .map(|recorded| (recorded.thread.clone(), recorded.kit().clone()));
+    drop(state);
+    found
 }
 
 /// A message that is already in a foreman's inbox, and what that arrival was.
@@ -1337,23 +1382,19 @@ async fn turn(
     };
 
     // Read now rather than at the start of the session, because a project's
-    // set of job agents is edited from the dashboard and a session outlives
-    // those edits.
-    let agents: Vec<(&'static str, &'static str)> = {
+    // kits are edited from the dashboard and a session outlives those edits.
+    // Each with the description its operator wrote, which is what the choice
+    // is made on — `docs/decisions/0048-a-job-runs-on-a-kit.md`.
+    let kits: Vec<(String, String)> = {
         let state = store.read();
-        let named = state
-            .projects
-            .get(&project)
-            .map_or_else(Vec::new, |watched| {
-                watched
-                    .job_agents
-                    .iter()
-                    .map(|agent| (crate::dashboard::wire_name(*agent).0, agent.description()))
-                    .collect()
-            });
+        let offered = crate::tooling::allowed_kits(&state, project);
         drop(state);
-        named
+        offered
     };
+    let kits: Vec<(&str, &str)> = kits
+        .iter()
+        .map(|(name, description)| (name.as_str(), description.as_str()))
+        .collect();
 
     // Minted per turn, not per project, and this is the turn's thread going
     // with it: a foreman answers in whichever thread it was spoken to in, so
@@ -1371,7 +1412,7 @@ async fn turn(
         project,
         &repository,
         &stageman_agent::Tools::new(crate::tooling::endpoint(*crate::endpoint::PORT), credential),
-        &agents,
+        &kits,
         stageman_foreman::Turn {
             said: &errand.said,
             starting,
@@ -1415,10 +1456,10 @@ mod tests {
     };
     use stageman_agent::{Answer, ContainerRuntime, StopReason};
     use stageman_core::{
-        Agent, AgentConfig, Job, JobId, Key, Progress, Project, ProjectId, Secret, State, Taken,
-        Thread, Timestamp, Uuid,
+        Agent, AgentConfig, Job, JobId, Key, Kit, Progress, Project, ProjectId, Secret, State,
+        Taken, Thread, Timestamp, Uuid,
     };
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
 
@@ -1449,30 +1490,34 @@ mod tests {
             Project {
                 name: "example".to_owned(),
                 repository: "https://example.invalid/repo".to_owned(),
-                foreman_agent: Agent::Claude,
-                job_agents: only_claude(),
+                foreman_kit: Kit::defaults(Agent::Claude),
+                kits: only_claude(),
                 credentials: BTreeMap::new(),
                 channels: BTreeMap::new(),
                 variables: BTreeMap::new(),
                 attending: stageman_core::Attending::default(),
                 jobs: BTreeMap::from([(
                     job,
-                    Job {
-                        agent: Agent::Claude,
-                        reason: "started by hand".to_owned(),
-                        kickoff: "do the thing".to_owned(),
-                        created_at: Timestamp::UNIX_EPOCH,
-                        progress: Progress::Working,
-                        thread: None,
-                    },
+                    Job::new(
+                        Kit::defaults(Agent::Claude),
+                        "started by hand".to_owned(),
+                        "do the thing".to_owned(),
+                        Timestamp::UNIX_EPOCH,
+                    ),
                 )]),
             },
         );
         (state, job)
     }
 
-    fn only_claude() -> BTreeSet<Agent> {
-        BTreeSet::from([Agent::Claude])
+    /// The kits a project offers when nobody has written one: its agent's
+    /// defaults under the agent's name, which is what every project written
+    /// before kits opens with.
+    fn only_claude() -> BTreeMap<stageman_core::KitName, stageman_core::KitConfig> {
+        BTreeMap::from([(
+            stageman_core::KitName::new("Claude").expect("a name"),
+            stageman_core::KitConfig::defaults(Agent::Claude),
+        )])
     }
 
     fn a_message() -> stageman_core::Errand {
@@ -1721,8 +1766,8 @@ mod tests {
                 Project {
                     name: "example".to_owned(),
                     repository: "https://example.invalid/repo".to_owned(),
-                    foreman_agent: Agent::Claude,
-                    job_agents: only_claude(),
+                    foreman_kit: Kit::defaults(Agent::Claude),
+                    kits: only_claude(),
                     credentials: BTreeMap::new(),
                     channels: BTreeMap::new(),
                     jobs: BTreeMap::new(),
@@ -1758,8 +1803,8 @@ mod tests {
             stageman_core::Project {
                 name: "aviary".to_owned(),
                 repository: "https://example.invalid/aviary".to_owned(),
-                foreman_agent: Agent::Claude,
-                job_agents: std::collections::BTreeSet::from([Agent::Claude]),
+                foreman_kit: Kit::defaults(Agent::Claude),
+                kits: only_claude(),
                 credentials: std::collections::BTreeMap::new(),
                 channels: std::collections::BTreeMap::new(),
                 jobs: std::collections::BTreeMap::new(),
@@ -1772,17 +1817,16 @@ mod tests {
             .get_mut(&project)
             .expect("the project")
             .jobs
-            .insert(
-                job,
-                stageman_core::Job {
-                    agent: Agent::Claude,
-                    reason: "because".to_owned(),
-                    kickoff: "do the thing".to_owned(),
-                    created_at: Timestamp::now(),
-                    progress: Progress::Idle,
-                    thread: None,
-                },
-            );
+            .insert(job, {
+                let mut idle = stageman_core::Job::new(
+                    Kit::defaults(Agent::Claude),
+                    "because".to_owned(),
+                    "do the thing".to_owned(),
+                    Timestamp::now(),
+                );
+                idle.progress = Progress::Idle;
+                idle
+            });
         let store = Store::create(snapshot_path(&directory), key(), state).expect("it can write");
 
         assert!(
@@ -1792,6 +1836,67 @@ mod tests {
         assert!(
             super::tools_for(&store, JobId::from_uuid(Uuid::from_u128(99)), None).is_none(),
             "a job this instance cannot place must be given none, not somebody else's",
+        );
+    }
+
+    /// What a session reported is written onto the job and read back beside
+    /// the kit it runs on, and a job this instance does not hold reads as
+    /// nothing.
+    ///
+    /// Mutation testing is what asked for this: the write could be deleted
+    /// and the read could answer nothing, and no test noticed either.
+    #[test]
+    fn what_a_session_reported_is_noted_and_read_back_with_the_kit() {
+        let directory = TempDir::new().expect("a temporary directory");
+        let mut state = configured();
+        let project = ProjectId::from_uuid(Uuid::from_u128(3));
+        let job = JobId::from_uuid(Uuid::from_u128(7));
+        state.projects.insert(
+            project,
+            stageman_core::Project {
+                name: "aviary".to_owned(),
+                repository: "https://example.invalid/aviary".to_owned(),
+                foreman_kit: Kit::defaults(Agent::Claude),
+                kits: only_claude(),
+                credentials: std::collections::BTreeMap::new(),
+                channels: std::collections::BTreeMap::new(),
+                jobs: std::collections::BTreeMap::from([(
+                    job,
+                    stageman_core::Job::new(
+                        stageman_core::Kit::Claude {
+                            model: stageman_core::ClaudeModel::Haiku,
+                        },
+                        "because".to_owned(),
+                        "do the thing".to_owned(),
+                        Timestamp::now(),
+                    ),
+                )]),
+                variables: BTreeMap::new(),
+                attending: stageman_core::Attending::default(),
+            },
+        );
+        let store = Store::create(snapshot_path(&directory), key(), state).expect("it can write");
+
+        let reported = BTreeMap::from([("model".to_owned(), "haiku".to_owned())]);
+        super::noted(&store, job, reported.clone());
+        assert_eq!(
+            store.read().job(job).expect("the job").reported,
+            reported,
+            "what the session said is on the record"
+        );
+
+        let (thread, kit) = super::recorded(&store, job).expect("a job this instance holds");
+        assert!(thread.is_none(), "no channel is bound, so no thread");
+        assert_eq!(
+            kit,
+            stageman_core::Kit::Claude {
+                model: stageman_core::ClaudeModel::Haiku
+            },
+            "the kit read back is the one the job was created on"
+        );
+        assert!(
+            super::recorded(&store, JobId::from_uuid(Uuid::from_u128(404))).is_none(),
+            "a job this instance has no record of reads as nothing, not as a default"
         );
     }
 
@@ -1851,22 +1956,20 @@ mod tests {
         let mut jobs = BTreeMap::new();
         jobs.insert(
             job,
-            Job {
-                agent: Agent::Claude,
-                reason: "an issue was opened".to_owned(),
-                kickoff: "work on it".to_owned(),
-                created_at: Timestamp::UNIX_EPOCH,
-                progress: Progress::Working,
-                thread: None,
-            },
+            Job::new(
+                Kit::defaults(Agent::Claude),
+                "an issue was opened".to_owned(),
+                "work on it".to_owned(),
+                Timestamp::UNIX_EPOCH,
+            ),
         );
         state.projects.insert(
             project,
             Project {
                 name: "example".to_owned(),
                 repository: "https://example.invalid/repo".to_owned(),
-                foreman_agent: Agent::Claude,
-                job_agents: only_claude(),
+                foreman_kit: Kit::defaults(Agent::Claude),
+                kits: only_claude(),
                 credentials: BTreeMap::new(),
                 channels: BTreeMap::new(),
                 jobs,
@@ -2190,8 +2293,8 @@ mod tests {
                 Project {
                     name: "hello".to_owned(),
                     repository: repository.to_owned(),
-                    foreman_agent: Agent::Claude,
-                    job_agents: only_claude(),
+                    foreman_kit: Kit::defaults(Agent::Claude),
+                    kits: only_claude(),
                     // No platform credential: the repository is public, so this
                     // also checks that a job with nothing to authenticate with
                     // is a perfectly ordinary job rather than a broken one.
@@ -2227,7 +2330,7 @@ mod tests {
                 &store,
                 &runtime,
                 project,
-                Agent::Claude,
+                Kit::defaults(Agent::Claude),
                 "checking that a job can run at all",
                 "Clone the repository. Then reply with one short line saying how many files are \
                  in it. Make no changes, commit nothing, and open nothing.",
@@ -2286,6 +2389,7 @@ mod tests {
         Answer {
             text: "whatever it said".to_owned(),
             stop_reason,
+            reported: BTreeMap::new(),
         }
     }
 

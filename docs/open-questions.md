@@ -306,6 +306,21 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   map instead of a directory, it is cheap; if it is the asset pipeline, it is
   not.
 
+- **When do credentials move from agents to providers?**
+  `docs/decisions/0048-a-job-runs-on-a-kit.md` decides that they will. With an
+  agent that reaches several providers, the credential is the provider's rather
+  than the agent's, and a job must be handed exactly the one its kit names or
+  the billing failure `docs/decisions/0008-one-credential-per-agent.md` guards
+  against returns through a new door. A provider is platform-shaped — a closed
+  set, because naming the variable an agent reads it from is code — and
+  anything stranger is already a project variable.
+
+  What is undecided is only when. Moving them before any configured agent has
+  more than one provider is a snapshot migration for a distinction nothing yet
+  has, so the honest answer is: with the first adapter that does. Settled by
+  that adapter landing, and worth deciding in the same change as its kit
+  variant, since that variant is where the provider has to be named.
+
 ## Next
 
 Intended next steps, in order, each with its reason. Written as intentions, not

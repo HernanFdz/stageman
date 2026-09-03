@@ -24,7 +24,7 @@
 //! held to a test.
 
 use stageman_agent::{AgentError, Answer, ContainerRuntime};
-use stageman_core::{Handout, JobId, ProjectId, VariableName};
+use stageman_core::{Agent, Handout, JobId, ProjectId, VariableName};
 
 /// What every foreman's container is named for.
 ///
@@ -137,16 +137,22 @@ Whatever it has to say appears in this thread. Job {job}."
 /// turn is a message on the same session, which is what lets a foreman
 /// remember what it was already asked.
 ///
+/// Skipped by mutation testing, like everything that drives the runtime: every
+/// path through this starts or resumes a container. What it decides that can
+/// be checked cheaply is pure and has its own test — `continuing`, `keeps`, and
+/// every prompt it sends.
+///
 /// # Errors
 ///
 /// Fails if the runtime cannot be reached, or the agent cannot be run.
+#[mutants::skip]
 pub async fn attend(
     runtime: &ContainerRuntime,
     handout: &Handout,
     project: ProjectId,
     repository: &str,
     tools: &stageman_agent::Tools,
-    agents: &[(&str, &str)],
+    kits: &[(&str, &str)],
     turn: Turn<'_>,
 ) -> Result<Answer, ForemanError> {
     let name = container(project);
@@ -155,20 +161,48 @@ pub async fn attend(
         .map_err(ForemanError::Agent)?;
 
     if continuing(&existing, &name) {
+        // The turn boundary `docs/decisions/0048-a-job-runs-on-a-kit.md` puts
+        // a kit change at. A container made for another agent is another
+        // image, so it goes and a fresh one is begun — with the session, which
+        // is the price that record accepts. A container made for this agent
+        // is kept whatever its settings were, because settings are settled
+        // again every turn.
+        let made_for = stageman_agent::made_for(runtime, &name)
+            .await
+            .map_err(ForemanError::Agent)?;
+        if !keeps(made_for, handout.agent()) {
+            stageman_agent::discard(runtime, &name)
+                .await
+                .map_err(ForemanError::Agent)?;
+            let first = format!("{}\n\n{}", opening(repository), asked(turn, kits));
+            return stageman_agent::begin(runtime, handout, &name, Some(tools), &first)
+                .await
+                .map_err(ForemanError::Agent);
+        }
+
         // The thread comes from the handout every turn, which is the whole
         // point: one container, a different thread each time. The address this
         // instance answers at used to be written in beside it; it now travels
         // on the session declaration `resume` sends, which is what lets a
         // restarted instance name a different port — see
         // `docs/decisions/0034-tools-are-served-not-shipped.md`.
-        stageman_agent::resume(runtime, &name, Some(tools), &asked(turn, agents))
-            .await
-            .map_err(ForemanError::Agent)
+        // The kit goes with every turn, not only the first: a loaded session
+        // forgets what it was set to, so a foreman resumed on its own would run
+        // on the agent's defaults — `docs/decisions/0048-a-job-runs-on-a-kit.md`.
+        stageman_agent::resume(
+            runtime,
+            &name,
+            handout.kit(),
+            Some(tools),
+            &asked(turn, kits),
+        )
+        .await
+        .map_err(ForemanError::Agent)
     } else {
         // The opening and the first message together, because a session that
         // was told who it is and then asked nothing would have spent a turn
         // saying hello.
-        let first = format!("{}\n\n{}", opening(repository), asked(turn, agents));
+        let first = format!("{}\n\n{}", opening(repository), asked(turn, kits));
         stageman_agent::begin(runtime, handout, &name, Some(tools), &first)
             .await
             .map_err(ForemanError::Agent)
@@ -185,6 +219,26 @@ pub async fn attend(
 #[must_use]
 fn continuing(existing: &[String], name: &str) -> bool {
     existing.iter().any(|found| found == name)
+}
+
+/// Whether a foreman's existing container is kept for the agent it now wants.
+///
+/// Kept when it was made for that agent, and kept when it cannot say — a
+/// container from before the label existed could only have been made for the
+/// agent its project named then, and discarding every foreman's memory on the
+/// first turn after an upgrade would be a real cost paid against no evidence.
+/// Replaced only when the label names a different agent, which is the one
+/// case where keeping it would run the wrong image.
+///
+/// Skipped by mutation testing, and equivalent rather than untested: [`Agent`]
+/// has one member, so a label can never name a different one and this is
+/// `true` for every input there is. **Delete this attribute in the commit that
+/// adds a second agent**, and give the test below its replaced case — the
+/// same instruction `State::used_by` carries, for the same reason.
+#[must_use]
+#[mutants::skip]
+fn keeps(made_for: Option<Agent>, wanted: Agent) -> bool {
+    made_for.is_none_or(|made| made == wanted)
 }
 
 /// A foreman's turn could not be taken.
@@ -314,15 +368,17 @@ pub const fn resumed_notice() -> &'static str {
 /// arrives is somebody's words, and a session that has been running for days
 /// has no other way to tell those from an instruction it wrote itself.
 ///
-/// **The agents are named here rather than in the opening**, and that is the
-/// point of saying them every turn: a project's set of job agents is edited
-/// from the dashboard, and a session outlives those edits. Said once at the
-/// start, the list would be right until somebody changed it and wrong
-/// thereafter, with nothing to notice.
+/// **The kits are named here rather than in the opening**, and that is the
+/// point of saying them every turn: a project's kits are edited from the
+/// dashboard, and a session outlives those edits. Said once at the start, the
+/// list would be right until somebody changed it and wrong thereafter, with
+/// nothing to notice. Each comes with the description its operator wrote,
+/// which is what the choice is made on — see
+/// `docs/decisions/0048-a-job-runs-on-a-kit.md`.
 #[must_use]
-pub fn asked(turn: Turn<'_>, agents: &[(&str, &str)]) -> String {
+pub fn asked(turn: Turn<'_>, kits: &[(&str, &str)]) -> String {
     let Turn { said, starting } = turn;
-    let choices = agents
+    let choices = kits
         .iter()
         .map(|(named, described)| format!("  {named} — {described}"))
         .collect::<Vec<_>>()
@@ -346,12 +402,13 @@ Answer it, or start a job for it with the `start_job` tool, or both. Then \
 call `say` before you finish: a turn that ends without calling it has told \
 nobody anything, however much you wrote.
 
-The agents this project's jobs may run on, and what each is for:
+The kits this project's jobs may run on — each an agent, set a particular way — \
+and what each is for:
 
 {choices}
 
 Choose one deliberately and name it first. It is your judgement to make — \
-`docs/decisions/0006-agents-are-pluggable.md` — and the list is said here \
+`docs/decisions/0048-a-job-runs-on-a-kit.md` — and the list is said here \
 rather than at the start of this session because it can change while you are \
 still running.
 
@@ -638,7 +695,7 @@ lets you work unattended.
 
 #[cfg(test)]
 mod tests {
-    use super::{JobId, ProjectId, VariableName, Voice, resumption_notice};
+    use super::{Agent, JobId, ProjectId, VariableName, Voice, resumption_notice};
 
     /// Where a job of this project would be reachable.
     ///
@@ -1285,12 +1342,13 @@ look at the parser
 Answer it, or start a job for it with the `start_job` tool, or both. Then call `say` before you \
 finish: a turn that ends without calling it has told nobody anything, however much you wrote.
 
-The agents this project's jobs may run on, and what each is for:
+The kits this project's jobs may run on — each an agent, set a particular way — and what each \
+is for:
 
   claude — General-purpose.
 
 Choose one deliberately and name it first. It is your judgement to make — \
-`docs/decisions/0006-agents-are-pluggable.md` — and the list is said here rather than at the \
+`docs/decisions/0048-a-job-runs-on-a-kit.md` — and the list is said here rather than at the \
 start of this session because it can change while you are still running.
 
 If a command fails, say what it printed rather than what you think it meant. An explanation you \
@@ -1344,15 +1402,15 @@ inferred is one a person will act on, and you have no way to check it."
         assert!(every.contains("no way to check it"), "{every}");
     }
 
-    /// The agents are named every turn, never once at the start.
+    /// The kits are named every turn, never once at the start.
     ///
-    /// A project's set of job agents is edited from the dashboard, and a
-    /// foreman's session outlives those edits — it lasts as long as the
-    /// project. Said in the opening, the list would be right until somebody
-    /// changed it and wrong from then on, with nothing to notice and a foreman
-    /// naming an agent that is no longer allowed.
+    /// A project's kits are edited from the dashboard, and a foreman's session
+    /// outlives those edits — it lasts as long as the project. Said in the
+    /// opening, the list would be right until somebody changed it and wrong
+    /// from then on, with nothing to notice and a foreman naming a kit that is
+    /// no longer offered.
     #[test]
-    fn the_agents_a_job_may_run_on_are_said_every_turn() {
+    fn the_kits_a_job_may_run_on_are_said_every_turn() {
         let each = super::asked(
             fresh("do the thing"),
             &[("claude", "General-purpose."), ("other", "Narrow.")],
@@ -1368,6 +1426,25 @@ inferred is one a person will act on, and you have no way to check it."
             !once.contains("General-purpose."),
             "a list said once goes stale the first time a project is edited: {once}"
         );
+    }
+
+    /// A foreman's container is kept unless it was made for another agent.
+    ///
+    /// Both directions and the unlabelled case, because the wrong answer in
+    /// each is a different failure: replacing a kept container discards a
+    /// foreman's memory for nothing, and keeping a replaced one runs the wrong
+    /// image with the right credentials.
+    #[test]
+    fn a_foremans_container_is_kept_unless_it_was_made_for_another_agent() {
+        assert!(super::keeps(Some(Agent::Claude), Agent::Claude));
+        assert!(
+            super::keeps(None, Agent::Claude),
+            "a container from before the label could only be this agent's"
+        );
+        // The one agent there is cannot be another, so the replaced case is
+        // asserted the moment a second exists: `Agent::ALL` is where it will
+        // appear, and this is the line to extend then.
+        assert_eq!(Agent::ALL, &[Agent::Claude]);
     }
 
     /// The instruction has to say a foreman assigns work rather than doing it.

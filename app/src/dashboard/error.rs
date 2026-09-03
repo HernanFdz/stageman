@@ -87,13 +87,13 @@ pub enum DashboardError {
         field: String,
     },
 
-    /// A project would have no agent its jobs could run on.
+    /// A project would have no kit its jobs could run on.
     ///
     /// Refused rather than stored, because a project whose jobs cannot run
     /// cannot do the one thing a project is for — the domain says so in
     /// `State::check`, and this is that refusal reaching a screen.
-    #[error("a project needs at least one agent its jobs can run on")]
-    JobAgentsMissing,
+    #[error("a project needs at least one kit its jobs can run on")]
+    KitsMissing,
 
     /// Another project already listens where this one would.
     ///
@@ -139,12 +139,49 @@ pub enum DashboardError {
     /// simply is not among the ones this project named. Refusing here rather
     /// than letting the handout fail keeps the answer about the request rather
     /// than about an instance that has stopped making sense.
-    #[error("{project} does not run its jobs on {name}")]
-    AgentNotOnProject {
-        /// The agent, as the screen names it.
+    #[error("{project} offers no kit called {name}")]
+    KitNotOnProject {
+        /// The kit, as the operator named it.
         name: String,
         /// The project, as the screen names it.
         project: String,
+    },
+
+    /// Two of a project's kits were given the same name.
+    ///
+    /// A name is what a foreman says in order to choose a kit, so two kits
+    /// under one name would make the choice mean either. The domain keys kits
+    /// on their names and would silently keep one, which is why the refusal is
+    /// here, where the operator is looking at both rows.
+    #[error("two kits are called {name}; a name has to pick one out")]
+    KitNameTaken {
+        /// The name given twice.
+        name: String,
+    },
+
+    /// A kit names a setting the agent does not have.
+    ///
+    /// The form offers only what the agent has, so this is what a request
+    /// written by hand reaches — and a value this build does not know is
+    /// refused rather than mapped onto the nearest one it does.
+    #[error("no {field} called {value}")]
+    UnknownSetting {
+        /// Which setting: the model, or the effort.
+        field: String,
+        /// What was asked for.
+        value: String,
+    },
+
+    /// A kit asks for an effort on a model that offers no such choice.
+    ///
+    /// The domain cannot hold this combination at all — see
+    /// `docs/decisions/0048-a-job-runs-on-a-kit.md` — so the request is
+    /// refused rather than the effort dropped, which would be a form saying one
+    /// thing and a kit doing another.
+    #[error("{model} has no effort to choose")]
+    EffortNotOnModel {
+        /// The model, as the screen names it.
+        model: String,
     },
 
     /// A variable was given a name a container could not be given.
@@ -263,9 +300,12 @@ impl DashboardError {
             // which is what separates them from the two above.
             Self::CredentialMissing
             | Self::Incomplete { .. }
-            | Self::JobAgentsMissing
+            | Self::KitsMissing
             | Self::AgentNotConfigured { .. }
-            | Self::AgentNotOnProject { .. }
+            | Self::KitNotOnProject { .. }
+            | Self::KitNameTaken { .. }
+            | Self::UnknownSetting { .. }
+            | Self::EffortNotOnModel { .. }
             | Self::VariableNameRefused { .. }
             | Self::VariableReserved { .. }
             | Self::VariableRepeated { .. }
@@ -320,7 +360,7 @@ impl DashboardError {
         naming: impl Fn(stageman_core::Agent) -> String,
     ) -> Self {
         match reason {
-            stageman_core::Inconsistent::NoJobAgents(_) => Self::JobAgentsMissing,
+            stageman_core::Inconsistent::NoKits(_) => Self::KitsMissing,
             stageman_core::Inconsistent::UnconfiguredProjectAgent { agent, .. } => {
                 Self::AgentNotConfigured {
                     name: naming(*agent),

@@ -21,7 +21,10 @@ use std::process::ExitCode;
 
 use stageman::Store;
 use stageman_agent::ContainerRuntime;
-use stageman_core::{Agent, AgentConfig, Key, Platform, Project, ProjectId, Secret, State, Uuid};
+use stageman_core::{
+    Agent, AgentConfig, Key, Kit, KitConfig, KitName, Platform, Project, ProjectId, Secret, State,
+    Uuid,
+};
 
 /// The work this job is asked to do.
 ///
@@ -96,8 +99,11 @@ async fn propose() -> Result<(), String> {
         Project {
             name: "stageman".to_owned(),
             repository: repository.clone(),
-            foreman_agent: Agent::Claude,
-            job_agents: std::collections::BTreeSet::from([Agent::Claude]),
+            foreman_kit: Kit::defaults(Agent::Claude),
+            kits: std::collections::BTreeMap::from([(
+                KitName::new("Claude").map_err(|error| format!("a kit's name: {error}"))?,
+                KitConfig::defaults(Agent::Claude),
+            )]),
             credentials,
             channels: std::collections::BTreeMap::new(),
             variables: std::collections::BTreeMap::new(),
@@ -115,9 +121,16 @@ async fn propose() -> Result<(), String> {
     println!("This runs a real agent and opens a real pull request. It takes a few minutes.");
     println!();
 
-    let (job, progress) = stageman::run(&store, &runtime, project, Agent::Claude, REASON, WORK)
-        .await
-        .map_err(|error| format!("the job could not be created: {error}"))?;
+    let (job, progress) = stageman::run(
+        &store,
+        &runtime,
+        project,
+        Kit::defaults(Agent::Claude),
+        REASON,
+        WORK,
+    )
+    .await
+    .map_err(|error| format!("the job could not be created: {error}"))?;
 
     println!();
     println!("  job        {job}");

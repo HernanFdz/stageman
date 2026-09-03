@@ -148,21 +148,24 @@ pub struct Tool {
     pub schema: serde_json::Value,
 }
 
-/// What this scope may be offered, given the agents its project runs jobs on.
+/// What this scope may be offered, given the kits its project runs jobs on.
 ///
-/// **The agents are enumerated in the schema rather than described in prose**,
+/// **The kits are enumerated in the schema rather than described in prose**,
 /// which is the concrete thing typed arguments buy over a command line. The
-/// old endpoint took an agent name as text and refused an unknown one with a
-/// message listing the alternatives, because a shell command cannot express a
-/// closed set. A schema can, so a foreman picks from what exists instead of
-/// guessing and being corrected — and `docs/decisions/0006-agents-are-pluggable.md`
-/// keeps the choice, which is what an absent field would have taken back.
+/// old endpoint took a name as text and refused an unknown one with a message
+/// listing the alternatives, because a shell command cannot express a closed
+/// set. A schema can, so a foreman picks from what exists instead of guessing
+/// and being corrected — and `docs/decisions/0048-a-job-runs-on-a-kit.md`
+/// keeps the choice with the foreman, which is what an absent field would have
+/// taken back. What each kit is *for* is said in the turn's own prompt, where
+/// there is room for the operator's description; a schema's enumeration has
+/// room for the names alone.
 ///
 /// An empty set omits the enumeration rather than emitting an empty one: a
 /// schema no value can satisfy reads to a model as a broken tool, where a
 /// plain string reaches the refusal below and says why.
 #[must_use]
-pub fn tools(warranted: &Warranted, agents: &[&str]) -> Vec<Tool> {
+pub fn tools(warranted: &Warranted, kits: &[(String, String)]) -> Vec<Tool> {
     // Offered to everything this instance runs, because speaking is the one
     // thing a foreman and a job both do — and the only thing a job does
     // outside its own container at all.
@@ -191,14 +194,17 @@ pub fn tools(warranted: &Warranted, agents: &[&str]) -> Vec<Tool> {
         return vec![say];
     }
 
-    let mut agent = serde_json::json!({
+    let mut kit = serde_json::json!({
         "type": "string",
-        "description": "Which agent runs this job. Pick from what this project allows.",
+        "description": "Which kit runs this job: an agent, set a particular way. Pick \
+                        by name from what this project offers; what each is for was \
+                        said in your instructions.",
     });
-    if !agents.is_empty()
-        && let Some(fields) = agent.as_object_mut()
+    if !kits.is_empty()
+        && let Some(fields) = kit.as_object_mut()
     {
-        fields.insert("enum".to_owned(), serde_json::json!(agents));
+        let names: Vec<&str> = kits.iter().map(|(name, _)| name.as_str()).collect();
+        fields.insert("enum".to_owned(), serde_json::json!(names));
     }
 
     vec![
@@ -225,9 +231,9 @@ pub fn tools(warranted: &Warranted, agents: &[&str]) -> Vec<Tool> {
                                         that somebody arriving with no other context \
                                         could act on it.",
                     },
-                    "agent": agent,
+                    "kit": kit,
                 },
-                "required": ["reason", "instructions", "agent"],
+                "required": ["reason", "instructions", "kit"],
             }),
         },
     ]
@@ -264,8 +270,8 @@ pub struct Starting {
     pub reason: String,
     /// What the job's agent is to do.
     pub instructions: String,
-    /// Which agent runs it, as a foreman names it.
-    pub agent: String,
+    /// Which kit runs it, by the name its project gives it.
+    pub kit: String,
 }
 
 /// What a request means, without performing any of it.
@@ -321,7 +327,7 @@ fn calling(params: &serde_json::Value) -> Call {
     Call::Starting(Starting {
         reason: field("reason"),
         instructions: field("instructions"),
-        agent: field("agent"),
+        kit: field("kit"),
     })
 }
 
@@ -434,10 +440,10 @@ async fn called(
             }),
         ),
         Call::Listing => {
-            let agents = allowed_agents(&store.read(), warranted.project);
+            let kits = allowed_kits(&store.read(), warranted.project);
             answered(
                 incoming.id,
-                serde_json::json!({"tools": tools(&warranted, &agents)}),
+                serde_json::json!({"tools": tools(&warranted, &kits)}),
             )
         }
         Call::NoSuchTool(named) => failed(
@@ -534,14 +540,18 @@ fn starting_a_job(
     }
     let project = warranted.project;
 
-    let Some(agent) = named_agent(&store.read(), project, &starting.agent) else {
-        let allowed = allowed_agents(&store.read(), project).join(", ");
-        tracing::warn!(%project, asked = %starting.agent, "no such agent for this project");
+    let Some(kit) = named_kit(&store.read(), project, &starting.kit) else {
+        let offered = allowed_kits(&store.read(), project)
+            .into_iter()
+            .map(|(name, description)| format!("{name} — {description}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        tracing::warn!(%project, asked = %starting.kit, "no such kit on this project");
         return failed(
             id,
             &format!(
-                "this project's jobs do not run on {:?}. It runs jobs on: {allowed}",
-                starting.agent
+                "this project offers no kit called {:?}. It offers: {offered}",
+                starting.kit
             ),
         );
     };
@@ -549,7 +559,7 @@ fn starting_a_job(
     let started = match crate::begin(
         store,
         project,
-        agent,
+        kit,
         &starting.reason,
         &starting.instructions,
     ) {
@@ -613,42 +623,45 @@ fn failed(id: Option<serde_json::Value>, why: &str) -> axum::response::Response 
     )
 }
 
-/// The agent a foreman named, if this project's jobs may run on it.
+/// The kit a foreman named, if this project offers one under that name.
 ///
-/// Answers `None` for an agent this instance does not run *and* for one it
-/// runs but this project does not allow — which is a refusal rather than a
-/// substitution, because silently running a different agent than the one asked
-/// for is a wrong answer that looks like a right one.
-pub fn named_agent(
+/// Answers `None` for a name this project does not offer — a refusal rather
+/// than a substitution, because silently running a different kit than the one
+/// asked for is a wrong answer that looks like a right one. Matched on the
+/// trimmed name, since that is what a name *is* here: `KitName` trims on the
+/// way in, so a foreman that quoted one with a space around it has still named
+/// it.
+pub fn named_kit(
     state: &stageman_core::State,
     project: stageman_core::ProjectId,
     named: &str,
-) -> Option<stageman_core::Agent> {
+) -> Option<stageman_core::Kit> {
+    let wanted = stageman_core::KitName::new(named).ok()?;
     state
         .projects
         .get(&project)?
-        .job_agents
-        .iter()
-        .find(|agent| crate::dashboard::wire_name(**agent).0 == named)
-        .copied()
+        .kits
+        .get(&wanted)
+        .map(|offered| offered.kit.clone())
 }
 
-/// What this project's jobs may run on, as a foreman names them.
+/// What this project's jobs may run on: each kit's name and what it is for.
 ///
 /// Said back with a refusal, so a foreman that guessed wrong is told what it
-/// could have said rather than only that it was wrong.
-pub fn allowed_agents(
+/// could have said rather than only that it was wrong — and said in the turn's
+/// prompt every turn, which is where the description does its work.
+pub fn allowed_kits(
     state: &stageman_core::State,
     project: stageman_core::ProjectId,
-) -> Vec<&'static str> {
+) -> Vec<(String, String)> {
     state
         .projects
         .get(&project)
         .map_or_else(Vec::new, |watched| {
             watched
-                .job_agents
+                .kits
                 .iter()
-                .map(|agent| crate::dashboard::wire_name(*agent).0)
+                .map(|(name, offered)| (name.to_string(), offered.description.clone()))
                 .collect()
         })
 }
@@ -656,8 +669,8 @@ pub fn allowed_agents(
 #[cfg(test)]
 mod tests {
     use super::{
-        Call, PROTOCOL, Sessions, Speaker, Starting, Warranted, allowed_agents, axum, decode,
-        endpoint, named_agent, presented, tools,
+        Call, PROTOCOL, Sessions, Speaker, Starting, Warranted, allowed_kits, axum, decode,
+        endpoint, named_kit, presented, tools,
     };
     use stageman_core::{ProjectId, Uuid};
 
@@ -727,14 +740,14 @@ mod tests {
                     "arguments": {
                         "reason": "the tests are red on main",
                         "instructions": "find out why and open a pull request",
-                        "agent": "claude",
+                        "kit": "Claude",
                     },
                 }),
             ),
             Call::Starting(Starting {
                 reason: "the tests are red on main".to_owned(),
                 instructions: "find out why and open a pull request".to_owned(),
-                agent: "claude".to_owned(),
+                kit: "Claude".to_owned(),
             }),
         );
 
@@ -763,32 +776,38 @@ mod tests {
             Call::Starting(Starting {
                 reason: String::new(),
                 instructions: String::new(),
-                agent: String::new(),
+                kit: String::new(),
             }),
         );
     }
 
-    /// A foreman is offered the tool that starts jobs, and its agents by name.
+    /// A foreman is offered the tool that starts jobs, and its kits by name.
     #[test]
-    fn what_a_foreman_is_offered_names_the_agents_it_may_choose() {
-        let offered = tools(&a_foreman(), &["claude"]);
+    fn what_a_foreman_is_offered_names_the_kits_it_may_choose() {
+        let offered = tools(&a_foreman(), &one_kit());
         let starting = offered
             .iter()
             .find(|tool| tool.name == "start_job")
             .expect("a foreman is offered the tool that starts jobs");
 
-        let agent = &starting.schema["properties"]["agent"];
+        let kit = &starting.schema["properties"]["kit"];
         assert_eq!(
-            agent["enum"],
-            serde_json::json!(["claude"]),
+            kit["enum"],
+            serde_json::json!(["Claude"]),
             "the closed set is in the schema, so a foreman picks rather than guesses",
         );
 
         let required = &starting.schema["required"];
         assert_eq!(
             required,
-            &serde_json::json!(["reason", "instructions", "agent"])
+            &serde_json::json!(["reason", "instructions", "kit"])
         );
+    }
+
+    /// The one kit a fixture offers: an agent's defaults, under the agent's
+    /// name, which is what every project written before kits opens with.
+    fn one_kit() -> Vec<(String, String)> {
+        vec![("Claude".to_owned(), "General-purpose.".to_owned())]
     }
 
     /// Minting forgets that speaker's last credential and nobody else's.
@@ -857,7 +876,7 @@ mod tests {
             thread: None,
         };
 
-        let offered: Vec<_> = tools(&job, &["claude"])
+        let offered: Vec<_> = tools(&job, &one_kit())
             .iter()
             .map(|tool| tool.name)
             .collect();
@@ -867,7 +886,7 @@ mod tests {
             "a job may say things and may not start jobs",
         );
 
-        let foreman: Vec<_> = tools(&a_foreman(), &["claude"])
+        let foreman: Vec<_> = tools(&a_foreman(), &one_kit())
             .iter()
             .map(|tool| tool.name)
             .collect();
@@ -877,20 +896,20 @@ mod tests {
         );
     }
 
-    /// A project with no agents gets a plain string, not an empty enumeration.
+    /// A project with no kits gets a plain string, not an empty enumeration.
     ///
     /// An enumeration no value satisfies reads to a model as a broken tool. A
     /// plain string reaches the refusal that can say what is wrong.
     #[test]
-    fn no_agents_omits_the_enumeration_rather_than_emitting_an_empty_one() {
+    fn no_kits_omits_the_enumeration_rather_than_emitting_an_empty_one() {
         let offered = tools(&a_foreman(), &[]);
         let starting = offered
             .iter()
             .find(|tool| tool.name == "start_job")
             .expect("a foreman is offered the tool that starts jobs");
-        let agent = &starting.schema["properties"]["agent"];
-        assert_eq!(agent["type"], "string");
-        assert!(agent.get("enum").is_none(), "no enumeration at all");
+        let kit = &starting.schema["properties"]["kit"];
+        assert_eq!(kit["type"], "string");
+        assert!(kit.get("enum").is_none(), "no enumeration at all");
     }
 
     /// The endpoint really answers over HTTP, and only to a warrant it holds.
@@ -914,7 +933,7 @@ mod tests {
         std::sync::Arc<Sessions>,
     ) {
         use stageman_core::{Agent, AgentConfig, Attending, Project, Secret, State};
-        use std::collections::{BTreeMap, BTreeSet};
+        use std::collections::BTreeMap;
 
         let mut state = State::default();
         state.agents.insert(
@@ -928,8 +947,11 @@ mod tests {
             Project {
                 name: "aviary".to_owned(),
                 repository: "https://example.invalid/aviary".to_owned(),
-                foreman_agent: Agent::Claude,
-                job_agents: BTreeSet::from([Agent::Claude]),
+                foreman_kit: stageman_core::Kit::defaults(Agent::Claude),
+                kits: BTreeMap::from([(
+                    stageman_core::KitName::new("Claude").expect("a name"),
+                    stageman_core::KitConfig::defaults(Agent::Claude),
+                )]),
                 credentials: BTreeMap::new(),
                 channels: BTreeMap::new(),
                 jobs: BTreeMap::new(),
@@ -1020,9 +1042,9 @@ mod tests {
             .find(|tool| tool["name"] == "start_job")
             .expect("the tool that starts jobs");
         assert_eq!(
-            starting["inputSchema"]["properties"]["agent"]["enum"],
-            serde_json::json!(["claude"]),
-            "the project's own agents reach the schema, not a fixed list",
+            starting["inputSchema"]["properties"]["kit"]["enum"],
+            serde_json::json!(["Claude"]),
+            "the project's own kits reach the schema, not a fixed list",
         );
 
         // A method in no specification is answered rather than refused, which
@@ -1065,7 +1087,7 @@ mod tests {
         use stageman_core::{
             Agent, AgentConfig, Attending, Handout, Project, ProjectId, Secret, State, Uuid,
         };
-        use std::collections::{BTreeMap, BTreeSet};
+        use std::collections::BTreeMap;
 
         /// What a real agent authenticates with.
         fn credential() -> Secret {
@@ -1116,8 +1138,11 @@ mod tests {
                 Project {
                     name: "aviary".to_owned(),
                     repository: "https://example.invalid/aviary".to_owned(),
-                    foreman_agent: Agent::Claude,
-                    job_agents: BTreeSet::from([Agent::Claude]),
+                    foreman_kit: stageman_core::Kit::defaults(Agent::Claude),
+                    kits: BTreeMap::from([(
+                        stageman_core::KitName::new("Claude").expect("a name"),
+                        stageman_core::KitConfig::defaults(Agent::Claude),
+                    )]),
                     credentials: BTreeMap::new(),
                     channels: BTreeMap::new(),
                     jobs: BTreeMap::new(),
@@ -1217,8 +1242,11 @@ mod tests {
                 Project {
                     name: "aviary".to_owned(),
                     repository: "https://example.invalid/aviary".to_owned(),
-                    foreman_agent: Agent::Claude,
-                    job_agents: BTreeSet::from([Agent::Claude]),
+                    foreman_kit: stageman_core::Kit::defaults(Agent::Claude),
+                    kits: BTreeMap::from([(
+                        stageman_core::KitName::new("Claude").expect("a name"),
+                        stageman_core::KitConfig::defaults(Agent::Claude),
+                    )]),
                     credentials: BTreeMap::new(),
                     channels: BTreeMap::new(),
                     jobs: BTreeMap::new(),
@@ -1313,54 +1341,77 @@ mod tests {
         }
     }
 
-    /// An agent a project's jobs may not run on is refused, not substituted.
+    /// A kit a project does not offer is refused, not substituted.
     ///
-    /// Silently running a different agent than the one asked for is a wrong
+    /// Silently running a different kit than the one asked for is a wrong
     /// answer that looks like a right one — the job would run, report success,
     /// and have been done by something the foreman did not choose.
-    /// `docs/decisions/0006-agents-are-pluggable.md` makes the choice the
-    /// foreman's, so overriding it here would take back a decision that record
-    /// gave away.
+    /// `docs/decisions/0048-a-job-runs-on-a-kit.md` makes the choice the
+    /// foreman's, from what the project offers, so overriding it here would
+    /// take back a decision that record gave away.
     #[test]
-    fn an_agent_must_be_named_and_allowed_or_it_is_refused() {
-        use stageman_core::{Agent, ProjectId, State, Uuid};
+    fn a_kit_must_be_named_and_offered_or_it_is_refused() {
+        use stageman_core::{Agent, Kit, ProjectId, State, Uuid};
 
         let mut state = State::default();
         let project = ProjectId::from_uuid(Uuid::from_u128(1));
         state.projects.insert(project, watched_by([Agent::Claude]));
 
-        assert_eq!(named_agent(&state, project, "claude"), Some(Agent::Claude));
         assert_eq!(
-            named_agent(&state, project, "gpt"),
-            None,
-            "an agent this instance does not run is a refusal, not a substitution"
+            named_kit(&state, project, "Claude"),
+            Some(Kit::defaults(Agent::Claude))
         );
         assert_eq!(
-            named_agent(&state, project, ""),
+            named_kit(&state, project, " Claude "),
+            Some(Kit::defaults(Agent::Claude)),
+            "a name quoted with space around it is still that name"
+        );
+        assert_eq!(
+            named_kit(&state, project, "gpt"),
+            None,
+            "a kit this project does not offer is a refusal, not a substitution"
+        );
+        assert_eq!(
+            named_kit(&state, project, ""),
             None,
             "and naming nothing is not naming the first"
         );
         assert_eq!(
-            named_agent(&state, ProjectId::from_uuid(Uuid::from_u128(9)), "claude"),
+            named_kit(&state, ProjectId::from_uuid(Uuid::from_u128(9)), "Claude"),
             None,
-            "a project this instance does not watch has no agents"
+            "a project this instance does not watch offers nothing"
         );
 
         // A refusal says what could have been said instead, so a foreman that
-        // guessed wrong learns the set rather than only that it was wrong.
-        assert_eq!(allowed_agents(&state, project), vec!["claude"]);
-        assert!(allowed_agents(&state, ProjectId::from_uuid(Uuid::from_u128(9))).is_empty());
+        // guessed wrong learns the set rather than only that it was wrong — and
+        // learns what each is for, which is what it chooses by.
+        assert_eq!(
+            allowed_kits(&state, project),
+            vec![(
+                "Claude".to_owned(),
+                stageman_core::Agent::Claude.description().to_owned()
+            )]
+        );
+        assert!(allowed_kits(&state, ProjectId::from_uuid(Uuid::from_u128(9))).is_empty());
     }
 
-    /// A project running jobs on exactly these agents.
+    /// A project offering exactly these agents' defaults, one kit each.
     fn watched_by<const N: usize>(agents: [stageman_core::Agent; N]) -> stageman_core::Project {
-        use std::collections::{BTreeMap, BTreeSet};
+        use std::collections::BTreeMap;
 
         stageman_core::Project {
             name: "aviary".to_owned(),
             repository: "https://example.invalid/aviary".to_owned(),
-            foreman_agent: stageman_core::Agent::Claude,
-            job_agents: BTreeSet::from(agents),
+            foreman_kit: stageman_core::Kit::defaults(stageman_core::Agent::Claude),
+            kits: agents
+                .into_iter()
+                .map(|agent| {
+                    (
+                        stageman_core::KitName::new(agent.name()).expect("a name"),
+                        stageman_core::KitConfig::defaults(agent),
+                    )
+                })
+                .collect(),
             credentials: BTreeMap::new(),
             channels: BTreeMap::new(),
             variables: BTreeMap::new(),

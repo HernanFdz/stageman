@@ -201,6 +201,15 @@ nobody is a wish.
   the whole point. *Defended by* the agent process being driven
   programmatically rather than interactively, and by a reviewer.
 
+- **A job runs on the kit it was created with, on every turn.** Not only the
+  first: a loaded session comes back with every setting at the agent's
+  default, so a job put back to work after this process died would otherwise
+  run on something other than its record says, with nothing in any reply
+  saying so. *Defended by* the type — a job's kit is given to its constructor
+  and has no setter — and by the adapter settling every option before the
+  first prompt of every turn, failing the turn if the agent refuses one or
+  reports it unchanged. See `docs/decisions/0048-a-job-runs-on-a-kit.md`.
+
 **Deliberately not an invariant: that every job traces to a recorded signal.**
 Each job carries a reason (`docs/conventions.md` §2), but nothing enforces it
 and no type prevents a job existing without one. Recorded here so the absence

@@ -13,6 +13,10 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# An attribute and nothing else — it compiles to nothing unless cargo-mutants
+# is the one building. Needed because the function that runs a foreman's turn
+# drives the runtime and is covered only by tests the gate cannot run.
+mutants = "0.0.4"
 stageman-agent.workspace = true
 # A typed error, because this crate is a library and its failures cross a
 # boundary — `docs/conventions.md` §3.

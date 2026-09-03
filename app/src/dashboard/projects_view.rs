@@ -36,12 +36,13 @@ pub struct Project {
     pub name: String,
     /// Where its jobs work.
     pub repository: String,
-    /// The agent its foreman thinks with, as the identifier a browser sends
-    /// back — not the name a person reads. See `projected`, which says why.
-    pub foreman: String,
-    /// The agents its jobs may run on, by identifier. Never empty in a valid
-    /// instance.
-    pub job_agents: Vec<String>,
+    /// How its foreman's agent is set, as the identifiers a browser sends
+    /// back — not the names a person reads. See `projected`, which says why.
+    pub foreman: Fitted,
+    /// The kits its jobs may run on, as the form edits them. Never empty in a
+    /// valid instance. Whole rather than named, because the form has to open
+    /// showing what is true, and a kit holds nothing a browser may not see.
+    pub kits: Vec<KitDraft>,
     /// The platforms it has a credential for.
     pub platforms: Vec<String>,
     /// The channels bound to it. Empty is valid: a project with nowhere to
@@ -87,6 +88,188 @@ pub struct Watching {
     /// agent without a credential is refused, so offering it would be an
     /// invitation to fail.
     pub available: Vec<Agent>,
+    /// What each of those can be set to: the models it offers, which of them
+    /// take an effort, and the efforts. Built on the server from the domain's
+    /// closed sets, because the browser's half cannot name them — see
+    /// `docs/decisions/0022-the-browser-never-sees-the-domain.md` — and a form
+    /// that listed them itself would be a second copy nothing holds to the
+    /// first.
+    pub shapes: Vec<Shape>,
+}
+
+/// One agent, set a particular way, as a browser edits it.
+///
+/// Identifiers throughout, on the terms [`Project`]'s agent has always used:
+/// these are what a browser sends back, and the names a person reads come from
+/// the [`Shape`] the server sent alongside. The effort is empty where the model
+/// offers none, which is the one shape of absence this type has.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Fitted {
+    /// Which agent.
+    pub agent: String,
+    /// Which of its models.
+    pub model: String,
+    /// How hard it thinks, or empty where the model has no such choice.
+    pub effort: String,
+}
+
+impl Fitted {
+    /// Whether this names an agent and a model.
+    ///
+    /// The effort is not required here because the screen cannot know whether
+    /// the model takes one without the shape, and the far side refuses a model
+    /// given none. What the screen can see is that nothing was chosen at all.
+    #[must_use]
+    pub const fn is_complete(&self) -> bool {
+        !self.agent.is_empty() && !self.model.is_empty()
+    }
+}
+
+/// One kit a project offers, as a browser edits it.
+///
+/// The name and the description are the operator's, and the description is
+/// required: it is the whole of what the foreman chooses by — see
+/// `docs/decisions/0048-a-job-runs-on-a-kit.md` — so a kit without one is half
+/// a kit.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct KitDraft {
+    /// What to call it, and what a foreman says to choose it.
+    pub name: String,
+    /// What this project wants it for.
+    pub description: String,
+    /// The agent, set a particular way.
+    pub fitted: Fitted,
+}
+
+impl KitDraft {
+    /// Whether this says enough to be a kit.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        !self.name.trim().is_empty()
+            && !self.description.trim().is_empty()
+            && self.fitted.is_complete()
+    }
+}
+
+/// What one agent can be set to, as the choices a form offers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Shape {
+    /// The agent, by identifier.
+    pub agent: String,
+    /// Its models, the default first.
+    pub models: Vec<ModelChoice>,
+    /// Its effort levels, the default first, for the models that take one.
+    pub efforts: Vec<Choice>,
+}
+
+/// One model a form may choose, and whether choosing it opens an effort.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelChoice {
+    /// What the browser sends back.
+    pub id: String,
+    /// What a person reads.
+    pub name: String,
+    /// Whether this model takes an effort at all.
+    pub has_effort: bool,
+}
+
+/// One value a form may choose.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Choice {
+    /// What the browser sends back.
+    pub id: String,
+    /// What a person reads.
+    pub name: String,
+}
+
+/// An agent as it comes: the shape's first model, and its first effort where
+/// that model takes one.
+///
+/// What a new kit starts on, and what a fitted agent moves to when its agent
+/// changes — nothing carries over between agents, because a model is one
+/// agent's and not another's.
+fn seeded(shape: &Shape) -> Fitted {
+    let model = shape.models.first();
+    Fitted {
+        agent: shape.agent.clone(),
+        model: model.map(|model| model.id.clone()).unwrap_or_default(),
+        effort: model
+            .filter(|model| model.has_effort)
+            .and_then(|_| shape.efforts.first())
+            .map(|effort| effort.id.clone())
+            .unwrap_or_default(),
+    }
+}
+
+/// The shape describing an agent, if the server sent one for it.
+///
+/// A function rather than a `find` at each of its three call sites, so that the
+/// comparison it turns on is tested once — mutation testing inverted it inside
+/// the component, where nothing could notice.
+fn shape_for<'a>(shapes: &'a [Shape], agent: &str) -> Option<&'a Shape> {
+    shapes.iter().find(|shape| shape.agent == agent)
+}
+
+/// Whether a model takes an effort, as its agent's shape says.
+///
+/// False for a model the shape does not list at all, which the form cannot
+/// produce and a request written by hand can: the far side refuses it by name,
+/// and offering an effort select for it here would be offering a second thing
+/// to refuse.
+fn takes_effort(shape: &Shape, model: &str) -> bool {
+    shape
+        .models
+        .iter()
+        .any(|choice| choice.id == model && choice.has_effort)
+}
+
+/// A fitted agent moved to another agent.
+///
+/// That agent's defaults, or — for an identifier no shape describes, which the
+/// form cannot produce — the identifier alone, so that the refusal on the far
+/// side names it rather than a substitute.
+fn with_agent(shapes: &[Shape], agent: &str) -> Fitted {
+    shape_for(shapes, agent).map_or_else(
+        || Fitted {
+            agent: agent.to_owned(),
+            ..Fitted::default()
+        },
+        seeded,
+    )
+}
+
+/// A fitted agent moved to another of its models.
+///
+/// The effort is kept where the new model takes one, cleared where it does
+/// not, and given the first where the old model had none — so what the form
+/// shows is always something the far side will accept.
+fn with_model(fitted: &Fitted, shape: &Shape, model: &str) -> Fitted {
+    let effort = if !takes_effort(shape, model) {
+        String::new()
+    } else if fitted.effort.is_empty() {
+        shape
+            .efforts
+            .first()
+            .map(|effort| effort.id.clone())
+            .unwrap_or_default()
+    } else {
+        fitted.effort.clone()
+    };
+    Fitted {
+        agent: fitted.agent.clone(),
+        model: model.to_owned(),
+        effort,
+    }
+}
+
+/// Whether no two kits share a name, once the space around each is gone.
+///
+/// The domain keys kits on their names and would keep one of two silently, so
+/// the screen refuses to submit the pair — the far side refuses it too, with
+/// the name, for a request the form did not make.
+fn distinct(kits: &[KitDraft]) -> bool {
+    let names: std::collections::BTreeSet<&str> = kits.iter().map(|kit| kit.name.trim()).collect();
+    names.len() == kits.len()
 }
 
 /// Everything the projects screen shows.
@@ -104,13 +287,7 @@ pub struct Watching {
 #[get("/api/projects", instance: Extension<std::sync::Arc<crate::Store>>)]
 pub async fn projects() -> DashboardResult<Watching> {
     let state = instance.0.read();
-    Ok(Watching {
-        projects: super::watching(&state),
-        available: super::listed(&state)
-            .into_iter()
-            .filter(|agent| agent.configured)
-            .collect(),
-    })
+    Ok(watching_now(&state))
 }
 
 /// Starts watching a repository.
@@ -131,16 +308,9 @@ pub async fn projects() -> DashboardResult<Watching> {
 pub async fn create(draft: Draft) -> DashboardResult<Watching> {
     let name = required("name", &draft.name)?;
     let repository = required("repository", &draft.repository)?;
-    let foreman_agent = super::named(&draft.foreman)?;
+    let foreman_kit = super::kit_of(&draft.foreman)?;
     let credential = required("credential", &draft.credential)?;
-    if draft.job_agents.is_empty() {
-        return Err(DashboardError::JobAgentsMissing);
-    }
-    let job_agents = draft
-        .job_agents
-        .iter()
-        .map(|agent| super::named(agent))
-        .collect::<DashboardResult<_>>()?;
+    let kits = kits_of(&draft.kits)?;
     let channels = binding(&draft.channel)?;
     // Nothing is held yet, so every row here has to carry its own value —
     // which `resolved` says by refusing a new name with an empty one.
@@ -172,8 +342,8 @@ pub async fn create(draft: Draft) -> DashboardResult<Watching> {
         stageman_core::Project {
             name,
             repository,
-            foreman_agent,
-            job_agents,
+            foreman_kit,
+            kits,
             // One platform, so one field. A second would make this a list
             // here and on the form, and the closed set in the domain is what
             // would force both.
@@ -251,15 +421,8 @@ pub async fn create(draft: Draft) -> DashboardResult<Watching> {
 pub async fn amend(project: String, draft: Draft) -> DashboardResult<Watching> {
     let name = required("name", &draft.name)?;
     let repository = required("repository", &draft.repository)?;
-    let foreman_agent = super::named(&draft.foreman)?;
-    if draft.job_agents.is_empty() {
-        return Err(DashboardError::JobAgentsMissing);
-    }
-    let job_agents = draft
-        .job_agents
-        .iter()
-        .map(|agent| super::named(agent))
-        .collect::<DashboardResult<_>>()?;
+    let foreman_kit = super::kit_of(&draft.foreman)?;
+    let kits = kits_of(&draft.kits)?;
     let credential = draft.credential.trim();
     // The channel arrives and is ignored, because amending does not offer one
     // — see this route's own note on why an empty box could not mean
@@ -280,14 +443,7 @@ pub async fn amend(project: String, draft: Draft) -> DashboardResult<Watching> {
     // Decided against what the project already holds, which is what lets an
     // empty box mean *keep this one* rather than *clear it*.
     watched.variables = resolved(&watched.variables, &draft.variables)?;
-    amended(
-        watched,
-        name,
-        repository,
-        foreman_agent,
-        job_agents,
-        credential,
-    );
+    amended(watched, name, repository, foreman_kit, kits, credential);
     candidate
         .check()
         .map_err(|reason| DashboardError::from_inconsistent(&reason, super::shown))?;
@@ -414,20 +570,65 @@ fn amended(
     watched: &mut stageman_core::Project,
     name: String,
     repository: String,
-    foreman_agent: stageman_core::Agent,
-    job_agents: std::collections::BTreeSet<stageman_core::Agent>,
+    foreman_kit: stageman_core::Kit,
+    kits: std::collections::BTreeMap<stageman_core::KitName, stageman_core::KitConfig>,
     credential: &str,
 ) {
     watched.name = name;
     watched.repository = repository;
-    watched.foreman_agent = foreman_agent;
-    watched.job_agents = job_agents;
+    // Replaced whole, both of them, because the form shows and resubmits the
+    // whole of each: a kit that survives is one the operator left on the
+    // form, and a change to the foreman's lands at its next turn boundary —
+    // see `docs/decisions/0048-a-job-runs-on-a-kit.md`.
+    watched.foreman_kit = foreman_kit;
+    watched.kits = kits;
     if !credential.is_empty() {
         watched.credentials.insert(
             stageman_core::Platform::GitHub,
             stageman_core::Secret::new(credential.to_owned()),
         );
     }
+}
+
+/// The kits a form described, refusing what the domain would silently mend.
+///
+/// The domain keys kits on their names, so two rows under one name would keep
+/// one and lose the other without a word; a blank name is not a name; and a
+/// description is required because it is the whole of what a foreman chooses
+/// by — `docs/decisions/0048-a-job-runs-on-a-kit.md`. Each agent's settings
+/// are checked by `kit_of`, which refuses rather than mends for the same
+/// reason.
+///
+/// # Errors
+///
+/// Fails if there are no kits, if one has no name or no description, if two
+/// share a name, or if one describes settings this build does not know.
+#[cfg(feature = "server")]
+fn kits_of(
+    drafts: &[KitDraft],
+) -> DashboardResult<std::collections::BTreeMap<stageman_core::KitName, stageman_core::KitConfig>> {
+    if drafts.is_empty() {
+        return Err(DashboardError::KitsMissing);
+    }
+    let mut kits = std::collections::BTreeMap::new();
+    for draft in drafts {
+        let name = stageman_core::KitName::new(draft.name.as_str()).map_err(|_| {
+            DashboardError::Incomplete {
+                field: "kit name".to_owned(),
+            }
+        })?;
+        let description = required("kit description", &draft.description)?;
+        let kit = super::kit_of(&draft.fitted)?;
+        if kits
+            .insert(name.clone(), stageman_core::KitConfig { description, kit })
+            .is_some()
+        {
+            return Err(DashboardError::KitNameTaken {
+                name: name.to_string(),
+            });
+        }
+    }
+    Ok(kits)
 }
 
 /// How many of a project's jobs are still going, if any are.
@@ -540,6 +741,13 @@ fn watching_now(state: &stageman_core::State) -> Watching {
             .into_iter()
             .filter(|agent| agent.configured)
             .collect(),
+        // For the same agents `available` lists, so the form never meets an
+        // agent it has no shape for.
+        shapes: stageman_core::Agent::ALL
+            .iter()
+            .filter(|agent| state.agents.contains_key(agent))
+            .map(|agent| super::shape_of(*agent))
+            .collect(),
     }
 }
 
@@ -596,21 +804,44 @@ pub fn ProjectsView() -> Element {
                                 title: "New project",
                                 disabled: watching.available.is_empty(),
                                 onclick: {
-                                    // The first configured agent, which is
-                                    // what both fields start on. Taken here so
-                                    // the handler does not need the whole list.
+                                    // The first configured agent as it comes,
+                                    // which is what the foreman and the one
+                                    // starting kit are seeded with. The kit is
+                                    // named and described after the agent, so
+                                    // a project with nothing particular to say
+                                    // can be saved as it opens — and a kit
+                                    // that says more is a row edited rather
+                                    // than a row invented.
                                     let first = watching
-                                        .available
+                                        .shapes
                                         .first()
-                                        .map(|agent| agent.id.clone());
+                                        .map(|shape| {
+                                            let fitted = seeded(shape);
+                                            let agent = watching
+                                                .available
+                                                .iter()
+                                                .find(|agent| agent.id == shape.agent);
+                                            KitDraft {
+                                                name: agent
+                                                    .map(|agent| agent.name.clone())
+                                                    .unwrap_or_default(),
+                                                description: agent
+                                                    .map(|agent| agent.description.clone())
+                                                    .unwrap_or_default(),
+                                                fitted,
+                                            }
+                                        });
                                     move |_| {
                                         // Emptied on the way in rather than on
                                         // the way out, so that a modal
                                         // abandoned half-filled does not
                                         // reopen holding what was abandoned.
                                         draft.set(Draft {
-                                            foreman: first.clone().unwrap_or_default(),
-                                            job_agents: first.clone().into_iter().collect(),
+                                            foreman: first
+                                                .as_ref()
+                                                .map(|kit| kit.fitted.clone())
+                                                .unwrap_or_default(),
+                                            kits: first.clone().into_iter().collect(),
                                             ..Draft::default()
                                         });
                                         failure.set(None);
@@ -651,7 +882,7 @@ pub fn ProjectsView() -> Element {
                                                             name: project.name.clone(),
                                                             repository: project.repository.clone(),
                                                             foreman: project.foreman.clone(),
-                                                            job_agents: project.job_agents.clone(),
+                                                            kits: project.kits.clone(),
                                                             credential: String::new(),
                                                             channel: ChannelDraft::default(),
                                                             // Names with empty
@@ -741,6 +972,7 @@ pub fn ProjectsView() -> Element {
                             ProjectForm {
                                 draft,
                                 available: watching.available,
+                                shapes: watching.shapes,
                                 filling: open,
                                 held,
                             }
@@ -793,11 +1025,11 @@ fn shown_as(available: &[Agent], identifier: &str) -> String {
 /// seeing, and `State::check` refuses one anyway.
 #[component]
 fn WatchedProject(project: Project, available: Vec<Agent>, onedit: EventHandler<()>) -> Element {
-    let foreman = shown_as(&available, &project.foreman);
-    let jobs_on = project
-        .job_agents
+    let foreman = shown_as(&available, &project.foreman.agent);
+    let offers = project
+        .kits
         .iter()
-        .map(|identifier| shown_as(&available, identifier))
+        .map(|kit| kit.name.as_str())
         .collect::<Vec<_>>()
         .join(", ");
     rsx! {
@@ -860,7 +1092,7 @@ fn WatchedProject(project: Project, available: Vec<Agent>, onedit: EventHandler<
                 }
             }
             p { class: "text-xs text-muted-foreground",
-                "thinks with {foreman} · runs jobs on {jobs_on}"
+                "thinks with {foreman} · offers {offers}"
                 if project.platforms.is_empty() {
                     " · no credential"
                 }
@@ -997,10 +1229,11 @@ pub struct Draft {
     pub name: String,
     /// Where its jobs work.
     pub repository: String,
-    /// The agent its foreman thinks with.
-    pub foreman: String,
-    /// The agents its jobs may run on.
-    pub job_agents: Vec<String>,
+    /// How its foreman's agent is set.
+    pub foreman: Fitted,
+    /// The kits its jobs may run on. A list of rows, like the variables,
+    /// because an operator names and describes each one.
+    pub kits: Vec<KitDraft>,
     /// What reaches the repository.
     pub credential: String,
     /// Where this project's conversation happens, if anywhere. Optional, and
@@ -1027,7 +1260,7 @@ impl fmt::Debug for Draft {
             .field("name", &self.name)
             .field("repository", &self.repository)
             .field("foreman", &self.foreman)
-            .field("job_agents", &self.job_agents)
+            .field("kits", &self.kits)
             .field("credential", &"<redacted>")
             .field("channel", &self.channel)
             .field("variables", &self.variables)
@@ -1061,7 +1294,9 @@ impl Draft {
     ///
     /// What it deliberately does *not* check is anything the domain decides:
     /// whether the agents named are configured is `State::check`'s to answer,
-    /// and the form only offers agents that are.
+    /// and the form only offers agents that are. Nor whether a kit's settings
+    /// are ones the agent has — the form offers only those, and the far side
+    /// refuses the rest by name.
     ///
     /// The channel is the one part that is *optional* rather than required,
     /// and it is still checked: both halves or neither, which is the rule
@@ -1078,8 +1313,10 @@ impl Draft {
     pub fn is_complete(&self, filling: &Filling, held: &[String]) -> bool {
         let described = !self.name.trim().is_empty()
             && !self.repository.trim().is_empty()
-            && !self.foreman.is_empty()
-            && !self.job_agents.is_empty();
+            && self.foreman.is_complete()
+            && !self.kits.is_empty()
+            && self.kits.iter().all(KitDraft::is_complete)
+            && distinct(&self.kits);
 
         // Every row needs a name, whichever caller this is, and a row needs a
         // value unless the project already holds that name — which is exactly
@@ -1131,11 +1368,14 @@ impl Draft {
 fn ProjectForm(
     draft: Signal<Draft>,
     available: Vec<Agent>,
+    shapes: Vec<Shape>,
     filling: Filling,
     held: Vec<String>,
 ) -> Element {
     let mut draft = draft;
     let creating = filling.creating();
+    // What a kit added to the form starts on: the first agent as it comes.
+    let starting = shapes.first().map(seeded).unwrap_or_default();
 
     rsx! {
         div { class: "flex flex-col gap-3",
@@ -1156,42 +1396,100 @@ fn ProjectForm(
                 }
             }
             Field { label: "Thinks with",
-                select {
-                    class: FIELD,
-                    value: "{draft().foreman}",
-                    onchange: move |event| {
-                        draft.with_mut(|draft| draft.foreman = event.value());
-                    },
-                    for agent in available.iter() {
-                        option { key: "{agent.id}", value: "{agent.id}", "{agent.name}" }
+                FittedEditor {
+                    fitted: draft().foreman,
+                    shapes: shapes.clone(),
+                    available: available.clone(),
+                    onchange: move |fitted| draft.with_mut(|draft| draft.foreman = fitted),
+                }
+            }
+            p { class: "text-xs text-faint-foreground",
+                "A change here lands when the foreman next picks up a message, never in the \
+                 middle of one. Changing the agent starts its memory over; changing only the \
+                 model or the effort keeps it."
+            }
+            Field { label: "Runs jobs on",
+                div { class: "flex flex-col gap-2",
+                    for (position, row) in draft().kits.iter().enumerate() {
+                        div { key: "{position}", class: "flex flex-col gap-2 rounded-md border border-border p-2",
+                            div { class: "flex items-center gap-2",
+                                input {
+                                    class: FIELD,
+                                    placeholder: "a name, e.g. quick",
+                                    value: "{row.name}",
+                                    oninput: move |event| {
+                                        draft
+                                            .with_mut(|draft| {
+                                                if let Some(row) = draft.kits.get_mut(position) {
+                                                    row.name = event.value();
+                                                }
+                                            });
+                                    },
+                                }
+                                // Removing the row is how a kit is taken away.
+                                Button {
+                                    variant: ButtonVariant::Secondary,
+                                    class: "shrink-0 px-2 py-1 text-sm leading-none",
+                                    aria_label: "Remove kit {position + 1}",
+                                    title: "Remove",
+                                    onclick: move |_| {
+                                        draft.with_mut(|draft| { draft.kits.remove(position); });
+                                    },
+                                    "×"
+                                }
+                            }
+                            input {
+                                class: FIELD,
+                                placeholder: "what this project wants it for, e.g. small fixes and questions",
+                                value: "{row.description}",
+                                oninput: move |event| {
+                                    draft
+                                        .with_mut(|draft| {
+                                            if let Some(row) = draft.kits.get_mut(position) {
+                                                row.description = event.value();
+                                            }
+                                        });
+                                },
+                            }
+                            FittedEditor {
+                                fitted: row.fitted.clone(),
+                                shapes: shapes.clone(),
+                                available: available.clone(),
+                                onchange: move |fitted| {
+                                    draft
+                                        .with_mut(|draft| {
+                                            if let Some(row) = draft.kits.get_mut(position) {
+                                                row.fitted = fitted;
+                                            }
+                                        });
+                                },
+                            }
+                        }
+                    }
+                    Button {
+                        variant: ButtonVariant::Secondary,
+                        class: "self-start px-2.5 py-1 text-sm leading-none",
+                        aria_label: "Add a kit",
+                        title: "Add a kit",
+                        onclick: {
+                            move |_| {
+                                let fitted = starting.clone();
+                                draft.with_mut(|draft| {
+                                    draft.kits.push(KitDraft {
+                                        fitted,
+                                        ..KitDraft::default()
+                                    });
+                                });
+                            }
+                        },
+                        "+"
                     }
                 }
             }
-            Field { label: "Runs jobs on",
-                div { class: "flex flex-wrap gap-3",
-                    for agent in available.iter() {
-                        label { key: "{agent.id}", class: "flex items-center gap-1.5 text-sm",
-                            input {
-                                r#type: "checkbox",
-                                checked: draft().job_agents.contains(&agent.id),
-                                onchange: {
-                                    let picked = agent.id.clone();
-                                    move |event: Event<FormData>| {
-                                        let picked = picked.clone();
-                                        draft
-                                            .with_mut(|draft| {
-                                                draft.job_agents.retain(|held| held != &picked);
-                                                if event.checked() {
-                                                    draft.job_agents.push(picked);
-                                                }
-                                            });
-                                    }
-                                },
-                            }
-                            "{agent.name}"
-                        }
-                    }
-                }
+            p { class: "text-xs text-faint-foreground",
+                "A kit is an agent set a particular way. The foreman picks one per job by what \
+                 you say it is for, so say what each is for — a cheap one for small fixes and \
+                 questions, a strong one for work that touches many files."
             }
             Field { label: if creating { "GitHub credential" } else { "GitHub credential (optional)" },
                 input {
@@ -1338,6 +1636,79 @@ fn ProjectForm(
     }
 }
 
+/// The three selects that set an agent: which one, which model, and how hard
+/// it thinks where the model allows a choice.
+///
+/// **Controlled**, like the form around it: it emits the whole [`Fitted`] on
+/// every change rather than writing anywhere, so that the parent decides which
+/// row it lands in. Moving to another agent starts from that agent's defaults;
+/// moving to another model keeps the effort where the new one takes it and
+/// clears it where it does not — see [`with_agent`] and [`with_model`], which
+/// are pure so that both rules can be tested without a browser.
+///
+/// The effort select appears only where the model takes one. A select for a
+/// setting the model does not have would offer a choice the far side refuses.
+#[component]
+fn FittedEditor(
+    fitted: Fitted,
+    shapes: Vec<Shape>,
+    available: Vec<Agent>,
+    onchange: EventHandler<Fitted>,
+) -> Element {
+    let shape = shape_for(&shapes, &fitted.agent).cloned();
+    let with_effort = shape
+        .as_ref()
+        .is_some_and(|shape| takes_effort(shape, &fitted.model));
+
+    rsx! {
+        div { class: "flex flex-wrap gap-2",
+            select {
+                class: "{FIELD} basis-40 grow",
+                value: "{fitted.agent}",
+                onchange: move |event: Event<FormData>| {
+                    onchange.call(with_agent(&shapes, &event.value()));
+                },
+                for agent in available.iter() {
+                    option { key: "{agent.id}", value: "{agent.id}", "{agent.name}" }
+                }
+            }
+            if let Some(shape) = shape {
+                select {
+                    class: "{FIELD} basis-40 grow",
+                    value: "{fitted.model}",
+                    onchange: {
+                        let fitted = fitted.clone();
+                        move |event: Event<FormData>| {
+                            onchange.call(with_model(&fitted, &shape, &event.value()));
+                        }
+                    },
+                    for model in shape.models.iter() {
+                        option { key: "{model.id}", value: "{model.id}", "{model.name}" }
+                    }
+                }
+                if with_effort {
+                    select {
+                        class: "{FIELD} basis-40 grow",
+                        value: "{fitted.effort}",
+                        onchange: {
+                            let fitted = fitted.clone();
+                            move |event: Event<FormData>| {
+                                onchange.call(Fitted {
+                                    effort: event.value(),
+                                    ..fitted.clone()
+                                });
+                            }
+                        },
+                        for effort in shape.efforts.iter() {
+                            option { key: "{effort.id}", value: "{effort.id}", "{effort.name}" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// What every input on this screen looks like.
 ///
 /// A constant rather than a component, because the thing being shared is the
@@ -1360,7 +1731,10 @@ fn Field(label: String, children: Element) -> Element {
 
 #[cfg(all(test, feature = "server"))]
 mod server_tests {
-    use super::{ChannelDraft, DashboardError, VariableDraft, amended, binding, busy, resolved};
+    use super::{
+        ChannelDraft, DashboardError, Fitted, KitDraft, VariableDraft, amended, binding, busy,
+        kits_of, resolved,
+    };
     use stageman_core::{ProjectId, State};
 
     /// The two boxes that bind a channel, plus the optional third.
@@ -1371,28 +1745,174 @@ mod server_tests {
             listen_credential: listening.to_owned(),
         }
     }
-    use stageman_core::{Agent, Channel, Job, JobId, Progress, Project, Secret, Timestamp};
-    use std::collections::{BTreeMap, BTreeSet};
+    use stageman_core::{
+        Agent, Channel, ClaudeEffort, ClaudeModel, Job, JobId, Kit, KitConfig, KitName, Progress,
+        Project, Secret, Timestamp,
+    };
+    use std::collections::BTreeMap;
 
-    /// One job, in whatever state the caller needs it.
-    fn job(progress: Progress) -> Job {
-        Job {
-            agent: Agent::Claude,
-            reason: "because a test said so".to_owned(),
-            kickoff: "do the thing".to_owned(),
-            created_at: Timestamp::UNIX_EPOCH,
-            progress,
-            thread: None,
+    /// The one kit a fixture offers: its agent's defaults, under the agent's
+    /// name.
+    #[expect(
+        clippy::expect_used,
+        reason = "a fixture kit that cannot be named is a broken test, and should say so"
+    )]
+    fn one_kit() -> BTreeMap<KitName, KitConfig> {
+        BTreeMap::from([(
+            KitName::new("Claude").expect("a name"),
+            KitConfig::defaults(Agent::Claude),
+        )])
+    }
+
+    /// Amending replaces both the foreman's kit and the kits whole, because
+    /// the form shows and resubmits the whole of each.
+    ///
+    /// The fixture's own kit is asserted first, so that a fixture offering
+    /// nothing cannot make the rest pass vacuously — which mutation testing
+    /// showed it could.
+    #[test]
+    fn amending_replaces_the_foremans_kit_and_the_kits_whole() {
+        let mut watched = holding(&[]);
+        assert_eq!(watched.kits.len(), 1, "the fixture offers one kit");
+        assert!(
+            watched
+                .kits
+                .contains_key(&KitName::new("Claude").expect("a name")),
+            "named after its agent"
+        );
+
+        let deep = KitConfig {
+            description: "refactors touching many files".to_owned(),
+            kit: Kit::Claude {
+                model: ClaudeModel::Opus {
+                    effort: ClaudeEffort::XHigh,
+                },
+            },
+        };
+        amended(
+            &mut watched,
+            "aviary".to_owned(),
+            "https://example.invalid/aviary".to_owned(),
+            Kit::Claude {
+                model: ClaudeModel::Haiku,
+            },
+            BTreeMap::from([(KitName::new("deep").expect("a name"), deep.clone())]),
+            "",
+        );
+
+        assert_eq!(
+            watched.foreman_kit,
+            Kit::Claude {
+                model: ClaudeModel::Haiku
+            }
+        );
+        assert_eq!(
+            watched.kits,
+            BTreeMap::from([(KitName::new("deep").expect("a name"), deep)]),
+            "the old kit is gone, because the form did not resubmit it"
+        );
+    }
+
+    /// A kit row as the form would send it.
+    fn kit_row(name: &str, description: &str, model: &str, effort: &str) -> KitDraft {
+        KitDraft {
+            name: name.to_owned(),
+            description: description.to_owned(),
+            fitted: Fitted {
+                agent: "claude".to_owned(),
+                model: model.to_owned(),
+                effort: effort.to_owned(),
+            },
         }
     }
 
+    /// What a form describes becomes the project's kits, and what the domain
+    /// would silently mend is refused instead.
+    ///
+    /// Two rows under one name is the case that matters: the domain keys on
+    /// the name and would keep one without a word, which is the failure this
+    /// route exists to stop.
+    #[test]
+    fn a_forms_kits_are_kept_whole_and_refused_where_the_domain_would_mend() {
+        let kits = kits_of(&[
+            kit_row("quick", "small fixes", "haiku", ""),
+            kit_row(" deep ", "refactors touching many files", "opus", "xhigh"),
+        ])
+        .expect("two well-formed kits");
+        assert_eq!(kits.len(), 2);
+        let deep = kits
+            .get(&KitName::new("deep").expect("a name"))
+            .expect("named as typed, less the space around it");
+        assert_eq!(deep.description, "refactors touching many files");
+        assert_eq!(
+            deep.kit,
+            Kit::Claude {
+                model: ClaudeModel::Opus {
+                    effort: ClaudeEffort::XHigh,
+                },
+            }
+        );
+
+        assert_eq!(kits_of(&[]), Err(DashboardError::KitsMissing));
+        assert_eq!(
+            kits_of(&[kit_row("  ", "described", "default", "default")]),
+            Err(DashboardError::Incomplete {
+                field: "kit name".to_owned()
+            }),
+            "a blank name is not a name"
+        );
+        assert_eq!(
+            kits_of(&[kit_row("quick", "  ", "default", "default")]),
+            Err(DashboardError::Incomplete {
+                field: "kit description".to_owned()
+            }),
+            "a kit is chosen by its description, so it needs one"
+        );
+        assert_eq!(
+            kits_of(&[
+                kit_row("quick", "one", "haiku", ""),
+                kit_row("quick ", "another", "sonnet", "low"),
+            ]),
+            Err(DashboardError::KitNameTaken {
+                name: "quick".to_owned()
+            }),
+            "two rows under one name, however spaced, are refused rather than merged"
+        );
+        assert_eq!(
+            kits_of(&[kit_row("quick", "small fixes", "haiku", "high")]),
+            Err(DashboardError::EffortNotOnModel {
+                model: "Haiku".to_owned()
+            }),
+            "the far side refuses what the form would never send"
+        );
+    }
+
+    /// One job, in whatever state the caller needs it.
+    fn job(progress: Progress) -> Job {
+        let mut job = Job::new(
+            Kit::defaults(Agent::Claude),
+            "because a test said so".to_owned(),
+            "do the thing".to_owned(),
+            Timestamp::UNIX_EPOCH,
+        );
+        job.progress = progress;
+        job
+    }
+
     /// A project holding exactly these jobs.
+    #[expect(
+        clippy::expect_used,
+        reason = "a fixture kit that cannot be named is a broken test, and should say so"
+    )]
     fn holding(jobs: &[Progress]) -> Project {
         Project {
             name: "aviary".to_owned(),
             repository: "https://example.invalid/aviary".to_owned(),
-            foreman_agent: Agent::Claude,
-            job_agents: BTreeSet::from([Agent::Claude]),
+            foreman_kit: Kit::defaults(Agent::Claude),
+            kits: BTreeMap::from([(
+                KitName::new("Claude").expect("a name"),
+                KitConfig::defaults(Agent::Claude),
+            )]),
             credentials: BTreeMap::new(),
             channels: BTreeMap::new(),
             variables: BTreeMap::new(),
@@ -1630,12 +2150,21 @@ mod server_tests {
             &mut project,
             "renamed".to_owned(),
             "https://example.invalid/renamed".to_owned(),
-            Agent::Claude,
-            BTreeSet::from([Agent::Claude]),
+            Kit::defaults(Agent::Claude),
+            one_kit(),
             "",
         );
 
         assert_eq!(token_of(&project).as_deref(), Some("ghp-not-a-real-token"));
+        // And the kits given are now the project's. Asserted here on the
+        // fixture's content, because a fixture offering nothing would let
+        // every use of it above pass without saying anything.
+        assert_eq!(project.kits.len(), 1);
+        assert!(
+            project
+                .kits
+                .contains_key(&KitName::new("Claude").expect("a name"))
+        );
     }
 
     /// And a credential that was typed replaces it, which is the whole point
@@ -1648,8 +2177,8 @@ mod server_tests {
             &mut project,
             "aviary".to_owned(),
             "https://example.invalid/aviary".to_owned(),
-            Agent::Claude,
-            BTreeSet::from([Agent::Claude]),
+            Kit::defaults(Agent::Claude),
+            one_kit(),
             "ghp-the-new-one",
         );
 
@@ -1668,8 +2197,8 @@ mod server_tests {
             &mut project,
             "aviary".to_owned(),
             "https://example.invalid/aviary".to_owned(),
-            Agent::Claude,
-            BTreeSet::from([Agent::Claude]),
+            Kit::defaults(Agent::Claude),
+            one_kit(),
             "",
         );
 
@@ -1698,8 +2227,8 @@ mod server_tests {
             &mut project,
             "renamed".to_owned(),
             "https://example.invalid/renamed".to_owned(),
-            Agent::Claude,
-            BTreeSet::from([Agent::Claude]),
+            Kit::defaults(Agent::Claude),
+            one_kit(),
             "",
         );
 
@@ -1770,8 +2299,11 @@ mod server_tests {
             Project {
                 name: "aviary".to_owned(),
                 repository: "https://example.invalid/aviary".to_owned(),
-                foreman_agent: Agent::Claude,
-                job_agents: BTreeSet::from([Agent::Claude]),
+                foreman_kit: Kit::defaults(Agent::Claude),
+                kits: BTreeMap::from([(
+                    KitName::new("Claude").expect("a name"),
+                    KitConfig::defaults(Agent::Claude),
+                )]),
                 credentials: BTreeMap::new(),
                 channels: BTreeMap::from([(
                     Channel::Slack,
@@ -1905,7 +2437,51 @@ mod server_tests {
 #[cfg(test)]
 mod tests {
     use super::super::agents_view::Agent;
-    use super::{ChannelDraft, Draft, Filling, Project, VariableDraft, shown_as};
+    use super::{
+        ChannelDraft, Choice, Draft, Filling, Fitted, KitDraft, ModelChoice, Project, Shape,
+        VariableDraft, distinct, seeded, shape_for, shown_as, takes_effort, with_agent, with_model,
+    };
+
+    /// The agent's defaults, as a browser holds them.
+    fn as_it_comes() -> Fitted {
+        Fitted {
+            agent: "claude".to_owned(),
+            model: "default".to_owned(),
+            effort: "default".to_owned(),
+        }
+    }
+
+    /// One kit on the agent's defaults, named and described after it.
+    fn default_kit() -> KitDraft {
+        KitDraft {
+            name: "Claude".to_owned(),
+            description: "General-purpose.".to_owned(),
+            fitted: as_it_comes(),
+        }
+    }
+
+    /// The shape the server would send for Claude, as the form sees it.
+    fn claude() -> Shape {
+        let model = |id: &str, has_effort: bool| ModelChoice {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            has_effort,
+        };
+        let effort = |id: &str| Choice {
+            id: id.to_owned(),
+            name: id.to_owned(),
+        };
+        Shape {
+            agent: "claude".to_owned(),
+            models: vec![
+                model("default", true),
+                model("sonnet", true),
+                model("opus", true),
+                model("haiku", false),
+            ],
+            efforts: vec![effort("default"), effort("low"), effort("high")],
+        }
+    }
 
     /// One project, with however many jobs running.
     fn watched(working: usize, jobs: usize) -> Project {
@@ -1913,8 +2489,8 @@ mod tests {
             id: "an-identifier".to_owned(),
             name: "aviary".to_owned(),
             repository: "https://example.invalid/aviary".to_owned(),
-            foreman: "Claude".to_owned(),
-            job_agents: vec!["Claude".to_owned()],
+            foreman: as_it_comes(),
+            kits: vec![default_kit()],
             platforms: Vec::new(),
             channels: Vec::new(),
             variables: Vec::new(),
@@ -1929,8 +2505,8 @@ mod tests {
         Draft {
             name: "aviary".to_owned(),
             repository: "https://example.invalid/aviary".to_owned(),
-            foreman: "claude".to_owned(),
-            job_agents: vec!["claude".to_owned()],
+            foreman: as_it_comes(),
+            kits: vec![default_kit()],
             credential: "ghp-not-a-real-token".to_owned(),
             channel: ChannelDraft {
                 address: "C0123456789".to_owned(),
@@ -1978,12 +2554,10 @@ mod tests {
                 .is_complete(&Filling::Creating, NOTHING_HELD)
         );
         assert!(
-            !without(|draft| draft.foreman.clear()).is_complete(&Filling::Creating, NOTHING_HELD)
-        );
-        assert!(
-            !without(|draft| draft.job_agents.clear())
+            !without(|draft| draft.foreman.agent.clear())
                 .is_complete(&Filling::Creating, NOTHING_HELD)
         );
+        assert!(!without(|draft| draft.kits.clear()).is_complete(&Filling::Creating, NOTHING_HELD));
         assert!(
             !without(|draft| draft.credential.clear())
                 .is_complete(&Filling::Creating, NOTHING_HELD)
@@ -2011,8 +2585,10 @@ mod tests {
     fn amending_still_requires_everything_a_project_is() {
         assert!(!without(|draft| draft.name.clear()).is_complete(&amending(), NOTHING_HELD));
         assert!(!without(|draft| draft.repository.clear()).is_complete(&amending(), NOTHING_HELD));
-        assert!(!without(|draft| draft.foreman.clear()).is_complete(&amending(), NOTHING_HELD));
-        assert!(!without(|draft| draft.job_agents.clear()).is_complete(&amending(), NOTHING_HELD));
+        assert!(
+            !without(|draft| draft.foreman.agent.clear()).is_complete(&amending(), NOTHING_HELD)
+        );
+        assert!(!without(|draft| draft.kits.clear()).is_complete(&amending(), NOTHING_HELD));
     }
 
     /// A project carries identifiers and a row shows names, so something has
@@ -2267,5 +2843,117 @@ mod tests {
     fn a_project_whose_jobs_have_all_finished_is_idle() {
         assert!(watched(0, 3).idle());
         assert!(watched(0, 0).idle());
+    }
+
+    /// A kit row needs a name and a description, and two rows cannot share a
+    /// name — the screen refuses what the far side would refuse, before the
+    /// operator presses anything.
+    #[test]
+    fn a_kit_row_needs_a_name_and_a_description_and_names_are_distinct() {
+        assert!(filled().is_complete(&Filling::Creating, NOTHING_HELD));
+
+        let mut unnamed = filled();
+        unnamed.kits.push(KitDraft {
+            name: "  ".to_owned(),
+            description: "something".to_owned(),
+            fitted: as_it_comes(),
+        });
+        assert!(!unnamed.is_complete(&Filling::Creating, NOTHING_HELD));
+
+        let mut undescribed = filled();
+        undescribed.kits.push(KitDraft {
+            name: "deep".to_owned(),
+            description: " ".to_owned(),
+            fitted: as_it_comes(),
+        });
+        assert!(!undescribed.is_complete(&Filling::Creating, NOTHING_HELD));
+
+        let mut twice = filled();
+        twice.kits.push(KitDraft {
+            name: " Claude ".to_owned(),
+            description: "again".to_owned(),
+            fitted: as_it_comes(),
+        });
+        assert!(
+            !twice.is_complete(&Filling::Creating, NOTHING_HELD),
+            "the same name with space around it is the same name"
+        );
+        assert!(!distinct(&twice.kits));
+        assert!(distinct(&filled().kits));
+    }
+
+    /// Moving between models keeps, clears or seeds the effort as the new
+    /// model demands, so the form never holds a pair the far side refuses.
+    #[test]
+    fn changing_the_model_keeps_the_effort_only_where_the_new_model_takes_one() {
+        let shape = claude();
+        let on_opus = with_model(&as_it_comes(), &shape, "opus");
+        assert_eq!(on_opus.model, "opus");
+        assert_eq!(on_opus.effort, "default", "kept, since opus takes one");
+
+        let on_haiku = with_model(&on_opus, &shape, "haiku");
+        assert_eq!(on_haiku.model, "haiku");
+        assert_eq!(on_haiku.effort, "", "cleared, since haiku takes none");
+
+        let back = with_model(&on_haiku, &shape, "sonnet");
+        assert_eq!(
+            back.effort, "default",
+            "seeded with the first, since there was none"
+        );
+
+        let chosen = Fitted {
+            effort: "high".to_owned(),
+            ..as_it_comes()
+        };
+        assert_eq!(
+            with_model(&chosen, &shape, "sonnet").effort,
+            "high",
+            "a chosen effort survives a change of model"
+        );
+    }
+
+    /// The two comparisons the form turns on, asserted in both directions.
+    ///
+    /// Mutation testing inverted each of these inside the component and no
+    /// test noticed, which is why they are functions now.
+    #[test]
+    fn a_shape_is_found_by_its_agent_and_says_which_models_take_an_effort() {
+        let shapes = vec![claude()];
+        assert_eq!(shape_for(&shapes, "claude"), Some(&claude()));
+        assert_eq!(shape_for(&shapes, "gpt"), None);
+        assert_eq!(shape_for(&[], "claude"), None);
+
+        assert!(takes_effort(&claude(), "opus"));
+        assert!(takes_effort(&claude(), "default"));
+        assert!(!takes_effort(&claude(), "haiku"), "the one model with none");
+        assert!(
+            !takes_effort(&claude(), "gpt-5"),
+            "a model the shape does not list takes nothing"
+        );
+    }
+
+    /// Moving to another agent starts from that agent's defaults, and an
+    /// agent no shape describes is carried as itself for the far side to
+    /// refuse by name.
+    #[test]
+    fn changing_the_agent_starts_from_its_defaults() {
+        let shapes = vec![claude()];
+        assert_eq!(with_agent(&shapes, "claude"), as_it_comes());
+        assert_eq!(seeded(&claude()), as_it_comes());
+        assert_eq!(
+            with_agent(&shapes, "gpt"),
+            Fitted {
+                agent: "gpt".to_owned(),
+                ..Fitted::default()
+            }
+        );
+
+        let mut effortless = claude();
+        effortless.models.rotate_left(3);
+        assert_eq!(
+            seeded(&effortless).effort,
+            "",
+            "an agent whose first model takes no effort is seeded with none"
+        );
     }
 }

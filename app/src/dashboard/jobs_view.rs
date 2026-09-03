@@ -19,7 +19,6 @@ use dioxus::server::axum::Extension;
 use lucide_dioxus::{ExternalLink, Eye, EyeOff};
 use serde::{Deserialize, Serialize};
 
-use super::agents_view::Agent;
 use super::error::{DashboardError, DashboardResult};
 use crate::ui::{Badge, BadgeTone, Button, Card, EmptyState, Modal};
 
@@ -82,8 +81,16 @@ impl Standing {
 pub struct Job {
     /// What names it, and what its container is named after.
     pub id: String,
-    /// Which agent ran it.
-    pub agent: String,
+    /// What it ran on, in the words a person reads: the agent, and whatever
+    /// of its settings differs from that agent's own defaults.
+    pub kit: String,
+    /// What its session reported it was set to, in the adapter's own words.
+    ///
+    /// Beside the kit rather than folded into it, because the two were
+    /// measured to differ — see `docs/decisions/0048-a-job-runs-on-a-kit.md`.
+    /// Empty for a job that has not had a turn, and for every job recorded
+    /// before this existed.
+    pub reported: Vec<(String, String)>,
     /// Why it was started, in prose.
     pub reason: String,
     /// What its agent was told to do.
@@ -113,6 +120,18 @@ pub struct Job {
     pub tunnel: String,
 }
 
+/// One kit a project offers, as much of it as a page needs to offer it back.
+///
+/// The name is what a browser sends to start a job on it, and the description
+/// is what a person chooses by — the same two things the foreman is given.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Offered {
+    /// What the operator called it, and what the browser names it back as.
+    pub name: String,
+    /// What this project wants it for, in the operator's words.
+    pub description: String,
+}
+
 /// One project and its jobs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Working {
@@ -120,8 +139,8 @@ pub struct Working {
     pub name: String,
     /// Where its jobs work.
     pub repository: String,
-    /// The agents its jobs may run on. Never empty in a valid instance.
-    pub agents: Vec<Agent>,
+    /// The kits its jobs may run on. Never empty in a valid instance.
+    pub kits: Vec<Offered>,
     /// Its jobs, newest first.
     pub jobs: Vec<Job>,
 }
@@ -155,8 +174,8 @@ pub async fn jobs(project: String) -> DashboardResult<Working> {
 ///
 /// # Errors
 ///
-/// Fails if the project is unknown, if the work is empty, or if the agent is
-/// not one that project's jobs may run on.
+/// Fails if the project is unknown, if the work is empty, or if the project
+/// offers no kit under that name.
 #[cfg_attr(
     feature = "server",
     expect(
@@ -165,8 +184,7 @@ pub async fn jobs(project: String) -> DashboardResult<Working> {
     )
 )]
 #[post("/api/projects/{project}/jobs/start", instance: Extension<std::sync::Arc<crate::Store>>)]
-pub async fn start(project: String, agent: String, work: String) -> DashboardResult<Working> {
-    let named = super::named(&agent)?;
+pub async fn start(project: String, kit: String, work: String) -> DashboardResult<Working> {
     let work = work.trim();
     if work.is_empty() {
         return Err(DashboardError::Incomplete {
@@ -178,29 +196,35 @@ pub async fn start(project: String, agent: String, work: String) -> DashboardRes
     // released before any of them is returned — a read guard living across a
     // `?` would hold the instance shut for as long as the error took to
     // travel.
-    let identifier = {
+    let (identifier, chosen) = {
         let state = instance.0.read();
         let found = super::identify(&state, &project);
-        // Asked before starting rather than after failing: a project's jobs
-        // may run on a set of agents, and one outside it is a request this
-        // instance should refuse rather than a handout it cannot decide.
-        let refusal = found.as_ref().ok().and_then(|found| {
-            let watched = state.projects.get(found)?;
-            forbids(watched, named).then(|| DashboardError::AgentNotOnProject {
-                name: super::shown(named),
-                project: watched.name.clone(),
-            })
+        // Asked before starting rather than after failing: a project's kits
+        // are the only kits — `docs/decisions/0048-a-job-runs-on-a-kit.md`,
+        // and by hand as much as by the foreman — so a name outside them is a
+        // request this instance refuses rather than a handout it cannot
+        // decide.
+        let decided = found.and_then(|found| {
+            let watched =
+                state
+                    .projects
+                    .get(&found)
+                    .ok_or_else(|| DashboardError::UnknownProject {
+                        id: project.clone(),
+                    })?;
+            offered(watched, &kit)
+                .map(|chosen| (found, chosen))
+                .ok_or_else(|| DashboardError::KitNotOnProject {
+                    name: kit.clone(),
+                    project: watched.name.clone(),
+                })
         });
         drop(state);
-
-        if let Some(refusal) = refusal {
-            return Err(refusal);
-        }
-        found?
+        decided?
     };
 
     let started =
-        crate::begin(&instance.0, identifier, named, BY_HAND, work).map_err(|reason| {
+        crate::begin(&instance.0, identifier, chosen, BY_HAND, work).map_err(|reason| {
             // Nothing an operator can act on: the project exists and its agents
             // are configured, or the checks above would have refused. What is left
             // is an instance that has stopped being consistent, which belongs in a
@@ -227,21 +251,17 @@ pub async fn start(project: String, agent: String, work: String) -> DashboardRes
     Ok(answer)
 }
 
-/// Whether this project's jobs may *not* run on that agent.
+/// The kit this project offers under a name, if it offers one.
 ///
-/// Phrased as the refusal rather than the permission so that the negation
-/// lives here, where it can be tested, rather than at the one call site where
-/// it cannot: a project's set of job agents always contains the only agent
-/// there is today, so no request can reach the refusing branch through the
-/// domain. A fixture can hold a set a valid instance could not, which is the
-/// whole reason this is a function.
-///
-/// It exists for the version of this with two agents, where a project running
-/// jobs on one and an operator asking for the other is an ordinary mistake
-/// rather than an impossible one.
+/// A function rather than a lookup at the call site so that the refusal can be
+/// tested against a fixture: through a request, a project always offers at
+/// least one kit, and the interesting case is the name it does not offer. The
+/// name is read the way `KitName` reads it, so a name with space around it
+/// still names the kit — and a blank one names nothing.
 #[cfg(feature = "server")]
-fn forbids(project: &stageman_core::Project, agent: stageman_core::Agent) -> bool {
-    !project.job_agents.contains(&agent)
+fn offered(project: &stageman_core::Project, name: &str) -> Option<stageman_core::Kit> {
+    let wanted = stageman_core::KitName::new(name).ok()?;
+    project.kits.get(&wanted).map(|offered| offered.kit.clone())
 }
 
 /// One project's screen, from the instance.
@@ -268,7 +288,12 @@ fn working(state: &stageman_core::State, project: &str) -> DashboardResult<Worki
         .iter()
         .map(|(id, job)| Job {
             id: id.to_string(),
-            agent: super::shown(job.agent),
+            kit: super::described(job.kit()),
+            reported: job
+                .reported
+                .iter()
+                .map(|(option, value)| (option.clone(), value.clone()))
+                .collect(),
             reason: job.reason.clone(),
             kickoff: job.kickoff.clone(),
             created_at: job.created_at.to_string(),
@@ -281,10 +306,12 @@ fn working(state: &stageman_core::State, project: &str) -> DashboardResult<Worki
     Ok(Working {
         name: watched.name.clone(),
         repository: watched.repository.clone(),
-        agents: super::listed(state)
-            .into_iter()
-            .filter(|agent| {
-                super::named(&agent.id).is_ok_and(|named| watched.job_agents.contains(&named))
+        kits: watched
+            .kits
+            .iter()
+            .map(|(name, offered)| Offered {
+                name: name.to_string(),
+                description: offered.description.clone(),
             })
             .collect(),
         jobs,
@@ -334,10 +361,13 @@ pub fn ProjectJobsView(project: String) -> Element {
                                 aria_label: "Start a job",
                                 title: "Start a job",
                                 onclick: {
-                                    let first = working.agents.first().map(|agent| agent.id.clone());
+                                    // The first kit the project offers, which
+                                    // is the one a select with a single option
+                                    // would have chosen anyway.
+                                    let first = working.kits.first().map(|kit| kit.name.clone());
                                     move |_| {
                                         draft.set(Wanted {
-                                            agent: first.clone().unwrap_or_default(),
+                                            kit: first.clone().unwrap_or_default(),
                                             work: String::new(),
                                         });
                                         failure.set(None);
@@ -375,7 +405,7 @@ pub fn ProjectJobsView(project: String) -> Element {
                                         let identifier = identifier.clone();
                                         let asked = draft();
                                         async move {
-                                            match start(identifier, asked.agent, asked.work).await {
+                                            match start(identifier, asked.kit, asked.work).await {
                                                 Ok(fresh) => {
                                                     failure.set(None);
                                                     reading.set(Some(Ok(fresh)));
@@ -391,7 +421,7 @@ pub fn ProjectJobsView(project: String) -> Element {
                             if let Some(reason) = failure() {
                                 p { class: "mb-3 text-sm text-failed", "{reason}" }
                             }
-                            JobForm { draft, agents: working.agents }
+                            JobForm { draft, kits: working.kits }
                         }
                     }
                 },
@@ -419,11 +449,22 @@ fn RanJob(job: Job) -> Element {
                 Badge { tone: job.standing.tone(), "{job.standing.label()}" }
                 span { class: "text-sm", "{job.reason}" }
                 span { class: "ml-auto shrink-0 font-mono text-xs text-faint-foreground",
-                    "{job.agent} · {job.created_at}"
+                    "{job.kit} · {job.created_at}"
                 }
             }
             if let Standing::Failed { why } = &job.standing {
                 p { class: "text-xs text-failed", "{why}" }
+            }
+            // What the session said it was set to, in the adapter's spelling,
+            // beside what was asked for above. Shown whenever there is
+            // anything, because the one case worth seeing is the two
+            // disagreeing — and a reader cannot spot a disagreement that is
+            // only shown when it occurs.
+            if !job.reported.is_empty() {
+                p { class: "font-mono text-xs text-faint-foreground",
+                    "reported "
+                    {job.reported.iter().map(|(option, value)| format!("{option} {value}")).collect::<Vec<_>>().join(" · ")}
+                }
             }
             // Icons rather than words, because a row of jobs is a list and a
             // list reads better as shapes. Both carry an accessible name and a
@@ -482,13 +523,13 @@ fn RanJob(job: Job) -> Element {
 
 /// What starting a job asks for.
 ///
-/// The work and which agent, and nothing else. Not the instruction: that is
+/// The work and which kit, and nothing else. Not the instruction: that is
 /// composed from this, and composing it here would put an author of
 /// instructions outside the one crate allowed to be one.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Wanted {
-    /// Which of the project's agents should do it.
-    pub agent: String,
+    /// Which of the project's kits should do it, by name.
+    pub kit: String,
     /// What to do, in the operator's own words.
     pub work: String,
 }
@@ -497,7 +538,7 @@ impl Wanted {
     /// Whether this says enough to start a job.
     #[must_use]
     pub fn is_complete(&self) -> bool {
-        !self.agent.is_empty() && !self.work.trim().is_empty()
+        !self.kit.trim().is_empty() && !self.work.trim().is_empty()
     }
 }
 
@@ -506,23 +547,28 @@ impl Wanted {
 /// Controlled, like the project form and for the same reason: the control that
 /// submits lives in the modal's header, and cannot read state the form owns.
 #[component]
-fn JobForm(draft: Signal<Wanted>, agents: Vec<Agent>) -> Element {
+fn JobForm(draft: Signal<Wanted>, kits: Vec<Offered>) -> Element {
     let mut draft = draft;
 
     rsx! {
         div { class: "flex flex-col gap-3",
-            // Only when there is a choice. A project with one agent has
-            // already made this decision, and a select with one option asks a
-            // question that has no other answer.
-            if agents.len() > 1 {
+            // Only when there is a choice. A project with one kit has already
+            // made this decision, and a select with one option asks a question
+            // that has no other answer.
+            if kits.len() > 1 {
                 label { class: "flex flex-col gap-1",
                     span { class: "text-xs font-medium text-muted-foreground", "Runs on" }
                     select {
                         class: FIELD,
-                        value: "{draft().agent}",
-                        onchange: move |event| draft.with_mut(|draft| draft.agent = event.value()),
-                        for agent in agents.iter() {
-                            option { key: "{agent.id}", value: "{agent.id}", "{agent.name}" }
+                        value: "{draft().kit}",
+                        onchange: move |event| draft.with_mut(|draft| draft.kit = event.value()),
+                        for kit in kits.iter() {
+                            option {
+                                key: "{kit.name}",
+                                value: "{kit.name}",
+                                title: "{kit.description}",
+                                "{kit.name} — {kit.description}"
+                            }
                         }
                     }
                 }
@@ -553,9 +599,9 @@ const FIELD: &str = "w-full rounded-md border border-border bg-surface px-2 py-1
 
 #[cfg(all(test, feature = "server"))]
 mod server_tests {
-    use super::{Standing, forbids, standing};
-    use stageman_core::{Agent, Progress};
-    use std::collections::{BTreeMap, BTreeSet};
+    use super::{Standing, offered, standing};
+    use stageman_core::{Agent, Kit, KitConfig, KitName, Progress};
+    use std::collections::BTreeMap;
 
     /// A failure's prose is the only thing a person has to go on.
     #[test]
@@ -570,13 +616,13 @@ mod server_tests {
         );
     }
 
-    /// A project running jobs on these agents.
-    fn running_on(agents: BTreeSet<Agent>) -> stageman_core::Project {
+    /// A project offering these kits.
+    fn running_on(kits: BTreeMap<KitName, KitConfig>) -> stageman_core::Project {
         stageman_core::Project {
             name: "aviary".to_owned(),
             repository: "https://example.invalid/aviary".to_owned(),
-            foreman_agent: Agent::Claude,
-            job_agents: agents,
+            foreman_kit: Kit::defaults(Agent::Claude),
+            kits,
             credentials: BTreeMap::new(),
             channels: BTreeMap::new(),
             jobs: BTreeMap::new(),
@@ -585,18 +631,35 @@ mod server_tests {
         }
     }
 
-    /// An agent the project names is allowed, and one it does not is refused.
+    /// A kit the project offers is found by its name, and a name it does not
+    /// offer finds nothing.
     ///
-    /// The second half needs a project naming no agents, which a valid
-    /// instance cannot contain — `State::check` refuses one. That is why this
-    /// is tested here against a fixture rather than through a request.
+    /// The second half is what a request cannot reach through a valid
+    /// instance, since the form only offers names the project has — so it is
+    /// tested here against a fixture. The trimmed case is the one a select
+    /// cannot produce and a hand-written request can.
     #[test]
-    fn a_project_forbids_exactly_the_agents_it_does_not_name() {
-        assert!(!forbids(
-            &running_on(BTreeSet::from([Agent::Claude])),
-            Agent::Claude
-        ));
-        assert!(forbids(&running_on(BTreeSet::new()), Agent::Claude));
+    fn a_project_offers_exactly_the_kits_it_names() {
+        let quick = KitConfig {
+            description: "for small fixes".to_owned(),
+            kit: Kit::Claude {
+                model: stageman_core::ClaudeModel::Haiku,
+            },
+        };
+        let project = running_on(BTreeMap::from([(
+            KitName::new("quick").expect("a name"),
+            quick.clone(),
+        )]));
+
+        assert_eq!(offered(&project, "quick"), Some(quick.kit.clone()));
+        assert_eq!(
+            offered(&project, " quick "),
+            Some(quick.kit),
+            "named, if untidily"
+        );
+        assert_eq!(offered(&project, "deep"), None);
+        assert_eq!(offered(&project, ""), None, "a blank names nothing");
+        assert_eq!(offered(&running_on(BTreeMap::new()), "quick"), None);
     }
 
     #[test]
@@ -613,19 +676,20 @@ mod server_tests {
     /// they are looking at the right one.
     #[test]
     fn a_job_crosses_with_the_address_that_reaches_it() {
-        let mut watched = running_on(BTreeSet::from([Agent::Claude]));
+        let mut watched = running_on(BTreeMap::from([(
+            KitName::new("Claude").expect("a name"),
+            KitConfig::defaults(Agent::Claude),
+        )]));
         for which in 1..=2_u128 {
             let job = stageman_core::JobId::from_uuid(stageman_core::Uuid::from_u128(which));
             watched.jobs.insert(
                 job,
-                stageman_core::Job {
-                    agent: Agent::Claude,
-                    reason: "because".to_owned(),
-                    kickoff: "do the thing".to_owned(),
-                    created_at: stageman_core::Timestamp::now(),
-                    progress: Progress::Working,
-                    thread: None,
-                },
+                stageman_core::Job::new(
+                    stageman_core::Kit::defaults(Agent::Claude),
+                    "because".to_owned(),
+                    "do the thing".to_owned(),
+                    stageman_core::Timestamp::now(),
+                ),
             );
         }
 
@@ -706,16 +770,16 @@ mod tests {
     /// The control that starts a job is unavailable until pressing it would
     /// work, so this is the whole of that guard.
     #[test]
-    fn a_request_needs_both_an_agent_and_some_work() {
+    fn a_request_needs_both_a_kit_and_some_work() {
         let complete = Wanted {
-            agent: "claude".to_owned(),
+            kit: "Claude".to_owned(),
             work: "document the three missing variables".to_owned(),
         };
         assert!(complete.is_complete());
 
-        let mut without_agent = complete.clone();
-        without_agent.agent.clear();
-        assert!(!without_agent.is_complete());
+        let mut without_kit = complete.clone();
+        without_kit.kit.clear();
+        assert!(!without_kit.is_complete());
 
         let mut without_work = complete;
         without_work.work.clear();
@@ -729,7 +793,7 @@ mod tests {
     #[test]
     fn whitespace_is_not_work() {
         let asked = Wanted {
-            agent: "claude".to_owned(),
+            kit: "Claude".to_owned(),
             work: "  \n\t ".to_owned(),
         };
 

@@ -204,6 +204,25 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   used bare. This is the one place in the codebase where the wrong meaning of
   this word type-checks.
 
+- **kit** — one agent, set the way one job runs it: which model, how hard it
+  thinks, and whatever else that agent's adapter can be told. A job runs on
+  exactly one, fixed when the job is created and settled again at the start of
+  every turn — see `docs/decisions/0048-a-job-runs-on-a-kit.md`, which also
+  decides that a project names the kits its jobs may run on. In the code its
+  tag *is* the agent, so a kit cannot hold settings for an agent other than
+  its own; and what the adapter reports back after being set is kept on the
+  job beside the kit rather than derived from it, because the two were
+  measured to differ.
+
+  Not *profile* or *preset*, both of which name a saved form rather than the
+  thing a job actually runs under. Not *assignment*, which names the act of a
+  job receiving one and would leave nothing to call the thing received. Not
+  *configuration* or *settings* either — and note that the objection recorded
+  under **variable**, that those words imply something here reads one, does
+  not apply, which is exactly the difference between the two concepts: a kit is
+  read, by the adapter, on every turn. What rules those words out is that they
+  name a bag of values, and a kit is a decision about one job.
+
 - **variable** — one name and one value an operator gives a project, set in the
   environment of every container that project's jobs run in. What makes it a
   concept of its own rather than a loose platform credential is that **this
@@ -508,6 +527,19 @@ it lands.
   added without a default, and the first thing anybody did with the build was
   fail to open an instance holding five real projects.
 
+- **What this project can spell, the pinned adapter must accept.** A kit's
+  values are variants in the domain and spellings in the adapter, and the
+  adapter's version is pinned in the image compiled into the binary — so the
+  set is a fact about this build, and a container test settles every kit the
+  domain can spell on one real session and fails on the pin bump that removes
+  or renames a value. It needs no credential and no network, because a session
+  opens with neither, which is why it sits with the handshake tests rather
+  than with the ones that cost a credential. What it cannot see is an *added*
+  value, which passes silently and is a feature to add rather than a defect.
+  See `docs/decisions/0048-a-job-runs-on-a-kit.md`, and note that the same
+  record's read-back cannot be exact either: an account's entitlements change
+  how a value is spelled in a reply, so what is checked is that the reading
+  moved.
 - **Kickoff prompts are snapshot-tested.** The prompt text the foreman
   composes is asserted as literal text, so a change to what a job is told to do
   shows up as a reviewable diff. Prompt text is the highest-leverage code here

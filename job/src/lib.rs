@@ -14,7 +14,7 @@
 //! runs in, the credentials it is handed, and the supervision that ends it.
 
 use stageman_agent::{AgentError, Answer, ContainerRuntime};
-use stageman_core::{Handout, JobId, Uuid};
+use stageman_core::{Handout, JobId, Kit, Uuid};
 
 /// What every one of this project's containers is named for.
 ///
@@ -208,11 +208,14 @@ pub async fn start(
 /// Puts a job back to work after its container stopped.
 ///
 /// Takes no handout: what a container was given at creation is part of it, so
-/// a restart is already authenticated. It does take the thread, because that
-/// is the one thing a container cannot keep — an environment is fixed at
-/// creation and a job's thread is written in before each start. `notice` is what the agent is told about
-/// having been interrupted, and like every other instruction it is composed by
-/// the foreman rather than invented here.
+/// a restart is already authenticated. It does take the job's kit, because
+/// that is the one thing a container cannot keep — a loaded session comes back
+/// with every setting at the agent's default, measured in
+/// `docs/decisions/0048-a-job-runs-on-a-kit.md` — and the kit is the job's own
+/// record of what it runs on, so the caller reads it off the job rather than
+/// deciding it again. `notice` is what the agent is told about having been
+/// interrupted, and like every other instruction it is composed by the foreman
+/// rather than invented here.
 ///
 /// # Errors
 ///
@@ -223,10 +226,11 @@ pub async fn start(
 pub async fn resume(
     runtime: &ContainerRuntime,
     job: JobId,
+    kit: &Kit,
     tools: Option<&stageman_agent::Tools>,
     notice: &str,
 ) -> Result<Answer, JobError> {
-    stageman_agent::resume(runtime, &container(job), tools, notice)
+    stageman_agent::resume(runtime, &container(job), kit, tools, notice)
         .await
         .map_err(JobError::Agent)
 }
