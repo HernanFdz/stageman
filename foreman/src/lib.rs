@@ -560,9 +560,9 @@ pub enum Voice {
 /// constraint — `docs/conventions.md` §2.
 ///
 /// Three things it says that are not negotiable, each from a decision rather
-/// than from taste. Nothing has been checked out, because
-/// `docs/decisions/0016-the-agent-clones-the-repository.md` removed every
-/// mechanism that would have. The tools are already authenticated, because
+/// than from taste. The repository is already checked out, because
+/// `docs/decisions/0050-the-repository-is-checked-out-before-the-first-turn.md`
+/// puts it there before this is read. The tools are already authenticated, because
 /// `docs/decisions/0009-jobs-hold-their-own-platform-credentials.md` hands the
 /// job its project's credential rather than proxying its access. And work ends
 /// at a proposal, because
@@ -614,12 +614,12 @@ you from inside this container and is reachable from nowhere else."
 
     let tools = match voice {
         Voice::Channel => {
-            "You have git and gh, and the `say` tool for talking to people; \
-gh is already signed in as the account this work belongs to."
+            "You have git and gh, both signed in as the account this work \
+belongs to, and the `say` tool for talking to people."
         }
         Voice::Silent => {
-            "You have git and gh, and gh is already signed in as the \
-account this work belongs to."
+            "You have git and gh, both signed in as the account this work \
+belongs to."
         }
     };
 
@@ -675,8 +675,7 @@ one in a change you propose."
         "\
 You are working on {repository}.
 
-Nothing has been checked out for you. If the work needs the repository, clone \
-it into the current directory yourself. {tools}
+It is checked out in the current directory, on its default branch. {tools}
 
 The work:
 
@@ -748,9 +747,8 @@ Then carry on with the work you were given."
             ),
             "You are working on https://example.invalid/repo.
 
-Nothing has been checked out for you. If the work needs the repository, clone it into the \
-current directory yourself. You have git and gh, and gh is already signed in as the account this \
-work belongs to.
+It is checked out in the current directory, on its default branch. You have git and gh, both \
+signed in as the account this work belongs to.
 
 The work:
 
@@ -801,9 +799,8 @@ guess, and do not wait — nobody is watching this terminal."
             ),
             "You are working on https://example.invalid/repo.
 
-Nothing has been checked out for you. If the work needs the repository, clone it into the \
-current directory yourself. You have git and gh, and gh is already signed in as the account this \
-work belongs to.
+It is checked out in the current directory, on its default branch. You have git and gh, both \
+signed in as the account this work belongs to.
 
 The work:
 
@@ -894,9 +891,8 @@ guess, and do not wait — nobody is watching this terminal."
             ),
             "You are working on https://example.invalid/repo.
 
-Nothing has been checked out for you. If the work needs the repository, clone it into the \
-current directory yourself. You have git and gh, and the `say` tool for talking to people; gh \
-is already signed in as the account this work belongs to.
+It is checked out in the current directory, on its default branch. You have git and gh, both \
+signed in as the account this work belongs to, and the `say` tool for talking to people.
 
 The work:
 

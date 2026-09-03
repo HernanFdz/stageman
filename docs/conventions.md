@@ -129,20 +129,23 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   and no such thing exists here. A job records which agent ran it, because once
   more than one can, "why did this go badly?" has no answer without it.
 - **workspace** — the isolated place a job's agent works: the container it runs
-  in, for as long as that job lasts — see
-  `docs/decisions/0012-agents-run-in-containers.md`. One job, one workspace: no
-  two ever share one, which is an invariant rather than an aspiration
-  (`docs/architecture.md` §2). Not a *checkout*, which names the files and
-  misses the boundary that makes them isolated — and the files are no longer
-  even part of the definition. This once read "the filesystem the repository is
-  checked out into", from a design in which something delivered that
-  repository. Nothing does:
-  `docs/decisions/0016-the-agent-clones-the-repository.md` has the agent clone
-  it if the work needs one, so what is inside a workspace is the job's business
-  and a job with no repository at all is an ordinary case rather than an empty
-  mount. The foreman's agent still has no workspace, and now for a plainer
-  reason than having no repository — a workspace belongs to a job, and triage
-  is not one.
+  in, with the project's repository checked out in it before the agent's first
+  turn, for as long as that job lasts — see
+  `docs/decisions/0012-agents-run-in-containers.md` and
+  `docs/decisions/0050-the-repository-is-checked-out-before-the-first-turn.md`.
+  One job, one workspace: no two ever share one, which is an invariant rather
+  than an aspiration (`docs/architecture.md` §2). Not a *checkout*, which names
+  the files and misses the boundary that makes them isolated. The checkout has
+  been in and out of this definition, and the history is worth keeping: it once
+  read "the filesystem the repository is checked out into", from a design in
+  which something delivered that repository;
+  `docs/decisions/0016-the-agent-clones-the-repository.md` removed every such
+  mechanism and had the agent clone it if the work needed one, so that a job
+  with no repository was an ordinary case; and 0050 put the checkout back —
+  made inside the container by this project, before the agent speaks — because
+  a coding agent reads a project's instructions when it starts, and no job
+  without a repository ever came. The foreman's agent has no workspace, for the
+  plainest reason — a workspace belongs to a job, and triage is not one.
 - **thread** — where one job's conversation happens on a channel. A channel
   belongs to a project and everything it runs shares it, so a thread is what
   narrows a conversation down to one job — which is also what makes a reply

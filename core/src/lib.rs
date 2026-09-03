@@ -1932,6 +1932,12 @@ pub enum Role {
 pub struct Handout {
     kit: Kit,
     role: Role,
+    // Where the job's repository lives, and nothing for a foreman. Not a
+    // secret — every kickoff embeds it — but decided here beside the
+    // credentials, because the checkout is made from this value and a foreman
+    // must have nothing to check out; see
+    // `docs/decisions/0050-the-repository-is-checked-out-before-the-first-turn.md`.
+    repository: Option<String>,
     agent_credential: Secret,
     platforms: BTreeMap<Platform, Secret>,
     variables: BTreeMap<VariableName, Secret>,
@@ -1985,6 +1991,11 @@ impl Handout {
         Ok(Self {
             kit: watching.foreman_kit.clone(),
             role: Role::Foreman,
+            // No repository, for the reason there is no platform credential: a
+            // foreman has no workspace, and its image carries no tool that
+            // could check anything out into one — see
+            // `docs/decisions/0036-a-foremans-image-is-not-a-jobs.md`.
+            repository: None,
             agent_credential: config.auth_token.clone(),
             platforms: BTreeMap::new(),
             // None, for the reason there is no platform credential here: a
@@ -2029,6 +2040,7 @@ impl Handout {
         Ok(Self {
             kit,
             role: Role::Job,
+            repository: Some(project.repository.clone()),
             agent_credential: config.auth_token.clone(),
             platforms: project.credentials.clone(),
             variables: project.variables.clone(),
@@ -2071,6 +2083,19 @@ impl Handout {
     #[must_use]
     pub const fn agent_credential(&self) -> &Secret {
         &self.agent_credential
+    }
+
+    /// Where the repository this job works on lives, or nothing for a foreman.
+    ///
+    /// Decided by the constructor and not by a caller: a job's handout carries
+    /// its project's repository and a foreman's carries none, by construction,
+    /// because a foreman has no workspace to check anything out into. An
+    /// adapter reads this to make the checkout before the agent's first turn —
+    /// see
+    /// `docs/decisions/0050-the-repository-is-checked-out-before-the-first-turn.md`.
+    #[must_use]
+    pub fn repository(&self) -> Option<&str> {
+        self.repository.as_deref()
     }
 
     /// What this job reaches one platform with, if it has anything for it.
@@ -2152,6 +2177,8 @@ impl fmt::Debug for Handout {
         f.debug_struct("Handout")
             .field("kit", &self.kit)
             .field("role", &self.role)
+            // A URL rather than a secret, and every kickoff embeds it already.
+            .field("repository", &self.repository)
             .field("agent_credential", &"<redacted>")
             .field("platforms", &self.platforms.keys().collect::<Vec<_>>())
             // Names, never values. A name is not a credential — the operator
@@ -3451,6 +3478,27 @@ mod tests {
             handout.platform(Platform::GitHub).map(Secret::expose),
             Some(TOKEN)
         );
+    }
+
+    /// The checkout is made from the handout, so the repository has to travel
+    /// on it — for a job. A foreman has no workspace and nothing to check out,
+    /// and that is decided by the constructor rather than left to a caller;
+    /// see `docs/decisions/0050-the-repository-is-checked-out-before-the-first-turn.md`.
+    #[test]
+    fn a_job_is_handed_its_projects_repository_and_a_foreman_is_not() {
+        let (state, mine, _) = two_projects();
+        let expected = state
+            .projects
+            .get(&mine)
+            .map(|project| project.repository.clone())
+            .expect("a watched project");
+
+        let job = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine)
+            .expect("a watched project");
+        assert_eq!(job.repository(), Some(expected.as_str()));
+
+        let foreman = Handout::for_foreman(&state, mine).expect("a watched project");
+        assert_eq!(foreman.repository(), None);
     }
 
     /// How a job speaks without a terminal — the invariant in

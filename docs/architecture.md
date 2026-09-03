@@ -64,8 +64,11 @@ first.
   interrupted by the daemon being killed is resumed at startup rather than
   abandoned, per
   `docs/decisions/0015-a-job-survives-the-daemon-dying.md`. It provisions the
-  workspace and not its contents — nothing here delivers a repository, and an
-  agent that needs one clones it, per
+  workspace with the project's repository already checked out in it — before
+  the agent's first turn, inside the same container, with the platform's own
+  tool and the job's own credential, per
+  `docs/decisions/0050-the-repository-is-checked-out-before-the-first-turn.md`,
+  which reversed that half of
   `docs/decisions/0016-the-agent-clones-the-repository.md`. The agent reaches
   platforms through those platforms' own tools rather than through anything
   hosted here — see
@@ -160,12 +163,15 @@ nobody is a wish.
   and the test is evidence about what the mechanism actually permits.
 
   This once said *no two jobs share a working tree*, which named the files
-  instead of the boundary. Since
-  `docs/decisions/0016-the-agent-clones-the-repository.md` a job may have no
-  working tree at all and the invariant is untouched — which is the sense in
+  instead of the boundary. Under
+  `docs/decisions/0016-the-agent-clones-the-repository.md` a job could have no
+  working tree at all and the invariant was untouched — which is the sense in
   which naming the container was always the more accurate claim, and the
   clearest sign that the older wording described an implementation rather than a
   property.
+  `docs/decisions/0050-the-repository-is-checked-out-before-the-first-turn.md`
+  gives every job a working tree again, and the invariant is still about the
+  container: the checkout is made inside it, from nothing on the host.
 - **Nothing served to a browser can carry a credential.** What the dashboard
   reads is a small set of plain types holding counts, names and paths, built on
   the server from the domain and never the domain itself. *Defended by* those

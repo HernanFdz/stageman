@@ -547,6 +547,21 @@ pub enum AgentError {
         /// What it printed, if anything — prefixed and truncated, or empty.
         message: String,
     },
+    /// The repository could not be checked out before the agent's first turn.
+    ///
+    /// Its own variant rather than [`AgentError::Container`], because the
+    /// container is fine and the agent never ran: this is a credential that
+    /// does not open the repository, or a URL that names nothing, failing
+    /// before a model turn is spent — which is the point of doing it first,
+    /// per
+    /// `docs/decisions/0050-the-repository-is-checked-out-before-the-first-turn.md`.
+    #[error("the repository {repository} could not be checked out: {message}")]
+    Checkout {
+        /// What was asked for.
+        repository: String,
+        /// What the tool printed.
+        message: String,
+    },
     /// The container was asked to continue a session it does not have.
     ///
     /// Nothing is written until something is said, so a container stopped
@@ -1414,6 +1429,18 @@ pub async fn begin(
     }
 
     hold(runtime, name).await?;
+    // The workspace is filled before the agent is run, and inside the
+    // container it will run in: a coding agent reads a project's instructions
+    // when its session starts, so a checkout made during the first turn is
+    // one the agent's own machinery never loads — see
+    // `docs/decisions/0050-the-repository-is-checked-out-before-the-first-turn.md`.
+    // A foreman's handout carries no repository, and its image has no tool to
+    // clone with, so the step is a job's alone. With one platform, holding
+    // its credential is what decides which tool makes the clone.
+    if let Some(repository) = handout.repository() {
+        let platform = handout.platform(Platform::GitHub).map(|_| Platform::GitHub);
+        check_out(runtime, name, repository, platform).await?;
+    }
     let container = spawn(runtime, &agent_arguments(name), &[])?;
     converse(container, Opening::Fresh, tools, handout.kit(), question).await
 }
@@ -1443,6 +1470,91 @@ fn agent_arguments(name: &str) -> Vec<String> {
         name.to_owned(),
         AGENT_PROGRAM.to_owned(),
     ]
+}
+
+/// The variable the checkout step reads the repository from.
+///
+/// Not a secret, and not forwarded from this process the way credentials are:
+/// it is set on the one command that needs it, so a URL is on that command
+/// line and nothing else is.
+const REPOSITORY_VARIABLE: &str = "STAGEMAN_REPOSITORY";
+
+/// What checks the repository out into a container's workspace, before its
+/// agent is run for the first time — see
+/// `docs/decisions/0050-the-repository-is-checked-out-before-the-first-turn.md`.
+///
+/// Pure, so what runs in the container can be asserted without one. The
+/// repository travels in a variable rather than in the script, so it needs no
+/// quoting and the script is the same text for every job.
+fn checkout_arguments(name: &str, repository: &str, platform: Option<Platform>) -> Vec<String> {
+    vec![
+        "exec".to_owned(),
+        "--env".to_owned(),
+        format!("{REPOSITORY_VARIABLE}={repository}"),
+        name.to_owned(),
+        "sh".to_owned(),
+        "-c".to_owned(),
+        checkout_script(platform).to_owned(),
+    ]
+}
+
+/// The checkout itself, as the shell inside the container runs it.
+///
+/// Two shapes, decided by whether the job holds a credential for the
+/// repository's platform. With one, the platform's own tool makes the clone
+/// with the credential already in the environment, configures git to push
+/// with it — the tool leaves no helper behind on its own, measured — and sets
+/// the commit identity to the account the credential belongs to, spelled the
+/// way the platform spells a private address. Without one, plain git clones
+/// what is public, and there is no account to be.
+///
+/// Asserted as literal text, because this is the one place the project types
+/// commands into a container on a job's behalf.
+const fn checkout_script(platform: Option<Platform>) -> &'static str {
+    match platform {
+        Some(Platform::GitHub) => {
+            "set -eu\n\
+             gh repo clone \"$STAGEMAN_REPOSITORY\" .\n\
+             gh auth setup-git --hostname github.com\n\
+             account=\"$(gh api user --jq '\"\\(.id)+\\(.login)\"')\"\n\
+             git config --global user.name \"${account#*+}\"\n\
+             git config --global user.email \"${account}@users.noreply.github.com\"\n"
+        }
+        None => "set -eu\ngit clone \"$STAGEMAN_REPOSITORY\" .\n",
+    }
+}
+
+/// Runs the checkout in a container that is up.
+///
+/// # Errors
+///
+/// Fails if the runtime cannot be run, or if the checkout does — a credential
+/// that does not open the repository, a URL that names nothing, or a
+/// workspace that already holds something — with what the tool printed,
+/// before any model turn is spent.
+#[mutants::skip]
+async fn check_out(
+    runtime: &ContainerRuntime,
+    name: &str,
+    repository: &str,
+    platform: Option<Platform>,
+) -> Result<(), AgentError> {
+    let done = tokio::process::Command::new(runtime.path())
+        .args(checkout_arguments(name, repository, platform))
+        .kill_on_drop(true)
+        .output()
+        .await
+        .map_err(|source| AgentError::Runtime {
+            path: runtime.path().to_owned(),
+            source,
+        })?;
+    if done.status.success() {
+        return Ok(());
+    }
+    Err(AgentError::Checkout {
+        repository: repository.to_owned(),
+        message: String::from_utf8_lossy(&done.stderr).trim().to_owned(),
+    })
 }
 
 /// Leaves a container running, whether or not it already was.
@@ -3376,6 +3488,57 @@ mod tests {
         discard(&runtime, name).await.expect("it is removable");
     }
 
+    /// Asserted whole, the way a kickoff is: this is the one place the
+    /// project types commands into a container on a job's behalf, and a
+    /// change to it changes what every job starts from without any other
+    /// test noticing.
+    #[test]
+    fn the_checkout_reads_exactly_as_written() {
+        assert_eq!(
+            checkout_script(Some(Platform::GitHub)),
+            "set -eu\n\
+             gh repo clone \"$STAGEMAN_REPOSITORY\" .\n\
+             gh auth setup-git --hostname github.com\n\
+             account=\"$(gh api user --jq '\"\\(.id)+\\(.login)\"')\"\n\
+             git config --global user.name \"${account#*+}\"\n\
+             git config --global user.email \"${account}@users.noreply.github.com\"\n"
+        );
+        assert_eq!(
+            checkout_script(None),
+            "set -eu\ngit clone \"$STAGEMAN_REPOSITORY\" .\n"
+        );
+    }
+
+    /// The repository travels on the one command that needs it and never in
+    /// the script, so the script is the same text for every job and a URL
+    /// needs no quoting.
+    #[test]
+    fn the_checkout_runs_in_the_named_container_with_the_repository_in_its_environment() {
+        let arguments = checkout_arguments(
+            "stageman-job-1",
+            "https://example.invalid/repo.git",
+            Some(Platform::GitHub),
+        );
+
+        assert_eq!(
+            &arguments[..4],
+            [
+                "exec",
+                "--env",
+                "STAGEMAN_REPOSITORY=https://example.invalid/repo.git",
+                "stageman-job-1",
+            ]
+        );
+        assert_eq!(&arguments[4..6], ["sh", "-c"]);
+        assert_eq!(arguments[6], checkout_script(Some(Platform::GitHub)));
+        assert_eq!(arguments.len(), 7);
+        assert!(
+            !arguments[6].contains("example.invalid"),
+            "the script must not carry the URL: {}",
+            arguments[6]
+        );
+    }
+
     /// A published tunnel is reported by the runtime, and the report is read.
     ///
     /// The seam this feature turns on, and the one place a unit test cannot
@@ -3433,6 +3596,79 @@ mod tests {
             "a container that is gone cannot be reached, and says so",
         );
     }
+
+    /// The checkout is made in a container that is up, before any agent runs,
+    /// and lands at the workspace root — where the adapter looks for a
+    /// project's settings, per
+    /// `docs/decisions/0050-the-repository-is-checked-out-before-the-first-turn.md`.
+    ///
+    /// Needs a runtime and the network, and no credential: with no platform
+    /// credential the checkout is plain git against a public repository,
+    /// which is the path a job with nothing to authenticate with takes. What
+    /// a signed-in checkout adds — the helper and the identity — is asserted
+    /// as text above and exercised by the job that runs end to end under
+    /// `just image-session`.
+    #[tokio::test]
+    #[ignore = "needs a container runtime and the network; run `just image-handshake`"]
+    async fn a_repository_is_checked_out_before_any_agent_runs() {
+        let runtime = located_runtime();
+        let name = "stageman-job-checkout-probe";
+        discard(&runtime, name).await.expect("a clean slate");
+        let image = build(&runtime, Agent::Claude, Role::Job)
+            .await
+            .expect("the image builds");
+
+        let created = std::process::Command::new(runtime.path())
+            .args(retained_arguments(name, &image, Agent::Claude, &[]))
+            .output()
+            .expect("the runtime runs");
+        assert!(
+            created.status.success(),
+            "{}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+        hold(&runtime, name).await.expect("it starts");
+
+        check_out(&runtime, name, PUBLIC_REPOSITORY, None)
+            .await
+            .expect("a public repository checks out without a credential");
+
+        let inspected = std::process::Command::new(runtime.path())
+            .args([
+                "exec",
+                name,
+                "git",
+                "-C",
+                WORKSPACE,
+                "rev-parse",
+                "--show-toplevel",
+            ])
+            .output()
+            .expect("the runtime runs");
+        assert!(
+            inspected.status.success(),
+            "{}",
+            String::from_utf8_lossy(&inspected.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&inspected.stdout).trim(),
+            WORKSPACE,
+            "the checkout is the workspace itself, not a directory inside it",
+        );
+
+        // A workspace that already holds a checkout is refused loudly rather
+        // than nested into or overwritten.
+        let again = check_out(&runtime, name, PUBLIC_REPOSITORY, None).await;
+        assert!(
+            matches!(again, Err(AgentError::Checkout { .. })),
+            "{again:?}"
+        );
+
+        discard(&runtime, name).await.expect("it is removable");
+    }
+
+    /// A repository anybody can clone, for the checkout above.
+    const PUBLIC_REPOSITORY: &str = "https://github.com/octocat/Hello-World";
 
     mod costs_a_credential {
         use super::*;
