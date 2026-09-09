@@ -191,7 +191,11 @@ pub fn tools(warranted: &Warranted, kits: &[(String, String)]) -> Vec<Tool> {
         // A job may speak and may not start jobs. Under the warrant that was
         // the absence of a file; it is now this line, which is why it has a
         // test.
-        return vec![say];
+        //
+        // And it may say why it is stopping, which a foreman may not: a
+        // foreman has no state anybody acts on between turns, so a claim from
+        // one would be recorded nowhere.
+        return vec![say, stopping()];
     }
 
     let mut kit = serde_json::json!({
@@ -255,12 +259,69 @@ pub enum Call {
     Starting(Starting),
     /// Asking to say something to a person.
     Saying(String),
+    /// Saying why this turn is about to end.
+    ///
+    /// Carries the spelling as it arrived rather than a parsed claim, so that
+    /// an unreadable one is refused where every other unreadable argument is —
+    /// with a message naming what it could have been.
+    Stopping(String),
     /// A tool this instance does not serve, by name.
     NoSuchTool(String),
     /// Something needing no answer at all.
     Notification,
     /// Something this instance does not implement and need not.
     Ignored,
+}
+
+/// What a job says about why it is about to stop.
+///
+/// **Two, and never the other three.** A job can say it asked something or
+/// that it has something to show; it cannot claim to have failed, because a
+/// failure is observed rather than claimed, and it cannot claim to be paused,
+/// because that is a person's doing. See
+/// `docs/decisions/0055-a-job-says-why-it-stopped.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Claim {
+    /// It needs an answer from a person before it can go on.
+    Asked,
+    /// It believes the work is done and there is something to look at.
+    Proposed,
+}
+
+impl Claim {
+    /// How this is spelled by an agent calling the tool.
+    ///
+    /// The agent's vocabulary rather than this project's, and the difference is
+    /// deliberate: what a model reads has to say what the state *means*, where
+    /// the domain can afford one word because everything around it supplies
+    /// the context.
+    const fn spelling(self) -> &'static str {
+        match self {
+            Self::Asked => "waiting_for_an_answer",
+            Self::Proposed => "ready_for_review",
+        }
+    }
+
+    /// Every claim, so that the schema and the parser cannot disagree.
+    const ALL: &'static [Self] = &[Self::Asked, Self::Proposed];
+
+    /// What an agent's spelling means, if it means anything.
+    fn spelled(text: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|claim| claim.spelling() == text.trim())
+    }
+}
+
+#[cfg(feature = "server")]
+impl From<Claim> for stageman_core::Waiting {
+    fn from(claim: Claim) -> Self {
+        match claim {
+            Claim::Asked => Self::Asked,
+            Claim::Proposed => Self::Proposed,
+        }
+    }
 }
 
 /// What a request to start a job carries.
@@ -321,6 +382,9 @@ fn calling(params: &serde_json::Value) -> Call {
     if name == "say" {
         return Call::Saying(field("message"));
     }
+    if name == STOPPING {
+        return Call::Stopping(field("because"));
+    }
     if name != "start_job" {
         return Call::NoSuchTool(name.to_owned());
     }
@@ -329,6 +393,47 @@ fn calling(params: &serde_json::Value) -> Call {
         instructions: field("instructions"),
         kit: field("kit"),
     })
+}
+
+/// What the tool a job ends its turn with is called.
+///
+/// Named for the moment rather than for an act, because there is no act:
+/// nothing changes when it is called. What it does is leave a note that the
+/// instance reads when the turn actually ends.
+const STOPPING: &str = "stopping";
+
+/// The tool a job calls to say why it is stopping.
+///
+/// **The description is the whole of the feature.** Nothing forces an agent to
+/// call this, and a turn that ends without it is recorded as having said
+/// nothing — so what decides whether the two readings a person acts on
+/// differently ever get recorded is how plainly this asks. It names the moment
+/// twice for that reason.
+fn stopping() -> Tool {
+    let spellings: Vec<&str> = Claim::ALL.iter().map(|claim| claim.spelling()).collect();
+
+    Tool {
+        name: STOPPING,
+        description: "Call this immediately before you stop, every time, to say why you are \
+                      stopping. It is the only way anybody learns whether you are waiting on \
+                      them or offering them something to look at: a turn that ends without it \
+                      is recorded as having stopped for reasons nobody knows."
+            .to_owned(),
+        schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "because": {
+                    "type": "string",
+                    "enum": spellings,
+                    "description": "\"ready_for_review\" if you have done what was asked and \
+                                    there is something for a person to look at. \
+                                    \"waiting_for_an_answer\" if you need something from a \
+                                    person before you can go on.",
+                },
+            },
+            "required": ["because"],
+        }),
+    }
 }
 
 /// The credential a request presents, if it presents one.
@@ -452,6 +557,59 @@ async fn called(
         ),
         Call::Starting(starting) => starting_a_job(&store, &warranted, &starting, incoming.id),
         Call::Saying(message) => saying(&store, &warranted, &message, incoming.id).await,
+        Call::Stopping(because) => stopping_because(&warranted, &because, incoming.id),
+    }
+}
+
+/// Records why a job is about to stop.
+///
+/// **It changes no state**, and that is the load-bearing part: a job is
+/// working until its agent actually stops, and the reply gate leans on that to
+/// keep two replies from resuming one container. What this leaves is a note
+/// the instance reads when the turn ends — see
+/// `docs/decisions/0055-a-job-says-why-it-stopped.md`.
+///
+/// Refused for a foreman, which has no state between turns for a claim to be
+/// recorded against, and for a job with no turn running, which is what a claim
+/// arriving after its own turn was stopped looks like.
+#[mutants::skip]
+fn stopping_because(
+    warranted: &Warranted,
+    because: &str,
+    id: Option<serde_json::Value>,
+) -> axum::response::Response {
+    let Speaker::Job(job) = warranted.speaker else {
+        // Refused rather than merely unlisted, for the reason starting a job
+        // is: a tool nobody was offered can still be called by name.
+        tracing::warn!(project = %warranted.project, "a foreman said why it was stopping");
+        return failed(
+            id,
+            &format!("this instance serves no tool called {STOPPING:?}"),
+        );
+    };
+
+    let Some(claim) = Claim::spelled(because) else {
+        let offered = Claim::ALL
+            .iter()
+            .map(|claim| format!("{:?}", claim.spelling()))
+            .collect::<Vec<_>>()
+            .join(" or ");
+        return failed(
+            id,
+            &format!("{because:?} is not one of the reasons this takes. Use {offered}."),
+        );
+    };
+
+    if crate::claimed(job, claim.into()) {
+        succeeded(id, "noted")
+    } else {
+        // Nothing to describe. Said plainly rather than swallowed, because an
+        // agent that is told this has learned something true about itself.
+        tracing::debug!(%job, "said why it was stopping, with no turn running");
+        failed(
+            id,
+            "this job has no turn running, so there is nothing to say this about",
+        )
     }
 }
 
@@ -669,8 +827,8 @@ pub fn allowed_kits(
 #[cfg(test)]
 mod tests {
     use super::{
-        Call, PROTOCOL, Sessions, Speaker, Starting, Warranted, allowed_kits, axum, decode,
-        endpoint, named_kit, presented, tools,
+        Call, Claim, PROTOCOL, Sessions, Speaker, Starting, Warranted, allowed_kits, axum, calling,
+        decode, endpoint, named_kit, presented, tools,
     };
     use stageman_core::{ProjectId, Uuid};
 
@@ -861,6 +1019,87 @@ mod tests {
         assert!(sessions.holder(mine.expose()).is_some());
     }
 
+    /// A foreman is offered no way to say why it stopped.
+    ///
+    /// It has no state between turns for a claim to be recorded against, so a
+    /// foreman calling this would be describing something nothing reads. The
+    /// refusal is asserted twice, here and against a call, because a tool
+    /// nobody was offered can still be called by name.
+    #[test]
+    fn a_foreman_is_offered_no_tool_for_saying_why_it_stopped() {
+        let offered: Vec<_> = tools(&a_foreman(), &one_kit())
+            .iter()
+            .map(|tool| tool.name)
+            .collect();
+
+        assert!(!offered.contains(&"stopping"), "{offered:?}");
+    }
+
+    /// Every claim has a spelling of its own, and reads back as itself.
+    ///
+    /// The schema offers these spellings and the parser accepts them, so a
+    /// disagreement between the two is a tool a model can see and cannot
+    /// successfully call. Two sharing a spelling would be worse: one of the
+    /// readings would be unreachable, silently.
+    #[test]
+    fn every_claim_has_a_spelling_of_its_own() {
+        let spellings: std::collections::BTreeSet<&str> =
+            Claim::ALL.iter().map(|claim| claim.spelling()).collect();
+        assert_eq!(spellings.len(), Claim::ALL.len(), "{spellings:?}");
+
+        for claim in Claim::ALL.iter().copied() {
+            assert_eq!(Claim::spelled(claim.spelling()), Some(claim));
+        }
+    }
+
+    /// Anything else is refused rather than guessed at.
+    ///
+    /// A near miss is the interesting case: an agent writing `reviewed` has
+    /// said something, and treating it as *ready for review* would record a
+    /// claim from a spelling nobody offered.
+    #[test]
+    fn a_reason_this_tool_does_not_take_is_refused() {
+        assert_eq!(Claim::spelled("reviewed"), None);
+        assert_eq!(Claim::spelled(""), None);
+        assert_eq!(
+            Claim::spelled("  ready_for_review  "),
+            Some(Claim::Proposed),
+            "space around it is untidiness rather than a different word",
+        );
+    }
+
+    /// The tool's schema offers exactly the spellings the parser takes.
+    #[test]
+    fn the_tool_offers_the_spellings_it_accepts() {
+        let tool = super::stopping();
+        let offered = tool.schema["properties"]["because"]["enum"]
+            .as_array()
+            .expect("the reasons are a list")
+            .iter()
+            .filter_map(|value| value.as_str().map(str::to_owned))
+            .collect::<Vec<_>>();
+
+        assert_eq!(offered.len(), Claim::ALL.len(), "{offered:?}");
+        for spelling in &offered {
+            assert!(
+                Claim::spelled(spelling).is_some(),
+                "{spelling} is offered and not taken"
+            );
+        }
+    }
+
+    /// A call to it carries the reason as it arrived.
+    #[test]
+    fn a_call_saying_why_it_stopped_carries_the_reason() {
+        assert_eq!(
+            calling(&serde_json::json!({
+                "name": "stopping",
+                "arguments": {"because": "ready_for_review"},
+            })),
+            Call::Stopping("ready_for_review".to_owned()),
+        );
+    }
+
     /// A job may speak and may not start jobs, which is 0032's property.
     ///
     /// It used to hold by construction: a job's container was never given a
@@ -882,8 +1121,8 @@ mod tests {
             .collect();
         assert_eq!(
             offered,
-            vec!["say"],
-            "a job may say things and may not start jobs",
+            vec!["say", "stopping"],
+            "a job may say things and say why it stopped, and may not start jobs",
         );
 
         let foreman: Vec<_> = tools(&a_foreman(), &one_kit())
@@ -1115,6 +1354,18 @@ mod tests {
         /// declaration being attached to a real session request is covered
         /// rather than assumed — and bound on every interface, because that is
         /// the only address a container reaches on every platform.
+        /// The project a foreman is told about, in both tests below.
+        ///
+        /// A function because the two used to spell it out abreast, and the
+        /// bundle they now pass is the same one every time.
+        fn watching(project: stageman_core::ProjectId) -> stageman_foreman::Watching<'static> {
+            stageman_foreman::Watching {
+                project,
+                repository: "https://example.invalid/aviary",
+                kits: &[("claude", "a general-purpose coding agent")],
+            }
+        }
+
         #[tokio::test]
         #[ignore = "needs a container runtime, a built image, a credential and the network; run `just image-session`"]
         async fn a_real_agent_is_offered_the_tools_this_instance_serves() {
@@ -1186,10 +1437,9 @@ mod tests {
             let answer = stageman_foreman::attend(
                 &runtime,
                 &handout,
-                project,
-                "https://example.invalid/aviary",
+                watching(project),
+                store.instance(),
                 &stageman_agent::Tools::new(super::super::endpoint(port), credential),
-                &[("claude", "a general-purpose coding agent")],
                 stageman_foreman::Turn {
                     said: "Do not start anything. List the names of every tool you have whose \
                            name contains 'stageman', exactly as they are spelled. If you have \
@@ -1286,10 +1536,9 @@ mod tests {
             let answer = stageman_foreman::attend(
                 &runtime,
                 &handout,
-                project,
-                "https://example.invalid/aviary",
+                watching(project),
+                store.instance(),
                 &stageman_agent::Tools::new(super::super::endpoint(port), credential),
-                &[("claude", "a general-purpose coding agent")],
                 stageman_foreman::Turn {
                     said: "The README has a broken link in it. Please get that fixed.",
                     starting: stageman_foreman::Starting::Fresh,

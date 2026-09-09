@@ -24,7 +24,7 @@
 //! held to a test.
 
 use stageman_agent::{AgentError, Answer, ContainerRuntime};
-use stageman_core::{Agent, Handout, JobId, ProjectId, VariableName};
+use stageman_core::{Agent, Handout, InstanceId, JobId, ProjectId, VariableName};
 
 /// What every foreman's container is named for.
 ///
@@ -149,12 +149,16 @@ Whatever it has to say appears in this thread. Job {job}."
 pub async fn attend(
     runtime: &ContainerRuntime,
     handout: &Handout,
-    project: ProjectId,
-    repository: &str,
+    watching: Watching<'_>,
+    instance: InstanceId,
     tools: &stageman_agent::Tools,
-    kits: &[(&str, &str)],
     turn: Turn<'_>,
 ) -> Result<Answer, ForemanError> {
+    let Watching {
+        project,
+        repository,
+        kits,
+    } = watching;
     let name = container(project);
     let existing = stageman_agent::abandoned(runtime)
         .await
@@ -175,7 +179,7 @@ pub async fn attend(
                 .await
                 .map_err(ForemanError::Agent)?;
             let first = format!("{}\n\n{}", opening(repository), asked(turn, kits));
-            return stageman_agent::begin(runtime, handout, &name, Some(tools), &first)
+            return stageman_agent::begin(runtime, handout, &name, instance, Some(tools), &first)
                 .await
                 .map_err(ForemanError::Agent);
         }
@@ -203,7 +207,7 @@ pub async fn attend(
         // was told who it is and then asked nothing would have spent a turn
         // saying hello.
         let first = format!("{}\n\n{}", opening(repository), asked(turn, kits));
-        stageman_agent::begin(runtime, handout, &name, Some(tools), &first)
+        stageman_agent::begin(runtime, handout, &name, instance, Some(tools), &first)
             .await
             .map_err(ForemanError::Agent)
     }
@@ -335,6 +339,24 @@ pub struct Turn<'a> {
     pub starting: Starting,
 }
 
+/// The project a foreman is thinking about, as it needs to know it.
+///
+/// Three values that have always travelled together and were three arguments
+/// until the instance became a fourth: which project this is, the repository
+/// its jobs work on, and the kits they may run on. Bundled rather than passed
+/// abreast because a caller that got two of them from one project and the
+/// third from another would compile — and would have a foreman start a job on
+/// somebody else's repository.
+#[derive(Debug, Clone, Copy)]
+pub struct Watching<'a> {
+    /// Which project this foreman belongs to.
+    pub project: ProjectId,
+    /// Where its jobs work.
+    pub repository: &'a str,
+    /// The kits its jobs may run on, each with what the operator wants it for.
+    pub kits: &'a [(&'a str, &'a str)],
+}
+
 /// What a foreman is told when a turn is picking up an interrupted one.
 ///
 /// Its own paragraph rather than a clause in the message, and prepended rather
@@ -444,6 +466,19 @@ pub const fn attention_notice() -> &'static str {
 #[must_use]
 pub const fn busy_notice() -> &'static str {
     "This job is still working, so that did not reach it. Wait until it stops, then say it again."
+}
+
+/// What a thread is told when a reply arrives for a job that is over.
+///
+/// Distinct from the notice for a job that was never here, and the difference
+/// is the one thing a person needs: this job existed and this thread was its
+/// thread, so a reply landing here is not a mistake about where to say it. It
+/// is a conversation that has ended, and there is nothing to reopen — the
+/// container went with the retirement, and the session with it.
+#[must_use]
+pub const fn over_notice() -> &'static str {
+    "This job is over, so that did not reach it. Nothing more can be added to it — \
+start a new job if there is still work here."
 }
 
 /// What a job's agent is told when a person replies on its thread.
@@ -574,7 +609,13 @@ pub enum Voice {
 /// nothing to open, and an unconditional instruction would have it inventing
 /// one to comply.
 ///
-/// The last paragraph is conditional for a different reason, and one worth
+/// **The closing instruction is unconditional and the one before it is not.**
+/// Saying something needs a channel; saying why you stopped does not, because
+/// it is recorded on the job and read from the dashboard. So every job is told
+/// to call it, including a job on a project nobody has bound a channel to —
+/// see `docs/decisions/0055-a-job-says-why-it-stopped.md`.
+///
+/// The paragraph before it is conditional for a different reason, and one worth
 /// knowing before changing it. `docs/open-questions.md` records that this
 /// instruction cannot honestly become *ask and wait* until a reply can reach a
 /// running job, and it still does not say that: what changed is where a
@@ -688,7 +729,14 @@ merge it, do not deploy anything, and do not push to the default branch. \
 Somebody reads what you propose before it counts for anything, which is what \
 lets you work unattended.
 
-{speaking}"
+{speaking}
+
+Before you stop, call the `stopping` tool, every time and last of all. Say \
+`ready_for_review` if you have done what was asked and there is something for a \
+person to look at, or `waiting_for_an_answer` if you need something from a \
+person before you can go on. Nothing else tells anybody which of the two this \
+is, so a job that stops without calling it is recorded as having stopped for \
+reasons nobody knows."
     )
 }
 
@@ -765,7 +813,13 @@ deploy anything, and do not push to the default branch. Somebody reads what you 
 it counts for anything, which is what lets you work unattended.
 
 If you need an answer from a person before you can continue, say so plainly and stop. Do not \
-guess, and do not wait — nobody is watching this terminal."
+guess, and do not wait — nobody is watching this terminal.
+
+Before you stop, call the `stopping` tool, every time and last of all. Say `ready_for_review` if \
+you have done what was asked and there is something for a person to look at, or \
+`waiting_for_an_answer` if you need something from a person before you can go on. Nothing else \
+tells anybody which of the two this is, so a job that stops without calling it is recorded as \
+having stopped for reasons nobody knows."
         );
     }
 
@@ -822,7 +876,13 @@ deploy anything, and do not push to the default branch. Somebody reads what you 
 it counts for anything, which is what lets you work unattended.
 
 If you need an answer from a person before you can continue, say so plainly and stop. Do not \
-guess, and do not wait — nobody is watching this terminal."
+guess, and do not wait — nobody is watching this terminal.
+
+Before you stop, call the `stopping` tool, every time and last of all. Say `ready_for_review` if \
+you have done what was asked and there is something for a person to look at, or \
+`waiting_for_an_answer` if you need something from a person before you can go on. Nothing else \
+tells anybody which of the two this is, so a job that stops without calling it is recorded as \
+having stopped for reasons nobody knows."
         );
     }
 
@@ -916,7 +976,13 @@ do.
 
 Use it during the work as well, whenever you need an answer from a person: say what you need, \
 then stop. It reaches somebody who can answer, but not now — no reply arrives in this session, \
-so do not wait for one and do not guess."
+so do not wait for one and do not guess.
+
+Before you stop, call the `stopping` tool, every time and last of all. Say `ready_for_review` if \
+you have done what was asked and there is something for a person to look at, or \
+`waiting_for_an_answer` if you need something from a person before you can go on. Nothing else \
+tells anybody which of the two this is, so a job that stops without calling it is recorded as \
+having stopped for reasons nobody knows."
         );
     }
 
@@ -1070,6 +1136,10 @@ it again."
         assert_eq!(
             super::resumed_notice(),
             "This instance restarted while it was working on that. It is picking it up again now."
+        );
+        assert_eq!(
+            super::over_notice(),
+            "This job is over, so that did not reach it. Nothing more can be added to it — start a new job if there is still work here."
         );
     }
 

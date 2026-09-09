@@ -5,6 +5,18 @@ Accepted. Depends on
 `docs/decisions/0035-an-image-is-built-never-named.md`, which is what makes a
 second image cost nothing to ship.
 
+**Its mechanism is replaced by
+`docs/decisions/0051-an-image-is-named-by-the-recipe-it-is-built-from.md`** and
+its decision is untouched. Two stages of one file become two compositions of
+four fragments, selected by role rather than by `--target`. The property this
+record bought with a stage boundary — that the job's image is the foreman's
+plus one layer, sharing every layer up to the split — is now bought by
+concatenation order, and measured to hold: a job's recipe is a foreman's byte
+for byte with the platform fragment appended, so the second build is a cache
+hit throughout. What that record's rejected *two recipes, one per role* refused
+is refused just as firmly, and by construction rather than by discipline: there
+is no second copy of the head to drift.
+
 ## Context
 
 One image serves both halves of `docs/architecture.md` §1. It carries the

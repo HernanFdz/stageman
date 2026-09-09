@@ -100,7 +100,16 @@ mutants = "0.0.4"
 #
 # Not optional, unlike everything the daemon needs. An icon is drawn in the
 # browser, which is the half that has no features beyond the framework.
-lucide-dioxus = { version = "2.43.0", features = ["accessibility", "arrows"] }
+# Icons are behind per-group features, and the groups are chosen to be the
+# smallest that cover what is drawn: `shapes` and `notifications` are 92 icons
+# between them, where the trash can that would have said *discard* is in a
+# group of 162 on its own.
+lucide-dioxus = { version = "2.43.0", features = [
+    "accessibility",
+    "arrows",
+    "notifications",
+    "shapes",
+] }
 
 etcetera = { version = "0.11.0", optional = true }
 parking_lot = { version = "0.12.5", optional = true }

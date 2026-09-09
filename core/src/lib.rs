@@ -25,7 +25,7 @@
 //! crates that are allowed effects do that; this one stays a set of values a
 //! test can build exactly.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt;
 
 use aes_gcm::aead::{Aead, KeyInit};
@@ -97,6 +97,22 @@ pub struct ProjectId(Uuid);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct JobId(Uuid);
 
+/// Identifies one instance of this program.
+///
+/// **Not a fact about the work, and here anyway.** What it exists for is one
+/// question a container runtime cannot answer on its own: given a container
+/// carrying this project's label, did *this* instance create it? Two instances
+/// sharing a daemon is the ordinary case rather than an exotic one — a
+/// development instance served out of a checkout, and the real one — and
+/// without this each sees the other's containers as its own abandoned work.
+///
+/// It travels with the snapshot rather than with the machine, which is the
+/// opposite of the container runtime's path and for the opposite reason: a
+/// copied instance file is the same instance, and a second daemon on another
+/// machine has none of its containers to confuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct InstanceId(Uuid);
+
 macro_rules! identifier {
     ($name:ident) => {
         impl $name {
@@ -127,6 +143,7 @@ macro_rules! identifier {
 
 identifier!(ProjectId);
 identifier!(JobId);
+identifier!(InstanceId);
 
 /// A coding agent this project knows how to run.
 ///
@@ -665,7 +682,6 @@ pub struct Job {
     /// genuinely ran on that agent's defaults, so that is what it reads as —
     /// the default that is the true answer, per `docs/conventions.md` §4,
     /// rather than the substituted one it forbids.
-    #[serde(alias = "agent", deserialize_with = "kit_or_agent")]
     kit: Kit,
     /// Why the foreman started it, in prose.
     ///
@@ -684,6 +700,11 @@ pub struct Job {
     /// there is a gap between a job existing and an agent starting.
     pub created_at: Timestamp,
     /// Where it has got to.
+    ///
+    /// Read through a bridge, because the shape on disk changed: a private
+    /// deserialiser beside this type reads what the last release wrote as well
+    /// as what this one does.
+    #[serde(deserialize_with = "progress_or_older")]
     pub progress: Progress,
     /// Where its conversation happens, once there is one.
     ///
@@ -747,34 +768,23 @@ impl Job {
     }
 }
 
-/// Reads a kit, or the bare agent name a job was recorded with before kits
-/// existed.
-///
-/// The current spelling is tried first. The older one is a string naming an
-/// agent, which no kit deserialises as — a kit's variants all carry a payload
-/// — so the two cannot be confused.
-fn kit_or_agent<'de, D>(deserializer: D) -> Result<Kit, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Written {
-        Kit(Kit),
-        Agent(Agent),
-    }
-
-    Ok(match Written::deserialize(deserializer)? {
-        Written::Kit(kit) => kit,
-        Written::Agent(agent) => Kit::defaults(agent),
-    })
-}
-
 /// Where a job has got to.
 ///
-/// The states `docs/architecture.md` §1 says this crate holds. Deliberately
-/// three and not more: they are what somebody has to *act* on, and a state
-/// nobody acts on differently is a label rather than a state.
+/// The states `docs/architecture.md` §1 says this crate holds, and the shape
+/// is two levels rather than one because two different questions are being
+/// answered — see
+/// `docs/decisions/0052-a-jobs-state-says-what-somebody-does-about-it.md`.
+///
+/// **The outer level is what the system does with a job**: resume it, leave it
+/// alone, or reclaim what it was holding. Three, and every caller that asks a
+/// behavioural question matches on exactly these three and stays at three when
+/// a reading is added. **The inner level is what a person does about it**, and
+/// only the dashboard and whoever reads it care.
+///
+/// A state nobody acts on differently is still a label rather than a state,
+/// and that rule is what puts *done* and *discarded* inside one variant rather
+/// than beside each other at the top: the system does the same thing with
+/// both.
 ///
 /// Note what is absent. There is no *interrupted*, although a job's container
 /// is stopped every time the daemon dies. That is a fact about the runtime and
@@ -801,40 +811,150 @@ pub enum Progress {
     /// dead and no process is running anywhere — see
     /// `docs/decisions/0015-a-job-survives-the-daemon-dying.md`. The word is
     /// about the work, not about a process.
-    ///
-    /// The alias is what lets a snapshot written before the rename still open.
-    /// `docs/decisions/0011-state-is-a-snapshot-not-a-database.md` says a
-    /// rename makes an existing file fail to load, and this is a rename of a
-    /// value that goes on disk — so the old spelling has to keep parsing. It
-    /// is read-only: writing uses the new name, so a snapshot upgrades itself
-    /// the first time anything changes.
-    #[serde(alias = "Running")]
     Working,
-    /// Its agent stopped, and nothing has been given to it since.
+    /// Its agent stopped, and it can be given something.
     ///
-    /// **Says nothing about how it went, deliberately.** This used to be
-    /// called *completed*, which claimed the work had ended — and that is a
-    /// claim this system cannot make. An agent stops when it is finished, and
-    /// equally when it has asked a question, when it wants a decision, and
-    /// when it is waiting on something outside the repository altogether.
-    /// Nothing here can tell those apart, so the state names the only fact
-    /// available: it is not working, and it can be given something.
+    /// **Says nothing about how it went**, and the payload says what it is
+    /// waiting for — which are two different claims and only the second is
+    /// ever a guess. This used to be called *completed*, which claimed the
+    /// work had ended, and that is a claim this system cannot make.
+    Idle(Waiting),
+    /// It is over, and nothing more will be given to it.
     ///
-    /// The tell that the old name was wrong is that the notice this project
-    /// already sends says *the agent has stopped* rather than *finished* —
-    /// the message was honest and the state was not.
+    /// The container is gone with everything in it, and the record is all that
+    /// is left. See
+    /// `docs/decisions/0052-a-jobs-state-says-what-somebody-does-about-it.md`.
+    Retired(Outcome),
+}
+
+impl Progress {
+    /// Whether this job is over.
     ///
-    /// Aliased for the same reason `Working` is: every job already on disk
-    /// says `Completed`.
-    #[serde(alias = "Completed")]
-    Idle,
-    /// It could not be finished, and this is what went wrong.
+    /// The question nearly every caller actually asks, and worth a method
+    /// rather than a pattern at each of them: a retired job takes no reply, is
+    /// never resumed, holds no container and is not swept.
+    #[must_use]
+    pub const fn is_retired(&self) -> bool {
+        matches!(self, Self::Retired(_))
+    }
+}
+
+/// What an idle job is waiting for.
+///
+/// **Every one of these is a job somebody could give something to**, which is
+/// what makes them one state with five readings rather than five states: the
+/// system does exactly the same thing with all of them, and a person does
+/// something different about each. That split — the outer level for what the
+/// system does, the inner for what a person does — is the whole shape of
+/// [`Progress`].
+///
+/// Four of the five are the agent's own account of why it stopped, delivered
+/// by a tool it is asked to call before the turn ends. The fifth is what a
+/// turn that ended without one becomes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Waiting {
+    /// Its agent asked something and stopped, and an answer is what unblocks
+    /// it.
+    Asked,
+    /// Its agent believes the work is done and is inviting somebody to look.
+    ///
+    /// A claim rather than a fact, and deliberately so — nothing here can
+    /// check it, and `docs/decisions/0002-never-merge-never-deploy.md` means a
+    /// person reads what it proposed before any of it counts for anything.
+    Proposed,
+    /// A person stopped it while it was working.
+    ///
+    /// Distinct from every other reading because it is the only one nothing
+    /// inside the job decided. Nothing went wrong and nothing was finished:
+    /// somebody wanted it to stop.
+    Paused,
+    /// Its turn ended badly, and this is what went wrong.
+    ///
+    /// **Not an ending.** The container is still there with the session in it,
+    /// so this is a job waiting for whatever broke to be fixed — an expired
+    /// credential being the case that will arrive first. A reply is what
+    /// tries again. What makes a job *over* is [`Progress::Retired`] and
+    /// nothing here.
     ///
     /// Prose for a person reading the dashboard, like `reason` — not a code to
-    /// branch on. What a job that fails ought to do beyond this is
-    /// `docs/open-questions.md`'s question about credentials expiring, wearing
-    /// a different hat.
+    /// branch on.
     Failed(String),
+    /// Its turn ended, and the agent said nothing about which of these it was.
+    ///
+    /// The honest residual, and it must exist: a turn can end on a token
+    /// limit, on a refusal, or on an agent that simply did not call the tool.
+    /// Defaulting those to *asked* or *proposed* would record a claim nobody
+    /// made, which is the one failure this whole shape exists to avoid. A job
+    /// landing here is a prompt that was not followed, and it is visible.
+    Silent,
+}
+
+/// How a job that is over ended.
+///
+/// Three because a person does something different about each, and no more:
+/// this is the level `docs/conventions.md` §2 warns about, where a label that
+/// nobody acts on differently gets added because it reads well.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Outcome {
+    /// A person judged that it produced what was wanted.
+    Done,
+    /// A person judged that it did not, and kept nothing.
+    ///
+    /// Not a failure: the job ran, and what it produced was read and turned
+    /// down. The distinction from [`Waiting::Failed`] is who decided and
+    /// whether anything can still be done about it.
+    Discarded,
+    /// Its container went missing before it reached an ending of its own.
+    ///
+    /// The one outcome nobody chooses. A job is put here by the sweep, on
+    /// finding that what it was recorded as still needing is not there — most
+    /// plausibly removed by hand, or by a runtime that was reset. Terminal
+    /// because there is nothing left to resume: the session lived in that
+    /// container.
+    ///
+    /// It also covers the narrow case of a job killed between its record being
+    /// written and its container being created, which never had one. That is
+    /// the ordering `begin` chooses deliberately, and this is the state that
+    /// resolves it.
+    Lost,
+}
+
+/// Reads a job's progress, in this shape or in the one before it.
+///
+/// The bridge `docs/conventions.md` §4 requires for a value that goes on disk.
+/// What the last release wrote is `Working`, a bare `Idle`, or a `Failed`
+/// carrying prose; all three still parse, and the two that have moved arrive
+/// as the reading that is true of them. A bare `Idle` says the agent stopped
+/// and nothing more, which is exactly [`Waiting::Silent`] — the older format
+/// could not carry a claim, so no claim is invented for it.
+///
+/// The current shape is tried first and the two cannot be confused: this
+/// shape's `Idle` carries a payload and the older one does not, and nothing
+/// here spells `Failed` at the top level any more.
+fn progress_or_older<'de, D>(deserializer: D) -> Result<Progress, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Written {
+        Now(Progress),
+        Then(Older),
+    }
+
+    /// Only the spellings that have moved. `Working` is unchanged, so it
+    /// parses as itself above and never reaches here.
+    #[derive(Deserialize)]
+    enum Older {
+        Idle,
+        Failed(String),
+    }
+
+    Ok(match Written::deserialize(deserializer)? {
+        Written::Now(progress) => progress,
+        Written::Then(Older::Idle) => Progress::Idle(Waiting::Silent),
+        Written::Then(Older::Failed(why)) => Progress::Idle(Waiting::Failed(why)),
+    })
 }
 
 /// One message waiting for, or held by, a project's foreman.
@@ -1155,7 +1275,26 @@ impl State {
             project
                 .jobs
                 .iter()
-                .filter(|(_, job)| job.progress == Progress::Working)
+                .filter(|(_, job)| matches!(job.progress, Progress::Working))
+                .map(|(id, _)| *id)
+        })
+    }
+
+    /// Every job that is not over.
+    ///
+    /// What a sweep has to account for, which is wider than [`working`]: a job
+    /// that is merely idle still owns a container, and a container that has
+    /// gone missing means the same thing whether or not a turn was running in
+    /// it. Retired jobs are excluded because there is nothing left of them to
+    /// reconcile against.
+    ///
+    /// [`working`]: State::working
+    pub fn unfinished(&self) -> impl Iterator<Item = JobId> + '_ {
+        self.projects.values().flat_map(|project| {
+            project
+                .jobs
+                .iter()
+                .filter(|(_, job)| !job.progress.is_retired())
                 .map(|(id, _)| *id)
         })
     }
@@ -1331,10 +1470,6 @@ impl State {
                         name: project.name.clone(),
                         repository: project.repository.clone(),
                         foreman_kit: project.foreman_kit.clone(),
-                        // Never written. The field exists to read files from
-                        // before kits, and writing it would carry both shapes
-                        // for ever.
-                        job_agents: BTreeSet::new(),
                         // Names in the clear beside their kits, on the terms a
                         // variable's name travels: a name is not a credential,
                         // and the operator typed it in order to read it back.
@@ -1353,7 +1488,14 @@ impl State {
             })
             .collect::<Result<BTreeMap<_, _>, SealError>>()?;
 
-        Ok(Snapshot { agents, projects })
+        Ok(Snapshot {
+            // Left for whoever holds the file to fill in, for the reason the
+            // field itself gives: this crate has no identity of its own to
+            // write here, and inventing one would need randomness.
+            instance: None,
+            agents,
+            projects,
+        })
     }
 }
 
@@ -1604,22 +1746,8 @@ pub struct SealedProject {
     /// §4, which gained that rule from this exact field failing to open a
     /// real instance. Written under this name from now on, so a file upgrades
     /// itself on its first change.
-    #[serde(
-        alias = "orchestrator_agent",
-        alias = "foreman_agent",
-        deserialize_with = "kit_or_agent"
-    )]
+    #[serde()]
     pub foreman_kit: Kit,
-    /// The agents its jobs ran on, in a file written before kits existed.
-    ///
-    /// Read and never written. `kits` below replaced it, and a file that says
-    /// this and not that is opened as one kit per agent named, on that
-    /// agent's defaults. A field replaced by one of another shape is a rename
-    /// with a conversion attached, and the conversion lives in the open path
-    /// rather than in a default — because the true answer depends on what the
-    /// old field said.
-    #[serde(default, skip_serializing)]
-    pub job_agents: BTreeSet<Agent>,
     /// The kits its jobs may run on, keyed by plain text.
     ///
     /// Plain text rather than the validated name, for the reason the
@@ -1684,6 +1812,21 @@ pub struct SealedProject {
 /// handles a reference that does not resolve.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Snapshot {
+    /// Which instance this file belongs to.
+    ///
+    /// **Deliberately not on [`State`].** Nothing in the domain reads it: it
+    /// answers a question about *containers*, which is the runtime's world and
+    /// not this crate's, and putting it in the state would mean every place
+    /// that builds one has to invent an identity it will never look at. So it
+    /// lives on the file, and whoever operates the file holds the value.
+    ///
+    /// Optional because a file written before this existed has none, and
+    /// because this crate cannot mint one — that needs randomness, and the
+    /// rule against effects here is what keeps every identifier arriving from
+    /// outside. Whoever opens such a file gives it one, and the next write
+    /// keeps it.
+    #[serde(default)]
+    pub instance: Option<InstanceId>,
     /// The configured agents, sealed.
     pub agents: BTreeMap<Agent, SealedAgentConfig>,
     /// The projects, sealed.
@@ -1700,7 +1843,11 @@ impl Snapshot {
     /// foreman's has no configuration. That check is what lets every
     /// later caller look that agent up without handling an absence.
     pub fn open(self, key: &Key) -> Result<State, OpenError> {
-        let Self { agents, projects } = self;
+        let Self {
+            instance: _,
+            agents,
+            projects,
+        } = self;
 
         let agents = agents
             .into_iter()
@@ -1751,29 +1898,14 @@ impl Snapshot {
                     })
                     .collect::<Result<BTreeMap<_, _>, OpenError>>()?;
                 // Where a kit's name stops being believed, on the same terms.
-                // A file from before kits existed names agents instead, and
-                // each becomes a kit named after its agent, on that agent's
-                // defaults: the true answer, since nothing else existed to run
-                // on, rather than a substitute for one.
-                let kits = if project.kits.is_empty() {
-                    project
-                        .job_agents
-                        .into_iter()
-                        .map(|agent| {
-                            let name = KitName::new(agent.name()).map_err(OpenError::KitName)?;
-                            Ok((name, KitConfig::defaults(agent)))
-                        })
-                        .collect::<Result<BTreeMap<_, _>, OpenError>>()?
-                } else {
-                    project
-                        .kits
-                        .into_iter()
-                        .map(|(name, offered)| {
-                            let name = KitName::new(name).map_err(OpenError::KitName)?;
-                            Ok((name, offered))
-                        })
-                        .collect::<Result<BTreeMap<_, _>, OpenError>>()?
-                };
+                let kits = project
+                    .kits
+                    .into_iter()
+                    .map(|(name, offered)| {
+                        let name = KitName::new(name).map_err(OpenError::KitName)?;
+                        Ok((name, offered))
+                    })
+                    .collect::<Result<BTreeMap<_, _>, OpenError>>()?;
                 Ok((
                     id,
                     Project {
@@ -1901,6 +2033,19 @@ pub enum Role {
     Foreman,
     /// One agent doing one piece of work, in one workspace.
     Job,
+}
+
+impl Role {
+    /// Every role there is.
+    ///
+    /// For anything that has to consider all of them rather than the one it
+    /// was handed — today, the sweep that reclaims images, which keeps the one
+    /// each role would currently be built from. Written out rather than
+    /// derived, like [`Agent::ALL`], and forgetting to add a role here costs
+    /// an image kept that could have been reclaimed: the cheapest failure
+    /// available, and the reason this is a list rather than a derive this
+    /// crate would otherwise have no use for.
+    pub const ALL: &'static [Self] = &[Self::Foreman, Self::Job];
 }
 
 /// Exactly what one agent process is allowed to see, and nothing more.
@@ -2219,8 +2364,9 @@ mod tests {
     use super::{
         Agent, AgentConfig, Arriving, Attending, BASE64, Channel, ChannelConfig, ClaudeEffort,
         ClaudeModel, Errand, Handout, HandoutError, Inconsistent, Job, JobId, Key, Kit, KitConfig,
-        KitName, KitNameError, NONCE_LEN, Nonce, OpenError, Platform, Progress, Project, ProjectId,
-        Recipient, Secret, Snapshot, State, Taken, Thread, VariableName, VariableNameError,
+        KitName, KitNameError, NONCE_LEN, Nonce, OpenError, Outcome, Platform, Progress, Project,
+        ProjectId, Recipient, Secret, Snapshot, State, Taken, Thread, VariableName,
+        VariableNameError, Waiting,
     };
     use base64::Engine as _;
     use jiff::Timestamp;
@@ -2405,69 +2551,6 @@ mod tests {
         assert_eq!(KitName::new("  deep ").expect("a name").as_str(), "deep");
         assert_eq!(KitName::new("   "), Err(KitNameError::Empty));
         assert_eq!(KitName::new(""), Err(KitNameError::Empty));
-    }
-
-    /// A project written before kits existed opens with one kit per agent it
-    /// named, on that agent's defaults, and is written back as kits.
-    ///
-    /// Literal text, for the reason every older-file test here is: the writer
-    /// no longer emits `job_agents` at all, so only a file from before the
-    /// change can produce the input that has to keep opening. Both spellings
-    /// of the foreman's field are covered, since both are on disk somewhere.
-    #[test]
-    fn a_project_recorded_with_agents_opens_with_a_kit_per_agent() {
-        for foreman_field in ["orchestrator_agent", "foreman_agent"] {
-            let older = format!(
-                r#"{{
-                  "agents": {{ "Claude": {{ "auth_token": {} }} }},
-                  "projects": {{
-                    "00000000-0000-0000-0000-000000000003": {{
-                      "name": "example",
-                      "repository": "https://example.invalid/repo",
-                      "{foreman_field}": "Claude",
-                      "job_agents": ["Claude"],
-                      "credentials": {{}},
-                      "jobs": {{}}
-                    }}
-                  }}
-                }}"#,
-                serde_json::to_string(
-                    &Secret::new("agent-token".to_owned())
-                        .seal(&key(), [1; NONCE_LEN])
-                        .expect("sealing a well-formed secret")
-                )
-                .expect("a sealed secret serialises")
-            );
-
-            let parsed: Snapshot =
-                serde_json::from_str(&older).expect("an older file still parses");
-            let state = parsed.open(&key()).expect("and still opens");
-            let project = state.projects.values().next().expect("the project");
-
-            assert_eq!(project.foreman_kit, Kit::defaults(Agent::Claude));
-            assert_eq!(project.kits, default_kits(), "under {foreman_field}");
-
-            let written = serde_json::to_value(
-                state
-                    .seal(&key(), &mut counting_nonces())
-                    .expect("sealing cannot fail"),
-            )
-            .expect("a snapshot serialises");
-            let on_disk = &written["projects"]["00000000-0000-0000-0000-000000000003"];
-            assert!(
-                on_disk.get("job_agents").is_none(),
-                "the old shape is not written"
-            );
-            assert!(on_disk.get("foreman_agent").is_none());
-            assert_eq!(
-                on_disk["kits"]["Claude"]["kit"],
-                serde_json::json!({ "Claude": { "model": { "Default": { "effort": "Default" } } } }),
-            );
-            assert_eq!(
-                on_disk["foreman_kit"],
-                serde_json::json!({ "Claude": { "model": { "Default": { "effort": "Default" } } } }),
-            );
-        }
     }
 
     /// A kit an operator wrote survives the snapshot boundary as itself: its
@@ -2773,7 +2856,7 @@ mod tests {
     #[test]
     fn an_idle_jobs_thread_still_routes_to_it() {
         let (mut state, _, job, thread) = listening();
-        state.job_mut(job).expect("the job").progress = Progress::Idle;
+        state.job_mut(job).expect("the job").progress = Progress::Idle(Waiting::Silent);
 
         assert_eq!(
             state.recipient(
@@ -2975,27 +3058,38 @@ mod tests {
         assert_eq!(thread.id, "1728312345.678901");
     }
 
-    /// A job recorded before the states were renamed still opens.
+    /// A job as the last release wrote it still opens, in every state it
+    /// could have been in.
     ///
-    /// The other half of the sentence in
-    /// `docs/decisions/0011-state-is-a-snapshot-not-a-database.md`: an added
-    /// field is free with a default, and **a rename is not free at all** — the
-    /// old spelling is on disk and stays there until something rewrites it.
-    /// Caught by a test that already existed, which is the only reason the
-    /// rename did not make every instance unopenable.
+    /// The literal-older-file test `docs/conventions.md` §4 demands, and the
+    /// window it covers is one release rather than every release there has
+    /// been: what is supported is what the latest tag wrote, and everything
+    /// older is dropped in the same change that would have had to carry it.
+    /// The writer always emits the current spelling, so only a file from
+    /// before the change can produce the input that breaks.
+    ///
+    /// The two states that moved arrive as the reading that is true of them.
+    /// A bare `Idle` becomes `Silent` rather than a guess: that format had
+    /// nowhere to record why an agent stopped, so no claim is invented for it.
     #[test]
-    fn a_job_recorded_under_the_old_state_names_still_opens() {
+    fn a_job_written_by_the_last_release_still_opens_in_every_state() {
         for (written, expected) in [
-            ("Running", Progress::Working),
-            ("Completed", Progress::Idle),
+            ("\"Working\"", Progress::Working),
+            ("\"Idle\"", Progress::Idle(Waiting::Silent)),
+            (
+                r#"{"Failed": "the credential had expired"}"#,
+                Progress::Idle(Waiting::Failed("the credential had expired".to_owned())),
+            ),
         ] {
             let older = format!(
                 r#"{{
-                  "agent": "Claude",
+                  "kit": {{ "Claude": {{ "model": {{ "Default": {{ "effort": "Default" }} }} }} }},
                   "reason": "an issue was opened",
                   "kickoff": "work on it",
                   "created_at": "1970-01-01T00:00:00Z",
-                  "progress": "{written}"
+                  "progress": {written},
+                  "thread": null,
+                  "reported": {{}}
                 }}"#
             );
 
@@ -3003,48 +3097,67 @@ mod tests {
                 .unwrap_or_else(|why| panic!("{written} must still parse: {why}"));
             assert_eq!(job.progress, expected);
         }
-
-        // And what is written back is the new spelling, so a file upgrades
-        // itself the first time anything changes rather than carrying both
-        // forever.
-        let written = serde_json::to_string(&Progress::Working).expect("it serialises");
-        assert_eq!(written, r#""Working""#);
     }
 
-    /// A job recorded before kits existed still opens, on its agent's defaults.
-    ///
-    /// The bare agent name is what every such job was written with, and the
-    /// default is the true answer rather than a substituted one: nothing else
-    /// existed to run on. Literal text for the reason the tests around it are —
-    /// the writer always emits the new spelling, so only a file from before the
-    /// change can produce the input that breaks.
+    /// What is written back is the current spelling, so a file upgrades itself
+    /// the first time anything changes rather than carrying both for ever.
     #[test]
-    fn a_job_recorded_with_a_bare_agent_still_opens_on_that_agents_defaults() {
-        let older = r#"{
-          "agent": "Claude",
-          "reason": "an issue was opened",
-          "kickoff": "work on it",
-          "created_at": "1970-01-01T00:00:00Z",
-          "progress": "Working"
-        }"#;
+    fn a_state_is_written_in_the_shape_this_build_reads() {
+        let written = serde_json::to_value(Progress::Idle(Waiting::Asked)).expect("it serialises");
+        assert_eq!(written, serde_json::json!({ "Idle": "Asked" }));
 
-        let job: Job = serde_json::from_str(older).expect("the bare spelling still parses");
-        assert_eq!(*job.kit(), Kit::defaults(Agent::Claude));
-        assert!(
-            job.reported.is_empty(),
-            "nothing was ever read back from a job this old"
-        );
+        let over = serde_json::to_value(Progress::Retired(Outcome::Lost)).expect("it serialises");
+        assert_eq!(over, serde_json::json!({ "Retired": "Lost" }));
 
-        // And what is written back is a kit, so a file upgrades itself the
-        // first time anything changes rather than carrying both for ever.
-        let written = serde_json::to_value(&job).expect("a job serialises");
-        assert!(
-            written.get("agent").is_none(),
-            "the old spelling is not written"
-        );
         assert_eq!(
-            written["kit"],
-            serde_json::json!({ "Claude": { "model": { "Default": { "effort": "Default" } } } }),
+            serde_json::to_value(Progress::Working).expect("it serialises"),
+            serde_json::json!("Working"),
+        );
+    }
+
+    /// Every reading round-trips as itself, including the one carrying prose.
+    #[test]
+    fn every_reading_survives_being_written_and_read_back() {
+        for progress in [
+            Progress::Working,
+            Progress::Idle(Waiting::Asked),
+            Progress::Idle(Waiting::Proposed),
+            Progress::Idle(Waiting::Paused),
+            Progress::Idle(Waiting::Silent),
+            Progress::Idle(Waiting::Failed("it ran out of tokens".to_owned())),
+            Progress::Retired(Outcome::Done),
+            Progress::Retired(Outcome::Discarded),
+            Progress::Retired(Outcome::Lost),
+        ] {
+            let job = Job {
+                progress: progress.clone(),
+                ..Job::new(
+                    Kit::defaults(Agent::Claude),
+                    "a reason".to_owned(),
+                    "some work".to_owned(),
+                    Timestamp::UNIX_EPOCH,
+                )
+            };
+            let written = serde_json::to_string(&job).expect("a job serialises");
+            let read: Job = serde_json::from_str(&written).expect("and parses back");
+            assert_eq!(read.progress, progress);
+        }
+    }
+
+    /// Only a retired job is over, and every reading of idle is not.
+    ///
+    /// The question every behavioural caller asks, so inverting it would let a
+    /// reply reach a job whose container is gone and stop one reaching a job
+    /// that is merely waiting.
+    #[test]
+    fn a_job_is_over_only_once_it_is_retired() {
+        assert!(Progress::Retired(Outcome::Done).is_retired());
+        assert!(Progress::Retired(Outcome::Lost).is_retired());
+        assert!(!Progress::Working.is_retired());
+        assert!(!Progress::Idle(Waiting::Silent).is_retired());
+        assert!(
+            !Progress::Idle(Waiting::Failed("broken".to_owned())).is_retired(),
+            "a failed job still has its container and can be given another go",
         );
     }
 
@@ -3125,154 +3238,70 @@ mod tests {
         assert_eq!(Kit::defaults(Agent::Claude).agent(), Agent::Claude);
     }
 
-    /// A job recorded before threads existed still opens, with none.
+    /// A snapshot as the last release wrote it still opens, whole.
     ///
-    /// The same rule as the channel map below, and the reason
-    /// `docs/conventions.md` §4 asks for this shape of test rather than a
-    /// round trip: the writer always emits the field, so only a file from
-    /// before the change can produce the input that breaks.
-    #[test]
-    fn a_job_recorded_before_threads_existed_still_opens() {
-        let older = format!(
-            r#"{{
-              "agents": {{ "Claude": {{ "auth_token": {} }} }},
-              "projects": {{
-                "00000000-0000-0000-0000-000000000003": {{
-                  "name": "example",
-                  "repository": "https://example.invalid/repo",
-                  "orchestrator_agent": "Claude",
-                  "job_agents": ["Claude"],
-                  "credentials": {{}},
-                  "channels": {{}},
-                  "jobs": {{
-                    "00000000-0000-0000-0000-000000000009": {{
-                      "agent": "Claude",
-                      "reason": "an issue was opened",
-                      "kickoff": "work on it",
-                      "created_at": "1970-01-01T00:00:00Z",
-                      "progress": "Running"
-                    }}
-                  }}
-                }}
-              }}
-            }}"#,
-            serde_json::to_string(
-                &Secret::new("agent-token".to_owned())
-                    .seal(&key(), [1; NONCE_LEN])
-                    .expect("sealing a well-formed secret")
-            )
-            .expect("a sealed secret serialises")
-        );
-
-        let parsed: Snapshot = serde_json::from_str(&older).expect("an older file still parses");
-        let state = parsed.open(&key()).expect("and still opens");
-        let job = state
-            .projects
-            .values()
-            .next()
-            .expect("the project survived")
-            .jobs
-            .values()
-            .next()
-            .expect("and its job");
-
-        assert!(job.thread.is_none(), "a job from before threads has none");
-        assert_eq!(job.reason, "an issue was opened");
-    }
-
-    /// A file written before channels existed still opens.
-    ///
-    /// The regression test for the one failure mode
-    /// `docs/decisions/0011-state-is-a-snapshot-not-a-database.md` names:
-    /// nothing versions a snapshot, so a field added without a default stops
-    /// every existing file loading, and there is only the one file. It cost a
-    /// running instance to find out, which is the cheapest place it could have
-    /// happened and not somewhere to leave it.
+    /// The literal-older-file test `docs/conventions.md` §4 asks for, and the
+    /// only one: what this build promises to read is what the latest tag
+    /// wrote, and everything older was dropped in the change that would have
+    /// had to keep carrying it. Two tests used to sit here, pinning files from
+    /// before threads and before channels, and both described releases this
+    /// one no longer reads.
     ///
     /// Written as literal text rather than by round-tripping, deliberately.
     /// The current writer always emits every field, so a round trip cannot
-    /// produce the input that breaks — only a file from before the change can,
+    /// produce the input that breaks — only a file from another release can,
     /// and this is one.
     ///
     /// **Nothing in here may be renamed to match the source.** These are the
-    /// names an old file carries, not the names the types use, and a
-    /// search-and-replace across the crate will silently update them and leave
-    /// a test that proves nothing. That happened: a rename swept through this
-    /// fixture, the suite stayed green, and a real instance would not open.
-    #[test]
-    fn a_snapshot_written_before_channels_existed_still_opens() {
-        let older = format!(
-            r#"{{
-              "agents": {{
-                "Claude": {{ "auth_token": {} }}
-              }},
-              "projects": {{
-                "00000000-0000-0000-0000-000000000003": {{
-                  "name": "example",
-                  "repository": "https://example.invalid/repo",
-                  "orchestrator_agent": "Claude",
-                  "job_agents": ["Claude"],
-                  "credentials": {{}},
-                  "jobs": {{}}
-                }}
-              }}
-            }}"#,
-            serde_json::to_string(
-                &Secret::new("agent-token".to_owned())
-                    .seal(&key(), [1; NONCE_LEN])
-                    .expect("sealing a well-formed secret")
-            )
-            .expect("a sealed secret serialises")
-        );
-
-        let parsed: Snapshot = serde_json::from_str(&older).expect("an older file still parses");
-        let state = parsed.open(&key()).expect("and still opens");
-        let project = state
-            .projects
-            .values()
-            .next()
-            .expect("the project survived");
-
-        assert!(
-            project.channels.is_empty(),
-            "a file that predates channels describes a project with none"
-        );
-        assert_eq!(project.name, "example");
-    }
-
-    /// `docs/conventions.md` §4: an added field is free *with* a default, and
-    /// only a file written before it existed can prove it.
+    /// names the last release wrote, not the names the types happen to use
+    /// now, and a search-and-replace across the crate will silently update
+    /// them and leave this passing against a file nothing ever produced.
     ///
-    /// The current writer always emits every field, so a round trip cannot
-    /// catch this — the input that breaks has to be written out as literal
-    /// text. This one predates variables entirely, and describes a project
-    /// that had none, which is why the empty map is the true answer here
-    /// rather than a substituted default.
+    /// Note what is absent: the field naming the agents a project's jobs could
+    /// run on. The last release read one and never wrote one, so a file it
+    /// wrote has kits and nothing else.
     #[test]
-    fn a_snapshot_written_before_variables_existed_still_opens() {
+    fn a_snapshot_written_by_the_last_release_still_opens() {
+        let sealed = serde_json::to_string(
+            &Secret::new("agent-token".to_owned())
+                .seal(&key(), [1; NONCE_LEN])
+                .expect("sealing a well-formed secret"),
+        )
+        .expect("a sealed secret serialises");
         let older = format!(
             r#"{{
               "agents": {{
-                "Claude": {{ "auth_token": {token} }}
+                "Claude": {{ "auth_token": {sealed} }}
               }},
               "projects": {{
                 "00000000-0000-0000-0000-000000000003": {{
                   "name": "example",
                   "repository": "https://example.invalid/repo",
-                  "foreman_agent": "Claude",
-                  "job_agents": ["Claude"],
+                  "foreman_kit": {{ "Claude": {{ "model": {{ "Default": {{ "effort": "Default" }} }} }} }},
+                  "kits": {{
+                    "Claude": {{
+                      "kit": {{ "Claude": {{ "model": {{ "Default": {{ "effort": "Default" }} }} }} }},
+                      "description": "its defaults"
+                    }}
+                  }},
                   "credentials": {{}},
                   "channels": {{}},
-                  "jobs": {{}}
+                  "variables": {{}},
+                  "jobs": {{
+                    "00000000-0000-0000-0000-000000000009": {{
+                      "kit": {{ "Claude": {{ "model": {{ "Default": {{ "effort": "Default" }} }} }} }},
+                      "reason": "an issue was opened",
+                      "kickoff": "work on it",
+                      "created_at": "1970-01-01T00:00:00Z",
+                      "progress": "Idle",
+                      "thread": null,
+                      "reported": {{}}
+                    }}
+                  }},
+                  "attending": "Idle"
                 }}
               }}
-            }}"#,
-            token = serde_json::to_string(
-                &Secret::new("agent-token".to_owned())
-                    .seal(&key(), [1; NONCE_LEN])
-                    .expect("sealing a well-formed secret")
-            )
-            .expect("a sealed secret serialises")
+            }}"#
         );
 
         let parsed: Snapshot = serde_json::from_str(&older).expect("an older file still parses");
@@ -3283,11 +3312,23 @@ mod tests {
             .next()
             .expect("the project survived");
 
-        assert!(
-            project.variables.is_empty(),
-            "a file that predates variables describes a project with none"
-        );
         assert_eq!(project.name, "example");
+        assert_eq!(
+            project
+                .kits
+                .keys()
+                .map(KitName::to_string)
+                .collect::<Vec<_>>(),
+            vec!["Claude".to_owned()],
+        );
+
+        let job = project.jobs.values().next().expect("and its job");
+        assert_eq!(job.reason, "an issue was opened");
+        assert_eq!(
+            job.progress,
+            Progress::Idle(Waiting::Silent),
+            "a state that could not say why becomes the reading that says so",
+        );
     }
 
     /// Where a name stops being believed.
@@ -3807,6 +3848,41 @@ mod tests {
     /// A refusal says which rule broke and never what was in the box.
     ///
     /// The name is not a credential, but an operator pasting a value into the
+    /// What is unfinished is everything that is not over, and nothing else.
+    ///
+    /// Both halves matter and each fails differently. Missing a job leaves a
+    /// container nothing reconciles against; including a retired one has the
+    /// sweep reporting the same casualty on every start for ever.
+    #[test]
+    fn unfinished_is_every_job_that_is_not_over() {
+        let mut state = populated();
+        let project = *state.projects.keys().next().expect("a project");
+        let jobs = &mut state.projects.get_mut(&project).expect("the project").jobs;
+        jobs.clear();
+
+        let going = JobId::from_uuid(Uuid::from_u128(21));
+        let waiting = JobId::from_uuid(Uuid::from_u128(22));
+        let over = JobId::from_uuid(Uuid::from_u128(23));
+        for (id, progress) in [
+            (going, Progress::Working),
+            (waiting, Progress::Idle(Waiting::Asked)),
+            (over, Progress::Retired(Outcome::Done)),
+        ] {
+            let mut job = Job::new(
+                Kit::defaults(Agent::Claude),
+                "a reason".to_owned(),
+                "some work".to_owned(),
+                Timestamp::UNIX_EPOCH,
+            );
+            job.progress = progress;
+            jobs.insert(id, job);
+        }
+
+        let mut unfinished: Vec<JobId> = state.unfinished().collect();
+        unfinished.sort_by_key(|job| job.as_uuid().as_u128());
+        assert_eq!(unfinished, vec![going, waiting]);
+    }
+
     /// wrong box is exactly the mistake this type exists to catch — so the
     /// error has to be safe to log even when the "name" is a token.
     #[test]
@@ -3831,7 +3907,7 @@ mod tests {
             .values_mut()
             .next()
             .expect("that project has one job");
-        job.progress = Progress::Failed("the credential had expired".to_owned());
+        job.progress = Progress::Idle(Waiting::Failed("the credential had expired".to_owned()));
 
         let recovered = state
             .seal(&key(), &mut counting_nonces())
@@ -3848,7 +3924,9 @@ mod tests {
 
         assert_eq!(
             carried,
-            Some(Progress::Failed("the credential had expired".to_owned()))
+            Some(Progress::Idle(Waiting::Failed(
+                "the credential had expired".to_owned()
+            )))
         );
     }
 
@@ -3866,7 +3944,7 @@ mod tests {
         let mut state = populated();
         let id = state.working().next().expect("one to start with");
 
-        state.job_mut(id).expect("it is there").progress = Progress::Idle;
+        state.job_mut(id).expect("it is there").progress = Progress::Idle(Waiting::Silent);
 
         assert_eq!(state.working().count(), 0);
         assert!(
@@ -3983,47 +4061,6 @@ mod tests {
             .attending;
         assert_eq!(attending.on().map(|e| e.said.as_str()), Some("in hand"));
         assert_eq!(attending.waiting(), 1);
-    }
-
-    /// A project recorded before foremen had an inbox still opens.
-    #[test]
-    fn a_project_recorded_before_the_inbox_existed_still_opens() {
-        let older = format!(
-            r#"{{
-              "agents": {{ "Claude": {{ "auth_token": {} }} }},
-              "projects": {{
-                "00000000-0000-0000-0000-000000000003": {{
-                  "name": "example",
-                  "repository": "https://example.invalid/repo",
-                  "orchestrator_agent": "Claude",
-                  "job_agents": ["Claude"],
-                  "credentials": {{}},
-                  "channels": {{}},
-                  "jobs": {{}}
-                }}
-              }}
-            }}"#,
-            serde_json::to_string(
-                &Secret::new("agent-token".to_owned())
-                    .seal(&key(), [1; NONCE_LEN])
-                    .expect("sealing a well-formed secret")
-            )
-            .expect("a sealed secret serialises")
-        );
-
-        let parsed: Snapshot = serde_json::from_str(&older).expect("an older file still parses");
-        let state = parsed.open(&key()).expect("and still opens");
-
-        assert_eq!(
-            state
-                .projects
-                .values()
-                .next()
-                .expect("the project survived")
-                .attending,
-            Attending::Idle,
-            "a project from before the inbox has nothing waiting"
-        );
     }
 
     /// A job's project is findable from the job alone.

@@ -23,7 +23,7 @@ neither — it was a claim about two adapters at one moment, and the second half
 was never tried at all.
 
 Both halves were measured, against the adapter pinned in
-`agent/images/claude/Dockerfile`. Protocol names below are unbackticked
+`agent/images/claude/install.fragment`. Protocol names below are unbackticked
 deliberately: they belong to a dependency, and `just drift` resolves a
 backticked identifier against this source.
 

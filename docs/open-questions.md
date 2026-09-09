@@ -111,43 +111,47 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   recording enough to recreate the container rather than restart it, which is a
   different design and not a patch to this one.
 
-- **When is a finished job's container removed?** Nothing does it today, so
-  `docs/decisions/0015-a-job-survives-the-daemon-dying.md` accumulates one
-  writable layer per job — the leak that record's own narrowed bar permits by
-  name. Deliberately unanswered until a job exists to retire, because the shape
-  of the rule depends on what finishing looks like. The leading candidate is
-  that an operator retires a job from the dashboard and that removes its
-  container, with automatic retirement later: an agent that judges itself
-  finished asks for confirmation on a channel and retires on the answer.
+- **Should a job's tools be a prerequisite rather than a courtesy?**
+  `docs/decisions/0055-a-job-says-why-it-stopped.md` measured something that
+  changes what the endpoint is for: with it unreachable, a job told to call a
+  tool failed outright about half the time rather than carrying on without
+  tools. `docs/decisions/0034-tools-are-served-not-shipped.md` recorded the
+  opposite — an unreachable endpoint "does not error" — and that was true while
+  nothing insisted on a tool.
 
-  One part is now settled by default rather than by decision, which is worth
-  saying out loud: the startup sweep removes *nothing*. A container it cannot
-  place is reported and left, because a container is where a job's work lives
-  and "I did not recognise this, so I deleted it" is the wrong answer when the
-  instance is the thing that is wrong — a snapshot restored from an older
-  backup, most obviously. So nothing is ever removed automatically today, and
-  the question below is entirely about when that should change. Note
-  what that second half already is — a job asking a question and waiting for a
-  human, which is
-  `docs/decisions/0005-conversation-happens-on-channels.md` and the last item
-  under Next. So this is not a separate feature to design; it falls out of the
-  channel work, and the cheap thing to record now is that the two are the same
-  problem.
+  Nothing is broken today, because the daemon serves the endpoint before it
+  runs anything. What is undecided is whether a job should *check* before it
+  starts, and what it should do when the check fails. The cheap answer is to
+  reach the endpoint from inside the container once, before the first turn, and
+  fail the job loudly rather than let its agent die halfway through with a
+  message about a container exiting. Settled by deciding what a job that cannot
+  start should look like in general, which is the same question the expiring
+  credential above is wearing a different hat of.
 
-  `docs/decisions/0042-a-job-shows-its-work-on-a-subdomain.md` raises the price
-  of leaving one. A retained container is no longer only a writable layer
-  nobody reclaims: it is a reachable one, serving whatever its agent last put
-  up, for as long as it exists. Retirement is now the only way to close a
-  tunnel, which turns this from housekeeping into the answer to a question that
-  record could not answer for itself.
+- **When does a job retire itself?**
+  `docs/decisions/0053-a-job-is-stopped-or-retired-by-a-person.md` answers the
+  half a person performs: an operator stops a working job or ends an idle one
+  with a verdict, and ending it removes the container, the session in it and
+  the images nothing else needs. What is left is the half nobody presses.
 
-  `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`
-  raises it again, and changes what is being reclaimed. A container showing
-  something is not stopped, so an agent that leaves a server bound holds a
-  *running* container indefinitely — this stops being about disk and becomes
-  about memory on somebody's laptop. The cheap answer in the meantime needs no
-  design at all: ask the agent to stop what it is showing, which is a message
-  to a job, and that already works.
+  An agent that believes it is finished already says so — that is what
+  *proposed* means in
+  `docs/decisions/0052-a-jobs-state-says-what-somebody-does-about-it.md` — and
+  what turns a proposal into an ending is a person. So the question is whether
+  a job should be able to ask for its own retirement on a channel and act on
+  the answer, which is the same shape as everything else under
+  `docs/decisions/0005-conversation-happens-on-channels.md` and falls out of
+  the channel work rather than needing a design of its own.
+
+  Deliberately not a timer, and worth writing down so nobody adds one: the
+  thing being reclaimed is somebody's unread work, and the only signal that it
+  has been read is a person saying so.
+
+  Note what has stopped being a reason to hurry. A container left behind used
+  to accumulate an image with it, and since
+  `docs/decisions/0051-an-image-is-named-by-the-recipe-it-is-built-from.md`
+  every container from one recipe shares one image. What a retained container
+  costs is its own writable layer, and memory if its tunnel is still answering.
 
 - **How is the foreman's long-lived container held open?**
   `docs/decisions/0012-agents-run-in-containers.md` puts the agent the

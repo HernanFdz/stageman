@@ -16,11 +16,14 @@
 #   demo:
 #       cargo run -- --fixtures tests/data
 
-# The recipe is compiled into the binary and built on demand, so there is no
-# tag here and no recipe that builds one — see
-# `docs/decisions/0035-an-image-is-built-never-named.md`. The two stages are
-# the only strings this file and the source both name, and the agent crate has
-# a test asserting that every stage it asks for is declared in the recipe.
+# The fragments a recipe is composed from are compiled into the binary and
+# built on demand, so there is nothing here that builds one for anybody else to
+# use — see
+# `docs/decisions/0051-an-image-is-named-by-the-recipe-it-is-built-from.md`.
+# The composition below is the one thing this file and the source both know,
+# and it is deliberately not held together by a test: a wrong order fails
+# loudly and immediately, because a recipe whose first instruction is not a
+# `FROM` is refused by the runtime.
 
 [doc("Check the image still answers the protocol handshake, without compiling anything")]
 image-check:
@@ -34,12 +37,35 @@ image-check:
     # Shell rather than Rust on purpose, and that is the whole point of keeping
     # it: this holds when the repository does not compile, which is exactly
     # when you most want to know whether the container half still works. It
-    # therefore builds the recipe itself rather than asking the binary to.
+    # therefore composes the recipe itself rather than asking the binary to,
+    # which is also the whole demonstration that a recipe is `cat` and nothing
+    # cleverer — pipe the same three files through `shasum -a 256` and you have
+    # the name the binary would build it under.
     #
-    # A foreman's stage, because it is the smaller of the two and the adapter
+    # A foreman's recipe, because it is the shorter of the two and the adapter
     # it proves is in both.
-    image="$(docker build --quiet --target thinking - < agent/images/claude/Dockerfile)"
-    docker run -i --rm --network none "$image" < agent/images/claude/handshake.json
+    #
+    # Piped rather than read into a variable, because a command substitution
+    # eats the trailing newline and these are exactly the bytes the binary
+    # hashes: `cat` them into `shasum -a 256` and you have the name it would
+    # build this under.
+    image="$(cat agent/images/base.Dockerfile \
+        agent/images/claude/install.fragment \
+        agent/images/holding.fragment \
+        | docker build --quiet -)"
+    #
+    # The adapter is named here, and it is the one string this file and the
+    # agent crate both know. It has to be: an image holds a container open by
+    # default since
+    # `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`,
+    # so a run that names no command starts a container that sleeps and never
+    # speaks — which is what this recipe did, silently, from that decision
+    # until the one below it.
+    docker run -i --rm --network none "$image" claude-agent-acp \
+        < agent/images/claude/handshake.json
+    # Named by nobody, so it would be a dangling image for ever. The binary's
+    # own images are named and swept; this one is this recipe's to clean up.
+    docker rmi "$image" > /dev/null
 
 # Both of these greet the image, and the difference is what is on trial. The
 # recipe above tests the image with a redirect and a file, so it holds when this
@@ -78,10 +104,16 @@ image-handshake:
 # they fail loudly rather than skipping when no credential is present: a test
 # that passes because it could not run is worse than one that is honestly
 # absent.
+#
+# **A port of its own, and the reason is on this machine rather than in the
+# code.** One of these serves the tools a job is told to call, on the port a
+# container is told to reach — and the operator's own daemon is very likely
+# listening on the default one while these run. Set here rather than defaulted
+# in the source, because what wants moving is the test and not the product.
 [doc("Drive an agent that actually answers — needs a built image and a credential")]
 image-session:
-    cargo nextest run --workspace --locked --run-ignored ignored-only \
-        -E 'test(/costs_a_credential/)'
+    STAGEMAN_JOB_PORT=47114 cargo nextest run --workspace --locked \
+        --run-ignored ignored-only -E 'test(/costs_a_credential/)'
 
 # Not a test, and deliberately so: `just image-handshake` runs every ignored
 # test that costs no credential, so an ignored test which opened a pull request
