@@ -43,9 +43,12 @@ use agent_client_protocol::schema::v1::{
 };
 use agent_client_protocol::{ByteStreams, Client, ConnectionTo};
 use parking_lot::Mutex;
+use sha2::{Digest as _, Sha256};
 #[cfg(test)]
 use stageman_core::Channel;
-use stageman_core::{Agent, ClaudeEffort, ClaudeModel, Handout, Kit, Platform, Role, Secret};
+use stageman_core::{
+    Agent, ClaudeEffort, ClaudeModel, Handout, InstanceId, Kit, Platform, Role, Secret, Uuid,
+};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
 
@@ -224,56 +227,112 @@ impl ContainerRuntime {
     }
 }
 
-/// The recipe an agent's image is built from.
+/// The base every recipe starts from.
 ///
-/// Compiled in, which is the whole of
-/// `docs/decisions/0035-an-image-is-built-never-named.md`: what a host needs
-/// is a container runtime, and a recipe that ships beside the binary is a
-/// second thing to carry and a thing that can be older than the code driving
-/// it. It stays a file rather than a string literal so it keeps its comments
-/// and its diffs — `include_str!` is what makes it part of the artifact.
+/// Shared by every agent rather than chosen per agent, and that is a decision
+/// rather than a convenience — `docs/decisions/0051-an-image-is-named-by-the-recipe-it-is-built-from.md`.
+/// Everything composed after it assumes what is in it, so an adapter free to
+/// bring its own base would invalidate every other fragment and every
+/// container test that establishes they work together.
+const BASE: &str = include_str!("../images/base.Dockerfile");
+
+/// What holds a container open once the agent that ran in it has stopped.
 ///
-/// Adapter knowledge, for the same reason the agent set is closed: an image is
-/// code.
-const fn recipe(agent: Agent) -> &'static str {
+/// Composed after an agent's fragment and never before it, which is what makes
+/// its command the last one any recipe names: an adapter's fragment cannot
+/// replace it, because a later `CMD` is what would have to. A property of the
+/// order rather than a rule anybody keeps.
+const HOLDING: &str = include_str!("../images/holding.fragment");
+
+/// What a job needs in order to reach a repository, and a foreman does not.
+///
+/// Last, so that a job's recipe is a foreman's with this appended. The
+/// instructions before it are then identical byte for byte, which is what
+/// makes the two images share every layer up to this one and the second build
+/// a cache hit throughout — measured, and the property
+/// `docs/decisions/0036-a-foremans-image-is-not-a-jobs.md` used two stages to
+/// get.
+const PLATFORM: &str = include_str!("../images/platform.fragment");
+
+/// What installs one agent's adapter.
+///
+/// The only fragment that is genuinely one agent's, which is what the split
+/// into fragments is for. Adapter knowledge, for the same reason the agent set
+/// is closed: an image is code.
+const fn installing(agent: Agent) -> &'static str {
     match agent {
-        Agent::Claude => include_str!("../images/claude/Dockerfile"),
+        Agent::Claude => include_str!("../images/claude/install.fragment"),
     }
 }
 
-/// Which stage of a recipe one role's image is built from.
+/// The recipe one role's image is built from, composed from its fragments.
 ///
-/// The two names are the recipe's and this crate's at once, which is the one
-/// place they have to agree; a test below builds both so that renaming a stage
-/// in the recipe alone cannot pass. See
-/// `docs/decisions/0036-a-foremans-image-is-not-a-jobs.md` for why there are
-/// two at all.
-const fn stage(role: Role) -> &'static str {
-    match role {
-        Role::Foreman => "thinking",
-        Role::Job => "working",
+/// Composed here rather than written out per agent, because the alternative is
+/// a near-identical copy of the base, the holding command and the platform
+/// layer for every adapter — and copies drift on exactly the pinned versions
+/// that pinning exists to hold. Concatenated rather than templated: a
+/// placeholder would move a Dockerfile fact into this file, and every fragment
+/// is meant to stay text a runtime could build.
+///
+/// Nothing separates the pieces, so each fragment ends in a newline and a test
+/// says so. Gluing two instructions into one line is the failure that would
+/// otherwise be silent until a build fails somewhere unrelated.
+fn recipe(agent: Agent, role: Role) -> String {
+    let mut composed = String::from(BASE);
+    composed.push_str(installing(agent));
+    composed.push_str(HOLDING);
+    if matches!(role, Role::Job) {
+        composed.push_str(PLATFORM);
     }
+    composed
 }
 
-/// An image, named by its content and by nothing else.
+/// The repository every image this project builds is named under.
 ///
-/// There is no tag, which is the point rather than an omission: an image an
-/// operator could name is one they could name wrongly, and an image *nobody*
-/// can name cannot be stale, cannot be confused with another instance's, and
-/// needs no agreement between this crate and anything that builds it.
+/// One name for all of them, with the recipe's digest as the tag, so that a
+/// listing of what this project has built is one query and a name of ours can
+/// never collide with anything else on the daemon.
+const REPOSITORY: &str = "stageman";
+
+/// An image, named by the recipe it is built from.
 ///
-/// Opaque on purpose. What is inside is whatever the runtime answered with —
-/// a digest on one, a bare identifier on the other — and the only thing this
-/// project does with it is start a container.
+/// The name is the digest of the exact bytes handed to the build, so two
+/// containers wanting the same recipe want the same image and get it — which
+/// is the whole of
+/// `docs/decisions/0051-an-image-is-named-by-the-recipe-it-is-built-from.md`.
+/// It is still not a name an operator chooses: nothing can be stale under it,
+/// because a changed recipe is a changed name.
+///
+/// Opaque on purpose. The only things this project does with one are start a
+/// container from it and ask whether it is there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Image(String);
 
 impl Image {
-    /// The identifier, as the runtime wants it on a command line.
+    /// The name, as the runtime wants it on a command line.
     #[must_use]
     pub fn as_argument(&self) -> &str {
         &self.0
     }
+}
+
+/// What one recipe's image is called.
+///
+/// Over the recipe rather than over the fragments or anything this crate
+/// arranges, so the name has a definition outside this binary: it is the
+/// digest of what the build was given, and nothing else goes into it.
+///
+/// The digest formats itself as hexadecimal, which is a trait the digest
+/// crate's own dependency provides. Reached for rather than reimplemented: the
+/// alternatives are a formatting loop whose only error is one that cannot
+/// happen, or a table whose only failure is an index that cannot be out of
+/// range, and both are the shape `.quality/gate-reference.md` warns about —
+/// code pretending to handle something impossible.
+fn named(recipe: &str) -> Image {
+    Image(format!(
+        "{REPOSITORY}:{:x}",
+        Sha256::digest(recipe.as_bytes())
+    ))
 }
 
 /// How much of a failed build is kept, in lines counted from the end.
@@ -283,29 +342,73 @@ impl Image {
 /// a build that fails says so after however many layers succeeded first.
 const BUILD_TAIL: usize = 12;
 
-/// The arguments that build one stage of a recipe, reading it from standard
-/// input.
+/// The arguments that build a recipe under the name it hashes to.
 ///
 /// A build with no context at all — the trailing `-` — because the recipe is
 /// the only input there is. `docs/decisions/0034-tools-are-served-not-shipped.md`
 /// is what keeps that true: nothing this project writes goes in the image, so
 /// there is nothing a context could carry.
 ///
-/// Quiet, so that the identifier is the whole of standard output and can be
-/// taken as the answer. What a build has to say about itself still arrives on
-/// standard error, which is where the failure message below comes from.
-const fn build_arguments(role: Role) -> [&'static str; 5] {
-    ["build", "--quiet", "--target", stage(role), "-"]
+/// Quiet, because the name is already known here and the identifier a build
+/// prints is of no further use. What a build has to say about itself still
+/// arrives on standard error, which is where the failure message comes from.
+fn build_arguments(image: &Image) -> [&str; 5] {
+    ["build", "--quiet", "--tag", image.as_argument(), "-"]
 }
 
-/// Builds the image one container will run, and answers with its identity.
+/// The arguments that ask whether an image is already here.
+fn present_arguments(image: &Image) -> [&str; 5] {
+    [
+        "image",
+        "inspect",
+        "--format",
+        "{{.Id}}",
+        image.as_argument(),
+    ]
+}
+
+/// Whether the runtime already holds this image.
 ///
-/// Run in front of every container rather than once and remembered. A cached
-/// rebuild costs about a second and reaches no network, and it compares the
-/// recipe's instructions rather than a name — so it is a freshness check that
-/// an existence check could not be, and the runtime's own layer cache is a
-/// better memo than this process could keep: it survives a restart, and it
-/// notices an edit.
+/// Total, and that is the honest signature rather than a convenience: a
+/// runtime that cannot answer is one the build a moment later fails on loudly,
+/// so a second error path here would report the same thing twice and earlier.
+///
+/// Skipped by mutation testing, like everything here that drives the runtime:
+/// what it does is spawn a process and read an exit status.
+#[mutants::skip]
+async fn present(runtime: &ContainerRuntime, image: &Image) -> bool {
+    tokio::process::Command::new(runtime.path())
+        .args(present_arguments(image))
+        .kill_on_drop(true)
+        .output()
+        .await
+        .is_ok_and(|asked| asked.status.success())
+}
+
+/// One build at a time, for as long as this process lives.
+///
+/// Two containers starting together would otherwise both find their image
+/// absent and build it, and the second build would move the name onto its own
+/// copy and leave the first's unreferenced — which is measured to *delete* it,
+/// taking the image record out from under a container created from it a moment
+/// earlier. Serialising also makes the second build free rather than
+/// duplicated, because it finds what the first one left.
+///
+/// It serialises two builds of *different* images too, which is a cost worth
+/// naming: a foreman and a job starting at once wait for one another. They
+/// share every layer but the last, so the second is a cache hit either way.
+static BUILDING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Makes sure the image one container will run exists, and answers with its
+/// name.
+///
+/// **Built only if it is not already here**, which is the reversal
+/// `docs/decisions/0051-an-image-is-named-by-the-recipe-it-is-built-from.md`
+/// records. Freshness is not given up with the unconditional build: the name
+/// *is* the recipe, so an image found under it was built from these exact
+/// bytes and an edited recipe asks for a name nothing has. What building
+/// anyway would cost is measured and severe — the name moves to a new copy,
+/// and the old one is deleted from under every container already using it.
 ///
 /// # Errors
 ///
@@ -318,8 +421,19 @@ pub async fn build(
     agent: Agent,
     role: Role,
 ) -> Result<Image, AgentError> {
+    let recipe = recipe(agent, role);
+    let image = named(&recipe);
+
+    // Held across the check and the build both, because the two are one
+    // decision: a gap between them is where the second builder gets its
+    // answer wrong.
+    let _building = BUILDING.lock().await;
+    if present(runtime, &image).await {
+        return Ok(image);
+    }
+
     let mut building = tokio::process::Command::new(runtime.path())
-        .args(build_arguments(role))
+        .args(build_arguments(&image))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -338,7 +452,7 @@ pub async fn build(
     // to be written while the output is drained, for the reason [`greet`]
     // drains standard error while the exchange happens.
     writing
-        .write_all(recipe(agent).as_bytes())
+        .write_all(recipe.as_bytes())
         .await
         .map_err(|source| AgentError::Runtime {
             path: runtime.path().to_owned(),
@@ -353,11 +467,7 @@ pub async fn build(
         .await
         .map_err(AgentError::Exit)?;
 
-    outcome(
-        finished.status.success(),
-        &finished.stdout,
-        &finished.stderr,
-    )
+    outcome(finished.status.success(), image, &finished.stderr)
 }
 
 /// What a finished build means.
@@ -371,9 +481,9 @@ pub async fn build(
 /// Mutation testing is what found this. With the decision inline, a build that
 /// failed could have been reported as an image — and the reverse — with every
 /// test still green, because the only cases exercising it were `#[ignore]`d.
-fn outcome(succeeded: bool, answered: &[u8], complained: &[u8]) -> Result<Image, AgentError> {
+fn outcome(succeeded: bool, image: Image, complained: &[u8]) -> Result<Image, AgentError> {
     if succeeded {
-        Ok(Image(String::from_utf8_lossy(answered).trim().to_owned()))
+        Ok(image)
     } else {
         Err(AgentError::Build {
             message: last_words(complained),
@@ -403,6 +513,161 @@ fn last_words(said: &[u8]) -> String {
     } else {
         kept.join("; ")
     }
+}
+
+/// The arguments that list every image this project has built.
+///
+/// By reference rather than by label, because an image carries no label of
+/// this project's: what it carries is a name, and the name is ours by its
+/// repository. Both runtimes match every tag under a repository named this
+/// way — measured, because a filter that silently matched only one tag would
+/// make the sweep below reclaim nothing and say it swept.
+fn ours_arguments() -> Vec<String> {
+    vec![
+        "images".to_owned(),
+        "--filter".to_owned(),
+        format!("reference={REPOSITORY}"),
+        "--format".to_owned(),
+        "{{.Repository}}:{{.Tag}}".to_owned(),
+    ]
+}
+
+/// Every image this project has built and still has, by name.
+///
+/// # Errors
+///
+/// Fails if the runtime cannot be run, or refuses the query.
+#[mutants::skip]
+async fn ours(runtime: &ContainerRuntime) -> Result<Vec<String>, AgentError> {
+    let listed = tokio::process::Command::new(runtime.path())
+        .args(ours_arguments())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .map_err(|source| AgentError::Runtime {
+            path: runtime.path().to_owned(),
+            source,
+        })?;
+
+    if !listed.status.success() {
+        return Err(AgentError::Unusable {
+            path: runtime.path().to_owned(),
+            message: String::from_utf8_lossy(&listed.stderr).trim().to_owned(),
+        });
+    }
+    Ok(tagged(&String::from_utf8_lossy(&listed.stdout)))
+}
+
+/// The image names in what a listing reported.
+///
+/// Pure, so what a sweep works from can be tested without a runtime. Two
+/// things are dropped rather than carried: a blank line, which is what a
+/// runtime prints when it found nothing, and anything still carrying the
+/// runtime's word for *no name*, which is an image that lost its name between
+/// the listing and now and is not one this project can address.
+fn tagged(reported: &str) -> Vec<String> {
+    reported
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && !name.contains("<none>"))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Every image this build would use, which is what a sweep keeps.
+///
+/// Kept rather than reclaimed and rebuilt, for two reasons and the second is
+/// the one that decides it. A rebuild is wasted work when the next container
+/// wants exactly this. And a sweep that removed them would race the path that
+/// has just built one and not yet created its container, which is a job
+/// failing on an image that was there a moment ago.
+fn keeping() -> Vec<Image> {
+    Agent::ALL
+        .iter()
+        .copied()
+        .flat_map(|agent| {
+            Role::ALL
+                .iter()
+                .copied()
+                .map(move |role| named(&recipe(agent, role)))
+        })
+        .collect()
+}
+
+/// Whether a name is one of the images this build would use.
+///
+/// Pulled out of [`reclaim`] and named, for the reason `keeping` is: the loop
+/// around it drives a runtime and cannot be tested cheaply, and this is the
+/// decision that says whether anything is removed at all. Inverted, a sweep
+/// reclaims exactly the images the next container wants and keeps the ones
+/// nothing will ask for again.
+fn kept(keeping: &[Image], image: &str) -> bool {
+    keeping.iter().any(|keep| keep.as_argument() == image)
+}
+
+/// Removes one image unless something is using it.
+///
+/// **Unforced, and that is the whole of it.** The refusal is the runtime's
+/// own, decided atomically against every container it has — including
+/// containers this instance did not create and cannot see the point of. So
+/// there is no window in which a container is created from an image this has
+/// just decided was unused, and no need to ask what is using it first.
+///
+/// Total, like [`present`]: a refusal means something needs it, which is not a
+/// failure, and a runtime broken badly enough to matter fails loudly
+/// everywhere else in the same breath.
+#[mutants::skip]
+async fn discarded(runtime: &ContainerRuntime, image: &str) -> bool {
+    tokio::process::Command::new(runtime.path())
+        .args(["rmi", image])
+        .kill_on_drop(true)
+        .output()
+        .await
+        .is_ok_and(|removed| removed.status.success())
+}
+
+/// Removes every image of this project's that nothing needs, and says how many
+/// went.
+///
+/// What stops images accumulating once they have names:
+/// `docs/decisions/0051-an-image-is-named-by-the-recipe-it-is-built-from.md`
+/// makes every container from one recipe share one image, and this is what
+/// reclaims the image of a recipe that has been *edited* — the one case a
+/// shared name does not cover, because the old name goes on naming an image
+/// nothing will ask for again.
+///
+/// Deliberately blind to what a container is for. An image held by another
+/// instance's container is kept because that container is using it, not
+/// because this recognised it, which is what makes this safe to run while
+/// something else is running.
+///
+/// # Errors
+///
+/// Fails only if the runtime will not say what images it has. An image that
+/// will not go is kept and not counted, which is the ordinary outcome for
+/// every image a container needs.
+///
+/// Skipped by mutation testing, like everything here that drives the runtime:
+/// what it decides is the private `kept` beside it, which has its own test, and
+/// what it does is spawn a process per image.
+#[mutants::skip]
+pub async fn reclaim(runtime: &ContainerRuntime) -> Result<usize, AgentError> {
+    let ours = ours(runtime).await?;
+    let keeping = keeping();
+
+    // Collected rather than counted up, for the reason the sweep in **app**
+    // gives: the gate denies arithmetic that can overflow, and the escapes
+    // that quiet it are the ones that produce silent wrong values.
+    let mut gone: Vec<String> = Vec::new();
+    for image in ours {
+        if kept(&keeping, &image) {
+            continue;
+        }
+        if discarded(runtime, &image).await {
+            gone.push(image);
+        }
+    }
+    Ok(gone.len())
 }
 
 /// The arguments that start a container just long enough to be greeted.
@@ -1226,6 +1491,21 @@ const AGENT_PROGRAM: &str = "claude-agent-acp";
 /// for.
 const OWNER_LABEL: &str = "stageman.job";
 
+/// The label saying which instance started a container.
+///
+/// **What makes a sweep safe to let remove anything.** [`OWNER_LABEL`] says a
+/// container is this *project's*; this says it is this *instance's*, and the
+/// two differ whenever a daemon is shared — a development instance served out
+/// of a checkout beside the real one is the ordinary case. Without it, either
+/// instance sees the other's containers as work it has lost and, if it removed
+/// them, would take the other's jobs with them.
+///
+/// A container carrying none was made before this existed. That is knowably
+/// different from one carrying somebody else's, and the sweep treats it
+/// differently — see
+/// `docs/decisions/0054-a-container-says-which-instance-started-it.md`.
+const INSTANCE_LABEL: &str = "stageman.instance";
+
 /// The label saying which agent a container was made for.
 ///
 /// Read at a foreman's turn boundary and nowhere else: a job's kit cannot
@@ -1295,6 +1575,70 @@ pub async fn made_for(runtime: &ContainerRuntime, name: &str) -> Result<Option<A
     Ok(labelled(String::from_utf8_lossy(&asked.stdout).trim()))
 }
 
+/// The arguments that ask a runtime which instance started a container.
+///
+/// Pure, so the query can be asserted without a container. The same template
+/// as [`made_for_arguments`], and both runtimes take it.
+fn started_by_arguments(name: &str) -> Vec<String> {
+    vec![
+        "inspect".to_owned(),
+        "--format".to_owned(),
+        format!("{{{{index .Config.Labels \"{INSTANCE_LABEL}\"}}}}"),
+        name.to_owned(),
+    ]
+}
+
+/// Which instance started a container, if it says.
+///
+/// `None` for a container carrying no such label, which means one made before
+/// the label existed rather than one belonging to nobody. Asked of a container
+/// at a time rather than read from a listing, because the two runtimes format
+/// a listing's labels differently and an inspection is the one shape both
+/// take.
+///
+/// # Errors
+///
+/// Fails if the runtime cannot be run, or refuses — a container that does not
+/// exist being the ordinary refusal.
+#[mutants::skip]
+pub async fn started_by(
+    runtime: &ContainerRuntime,
+    name: &str,
+) -> Result<Option<InstanceId>, AgentError> {
+    let asked = tokio::process::Command::new(runtime.path())
+        .args(started_by_arguments(name))
+        .kill_on_drop(true)
+        .output()
+        .await
+        .map_err(|source| AgentError::Runtime {
+            path: runtime.path().to_owned(),
+            source,
+        })?;
+
+    if !asked.status.success() {
+        return Err(AgentError::Container {
+            status: asked.status.to_string(),
+            message: String::from_utf8_lossy(&asked.stderr).trim().to_owned(),
+        });
+    }
+    Ok(minted(&String::from_utf8_lossy(&asked.stdout)))
+}
+
+/// The instance a label names, if it names one this build can read.
+///
+/// Pure, so every shape a runtime prints can be tested without a container. An
+/// empty answer is what both print for a label that is not there, and anything
+/// that is not an identifier is treated the same way: unreadable rather than
+/// somebody else's, because guessing the other way round would let a sweep
+/// remove a container it could not actually place.
+fn minted(text: &str) -> Option<InstanceId> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Uuid::parse_str(trimmed).ok().map(InstanceId::from_uuid)
+}
+
 /// The port inside a job's container that a tunnel reaches.
 ///
 /// One constant rather than a choice, because a mapping cannot be added to a
@@ -1322,6 +1666,7 @@ fn retained_arguments(
     name: &str,
     image: &Image,
     agent: Agent,
+    instance: InstanceId,
     delivering: &[(String, Secret)],
 ) -> Vec<String> {
     // Created rather than run, and never removed: the thread has to be put in
@@ -1367,6 +1712,10 @@ fn retained_arguments(
         // cannot answer this, since nothing is tagged.
         "--label".to_owned(),
         format!("{AGENT_LABEL}={}", agent_label(agent)),
+        // Which instance this belongs to, so that a sweep on a shared daemon
+        // can tell its own abandoned work from somebody else's containers.
+        "--label".to_owned(),
+        format!("{INSTANCE_LABEL}={instance}"),
     ];
     arguments.extend(carrying(image, delivering));
     arguments
@@ -1390,6 +1739,7 @@ pub async fn begin(
     runtime: &ContainerRuntime,
     handout: &Handout,
     name: &str,
+    instance: InstanceId,
     tools: Option<&Tools>,
     question: &str,
 ) -> Result<Answer, AgentError> {
@@ -1407,6 +1757,7 @@ pub async fn begin(
             name,
             &image,
             handout.agent(),
+            instance,
             &delivering,
         ))
         .envs(
@@ -2408,6 +2759,13 @@ mod tests {
         Image(BUILT.to_owned())
     }
 
+    /// A stand-in instance, for the same reason [`built`] is one: the label
+    /// has to be asserted, and minting an identity needs randomness this crate
+    /// deliberately does not take.
+    fn an_instance() -> InstanceId {
+        InstanceId::from_uuid(Uuid::from_u128(0x5747))
+    }
+
     /// The same identifier as a literal, which is what the assertions compare
     /// against.
     ///
@@ -2416,57 +2774,261 @@ mod tests {
     /// under test compares a mutation to itself and passes. Mutation testing
     /// found exactly that — [`Image::as_argument`] could return an empty
     /// string with every argument test still green.
-    const BUILT: &str = "sha256:0123456789abcdef";
+    const BUILT: &str = "stageman:0123456789abcdef";
 
-    /// Every stage this crate asks for exists in the recipe it asks of.
+    /// Every fragment ends in a newline, so composing cannot glue two
+    /// instructions into one.
     ///
-    /// The agreement no compiler can make, and the one that replaced a
-    /// harder one. It used to be an image tag written in two files, held
-    /// together by parsing `project.just` from a test;
-    /// `docs/decisions/0035-an-image-is-built-never-named.md` removed the tag
-    /// and `docs/decisions/0036-a-foremans-image-is-not-a-jobs.md` put this in
-    /// its place — a stage name in the recipe and the same name in [`stage`].
-    ///
-    /// Strictly cheaper than what it replaces, and that is the compiled-in
-    /// recipe paying for itself: the text is in the binary, so this reads no
-    /// file and reaches no second directory.
+    /// Nothing is inserted between fragments — see [`recipe`] — so this is the
+    /// whole of what keeps the seams valid. The failure it prevents is the
+    /// worst shape available: a recipe that builds something subtly different,
+    /// reported by the runtime as a syntax error in a line no file contains.
     #[test]
-    fn every_stage_the_adapter_asks_for_is_in_the_recipe() {
-        let recipe = recipe(Agent::Claude);
-        for role in [Role::Foreman, Role::Job] {
-            let declared = format!("AS {}", stage(role));
+    fn every_fragment_ends_where_the_next_can_begin() {
+        for (named, fragment) in [
+            ("the base", BASE),
+            ("the holding command", HOLDING),
+            ("the platform layer", PLATFORM),
+            ("claude's adapter", installing(Agent::Claude)),
+        ] {
             assert!(
-                recipe.contains(&declared),
-                "the recipe declares no `{declared}`, so a build for {role:?} would fail \
-                 at the runtime rather than here",
+                fragment.ends_with('\n'),
+                "{named} does not end in a newline, so whatever follows it \
+                 would continue its last line",
             );
         }
     }
 
-    /// The two roles do not build the same thing.
+    /// A composed recipe declares exactly one image to build on, first.
     ///
-    /// Worth asserting on its own, because a copy-paste in [`stage`] would
-    /// leave the test above perfectly green while handing a foreman a job's
-    /// image — which is the whole of what 0036 refuses.
+    /// Both halves matter and each fails differently. A second `FROM` starts a
+    /// second stage, and the build would answer with that one; a recipe whose
+    /// first instruction is not a `FROM` is refused outright. This is what
+    /// makes the composition order in [`recipe`] checkable without a runtime.
     #[test]
-    fn a_foreman_and_a_job_are_built_from_different_stages() {
-        assert_ne!(stage(Role::Foreman), stage(Role::Job));
+    fn every_recipe_builds_on_exactly_one_base_named_first() {
+        for role in Role::ALL.iter().copied() {
+            let composed = recipe(Agent::Claude, role);
+            let instructions: Vec<&str> = composed
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                .collect();
+
+            assert_eq!(
+                instructions
+                    .iter()
+                    .filter(|line| line.starts_with("FROM"))
+                    .count(),
+                1,
+                "{role:?} composes more than one stage",
+            );
+            assert!(
+                instructions
+                    .first()
+                    .is_some_and(|first| first.starts_with("FROM")),
+                "{role:?} names something before the image it builds on",
+            );
+        }
+    }
+
+    /// A job's recipe is a foreman's with a layer appended, byte for byte.
+    ///
+    /// The property `docs/decisions/0036-a-foremans-image-is-not-a-jobs.md`
+    /// used two stages to get, and the reason the platform fragment is last:
+    /// identical instructions up to the split are what make the two images
+    /// share every layer but one, and the second build a cache hit throughout.
+    /// Asserted here because the alternative is noticing it as a slow build.
+    #[test]
+    fn a_jobs_recipe_begins_with_the_whole_of_a_foremans() {
+        let foreman = recipe(Agent::Claude, Role::Foreman);
+        let job = recipe(Agent::Claude, Role::Job);
+
+        assert!(
+            job.starts_with(&foreman),
+            "a job's recipe has to extend a foreman's rather than rearrange it",
+        );
+        assert_ne!(job, foreman, "a job's recipe adds nothing");
+    }
+
+    /// Only the fragment that exists to name a command names one.
+    ///
+    /// The order in [`recipe`] puts the holding command after an adapter's
+    /// fragment so that nothing can override it. That protection is worth
+    /// nothing if a fragment further along names one too, and a `CMD` in the
+    /// platform layer would be a container that starts perfectly and never
+    /// speaks — the failure
+    /// `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`
+    /// spends a paragraph on.
+    #[test]
+    fn the_command_is_named_once_and_by_the_fragment_that_holds_a_container_open() {
+        let names_a_command = |fragment: &str| {
+            fragment
+                .lines()
+                .map(str::trim)
+                .any(|line| line.starts_with("CMD") || line.starts_with("ENTRYPOINT"))
+        };
+
+        assert!(names_a_command(HOLDING));
+        for (named, fragment) in [
+            ("the base", BASE),
+            ("the platform layer", PLATFORM),
+            ("claude's adapter", installing(Agent::Claude)),
+        ] {
+            assert!(
+                !names_a_command(fragment),
+                "{named} names a command, which would replace the one that holds \
+                 a container open",
+            );
+        }
+    }
+
+    /// The two roles are two recipes, so they are two images.
+    ///
+    /// What used to be a copy-paste in `stage` handing a foreman a job's
+    /// image — which is the whole of what 0036 refuses — is now a copy-paste
+    /// producing one name for both.
+    #[test]
+    fn a_foreman_and_a_job_are_not_named_the_same_image() {
+        let foreman = named(&recipe(Agent::Claude, Role::Foreman));
+        let job = named(&recipe(Agent::Claude, Role::Job));
+        assert_ne!(foreman, job);
+    }
+
+    /// A name is this project's repository and the recipe's digest.
+    ///
+    /// The shape rather than the value, because the value is whatever the
+    /// fragments currently say and pinning it here would make every recipe
+    /// edit a failing test that teaches nobody anything.
+    #[test]
+    fn an_image_is_named_for_the_repository_and_the_digest_of_its_recipe() {
+        let image = named(&recipe(Agent::Claude, Role::Job));
+        let (repository, digest) = image
+            .as_argument()
+            .split_once(':')
+            .expect("a name is a repository and a tag");
+
+        assert_eq!(repository, "stageman");
+        assert_eq!(digest.len(), 64, "a sha256 is 64 hexadecimal characters");
+        assert!(digest.chars().all(|each| each.is_ascii_hexdigit()));
+    }
+
+    /// The same recipe is the same name, every time.
+    ///
+    /// The property the whole design rests on, and the one the runtime does
+    /// not have: two builds of identical bytes were measured to produce two
+    /// images with different identifiers, which is what an image per container
+    /// was made of.
+    #[test]
+    fn one_recipe_is_one_name_however_often_it_is_asked_for() {
+        let recipe = recipe(Agent::Claude, Role::Job);
+        assert_eq!(named(&recipe), named(&recipe));
+    }
+
+    /// What a sweep keeps is one image per agent per role.
+    ///
+    /// Guards the list rather than the arithmetic: a role or an agent added
+    /// without being reachable here is an image reclaimed at every startup and
+    /// rebuilt at the next container, which is slow rather than broken and so
+    /// would not be noticed.
+    #[test]
+    fn what_a_sweep_keeps_is_every_image_this_build_would_use() {
+        let keeping = keeping();
+        assert_eq!(keeping.len(), Agent::ALL.len() * Role::ALL.len());
+
+        for agent in Agent::ALL.iter().copied() {
+            for role in Role::ALL.iter().copied() {
+                assert!(
+                    keeping.contains(&named(&recipe(agent, role))),
+                    "{agent:?} as {role:?} would be reclaimed and rebuilt",
+                );
+            }
+        }
+    }
+
+    /// A listing is the names in it, and never a name that is not one.
+    ///
+    /// An image whose name went between the listing and the read is reported
+    /// The listing asks the runtime for this project's images, by name.
+    ///
+    /// Every part is load-bearing and none is checked by anything else: the
+    /// wrong subcommand lists containers, a missing filter lists the whole
+    /// machine, and a format that is not the repository and tag produces lines
+    /// no removal can address. A sweep built on any of those reclaims nothing
+    /// and says it swept.
+    #[test]
+    fn a_listing_asks_for_this_projects_images_and_their_names() {
+        let arguments = ours_arguments();
+
+        assert_eq!(arguments.first().map(String::as_str), Some("images"));
+        assert!(
+            arguments.iter().any(|each| each == "reference=stageman"),
+            "{arguments:?}",
+        );
+        assert!(
+            arguments
+                .iter()
+                .any(|each| each.contains("{{.Repository}}") && each.contains("{{.Tag}}")),
+            "{arguments:?}",
+        );
+    }
+
+    /// What a sweep keeps is exactly what it would build, by name.
+    ///
+    /// The decision that says whether anything is reclaimed. Inverted, a sweep
+    /// removes the image the next container wants and keeps every one nothing
+    /// will ask for again — which is slow rather than broken, and so would go
+    /// unnoticed.
+    #[test]
+    fn an_image_this_build_would_use_is_kept_and_any_other_is_not() {
+        let keeping = keeping();
+        let current = named(&recipe(Agent::Claude, Role::Job));
+
+        assert!(kept(&keeping, current.as_argument()));
+        assert!(
+            !kept(&keeping, &format!("{REPOSITORY}:{}", "0".repeat(64))),
+            "a name nothing would build is not kept",
+        );
+        assert!(
+            !kept(&[], current.as_argument()),
+            "nothing is kept from nothing"
+        );
+    }
+
+    /// with the runtime's word for *no name*, and passing that to a removal
+    /// would address something other than what was meant.
+    #[test]
+    fn an_image_listing_drops_what_is_not_a_name() {
+        let reported = "stageman:abc\n\n<none>:<none>\n  stageman:def  \n";
+        assert_eq!(tagged(reported), vec!["stageman:abc", "stageman:def"]);
+        assert!(tagged("\n  \n").is_empty());
     }
 
     /// A build reads its recipe from standard input and names no context.
     #[test]
     fn a_build_takes_its_recipe_on_standard_input_and_no_context() {
-        let arguments = build_arguments(Role::Job);
+        let image = built();
+        let arguments = build_arguments(&image);
         assert_eq!(arguments[0], "build");
-        assert!(
-            arguments.contains(&"--quiet"),
-            "without this the identifier is not the whole of standard output",
-        );
         assert_eq!(
             arguments.last(),
             Some(&"-"),
             "the trailing dash is the recipe arriving on standard input",
         );
+    }
+
+    /// A build names what it is building, and asks about that same name.
+    ///
+    /// The pair is the point. A build that tagged nothing would leave an image
+    /// nobody can find, and a presence check asking about anything else would
+    /// answer for a different image — either way every container gets its own,
+    /// which is the state this replaced.
+    #[test]
+    fn a_build_and_the_question_before_it_name_one_image() {
+        let image = built();
+        assert!(build_arguments(&image).contains(&"--tag"));
+        assert!(build_arguments(&image).contains(&BUILT));
+        assert_eq!(present_arguments(&image).last(), Some(&BUILT));
     }
 
     #[test]
@@ -2499,15 +3061,15 @@ mod tests {
         );
     }
 
-    /// A build that worked is the image it named, and nothing else.
+    /// A build that worked is the image it was told to build.
     ///
-    /// Trimmed, because both runtimes end that line and an identifier with a
-    /// newline in it is not one a container can be started from.
+    /// Nothing is read back from the build to learn that. The name was decided
+    /// before the build began, which is what lets a container be started from
+    /// an image the build did not have to create.
     #[test]
     fn a_build_that_succeeded_is_the_image_it_named() {
-        let image =
-            outcome(true, b"sha256:abcdef123456\n", b"").expect("a build that worked is an image");
-        assert_eq!(image.as_argument(), "sha256:abcdef123456");
+        let image = outcome(true, built(), b"").expect("a build that worked is an image");
+        assert_eq!(image.as_argument(), BUILT);
     }
 
     /// A build that failed is not an image, however much it printed.
@@ -2516,7 +3078,7 @@ mod tests {
     /// its own would still pass with the test of success inverted.
     #[test]
     fn a_build_that_failed_is_not_an_image() {
-        let failure = outcome(false, b"sha256:notthis\n", b"#4 ERROR: exit code 1\n");
+        let failure = outcome(false, built(), b"#4 ERROR: exit code 1\n");
         let Err(AgentError::Build { message }) = failure else {
             panic!("expected a build failure, got {failure:?}");
         };
@@ -3192,6 +3754,7 @@ mod tests {
             "stageman-job-abc",
             &built(),
             Agent::Claude,
+            an_instance(),
             &delivered(&handout).expect("a handout with no reserved name"),
         );
         let line = arguments.join(" ");
@@ -3235,6 +3798,7 @@ mod tests {
             "stageman-job-abc",
             &built(),
             Agent::Claude,
+            an_instance(),
             &delivered(&handout).expect("a handout with no reserved name"),
         );
         let line = arguments.join(" ");
@@ -3242,6 +3806,70 @@ mod tests {
         assert!(
             line.contains(&format!("--publish 127.0.0.1::{TUNNEL_PORT}")),
             "{line}"
+        );
+    }
+
+    /// Every container this project creates says which instance made it.
+    ///
+    /// The label a sweep is allowed to remove things on the strength of, so
+    /// its absence is not a cosmetic loss: without it every container looks
+    /// like this instance's own abandoned work.
+    #[test]
+    fn a_retained_container_says_which_instance_started_it() {
+        let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
+        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project)
+            .expect("a watched project");
+
+        let arguments = retained_arguments(
+            "stageman-job-abc",
+            &built(),
+            Agent::Claude,
+            an_instance(),
+            &delivered(&handout).expect("a handout with no reserved name"),
+        );
+
+        let line = arguments.join(" ");
+        assert!(
+            line.contains(&format!("stageman.instance={}", an_instance())),
+            "{arguments:?}",
+        );
+    }
+
+    /// A label is read back as the instance it names, and anything else is
+    /// nobody.
+    ///
+    /// Every uncertainty has to answer *nobody*, because that is the answer a
+    /// sweep leaves alone. Reading an unparseable label as an instance would
+    /// be inventing an owner; reading a missing one as this instance would let
+    /// a sweep remove containers it cannot actually place.
+    #[test]
+    fn an_instance_label_reads_back_only_when_it_is_one() {
+        assert_eq!(minted(&an_instance().to_string()), Some(an_instance()));
+        assert_eq!(
+            minted(&format!("  {}  ", an_instance())),
+            Some(an_instance())
+        );
+        assert_eq!(minted(""), None, "a container carrying no such label");
+        assert_eq!(minted("   \n"), None, "what a runtime prints for one");
+        assert_eq!(
+            minted("not-a-uuid"),
+            None,
+            "a label that is not an identity"
+        );
+    }
+
+    /// The question is asked of the named container, and of nothing else.
+    #[test]
+    fn asking_which_instance_started_a_container_names_that_container() {
+        let arguments = started_by_arguments("stageman-job-abc");
+        assert_eq!(arguments[0], "inspect");
+        assert_eq!(
+            arguments.last().map(String::as_str),
+            Some("stageman-job-abc")
+        );
+        assert!(
+            arguments.iter().any(|each| each.contains(INSTANCE_LABEL)),
+            "{arguments:?}",
         );
     }
 
@@ -3341,10 +3969,93 @@ mod tests {
             "stageman-job-abc",
             &built(),
             Agent::Claude,
+            an_instance(),
             &delivered(&handout).expect("a handout with no reserved name"),
         );
 
         assert!(arguments.iter().any(|a| a == "--init"), "{arguments:?}");
+    }
+
+    /// A sweep removes an image nothing needs, keeps the ones a container is
+    /// using, and keeps the ones the next container will want.
+    ///
+    /// The only function here that destroys something an operator would miss,
+    /// so it is worth the minutes: everything it decides is decided against a
+    /// live runtime, and the refusal that protects an image in use is the
+    /// runtime's rather than this crate's — which means no unit test can
+    /// stand in for it.
+    ///
+    /// The image that ought to go is made by naming an existing one a second
+    /// time, which is what a recipe edit leaves behind: a name under this
+    /// project's repository that nothing will ask for again.
+    #[tokio::test]
+    #[ignore = "needs a container runtime and the network; run `just image-handshake`"]
+    async fn a_sweep_reclaims_what_nothing_needs_and_keeps_what_something_does() {
+        let runtime = located_runtime();
+        let name = "stageman-job-reclaim-probe";
+        discard(&runtime, name).await.expect("a clean slate");
+
+        let current = build(&runtime, Agent::Claude, Role::Foreman)
+            .await
+            .expect("the image builds");
+
+        // A name of ours that no container will ever want: the same image
+        // under a second name, which is exactly what an edited recipe leaves.
+        let stale = format!("{REPOSITORY}:{}", "0".repeat(64));
+        let named_twice = std::process::Command::new(runtime.path())
+            .args(["tag", current.as_argument(), &stale])
+            .output()
+            .expect("the runtime runs");
+        assert!(
+            named_twice.status.success(),
+            "{}",
+            String::from_utf8_lossy(&named_twice.stderr)
+        );
+
+        // And a container holding the current one, so the sweep has something
+        // it must refuse to take.
+        let created = std::process::Command::new(runtime.path())
+            .args([
+                "create",
+                "--name",
+                name,
+                "--label",
+                &format!("{OWNER_LABEL}={name}"),
+                current.as_argument(),
+            ])
+            .output()
+            .expect("the runtime runs");
+        assert!(
+            created.status.success(),
+            "{}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+
+        reclaim(&runtime).await.expect("the runtime answers");
+
+        // Asserted on what is left rather than on how many went, because
+        // another test may be sweeping the same daemon at the same moment and
+        // the count is the one thing that is genuinely theirs to change. What
+        // is left is not: an image nothing needs is gone whoever removed it,
+        // and one a container needs survives either way.
+        let left = ours(&runtime).await.expect("the runtime answers");
+        assert!(
+            !left.contains(&stale),
+            "a name nothing needs is still here: {left:?}",
+        );
+        assert!(
+            left.contains(&current.as_argument().to_owned()),
+            "the image the next container wants was reclaimed: {left:?}",
+        );
+
+        // And what a container is holding is still startable, which is the
+        // property the unforced removal exists to keep.
+        assert!(
+            present(&runtime, &current).await,
+            "the image a container is using was taken from under it",
+        );
+
+        discard(&runtime, name).await.expect("it is removable");
     }
 
     /// A container this project started, found without consulting the instance
@@ -3423,7 +4134,13 @@ mod tests {
             .expect("the image builds");
 
         let created = tokio::process::Command::new(runtime.path())
-            .args(retained_arguments(name, &image, Agent::Claude, &delivering))
+            .args(retained_arguments(
+                name,
+                &image,
+                Agent::Claude,
+                an_instance(),
+                &delivering,
+            ))
             .envs(
                 delivering
                     .iter()
@@ -3619,7 +4336,13 @@ mod tests {
             .expect("the image builds");
 
         let created = std::process::Command::new(runtime.path())
-            .args(retained_arguments(name, &image, Agent::Claude, &[]))
+            .args(retained_arguments(
+                name,
+                &image,
+                Agent::Claude,
+                an_instance(),
+                &[],
+            ))
             .output()
             .expect("the runtime runs");
         assert!(
@@ -3752,6 +4475,7 @@ mod tests {
                 &runtime,
                 &handout,
                 name,
+                an_instance(),
                 None,
                 "Remember this word and reply with it, alone: marmalade",
             )
@@ -3803,6 +4527,7 @@ mod tests {
                     &runtime,
                     &handout,
                     name,
+                    an_instance(),
                     None,
                     "Count from 1 to 40, one number per line, pausing two seconds between each.",
                 ),

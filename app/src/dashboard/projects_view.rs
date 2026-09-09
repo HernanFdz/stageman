@@ -455,23 +455,51 @@ pub async fn amend(project: String, draft: Draft) -> DashboardResult<Watching> {
     Ok(watching)
 }
 
-/// Stops watching a repository, if nothing of its is still running.
+/// Stops watching a repository, and reclaims everything it was holding.
+///
+/// **Its containers go before its record does**, and the order is the whole of
+/// why this is no longer one locked block. Removing the record first would
+/// take with it every name that could reach those containers, leaving them
+/// untracked — which is what `docs/conventions.md` §4 forbids and what the
+/// sweep can then only warn about. Interrupted the other way round, a job
+/// keeps a record and loses its container, which the next sweep resolves by
+/// recording it lost.
+///
+/// **The refusal is checked twice**, before and after. A job could in
+/// principle be started by this project's foreman in between, and the second
+/// check is what stops the record being removed underneath it. What that
+/// cannot undo is the containers already gone, so those jobs are recorded lost
+/// by the next sweep — a narrow window, reported honestly rather than closed
+/// by holding the instance shut across a runtime call.
 ///
 /// # Errors
 ///
-/// Fails if the project is unknown, or any of its jobs is still running.
-#[cfg_attr(
-    feature = "server",
-    expect(
-        clippy::unused_async,
-        reason = "the shape a server function is required to have"
-    )
-)]
+/// Fails if the project is unknown, or any of its jobs is still working.
 #[post("/api/projects/forget", instance: Extension<std::sync::Arc<crate::Store>>)]
 pub async fn forget(project: String) -> DashboardResult<Watching> {
-    let mut state = instance.0.update();
-    let identifier = super::identify(&state, &project)?;
+    let identifier = {
+        let state = instance.0.read();
+        let found =
+            super::identify(&state, &project).and_then(|identifier| {
+                let watched = state.projects.get(&identifier).ok_or_else(|| {
+                    DashboardError::UnknownProject {
+                        id: project.clone(),
+                    }
+                })?;
+                busy(watched).map_or(Ok(identifier), |working| {
+                    Err(DashboardError::ProjectBusy {
+                        name: watched.name.clone(),
+                        working,
+                    })
+                })
+            });
+        drop(state);
+        found?
+    };
 
+    crate::release(&instance.0, &crate::RUNTIME, identifier).await;
+
+    let mut state = instance.0.update();
     let Some(watched) = state.projects.get(&identifier) else {
         drop(state);
         return Err(DashboardError::UnknownProject { id: project });
@@ -1747,7 +1775,7 @@ mod server_tests {
     }
     use stageman_core::{
         Agent, Channel, ClaudeEffort, ClaudeModel, Job, JobId, Kit, KitConfig, KitName, Progress,
-        Project, Secret, Timestamp,
+        Project, Secret, Timestamp, Waiting,
     };
     use std::collections::BTreeMap;
 
@@ -2219,9 +2247,10 @@ mod server_tests {
                 listen_credential: None,
             },
         );
-        project
-            .jobs
-            .insert(JobId::from_uuid(uuid::Uuid::new_v4()), job(Progress::Idle));
+        project.jobs.insert(
+            JobId::from_uuid(uuid::Uuid::new_v4()),
+            job(Progress::Idle(Waiting::Silent)),
+        );
 
         amended(
             &mut project,
@@ -2247,8 +2276,8 @@ mod server_tests {
         assert_eq!(busy(&holding(&[])), None);
         assert_eq!(
             busy(&holding(&[
-                Progress::Idle,
-                Progress::Failed("it did not work".to_owned())
+                Progress::Idle(Waiting::Silent),
+                Progress::Idle(Waiting::Failed("it did not work".to_owned()))
             ])),
             None
         );
@@ -2426,7 +2455,7 @@ mod server_tests {
         assert_eq!(
             busy(&holding(&[
                 Progress::Working,
-                Progress::Idle,
+                Progress::Idle(Waiting::Silent),
                 Progress::Working,
             ])),
             Some(2)

@@ -1,0 +1,13 @@
+
+# Installs the adapter this project drives Claude through, and nothing else.
+# Adapter knowledge, for the same reason the agent set is closed: an image is
+# code, and what one agent needs installed is the one part of a recipe that is
+# genuinely that agent's.
+#
+# Pinned for the reason the base is. Note that this reaches the registry over
+# HTTPS *before* any fragment installs a certificate bundle. That is not an
+# oversight, it is the measurement: the base ships no bundle, and the runtime
+# brings its own roots, which is why the bundle belongs to a job's fragment
+# rather than to every image.
+RUN npm install --global --no-fund --no-audit \
+        @agentclientprotocol/claude-agent-acp@0.70.0

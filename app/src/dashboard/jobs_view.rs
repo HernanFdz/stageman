@@ -16,7 +16,7 @@
 use dioxus::prelude::*;
 #[cfg(feature = "server")]
 use dioxus::server::axum::Extension;
-use lucide_dioxus::{ExternalLink, Eye, EyeOff};
+use lucide_dioxus::{Check, CircleOff, ExternalLink, Eye, EyeOff, Square, X};
 use serde::{Deserialize, Serialize};
 
 use super::error::{DashboardError, DashboardResult};
@@ -35,33 +35,67 @@ const BY_HAND: &str = "started by hand from the dashboard";
 
 /// Where a job has got to, as a page sees it.
 ///
-/// The three in `docs/conventions.md` §2 and no more. `Idle` says its agent
-/// stopped rather than that the work is done — nothing here can tell a job
-/// that finished from one that asked a question, and
-/// `docs/decisions/0002-never-merge-never-deploy.md` means a person reads what
-/// it proposed before any of it counts for anything.
+/// **Flat, where the domain's is two levels.** The domain nests because its
+/// outer level decides behaviour and nothing here decides any: a page renders
+/// a badge and a word, so the readings a person tells apart are what it needs
+/// and the grouping is not. See
+/// `docs/decisions/0052-a-jobs-state-says-what-somebody-does-about-it.md`.
+///
+/// Nothing here claims work is finished. `Proposed` is the agent's own account
+/// of itself, and `docs/decisions/0002-never-merge-never-deploy.md` means a
+/// person reads what it proposed before any of it counts for anything. `Done`
+/// is the only one that is a verdict, and it is a person's.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "standing", rename_all = "snake_case")]
 pub enum Standing {
     /// Its agent has been given something and has not stopped.
     Working,
-    /// Its agent stopped, and nothing has been given to it since.
+    /// Its agent asked something and stopped.
+    Asked,
+    /// Its agent believes the work is done and is inviting somebody to look.
+    Proposed,
+    /// A person stopped it while it was working.
+    Paused,
+    /// Its agent stopped and said nothing about why.
+    ///
+    /// Called *idle* here and `Silent` in the domain, and the difference is
+    /// deliberate: the domain has to say why this is not one of the three
+    /// above, and a page is showing a job that simply stopped. It is also what
+    /// this has always been called on a screen, so nothing a reader knows
+    /// changes.
     Idle,
-    /// It could not be finished, and this is what went wrong.
+    /// Its turn ended badly, and this is what went wrong.
     Failed {
         /// Prose for a person, not a code to branch on.
         why: String,
     },
+    /// Over, and a person judged it produced what was wanted.
+    Done,
+    /// Over, and a person judged it did not.
+    Discarded,
+    /// Over, because its container went missing.
+    Lost,
 }
 
 impl Standing {
     /// How this reads on a badge.
+    ///
+    /// **Tones repeat and labels do not**, which is the deliberate half. There
+    /// are four tones and nine standings, so the tone says which family this
+    /// is in — going, stopped, wrong, over — and the label says which member.
+    /// A tone each would need five more colour tokens to separate things a
+    /// reader already tells apart by reading the word, and
+    /// `docs/decisions/0026-the-dashboards-vocabulary-is-a-token-set.md` is
+    /// what makes adding one a decision rather than a class.
     #[must_use]
     pub const fn tone(&self) -> BadgeTone {
         match self {
             Self::Working => BadgeTone::Working,
-            Self::Idle => BadgeTone::Idle,
-            Self::Failed { .. } => BadgeTone::Failed,
+            Self::Asked | Self::Proposed | Self::Paused | Self::Idle => BadgeTone::Idle,
+            // `Lost` is a failure that happens to be final, so it wears the
+            // colour a person scans for rather than the one meaning *over*.
+            Self::Failed { .. } | Self::Lost => BadgeTone::Failed,
+            Self::Done | Self::Discarded => BadgeTone::Neutral,
         }
     }
 
@@ -70,8 +104,14 @@ impl Standing {
     pub const fn label(&self) -> &'static str {
         match self {
             Self::Working => "working",
+            Self::Asked => "asked",
+            Self::Proposed => "proposed",
+            Self::Paused => "paused",
             Self::Idle => "idle",
             Self::Failed { .. } => "failed",
+            Self::Done => "done",
+            Self::Discarded => "discarded",
+            Self::Lost => "lost",
         }
     }
 }
@@ -251,6 +291,128 @@ pub async fn start(project: String, kit: String, work: String) -> DashboardResul
     Ok(answer)
 }
 
+/// How a job ends, as a browser asks for it.
+///
+/// Two of the three outcomes and never the third: *lost* is what the sweep
+/// writes on finding a container gone, and nothing a person presses should be
+/// able to claim it. A closed set rather than a string for the same reason a
+/// kit's name is checked — see
+/// `docs/decisions/0052-a-jobs-state-says-what-somebody-does-about-it.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Ending {
+    /// It produced what was wanted.
+    Done,
+    /// It did not, and nothing of it is kept.
+    Discarded,
+}
+
+#[cfg(feature = "server")]
+impl From<Ending> for stageman_core::Outcome {
+    fn from(ending: Ending) -> Self {
+        match ending {
+            Ending::Done => Self::Done,
+            Ending::Discarded => Self::Discarded,
+        }
+    }
+}
+
+/// The job this identifier names, if this project has one.
+///
+/// Both halves matter and the second is the one worth the function: a
+/// well-formed identifier belonging to *another* project must not be found
+/// here, or a stale page could retire a job it is not looking at.
+#[cfg(feature = "server")]
+fn identify_job(
+    state: &stageman_core::State,
+    project: stageman_core::ProjectId,
+    job: &str,
+) -> Option<stageman_core::JobId> {
+    let named = stageman_core::JobId::from_uuid(stageman_core::Uuid::parse_str(job.trim()).ok()?);
+    state
+        .projects
+        .get(&project)?
+        .jobs
+        .contains_key(&named)
+        .then_some(named)
+}
+
+/// Stops the turn running in a job.
+///
+/// Keeps everything: the container stays up, the session stays in it, and the
+/// job becomes one a reply reaches. See
+/// `docs/decisions/0053-a-job-is-stopped-or-retired-by-a-person.md`.
+///
+/// **A job whose turn ended while the request was in flight is not an error.**
+/// It is already where stopping would have left it, so this answers with the
+/// refreshed screen rather than a refusal about a race the operator did not
+/// cause and cannot avoid.
+///
+/// # Errors
+///
+/// Fails if the project is unknown, or holds no such job.
+#[cfg_attr(
+    feature = "server",
+    expect(
+        clippy::unused_async,
+        reason = "the shape a server function is required to have"
+    )
+)]
+#[post("/api/projects/{project}/jobs/{job}/stop", instance: Extension<std::sync::Arc<crate::Store>>)]
+pub async fn stop(project: String, job: String) -> DashboardResult<Working> {
+    let named = {
+        let state = instance.0.read();
+        let found = super::identify(&state, &project).and_then(|identifier| {
+            identify_job(&state, identifier, &job)
+                .ok_or_else(|| DashboardError::UnknownJob { id: job.clone() })
+        });
+        drop(state);
+        found?
+    };
+
+    // Said either way rather than only when nothing was running. A negation
+    // here would be a branch nothing can reach in a test — a server function
+    // drops every attribute but its documentation, so it cannot even be
+    // excused — and what it guarded was a log line.
+    let running = crate::stop(named);
+    dioxus::logger::tracing::debug!(job = %named, running, "asked to stop a job");
+
+    let state = instance.0.read();
+    working(&state, &project)
+}
+
+/// Ends a job, and reclaims everything it was holding.
+///
+/// Irreversible: the container goes, and the session with it. What survives is
+/// the record, which is what the screen keeps showing.
+///
+/// # Errors
+///
+/// Fails if the project is unknown, if it holds no such job, or if a turn is
+/// still running in it.
+#[post("/api/projects/{project}/jobs/{job}/retire", instance: Extension<std::sync::Arc<crate::Store>>)]
+pub async fn retire(project: String, job: String, ending: Ending) -> DashboardResult<Working> {
+    let named = {
+        let state = instance.0.read();
+        let found = super::identify(&state, &project).and_then(|identifier| {
+            identify_job(&state, identifier, &job)
+                .ok_or_else(|| DashboardError::UnknownJob { id: job.clone() })
+        });
+        drop(state);
+        found?
+    };
+
+    crate::retire(&instance.0, &crate::RUNTIME, named, ending.into())
+        .await
+        .map_err(|refused| match refused {
+            crate::Refused::Working => DashboardError::JobWorking,
+            crate::Refused::Unknown => DashboardError::UnknownJob { id: job.clone() },
+        })?;
+
+    let state = instance.0.read();
+    working(&state, &project)
+}
+
 /// The kit this project offers under a name, if it offers one.
 ///
 /// A function rather than a lookup at the call site so that the refusal can be
@@ -325,10 +487,18 @@ fn working(state: &stageman_core::State, project: &str) -> DashboardResult<Worki
 /// rather than a code precisely so that it can be read.
 #[cfg(feature = "server")]
 fn standing(progress: &stageman_core::Progress) -> Standing {
+    use stageman_core::{Outcome, Progress, Waiting};
+
     match progress {
-        stageman_core::Progress::Working => Standing::Working,
-        stageman_core::Progress::Idle => Standing::Idle,
-        stageman_core::Progress::Failed(why) => Standing::Failed { why: why.clone() },
+        Progress::Working => Standing::Working,
+        Progress::Idle(Waiting::Asked) => Standing::Asked,
+        Progress::Idle(Waiting::Proposed) => Standing::Proposed,
+        Progress::Idle(Waiting::Paused) => Standing::Paused,
+        Progress::Idle(Waiting::Silent) => Standing::Idle,
+        Progress::Idle(Waiting::Failed(why)) => Standing::Failed { why: why.clone() },
+        Progress::Retired(Outcome::Done) => Standing::Done,
+        Progress::Retired(Outcome::Discarded) => Standing::Discarded,
+        Progress::Retired(Outcome::Lost) => Standing::Lost,
     }
 }
 
@@ -386,7 +556,24 @@ pub fn ProjectJobsView(project: String) -> Element {
                         } else {
                             ul { class: "divide-y divide-border",
                                 for job in working.jobs {
-                                    li { key: "{job.id}", RanJob { job } }
+                                    li { key: "{job.id}",
+                                        RanJob {
+                                            job,
+                                            project: identifier.clone(),
+                                            // The child awaits and this
+                                            // decides what the screen does
+                                            // with the answer, so a row needs
+                                            // to know nothing about how the
+                                            // page holds its state.
+                                            onchanged: move |answered| match answered {
+                                                Ok(fresh) => {
+                                                    failure.set(None);
+                                                    reading.set(Some(Ok(fresh)));
+                                                }
+                                                Err(reason) => failure.set(Some(reason)),
+                                            },
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -438,10 +625,35 @@ pub fn ProjectJobsView(project: String) -> Element {
     }
 }
 
+/// How every icon-only control on a job row is drawn.
+///
+/// Written once because there are now five of them: padded and pulled back, so
+/// the target is bigger than the shape without moving anything around it.
+const CONTROL: &str = "-m-1 rounded p-1 text-muted-foreground hover:text-foreground \
+                       focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary";
+
 /// One job, as the list shows it.
+///
+/// **Which controls it offers is decided by the standing**, and the two are
+/// deliberately never offered together: a working job can be stopped and not
+/// retired, and every other job can be retired and not stopped. Retiring
+/// destroys the container and the session in it, so putting it beside a
+/// control that keeps both would make the irreversible one a mis-click away —
+/// see `docs/decisions/0053-a-job-is-stopped-or-retired-by-a-person.md`.
+///
+/// A job that is already over offers neither: there is nothing left to stop
+/// and nothing left to reclaim.
 #[component]
-fn RanJob(job: Job) -> Element {
+fn RanJob(
+    job: Job,
+    project: String,
+    onchanged: EventHandler<Result<Working, DashboardError>>,
+) -> Element {
     let mut showing = use_signal(|| false);
+    let over = matches!(
+        job.standing,
+        Standing::Done | Standing::Discarded | Standing::Lost
+    );
 
     rsx! {
         div { class: "flex flex-col gap-1.5 py-4 first:pt-0 last:pb-0",
@@ -509,6 +721,76 @@ fn RanJob(job: Job) -> Element {
                     aria_label: "Look at what it is showing",
                     title: "Look at what it is showing — {job.tunnel}",
                     ExternalLink { size: 16, class: "shrink-0" }
+                }
+                // A working job can be stopped, and that is all it can be:
+                // its container is in use and its session is mid-turn.
+                if job.standing == Standing::Working {
+                    button {
+                        r#type: "button",
+                        class: CONTROL,
+                        aria_label: "Stop it",
+                        title: "Stop it — the job keeps everything and can be given more",
+                        onclick: {
+                            let project = project.clone();
+                            let id = job.id.clone();
+                            move |_| {
+                                let project = project.clone();
+                                let id = id.clone();
+                                async move { onchanged.call(stop(project, id).await) }
+                            }
+                        },
+                        Square { size: 16, class: "shrink-0" }
+                    }
+                }
+                // And a job that has stopped can be ended, either way. Two
+                // controls rather than one with a choice behind it, because
+                // the verdict is the whole of what is being recorded.
+                if !over && job.standing != Standing::Working {
+                    button {
+                        r#type: "button",
+                        class: CONTROL,
+                        aria_label: "It is done",
+                        title: "It is done — removes its container and everything in it",
+                        onclick: {
+                            let project = project.clone();
+                            let id = job.id.clone();
+                            move |_| {
+                                let project = project.clone();
+                                let id = id.clone();
+                                async move {
+                                    onchanged.call(retire(project, id, Ending::Done).await);
+                                }
+                            }
+                        },
+                        Check { size: 16, class: "shrink-0" }
+                    }
+                    button {
+                        r#type: "button",
+                        class: CONTROL,
+                        aria_label: "Discard it",
+                        title: "Discard it — removes its container and everything in it",
+                        onclick: {
+                            // Moved rather than cloned: the last control on
+                            // the row is the last thing that wants it.
+                            let project = project;
+                            let id = job.id.clone();
+                            move |_| {
+                                let project = project.clone();
+                                let id = id.clone();
+                                async move {
+                                    onchanged.call(retire(project, id, Ending::Discarded).await);
+                                }
+                            }
+                        },
+                        X { size: 16, class: "shrink-0" }
+                    }
+                }
+                if over {
+                    span {
+                        class: "-m-1 p-1 text-faint-foreground",
+                        title: "This job is over — its container and session are gone",
+                        CircleOff { size: 16, class: "shrink-0" }
+                    }
                 }
                 if showing() {
                     pre { class: "mt-1.5 max-h-64 overflow-auto whitespace-pre-wrap rounded-md \
@@ -600,13 +882,15 @@ const FIELD: &str = "w-full rounded-md border border-border bg-surface px-2 py-1
 #[cfg(all(test, feature = "server"))]
 mod server_tests {
     use super::{Standing, offered, standing};
-    use stageman_core::{Agent, Kit, KitConfig, KitName, Progress};
+    use stageman_core::{Agent, Kit, KitConfig, KitName, Outcome, Progress, Waiting};
     use std::collections::BTreeMap;
 
     /// A failure's prose is the only thing a person has to go on.
     #[test]
     fn a_failure_carries_why_it_failed_across() {
-        let crossed = standing(&Progress::Failed("its container is gone".to_owned()));
+        let crossed = standing(&Progress::Idle(Waiting::Failed(
+            "its container is gone".to_owned(),
+        )));
 
         assert_eq!(
             crossed,
@@ -662,10 +946,96 @@ mod server_tests {
         assert_eq!(offered(&running_on(BTreeMap::new()), "quick"), None);
     }
 
+    /// Every reading crosses as its own standing, and none as another's.
+    ///
+    /// The whole crossing rather than a sample, because the failure it
+    /// prevents is silent: two readings collapsing to one standing shows a
+    /// person a job that asked a question as one that proposed an answer, and
+    /// nothing anywhere says the two were ever different.
     #[test]
-    fn the_other_two_cross_as_themselves() {
-        assert_eq!(standing(&Progress::Working), Standing::Working);
-        assert_eq!(standing(&Progress::Idle), Standing::Idle);
+    fn every_reading_crosses_as_a_standing_of_its_own() {
+        let crossings = [
+            (Progress::Working, Standing::Working),
+            (Progress::Idle(Waiting::Asked), Standing::Asked),
+            (Progress::Idle(Waiting::Proposed), Standing::Proposed),
+            (Progress::Idle(Waiting::Paused), Standing::Paused),
+            (Progress::Idle(Waiting::Silent), Standing::Idle),
+            (Progress::Retired(Outcome::Done), Standing::Done),
+            (Progress::Retired(Outcome::Discarded), Standing::Discarded),
+            (Progress::Retired(Outcome::Lost), Standing::Lost),
+        ];
+
+        for (progress, expected) in &crossings {
+            assert_eq!(standing(progress), *expected, "{progress:?}");
+        }
+        let reached: std::collections::BTreeSet<&str> = crossings
+            .iter()
+            .map(|(_, standing)| standing.label())
+            .collect();
+        assert_eq!(
+            reached.len(),
+            crossings.len(),
+            "two readings cross to one standing: {reached:?}",
+        );
+    }
+
+    /// A job is found on its own project and on no other.
+    ///
+    /// **The second half is the one worth the test.** A well-formed identifier
+    /// belonging to another project must not resolve here, or a stale page
+    /// could stop or retire a job it is not looking at — and both of those act
+    /// on whatever this answers with.
+    #[test]
+    fn a_job_is_found_on_its_own_project_and_nowhere_else() {
+        let kits = BTreeMap::from([(
+            KitName::new("Claude").expect("a name"),
+            KitConfig::defaults(Agent::Claude),
+        )]);
+        let mine = stageman_core::JobId::from_uuid(stageman_core::Uuid::from_u128(1));
+        let theirs = stageman_core::JobId::from_uuid(stageman_core::Uuid::from_u128(2));
+
+        let mut state = stageman_core::State::default();
+        state.agents.insert(
+            Agent::Claude,
+            stageman_core::AgentConfig {
+                auth_token: stageman_core::Secret::new("a-credential".to_owned()),
+            },
+        );
+        let mut projects = Vec::new();
+        for (which, job) in [(7_u128, mine), (8, theirs)] {
+            let mut watched = running_on(kits.clone());
+            watched.jobs.insert(
+                job,
+                stageman_core::Job::new(
+                    stageman_core::Kit::defaults(Agent::Claude),
+                    "because".to_owned(),
+                    "do the thing".to_owned(),
+                    stageman_core::Timestamp::UNIX_EPOCH,
+                ),
+            );
+            let project =
+                stageman_core::ProjectId::from_uuid(stageman_core::Uuid::from_u128(which));
+            state.projects.insert(project, watched);
+            projects.push(project);
+        }
+        let here = projects[0];
+
+        assert_eq!(
+            super::identify_job(&state, here, &mine.to_string()),
+            Some(mine)
+        );
+        assert_eq!(
+            super::identify_job(&state, here, &format!("  {mine}  ")),
+            Some(mine),
+            "named, if untidily",
+        );
+        assert_eq!(
+            super::identify_job(&state, here, &theirs.to_string()),
+            None,
+            "a job of another project's is not this project's to act on",
+        );
+        assert_eq!(super::identify_job(&state, here, "not-an-identifier"), None);
+        assert_eq!(super::identify_job(&state, here, ""), None);
     }
 
     /// Every job crosses with the address that reaches that job.
@@ -732,10 +1102,16 @@ mod tests {
     fn every() -> Vec<Standing> {
         vec![
             Standing::Working,
+            Standing::Asked,
+            Standing::Proposed,
+            Standing::Paused,
             Standing::Idle,
             Standing::Failed {
                 why: "it did not work".to_owned(),
             },
+            Standing::Done,
+            Standing::Discarded,
+            Standing::Lost,
         ]
     }
 
@@ -743,17 +1119,17 @@ mod tests {
     /// a tone exists to prevent, and this is where the two are decided.
     #[test]
     fn no_two_standings_look_or_read_alike() {
-        let tones: Vec<BadgeTone> = every().iter().map(Standing::tone).collect();
         let labels: Vec<&str> = every().iter().map(Standing::label).collect();
 
-        for (position, tone) in tones.iter().enumerate() {
-            assert!(
-                !tones
-                    .iter()
-                    .skip(position)
-                    .skip(1)
-                    .any(|other| other == tone),
-                "two standings share a tone: {tones:?}"
+        // Tones are shared on purpose and labels are not, so what has to be
+        // unique is the word. This used to demand a tone each, which held only
+        // while there were as many tones as standings.
+        for standing in every() {
+            let alarming = matches!(standing.tone(), BadgeTone::Failed);
+            let wrong = matches!(standing, Standing::Failed { .. } | Standing::Lost);
+            assert_eq!(
+                alarming, wrong,
+                "{standing:?} wears the colour a person scans for, or fails to",
             );
         }
         assert!(labels.iter().all(|label| !label.is_empty()));

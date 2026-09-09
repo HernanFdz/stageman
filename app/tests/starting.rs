@@ -43,7 +43,7 @@ use std::time::Duration;
 use stageman::Store;
 use stageman_core::{
     Agent, AgentConfig, Channel, ChannelConfig, Job, JobId, Key, Kit, KitConfig, KitName, Progress,
-    Project, ProjectId, Secret, State, Timestamp,
+    Project, ProjectId, Secret, State, Timestamp, Waiting,
 };
 
 /// A key, as an operator would supply it: thirty-two bytes of base64.
@@ -760,11 +760,13 @@ fn the_dashboard_counts_working_jobs_rather_than_all_of_them() {
     let project = state.projects.values_mut().next().expect("the project");
     project.jobs.insert(
         JobId::from_uuid(uuid::Uuid::from_u128(1)),
-        job(Progress::Idle),
+        job(Progress::Idle(Waiting::Silent)),
     );
     project.jobs.insert(
         JobId::from_uuid(uuid::Uuid::from_u128(2)),
-        job(Progress::Failed("it did not work".to_owned())),
+        job(Progress::Idle(Waiting::Failed(
+            "it did not work".to_owned(),
+        ))),
     );
     drop(Store::create(snapshot.clone(), key(), state).expect("it can write"));
 

@@ -4,15 +4,26 @@
 Accepted. Completes one level down the move
 `docs/decisions/0034-tools-are-served-not-shipped.md` began.
 
+**Two of its clauses are reversed by
+`docs/decisions/0051-an-image-is-named-by-the-recipe-it-is-built-from.md`**:
+nothing is tagged, and a build runs in front of every container. Both rested on
+one assumption stated below as fact — that a cached rebuild of unchanged bytes
+yields the image it yielded last time — and it is false on the runtime
+measured, which is what made *an orphaned image per edit* an orphaned image per
+container. What survives is everything else, and it is most of the record: the
+recipe is compiled in, it is built from standard input with no context, nothing
+this project writes goes in the image, and no name is one an operator chooses.
+The rejected alternative below beginning *a tag naming a hash of the recipe* is
+the one that was reached in the end, and 0051 says what changed.
+
 ## Context
 
 `docs/decisions/0012-agents-run-in-containers.md` put every agent in a
 container and stated the property that made it worth doing: *the host needs a
 container runtime and nothing else.* That is true of the host and not of the
 operator. The image an agent runs in is built from a recipe — which this
-record also moves inside the crate that names it, to
-`agent/images/claude/Dockerfile`, because a package cannot compile in a file
-outside its own directory —
+record also moves inside the crate that names it, to `agent/images/`,
+because a package cannot compile in a file outside its own directory —
 under a tag written twice — once in `project.just` and once as a constant in
 the agent crate — held together by a test that parses the justfile. Neither the
 recipe nor the command that builds it ships with the binary, so what somebody

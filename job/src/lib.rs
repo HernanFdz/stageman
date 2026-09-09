@@ -14,7 +14,7 @@
 //! runs in, the credentials it is handed, and the supervision that ends it.
 
 use stageman_agent::{AgentError, Answer, ContainerRuntime};
-use stageman_core::{Handout, JobId, Kit, Uuid};
+use stageman_core::{Handout, InstanceId, JobId, Kit, Uuid};
 
 /// What every one of this project's containers is named for.
 ///
@@ -197,10 +197,11 @@ pub async fn start(
     runtime: &ContainerRuntime,
     handout: &Handout,
     job: JobId,
+    instance: InstanceId,
     tools: Option<&stageman_agent::Tools>,
     kickoff: &str,
 ) -> Result<Answer, JobError> {
-    stageman_agent::begin(runtime, handout, &container(job), tools, kickoff)
+    stageman_agent::begin(runtime, handout, &container(job), instance, tools, kickoff)
         .await
         .map_err(JobError::Agent)
 }

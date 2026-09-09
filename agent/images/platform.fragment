@@ -1,0 +1,35 @@
+
+# What a job needs in order to reach a repository at all, and the one fragment
+# a foreman's recipe leaves out — `docs/decisions/0036-a-foremans-image-is-not-a-jobs.md`,
+# which measured that every line of it exists for a job. A foreman's container
+# cannot run a repository tool because none is installed, rather than because
+# it was given no credential.
+#
+# Nothing outside the container delivers a repository, so the tools to check
+# one out have to be in here, installed at build time for the reason the
+# adapter is.
+#
+# Last of the four, so that a job's recipe is a foreman's with this appended:
+# the instructions before it are then byte-for-byte identical, which is what
+# makes the second build a cache hit throughout and the two images share every
+# layer up to this one.
+
+# Pinned for the reason the base is pinned: an image that resolves a version
+# at build time gives a different container to two jobs started a week apart,
+# and the one that breaks is the one nobody changed. Debian's git is pinned
+# already by the base's own tag; the repository host's tool is not packaged
+# there, so it is fetched at a named version.
+ARG GH_VERSION=2.98.0
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        ca-certificates \
+        curl \
+        git \
+    && arch="$(dpkg --print-architecture)" \
+    && curl --fail --silent --show-error --location \
+        "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${arch}.tar.gz" \
+        --output /tmp/gh.tar.gz \
+    && tar --extract --gzip --file /tmp/gh.tar.gz --directory /tmp \
+    && install -m 0755 "/tmp/gh_${GH_VERSION}_linux_${arch}/bin/gh" /usr/local/bin/gh \
+    && rm -rf /tmp/gh.tar.gz "/tmp/gh_${GH_VERSION}_linux_${arch}" \
+    && rm -rf /var/lib/apt/lists/*

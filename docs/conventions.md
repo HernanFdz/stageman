@@ -128,6 +128,32 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   either, since both imply a durable intent that separate attempts belong to,
   and no such thing exists here. A job records which agent ran it, because once
   more than one can, "why did this go badly?" has no answer without it.
+- **working, idle, retired** — where a job has got to, and the only three
+  things this system *does* about one: run a turn in it, leave it alone with
+  its container, or reclaim what it was holding. Idle carries a reading of why
+  its agent stopped — **asked**, **proposed**, **paused**, **failed**,
+  **silent** — and retired carries how it ended — **done**, **discarded**,
+  **lost**. The outer word is what code branches on and the inner word is what
+  a person acts on; see
+  `docs/decisions/0052-a-jobs-state-says-what-somebody-does-about-it.md`.
+
+  Three near-misses worth recording. **Failed is not an ending**: the container
+  and its session are still there, so a failed job is waiting for whatever
+  broke to be fixed, and only retirement is terminal. **Proposed is a claim,
+  not a verdict** — the agent's own account of itself, where **done** is a
+  person's judgement of it, which is why they are different words at different
+  levels. And **silent** is not a synonym for idle: it is the honest residual
+  for a turn that ended without the agent saying which reading applied, and a
+  job landing there is a prompt that was not followed. A screen says *idle* for
+  it, because that is what a reader of a job list expects and what it has
+  always been called there.
+
+  Not *completed*, which claimed the work had ended and was the old name for
+  idle. Not *cancelled* for paused, which implies the job is over when the
+  whole point is that it can be resumed. Not *archived* for retired, which
+  every product a person has used means something reversible by, where this
+  removes the container and the session with it.
+
 - **workspace** — the isolated place a job's agent works: the container it runs
   in, with the project's repository checked out in it before the agent's first
   turn, for as long as that job lasts — see
@@ -490,6 +516,25 @@ it lands.
   answers, one retained stopped because its job can be resumed, and one nothing
   can name, which is the only leak. Count anything and it passes on the last.
 
+  **Something now removes containers, and the bar is what says which ones.**
+  `docs/decisions/0053-a-job-is-stopped-or-retired-by-a-person.md` gives an
+  operator a way to end a job, and the sweep a way to finish one that was
+  interrupted. What goes is a container belonging to a job whose verdict has
+  just been written, or to a project being forgotten. A test that counted what
+  was left behind would now pass on all three of the cases above and on this
+  one too, which is the same reason it could never have been a count.
+
+  **And the sweep may now remove what it cannot place, but only its own.**
+  `docs/decisions/0054-a-container-says-which-instance-started-it.md` puts the
+  creating instance's identity on every container, because two instances
+  sharing one runtime is the ordinary arrangement here — `just dev` serves one
+  out of the checkout beside the real one. So the bar has a third thing to tell
+  apart, and it is the one worth testing against a live runtime rather than by
+  construction: a container this instance started, a container another instance
+  started, and a container from before either could say. Only the first may be
+  removed, and a test that cannot tell the second from the first is a test that
+  passes while a development instance destroys the real one's work.
+
   **Whatever asks whether a tunnel answers must ask it of a *published* port.**
   A port this project binds itself has nobody answering for it; a published one
   has the runtime's proxy in front, which accepts on the container's behalf
@@ -500,6 +545,25 @@ it lands.
   `docs/decisions/0047-a-tunnel-answers-only-when-something-behind-it-does.md`.
   This is why the container tests earn their minutes: the gap was not in the
   reasoning, it was in what the cheap test could reach.
+- **What a snapshot must still open is what the last release wrote, and
+  nothing older.** Compatibility is a window of one tag, not a growing pile:
+  when a released version exists, a schema change carries a bridge from *that*
+  version's shape and drops every shim older than it in the same commit. The
+  reasoning is that a shim's value decays to nothing while its cost does not —
+  each one is a branch nothing exercises, a test pinning a file no clone can
+  produce, and a second shape the type has to keep meaning. Five such shims
+  were dropped in the change that added this rule, and every one of them
+  described a release nobody was running.
+
+  **The defaults stay even where the last release writes the field.** They cost
+  nothing, they cannot produce a wrong value — absent genuinely means none —
+  and they are the pattern the next added field follows. What goes is the
+  *renaming* and *reshaping* compatibility, which is where the cost is.
+
+  This project is not stable and has no outside consumers, so the window is a
+  choice rather than an obligation. Widening it later is free; what would not
+  be free is discovering that a shim nobody could test had rotted.
+
 - **A field added to the sealed form is defaulted, and a literal older file
   proves it.** `docs/decisions/0011-state-is-a-snapshot-not-a-database.md`
   versions nothing and says what that costs: an added field is free *with a
@@ -559,10 +623,16 @@ built from this gate, this one needs:
   container, including the one the foreman thinks with, so nothing here
   runs an agent without one. See
   `docs/decisions/0012-agents-run-in-containers.md`.
-  There is deliberately nothing here about building an image. The recipe is
-  compiled into the binary and built on demand, per
-  `docs/decisions/0035-an-image-is-built-never-named.md`, so the only thing to
-  install is the runtime that builds it. The container tests still skip under
+  There is deliberately nothing here about building an image. The fragments a
+  recipe is composed from are compiled into the binary and built on demand, per
+  `docs/decisions/0035-an-image-is-built-never-named.md` and
+  `docs/decisions/0051-an-image-is-named-by-the-recipe-it-is-built-from.md`, so
+  the only thing to install is the runtime that builds them. Images this
+  project builds are named for the recipe they came from and shared by every
+  container built from it; ones left by a version before that carry no name at
+  all, so they are dangling images and `docker image prune` is what reclaims
+  them. That is a command to run rather than one this project runs, because it
+  would take every other dangling image on the machine with it. The container tests still skip under
   `just check` rather than failing — the first of them costs minutes and a
   network — so a green gate on a machine that has never built one is not
   evidence the containers work; `just image-handshake` is.

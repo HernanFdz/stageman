@@ -271,6 +271,26 @@ pub enum DashboardError {
         working: usize,
     },
 
+    /// The project is watched and holds no job under that identifier.
+    ///
+    /// Separate from a project nobody watches, because what an operator does
+    /// about it differs: a stale page showing a job that has since been
+    /// retired is the ordinary way to reach this, and reloading fixes it.
+    #[error("no job here is {id}")]
+    UnknownJob {
+        /// What was asked for, as it arrived.
+        id: String,
+    },
+
+    /// A turn is running in that job, so it cannot be retired yet.
+    ///
+    /// Refused rather than stopped on the operator's behalf. Stopping keeps
+    /// the work and retiring destroys it, so making the second a side effect
+    /// of the first would put an irreversible act behind a press that does
+    /// not look like one.
+    #[error("that job is still working — stop it before retiring it")]
+    JobWorking,
+
     /// Something went wrong that the operator cannot act on from here.
     ///
     /// Deliberately opaque and deliberately singular. Anything with a cause
@@ -294,7 +314,9 @@ impl DashboardError {
             // Nothing was asked for that does not exist; this process is
             // wrong.
             Self::NoInstance | Self::Failed => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::UnknownAgent { .. } | Self::UnknownProject { .. } => StatusCode::NOT_FOUND,
+            Self::UnknownAgent { .. } | Self::UnknownProject { .. } | Self::UnknownJob { .. } => {
+                StatusCode::NOT_FOUND
+            }
             // Well-formed requests that describe something invalid. The
             // operator can fix all of these by typing something different,
             // which is what separates them from the two above.
@@ -317,6 +339,7 @@ impl DashboardError {
             // is in a state that forbids it, which is what a conflict means.
             Self::AgentInUse { .. }
             | Self::ProjectBusy { .. }
+            | Self::JobWorking
             | Self::ChannelAlreadyBound { .. } => StatusCode::CONFLICT,
         }
     }
