@@ -466,7 +466,7 @@ justify is usually obsolete.
 - **The gate builds the browser's half too, and it is a line in
   `check_matrix`.** `cargo` builds the host side only, so without that line a
   client that does not compile would pass `just check` untouched and the gate
-  would silently stop covering half the application. The line excludes the four
+  would silently stop covering half the application. The line excludes the
   internal crates by name; a crate added later fails there until somebody says
   which side of the split it is on, which is the right default.
 - **Two things `dx` produces are corrected rather than accepted, and a `dx`

@@ -1,0 +1,319 @@
+//! The deciding and the doing as one deterministic value.
+//!
+//! An [`Instance`] holds everything one running stageman knows and makes every
+//! decision it makes. It is built from the bytes of its file, if there is one,
+//! and from what the runtime holds; after that it has one method, which takes
+//! one [`Event`] and answers with [`Effect`]s. It never reads a clock, never
+//! draws on entropy beyond the generator it was seeded with, and performs
+//! nothing: the world does, and reports back as events. See
+//! `docs/decisions/0056-the-instance-decides-and-the-world-performs.md`.
+//!
+//! **What it keeps and what it holds are two things.** The kept state goes to
+//! the disk, sealed by this crate. The held state — turns in flight, warrants
+//! minted, effects waiting on a write — is what only this process knows, and a
+//! restart begins with none of it.
+//!
+//! **Persisting is answered, and everything outward-facing waits for it.** A
+//! step that changes the kept state ends by asking the world to write, and any
+//! effect of that step that faces outward is held back until the world says
+//! the bytes have landed. So a client told a change succeeded was told the
+//! truth, and a job's record is on the disk before its container exists.
+
+mod file;
+mod sweep;
+mod tunnel;
+mod turns;
+mod vocabulary;
+
+use std::collections::{BTreeMap, VecDeque};
+use std::time::Duration;
+
+use rand::rngs::StdRng;
+use rand::{Rng as _, SeedableRng as _};
+use stageman_core::{InstanceId, JobId, Key, Kit, Progress, Secret, State, Thread, Uuid};
+
+pub use file::LoadError;
+pub use sweep::Swept;
+pub use tunnel::{DEFAULT_DOMAIN, Domain, Routed, address, decode};
+pub use vocabulary::{Container, Effect, Event, Run, Seed, Speaker, Startup, Timer, Warranted};
+
+use turns::Turn;
+
+/// How often the instance asks which containers still deserve to be up.
+///
+/// A server an agent left running does not say when it stops, so the only
+/// way to notice is to look — see
+/// `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`.
+const SETTLING_INTERVAL: Duration = Duration::from_mins(1);
+
+/// Everything one running stageman knows, and every decision it makes.
+pub struct Instance {
+    /// What goes to the disk.
+    state: State,
+    /// Which instance this is, for as long as this file is the instance.
+    id: InstanceId,
+    /// What seals the file.
+    key: Key,
+    /// The only randomness there is.
+    rng: StdRng,
+    /// The turns running right now, by whose they are.
+    turns: BTreeMap<Speaker, Turn>,
+    /// Which credential the tools endpoint may be shown, and by whom.
+    warrants: BTreeMap<String, Warranted>,
+    /// Effects waiting for a write to land, one entry per write asked for.
+    deferred: VecDeque<Vec<Effect>>,
+    /// Whether the kept state changed since it was last written.
+    dirty: bool,
+    /// Effects this step wants held back until its write lands.
+    staged: Vec<Effect>,
+}
+
+/// An instance that has just been opened, and what it does about it.
+pub struct Woken {
+    /// The instance.
+    pub instance: Instance,
+    /// What it asks of the world on waking.
+    pub effects: Vec<Effect>,
+    /// What waking found.
+    pub swept: Swept,
+}
+
+impl Instance {
+    /// Opens an instance from its file, or starts one where there is no file,
+    /// and reconciles it with what the runtime holds.
+    ///
+    /// Nothing can reach [`Instance::step`] before this has run, which is why
+    /// the facts the sweep needs are an argument rather than a first event.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the file is not JSON, cannot be opened with `key`, or
+    /// describes an instance that cannot exist.
+    pub fn open(
+        file: Option<&[u8]>,
+        key: Key,
+        seed: Seed,
+        startup: &Startup,
+    ) -> Result<Woken, LoadError> {
+        let (state, named) = file::opened(file, &key)?;
+        let mut rng = StdRng::from_seed(seed);
+        let id = named.unwrap_or_else(|| {
+            let minted = InstanceId::from_uuid(mint(&mut rng));
+            tracing::info!(instance = %minted, "this instance had no identity, so it was given one");
+            minted
+        });
+        let mut instance = Self {
+            state,
+            id,
+            key,
+            rng,
+            turns: BTreeMap::new(),
+            warrants: BTreeMap::new(),
+            deferred: VecDeque::new(),
+            // Written before anything can depend on this instance: a file
+            // that had no identity has one from the moment it is opened, and
+            // a first run has a file at all.
+            dirty: named.is_none(),
+            staged: Vec::new(),
+        };
+        let (mut effects, swept) = instance.waking(startup);
+        instance.flush(&mut effects);
+        Ok(Woken {
+            instance,
+            effects,
+            swept,
+        })
+    }
+
+    /// Which instance this is.
+    #[must_use]
+    pub const fn id(&self) -> InstanceId {
+        self.id
+    }
+
+    /// What this instance knows, for reading.
+    ///
+    /// The world reads this to say what it is serving; it decides nothing
+    /// from it, because deciding is what [`Instance::step`] is for.
+    #[must_use]
+    pub const fn state(&self) -> &State {
+        &self.state
+    }
+
+    /// What a presented credential entitles its bearer to, if this instance
+    /// minted it and the turn it was minted for is still running.
+    #[must_use]
+    pub fn warranted(&self, presented: &str) -> Option<&Warranted> {
+        self.warrants.get(presented)
+    }
+
+    /// One event in, effects out.
+    ///
+    /// The whole of the instance's interface after construction. Every
+    /// decision the daemon makes is made in here, on one thread, in the order
+    /// events arrive.
+    pub fn step(&mut self, event: Event) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        match event {
+            Event::Persisted { outcome } => self.persisted(outcome, &mut effects),
+            Event::TurnEnded { speaker, outcome } => self.ended(speaker, outcome, &mut effects),
+            Event::Probed { job, answering } => probed(job, answering, &mut effects),
+            Event::Listed { running } => self.listed(&running, &mut effects),
+            Event::Woke {
+                timer: Timer::Settle,
+            } => {
+                effects.push(Effect::ListRunning);
+                effects.push(sweep::settle_later());
+            }
+        }
+        self.flush(&mut effects);
+        debug_assert!(
+            self.state.check().is_ok(),
+            "a step left the state inconsistent"
+        );
+        effects
+    }
+
+    /// What the world said about a write.
+    ///
+    /// Persists are answered in the order they were asked for, so the front
+    /// of the queue is the one being answered. A write that failed drops what
+    /// waited on it: the state in memory is still right, the next change asks
+    /// again, and nothing outward-facing happens on the strength of a record
+    /// that is not on the disk.
+    fn persisted(&mut self, outcome: Result<(), String>, effects: &mut Vec<Effect>) {
+        let Some(waiting) = self.deferred.pop_front() else {
+            tracing::warn!("the world answered a write nobody asked for; ignored");
+            return;
+        };
+        match outcome {
+            Ok(()) => effects.extend(waiting),
+            Err(why) => tracing::error!(
+                %why,
+                dropped = waiting.len(),
+                "the instance could not be written; what waited on the write is dropped"
+            ),
+        }
+    }
+
+    /// The step's last act.
+    ///
+    /// A changed state is sealed and asked to be written, and whatever the
+    /// step held back waits on that write; an unchanged state releases the
+    /// held-back effects at once, because there is nothing to wait for.
+    fn flush(&mut self, effects: &mut Vec<Effect>) {
+        let staged = std::mem::take(&mut self.staged);
+        if !self.dirty {
+            effects.extend(staged);
+            return;
+        }
+        self.dirty = false;
+        match file::sealed(&self.state, self.id, &self.key, &mut self.rng) {
+            Ok(bytes) => {
+                self.deferred.push_back(staged);
+                effects.push(Effect::Persist { bytes });
+            }
+            Err(why) => tracing::error!(
+                %why,
+                dropped = staged.len(),
+                "the instance could not be sealed; nothing is written and what waited on the \
+                 write is dropped"
+            ),
+        }
+    }
+
+    /// Holds an effect back until the state this step changed is on the disk.
+    fn defer(&mut self, effect: Effect) {
+        self.staged.push(effect);
+    }
+
+    /// Writes what became of a job.
+    fn record(&mut self, job: JobId, progress: Progress) {
+        if let Some(recorded) = self.state.job_mut(job) {
+            recorded.progress = progress;
+            self.dirty = true;
+        }
+    }
+
+    /// Writes down what a job's session reported it was set to, this turn.
+    fn noted(&mut self, job: JobId, reported: BTreeMap<String, String>) {
+        if let Some(recorded) = self.state.job_mut(job) {
+            recorded.reported = reported;
+            self.dirty = true;
+        }
+    }
+
+    /// What a job resuming needs from its record: where it speaks, and what
+    /// it runs on.
+    fn recorded(&self, job: JobId) -> Option<(Option<Thread>, Kit)> {
+        self.state
+            .job(job)
+            .map(|recorded| (recorded.thread.clone(), recorded.kit().clone()))
+    }
+
+    /// Mints the credential a turn presents to the tools endpoint, forgetting
+    /// whatever that speaker held before.
+    ///
+    /// Unguessable from the instance's own generator, so there is one answer
+    /// to where an unguessable value comes from. Bounded by construction: one
+    /// entry per turn in flight rather than one per turn ever taken.
+    fn warrant(&mut self, speaker: Speaker, thread: Option<Thread>) -> Secret {
+        let credential = format!(
+            "{}{}",
+            mint(&mut self.rng).simple(),
+            mint(&mut self.rng).simple()
+        );
+        self.warrants.retain(|_, known| known.speaker != speaker);
+        self.warrants
+            .insert(credential.clone(), Warranted { speaker, thread });
+        Secret::new(credential)
+    }
+}
+
+/// A fresh identifier from the instance's own randomness.
+fn mint(rng: &mut StdRng) -> Uuid {
+    let mut bytes = [0_u8; 16];
+    rng.fill_bytes(&mut bytes);
+    uuid::Builder::from_random_bytes(bytes).into_uuid()
+}
+
+/// What to do about a job's tunnel, now the world has looked.
+///
+/// Answering means the container is left running for whoever is looking;
+/// nothing behind it means the container is stopped, keeping it and the
+/// session in it for the next reply.
+fn probed(job: JobId, answering: bool, effects: &mut Vec<Effect>) {
+    if answering {
+        tracing::info!(
+            %job,
+            "its container is left running, because something is still answering on its tunnel"
+        );
+    } else {
+        effects.push(Effect::Halt {
+            container: stageman_job::container(job),
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Effect, probed};
+    use stageman_core::{JobId, Uuid};
+
+    /// The whole of what deciding a container's life looks like from here:
+    /// answering keeps it, silence stops it.
+    #[test]
+    fn a_tunnel_that_answers_keeps_its_container_and_silence_stops_it() {
+        let job = JobId::from_uuid(Uuid::from_u128(5));
+
+        let mut effects = Vec::new();
+        probed(job, true, &mut effects);
+        assert!(effects.is_empty(), "{effects:?}");
+
+        probed(job, false, &mut effects);
+        assert!(
+            matches!(effects.as_slice(), [Effect::Halt { container }] if *container == stageman_job::container(job)),
+            "{effects:?}"
+        );
+    }
+}

@@ -41,8 +41,11 @@ pub fn container(job: JobId) -> String {
 /// version does not understand — an older naming scheme, or something that
 /// borrowed the label. Worth distinguishing rather than ignoring: it is still
 /// ours to clean up, and it is not ours to resume.
+///
+/// Public because placing a container is the instance's decision, and a
+/// listing reaches it as names.
 #[must_use]
-fn job_of(container: &str) -> Option<JobId> {
+pub fn job_of(container: &str) -> Option<JobId> {
     container
         .strip_prefix(PREFIX)
         .and_then(|rest| Uuid::parse_str(rest).ok())
