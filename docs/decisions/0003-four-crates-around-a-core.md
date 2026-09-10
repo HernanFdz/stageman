@@ -2,8 +2,10 @@
 
 ## Status
 Accepted. The crate count is superseded by
-`docs/decisions/0006-agents-are-pluggable.md`; the dependency rule and the
-rejected alternatives below still stand.
+`docs/decisions/0006-agents-are-pluggable.md`; the dependency rule still
+stands, and the rejection of ports and adapters below is superseded for one
+seam by `docs/decisions/0056-the-instance-decides-and-the-world-performs.md`,
+which draws it where the nondeterminism is and for a different reason.
 
 ## Context
 

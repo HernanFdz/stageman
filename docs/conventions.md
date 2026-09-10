@@ -300,6 +300,60 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   rather than a decision about one process, and loses the part that matters:
   a handout is scoped to somebody, and the scoping is the point.
 
+- **instance** — everything one running stageman knows and every decision it
+  makes, as one synchronous value: the projects and their jobs, the foremen's
+  inboxes, what is in flight, and the rule for what to do about each thing
+  that happens. It is stepped one event at a time and answers with effects,
+  and it can neither read a clock nor perform an effect of its own — see
+  `docs/decisions/0056-the-instance-decides-and-the-world-performs.md`. What
+  it *keeps* goes to the disk; what it merely *holds* — turns in flight,
+  warrants, a tunnel's port — a restart begins without. The word was already
+  in use for a running stageman and its file, and the two are one thing seen
+  from outside and from inside: what an operator installs is a daemon, and
+  what the daemon runs is the instance. Not *model*, the first name proposed
+  and the near-miss worth recording: a kit already has a model, and "the
+  model decided to start a job" is ambiguous in exactly the place this
+  section exists to keep clear. Not *core* either, which is a crate.
+
+- **world** — everything the instance is not: the container runtime and the
+  agents inside it, the channels, the clock, randomness, the disk, the
+  servers, and the async runtime that drives them all. There are two. The
+  real one is the app crate; the simulated one is what a scenario steps, and
+  it is where a fault is injected and a crash is chosen. A world routes by
+  the shape of a request and never decides on the instance's state, and it
+  answers an effect only once the effect has actually completed. Not
+  *simulator*, which is the literature's word and names only the second;
+  not *environment*, refused under **handout** for naming a delivery
+  mechanism; not *adapter*, which is one part of a world — the piece that
+  speaks one outside system's protocol — and not the whole.
+
+- **event** — one thing the world tells the instance: a message heard, a
+  turn ended, a request arrived, a timer gone off, bytes landed on the disk.
+  Plain data, and the only way anything reaches the instance at all. An
+  event carries a time only when its handler keeps one, which is why most do
+  not. Not *message*, which is what a person says on a channel, and not
+  *command*, which would suggest the world tells the instance what to do
+  rather than what happened.
+
+- **effect** — one thing the instance asks of the world: run a turn, stop a
+  container, post a message, write these bytes, answer this request, wake me
+  later. A value and never a call, so that a scenario's effects are a trace
+  that can be compared and the instance can learn nothing from making one.
+  An effect is *answered* by an event only where the instance's next decision
+  depends on the outcome; the rest are unanswered, and a failure in one of
+  them is the world's to log. Whatever faces outward waits for the persist of
+  the step that justified it. Not *action*, which reads as done rather than
+  asked for, and not *side effect*, which is what this design exists to have
+  none of inside the instance.
+
+- **scenario** — a scripted world: the file an instance starts from and the
+  sequence of events it is fed, run against the simulated world, whose trace
+  of effects and state after each step are snapshots. A **seed** is a random
+  world under the same simulation, and a seed found failing is committed as a
+  scenario, so that the bug costs one run to rule out for ever. Not *test
+  case*, which does not say that the world is simulated; not *replay*, which
+  is one way to make a scenario and not what one is.
+
 ## 3. House rules
 
 Anything someone would otherwise get wrong: framework versions and their
@@ -319,6 +373,12 @@ justify is usually obsolete.
   Credentials inside it stay encrypted under a key from the environment, so the
   file is portable and useless without it. Reasoning and reversal cost are in
   `docs/decisions/0011-state-is-a-snapshot-not-a-database.md`.
+
+  Since `docs/decisions/0056-the-instance-decides-and-the-world-performs.md`
+  the instance *asks* for that write rather than making it — an effect,
+  answered when the bytes have landed — and nothing outward-facing leaves the
+  step until they have. The write is still on every change; what moved is who
+  performs it, and where the guarantee that a client was told the truth lives.
 - **No secret is ever written to a log line.** Encryption protects the file, not
   the terminal, and a token escapes through a formatted struct long before it
   escapes through the database. The mechanical half of this rule is §4 below.
@@ -382,6 +442,11 @@ justify is usually obsolete.
   happen on the request path: watching a channel, judging a signal and
   supervising a job all belong on their own tasks. A dashboard that stops
   painting because a job is thinking is the failure this rule exists to prevent.
+
+  Since 0056 this is the shape of the program rather than a rule anybody
+  keeps: the instance's step is synchronous and short, everything that takes
+  time is an effect the world performs on a task of its own, and a request is
+  an event the loop answers between two others.
 - **The app's `server` feature is a contract with the framework, not a name.**
   The server-function macro emits `#[cfg(feature = "server")]` literally, so a
   feature spelled anything else silently moves every server function's body to
@@ -465,6 +530,29 @@ justify is usually obsolete.
   are derivable, they go stale, and `just drift` cannot catch a version number
   in prose. Gotchas belong here; numbers do not.
 
+- **Nothing inside the instance performs an effect, reads a clock, or draws on
+  entropy of its own.** No I/O, no async, no threads, no locks, and every map
+  ordered. Time arrives on the events whose handlers keep it; randomness comes
+  from a generator the world seeded at construction; the outside is reached by
+  returning an effect and heard from by being handed an event. The reason is
+  that determinism is then a property of the type rather than of anybody's
+  discipline: a scenario reproduces because there is nothing in the instance
+  that could make it otherwise. The manifest is where it is enforced — the
+  instance crate names no async runtime and nothing that opens a socket or a
+  file — and the review question for any change there is whether a line could
+  answer differently on another run. See
+  `docs/decisions/0056-the-instance-decides-and-the-world-performs.md`.
+
+- **The world routes by shape, never decides on state, and answers an effect
+  only when it has completed.** Routing by shape is the host, the path and the
+  port of a request; deciding on state is anything that reads what the
+  instance knows, and it belongs in the instance as an event and a response.
+  An `if` on domain data in the world is a smell to move. The completion rule
+  is the whole of what the durability guarantee rests on: the instance holds
+  back a client's answer and a turn's start until the world says the write
+  landed, so a world that answered a persist when the write was merely started
+  would make every one of those promises false.
+
 ## 4. Quality bar beyond the gate
 
 `AGENTS.md` carries the bar the gate enforces mechanically. This is for the part
@@ -545,6 +633,15 @@ it lands.
   `docs/decisions/0047-a-tunnel-answers-only-when-something-behind-it-does.md`.
   This is why the container tests earn their minutes: the gap was not in the
   reasoning, it was in what the cheap test could reach.
+
+  Since `docs/decisions/0056-the-instance-decides-and-the-world-performs.md`
+  this is an invariant the simulated world checks after every step of every
+  seed — nothing running without a turn in it or a tunnel answering, and
+  nothing left that the instance cannot name — and the container tests are
+  what tie the simulated runtime to the real one. Both halves are needed: the
+  simulation reaches the crash between two steps that no container test can,
+  and the container test reaches the proxy that no simulation would have
+  imagined.
 - **What a snapshot must still open is what the last release wrote, and
   nothing older.** Compatibility is a window of one tag, not a growing pile:
   when a released version exists, a schema change carries a bridge from *that*
@@ -613,6 +710,19 @@ it lands.
   and the only kind that changes behaviour without changing control flow, so it
   is also the only kind that can be rewritten completely without a single test
   going red.
+
+- **Sequencing is tested by scenarios and seeds, and their snapshots are
+  reviewed as behaviour.** Every flow that crosses an await today — a turn
+  ending, a sweep, a reply arriving while a turn runs, the daemon dying
+  part-way — is a scenario against the simulated world, and its trace of
+  effects and state after each step are snapshots whose diff somebody reads
+  before it merges. A seed found failing is committed as a scenario. A few
+  seeds run in `just check`, because the gate's cost is bounded by the code,
+  and more in `just verify`. Every event and effect is a value: it clones,
+  it compares, and it prints with every credential redacted, and a test holds
+  one that carries a credential to that. A channel or a callback added to a
+  variant would end the comparison that makes any of this work, and a
+  credential in a trace would end something worse.
 
 ## 5. What this project needs installed
 
@@ -728,4 +838,3 @@ there and why that number is not zero.
 That is about the project a job works on rather than about this repository, and
 `docs/decisions/0019-a-projects-tooling-is-the-projects-business.md` says why
 stageman does not answer it.
-

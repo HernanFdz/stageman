@@ -325,26 +325,24 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   that adapter landing, and worth deciding in the same change as its kit
   variant, since that variant is where the provider has to be named.
 
+- **Should the instance keep a flight recorder?** Everything it does is a
+  function of what it was constructed from and the events it was fed since,
+  per `docs/decisions/0056-the-instance-decides-and-the-world-performs.md`,
+  so a daemon that kept that sequence in memory and wrote it out when
+  something went wrong would turn any production failure into a scenario
+  that reproduces exactly. The design makes it cheap. What makes it a
+  question is that the sequence holds what people said on channels and the
+  bodies of tool calls, and the file it started from holds sealed
+  credentials — a second place secrets could live, with a retention and a
+  redaction question of its own. Settled by the first failure a log line
+  could not explain, and not before: noted so that it is not forgotten,
+  deliberately not built.
+
 ## Next
 
 Intended next steps, in order, each with its reason. Written as intentions, not
 progress: "next X, because Y" — never "X is 60% done", which is both derivable
 and wrong within a day.
-
-- Next, implement `docs/decisions/0034-tools-are-served-not-shipped.md`,
-  because everything queued behind it inherits the shape and one of those
-  things is how a job speaks. The instance serves its own tools over the
-  listener it already has; the two programs, the endpoint file, the thread
-  file and the mechanism that copies them into a stopped container all go; and
-  the warrant becomes per session rather than per container, delivered on the
-  session declaration and re-supplied on every resume.
-
-  **The one thing worth building carefully is the failure.** An endpoint the
-  container cannot reach does not error — session creation succeeds and the
-  agent simply has no tools, which reads exactly like an agent that chose not
-  to use them. That is the shape this record was written to avoid inheriting,
-  so it wants a test that asserts the tools are *there*, not merely that a
-  session started.
 
 - Next, cover Slack against regression, because it works and nothing in the
   repository would notice if it stopped. Both directions have been driven end
@@ -416,5 +414,9 @@ and wrong within a day.
   builders, the label constant, the name parser — is a unit test by definition
   and stays where it is. Roughly half of the ignored tests are in each group,
   so this is a move for some and not a reorganisation of all.
+
+  The scenarios of 0056 belong there too, and the simulated world with them:
+  test support that names the instance and nothing in the app, which is the
+  same rule from the other direction.
 
 

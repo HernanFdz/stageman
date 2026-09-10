@@ -4,7 +4,10 @@
 
 Accepted. Narrows the transport half of
 `docs/decisions/0029-a-reply-is-routed-by-its-thread.md`, which chose the
-socket and said nothing about what may be done on it.
+socket and said nothing about what may be done on it. Its consequence that
+the read loop's not awaiting is a property nobody can see, defended by a
+reviewer, is made structural by
+`docs/decisions/0056-the-instance-decides-and-the-world-performs.md`.
 
 ## Context
 
