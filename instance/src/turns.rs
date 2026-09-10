@@ -112,9 +112,12 @@ impl Instance {
             return;
         };
         self.warrants.retain(|_, known| known.speaker != speaker);
-        let Speaker::Job(job) = speaker else {
-            tracing::info!(?speaker, "a foreman's turn ended");
-            return;
+        let job = match speaker {
+            Speaker::Foreman(project) => {
+                self.foreman_ended(project, outcome);
+                return;
+            }
+            Speaker::Job(job) => job,
         };
 
         let progress = if turn.stopping {

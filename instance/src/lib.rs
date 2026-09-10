@@ -20,18 +20,21 @@
 //! truth, and a job's record is on the disk before its container exists.
 
 mod file;
+mod foreman;
 mod replies;
 mod sweep;
 mod tunnel;
 mod turns;
 mod vocabulary;
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::Duration;
 
 use rand::rngs::StdRng;
 use rand::{Rng as _, SeedableRng as _};
-use stageman_core::{InstanceId, JobId, Key, Kit, Progress, Secret, State, Thread, Uuid};
+use stageman_core::{
+    InstanceId, JobId, Key, Kit, Progress, ProjectId, Secret, State, Thread, Uuid,
+};
 
 pub use file::LoadError;
 pub use sweep::Swept;
@@ -63,6 +66,9 @@ pub struct Instance {
     turns: BTreeMap<Speaker, Turn>,
     /// Which credential the tools endpoint may be shown, and by whom.
     warrants: BTreeMap<String, Warranted>,
+    /// Projects whose foreman was found holding a message on waking, and
+    /// whose next turn is therefore told it was interrupted.
+    interrupted: BTreeSet<ProjectId>,
     /// Effects waiting for a write to land, one entry per write asked for.
     deferred: VecDeque<Vec<Effect>>,
     /// Whether the kept state changed since it was last written.
@@ -112,6 +118,7 @@ impl Instance {
             rng,
             turns: BTreeMap::new(),
             warrants: BTreeMap::new(),
+            interrupted: BTreeSet::new(),
             deferred: VecDeque::new(),
             // Written before anything can depend on this instance: a file
             // that had no identity has one from the moment it is opened, and
@@ -169,6 +176,11 @@ impl Instance {
                 effects.push(sweep::settle_later());
             }
             Event::Heard { channel, message } => self.heard(channel, &message, &mut effects),
+            Event::Inspected {
+                container,
+                present,
+                agent,
+            } => self.inspected(&container, present, agent, &mut effects),
         }
         self.flush(&mut effects);
         debug_assert!(

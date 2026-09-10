@@ -11,9 +11,9 @@ use std::collections::{BTreeMap, VecDeque};
 
 use stageman_agent::{Answer, StopReason};
 use stageman_core::{
-    Agent, AgentConfig, Channel, ChannelConfig, InstanceId, Job, JobId, Key, Kit, KitConfig,
-    KitName, NONCE_LEN, Nonce, Progress, Project, ProjectId, Secret, Snapshot, State, Thread,
-    Timestamp, Uuid,
+    Agent, AgentConfig, Channel, ChannelConfig, Errand, InstanceId, Job, JobId, Key, Kit,
+    KitConfig, KitName, NONCE_LEN, Nonce, Progress, Project, ProjectId, Secret, Snapshot, State,
+    Thread, Timestamp, Uuid,
 };
 use stageman_instance::{Container, Effect, Event, Instance, Message, Run, Seed, Startup};
 
@@ -174,6 +174,36 @@ pub fn said_in(thread: u32, text: &str) -> Event {
     }
 }
 
+/// Somebody mentioning this instance at the root of the project's channel.
+/// Each is its own message, so each opens its own thread.
+pub fn said_at_root(n: u32, text: &str) -> Event {
+    Event::Heard {
+        channel: Channel::Slack,
+        message: Message {
+            address: CHANNEL.to_owned(),
+            id: thread(n).id,
+            thread: None,
+            text: text.to_owned(),
+            mentions: true,
+            from_us: false,
+        },
+    }
+}
+
+/// Puts a message in the project's foreman's hands, as a daemon that died
+/// mid-turn would have left it.
+pub fn holding_a_message(state: &mut State, n: u32, text: &str) {
+    state
+        .projects
+        .get_mut(&project())
+        .expect("the project")
+        .attending
+        .take(Errand {
+            said: text.to_owned(),
+            thread: thread(n),
+        });
+}
+
 pub const fn key() -> Key {
     Key::new([7; 32])
 }
@@ -289,6 +319,7 @@ impl Simulation {
                     | Event::TurnEnded { .. }
                     | Event::Probed { .. }
                     | Event::Listed { .. }
+                    | Event::Inspected { .. }
                     | Event::Woke { .. }
             )
         });
@@ -341,6 +372,47 @@ impl Simulation {
         }
     }
 
+    /// Runs a turn: beginning makes the container, resuming needs one, and
+    /// how it ends is the next scripted answer or a clean ending.
+    fn run_turn(&mut self, speaker: stageman_instance::Speaker, run: &Run) {
+        let (container, warrant) = match &run {
+            Run::Begin {
+                container, warrant, ..
+            }
+            | Run::Resume {
+                container, warrant, ..
+            } => (container.clone(), warrant.clone()),
+        };
+        self.warrants.push(warrant);
+        if matches!(run, Run::Begin { .. }) {
+            // Beginning makes the container, named before it exists.
+            self.containers.insert(
+                container.clone(),
+                Held {
+                    instance: Some(this_instance()),
+                    agent: Some(Agent::Claude),
+                    running: true,
+                    serving: false,
+                },
+            );
+        }
+        let outcome = match self.containers.get_mut(&container) {
+            Some(held) => {
+                held.running = true;
+                self.answers.pop_front().unwrap_or_else(|| {
+                    Ok(Answer {
+                        text: "done".to_owned(),
+                        stop_reason: StopReason::EndTurn,
+                        reported: BTreeMap::new(),
+                    })
+                })
+            }
+            None => Err(format!("no such container: {container}")),
+        };
+        let at = self.now + self.turn_takes;
+        self.schedule(at, Event::TurnEnded { speaker, outcome });
+    }
+
     pub fn perform(&mut self, effect: Effect) {
         self.trace.push(format!("{}: -> {effect:?}", self.now));
         match effect {
@@ -354,38 +426,27 @@ impl Simulation {
                 };
                 self.schedule(self.now + 1, Event::Persisted { outcome });
             }
-            Effect::RunTurn { speaker, run } => {
-                let (container, warrant) = match &run {
-                    Run::Begin {
-                        container, warrant, ..
-                    }
-                    | Run::Resume {
-                        container, warrant, ..
-                    } => (container.clone(), warrant.clone()),
-                };
-                self.warrants.push(warrant);
-                let outcome = match self.containers.get_mut(&container) {
-                    Some(held) => {
-                        held.running = true;
-                        self.answers.pop_front().unwrap_or_else(|| {
-                            Ok(Answer {
-                                text: "done".to_owned(),
-                                stop_reason: StopReason::EndTurn,
-                                reported: BTreeMap::new(),
-                            })
-                        })
-                    }
-                    None => Err(format!("no such container: {container}")),
-                };
-                let at = self.now + self.turn_takes;
-                self.schedule(at, Event::TurnEnded { speaker, outcome });
-            }
+            Effect::RunTurn { speaker, run } => self.run_turn(speaker, &run),
             Effect::Probe { job } => {
                 let answering = self
                     .containers
                     .get(&stageman_job::container(job))
                     .is_some_and(|held| held.running && held.serving);
                 self.schedule(self.now, Event::Probed { job, answering });
+            }
+            Effect::Inspect { container } => {
+                let (present, agent) = self
+                    .containers
+                    .get(&container)
+                    .map_or((false, None), |held| (true, held.agent));
+                self.schedule(
+                    self.now,
+                    Event::Inspected {
+                        container,
+                        present,
+                        agent,
+                    },
+                );
             }
             Effect::ListRunning => {
                 let running = self

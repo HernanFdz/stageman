@@ -68,7 +68,8 @@ impl Instance {
                 self.replied(job, &message.text);
             }
             Recipient::Foreman(project) => {
-                tracing::debug!(%project, "a message for the foreman; not handled here yet");
+                tracing::info!(%project, "a message for the foreman");
+                self.for_foreman(project, channel, message);
             }
             // Answered rather than ignored. They addressed this instance, so
             // silence would read as broken — and this is where somebody lands

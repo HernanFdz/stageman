@@ -10,6 +10,7 @@
               report to; the virtual clock adds"
 )]
 
+mod foreman;
 mod replies;
 mod simulation;
 mod waking;

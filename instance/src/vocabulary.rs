@@ -149,6 +149,16 @@ pub enum Event {
         /// What was heard.
         message: Message,
     },
+    /// Answers [`Effect::Inspect`]: whether a container exists, and for
+    /// which agent it was made.
+    Inspected {
+        /// Its name.
+        container: String,
+        /// Whether the runtime holds it.
+        present: bool,
+        /// Which agent it was made for, if it is there and its label says.
+        agent: Option<Agent>,
+    },
 }
 
 /// One thing the instance asks of the world.
@@ -178,6 +188,17 @@ pub enum Effect {
     },
     /// Ask which containers are up. Answered by [`Event::Listed`].
     ListRunning,
+    /// Ask whether a container exists and for which agent it was made.
+    /// Answered by [`Event::Inspected`].
+    ///
+    /// Asked before every foreman's turn rather than remembered, because a
+    /// container is the truth about whether a session exists: a foreman that
+    /// believed it had one and did not would fail every turn until somebody
+    /// looked.
+    Inspect {
+        /// Its name.
+        container: String,
+    },
     /// Stop a container, keeping it and everything in it. Unanswered.
     Halt {
         /// Its name.
@@ -267,6 +288,10 @@ impl fmt::Debug for Effect {
                 .finish(),
             Self::Probe { job } => f.debug_struct("Probe").field("job", job).finish(),
             Self::ListRunning => f.write_str("ListRunning"),
+            Self::Inspect { container } => f
+                .debug_struct("Inspect")
+                .field("container", container)
+                .finish(),
             Self::Halt { container } => f
                 .debug_struct("Halt")
                 .field("container", container)

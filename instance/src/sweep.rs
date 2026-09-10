@@ -245,38 +245,7 @@ impl Instance {
 
         // First, because everything below reasons about containers a job
         // still needs, and these belong to nothing this instance knows.
-        let unplaceable = unplaceable(&left, &self.state);
-        let mut disowned = Vec::with_capacity(unplaceable.len());
-        for container in &unplaceable {
-            let whose = belonging(labelled(&left, container.named()), self.id);
-            match (whose, container) {
-                (Whose::Ours, Unplaceable::Unidentified(name)) => tracing::warn!(
-                    container = %name,
-                    "a container of this instance's, under a name it does not understand; removed"
-                ),
-                (Whose::Ours, Unplaceable::Forgotten(name, job)) => tracing::warn!(
-                    container = %name,
-                    %job,
-                    "a container of this instance's naming a job it has no record of — work may \
-                     have been lost; removed"
-                ),
-                (Whose::Elsewhere, _) => tracing::debug!(
-                    container = %container.named(),
-                    "a container belonging to another instance; left alone"
-                ),
-                (Whose::Unlabelled, _) => tracing::warn!(
-                    container = %container.named(),
-                    "a container this project started before instances were told apart, so it \
-                     cannot be attributed; left alone rather than removed"
-                ),
-            }
-            if whose == Whose::Ours {
-                effects.push(Effect::Discard {
-                    container: container.named().to_owned(),
-                });
-            }
-            disowned.push(whose);
-        }
+        let (unplaceable, disowned) = self.disowned(&left, &mut effects);
 
         // A retirement writes the record before removing the container, so
         // one left here is a retirement interrupted, and this finishes it.
@@ -348,6 +317,15 @@ impl Instance {
         }
         effects.push(settle_later());
 
+        // A foreman found holding a message was interrupted mid-turn, and
+        // nothing else would ever drive it again: only an arrival that finds
+        // it idle does, and it is not idle. See
+        // `docs/decisions/0045-a-foremans-turn-survives-the-daemon-dying.md`.
+        for project in crate::foreman::interrupted(&self.state) {
+            tracing::info!(%project, "its foreman was interrupted mid-turn; picking it up");
+            self.pick_up(project);
+        }
+
         (
             effects,
             tallied(
@@ -358,6 +336,53 @@ impl Instance {
                 &disowned,
             ),
         )
+    }
+
+    /// Deals with every container the instance cannot account for.
+    ///
+    /// A phase of its own because it is the one that *destroys* something,
+    /// and it answers a question none of the others ask: not "what should this
+    /// job do next" but "is this container mine at all". Answers with what it
+    /// found and what it decided about each, in the same order, so the tally
+    /// can pair them.
+    fn disowned<'a>(
+        &self,
+        left: &[Left<'a>],
+        effects: &mut Vec<Effect>,
+    ) -> (Vec<Unplaceable<'a>>, Vec<Whose>) {
+        let unplaceable = unplaceable(left, &self.state);
+        let mut disowned = Vec::with_capacity(unplaceable.len());
+        for container in &unplaceable {
+            let whose = belonging(labelled(left, container.named()), self.id);
+            match (whose, container) {
+                (Whose::Ours, Unplaceable::Unidentified(name)) => tracing::warn!(
+                    container = %name,
+                    "a container of this instance's, under a name it does not understand; removed"
+                ),
+                (Whose::Ours, Unplaceable::Forgotten(name, job)) => tracing::warn!(
+                    container = %name,
+                    %job,
+                    "a container of this instance's naming a job it has no record of — work may \
+                     have been lost; removed"
+                ),
+                (Whose::Elsewhere, _) => tracing::debug!(
+                    container = %container.named(),
+                    "a container belonging to another instance; left alone"
+                ),
+                (Whose::Unlabelled, _) => tracing::warn!(
+                    container = %container.named(),
+                    "a container this project started before instances were told apart, so it \
+                     cannot be attributed; left alone rather than removed"
+                ),
+            }
+            if whose == Whose::Ours {
+                effects.push(Effect::Discard {
+                    container: container.named().to_owned(),
+                });
+            }
+            disowned.push(whose);
+        }
+        (unplaceable, disowned)
     }
 
     /// What to do with the containers the world says are up.
