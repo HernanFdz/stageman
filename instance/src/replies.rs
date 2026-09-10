@@ -122,6 +122,9 @@ impl Instance {
                 let speaker = Speaker::Job(job);
                 let warrant = self.warrant(speaker, thread);
                 self.turns.insert(speaker, Turn::noticed());
+                // Resuming starts the container, which publishes its tunnel
+                // on a fresh port.
+                self.forget_tunnel(job);
                 self.defer(Effect::RunTurn {
                     speaker,
                     run: Run::Resume {

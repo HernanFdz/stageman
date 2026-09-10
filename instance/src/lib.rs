@@ -85,6 +85,12 @@ pub struct Instance {
     /// Tool calls waiting on the platform before they can be answered, with
     /// the identifier the agent sent, to answer under.
     asking: BTreeMap<RequestId, Option<serde_json::Value>>,
+    /// Where each job's tunnel was last found. Held, not kept: the runtime
+    /// publishes on a fresh port at every start, so what survives a restart
+    /// is wrong by construction.
+    tunnels: BTreeMap<JobId, u16>,
+    /// Tunnel requests waiting for the runtime to say where a job is.
+    routing: BTreeMap<JobId, Vec<RequestId>>,
     /// Effects waiting for a write to land, one entry per write asked for.
     deferred: VecDeque<Vec<Effect>>,
     /// Whether the kept state changed since it was last written.
@@ -140,6 +146,8 @@ impl Instance {
             warrants: BTreeMap::new(),
             interrupted: BTreeSet::new(),
             asking: BTreeMap::new(),
+            tunnels: BTreeMap::new(),
+            routing: BTreeMap::new(),
             deferred: VecDeque::new(),
             // Written before anything can depend on this instance: a file
             // that had no identity has one from the moment it is opened, and
@@ -188,7 +196,13 @@ impl Instance {
         match event {
             Event::Persisted { outcome } => self.persisted(outcome, &mut effects),
             Event::TurnEnded { speaker, outcome } => self.ended(speaker, outcome, &mut effects),
-            Event::Probed { job, answering } => probed(job, answering, &mut effects),
+            Event::Probed { job, answering } => {
+                if !answering {
+                    // Halted, so the port it was on reaches nothing.
+                    self.forget_tunnel(job);
+                }
+                probed(job, answering, &mut effects);
+            }
             Event::Listed { running } => self.listed(&running, &mut effects),
             Event::Woke {
                 timer: Timer::Settle,
@@ -212,6 +226,9 @@ impl Instance {
             Event::ThreadOpened { job, outcome } => self.thread_opened(job, outcome),
             Event::Posted { request, outcome } => self.posted(request, outcome),
             Event::Request { id, request } => self.requested(id, request, &mut effects),
+            Event::TunnelAsked { id, job } => self.tunnel_asked(id, job, &mut effects),
+            Event::PortFound { job, port } => self.port_found(job, port, &mut effects),
+            Event::TunnelFailed { job, why } => self.tunnel_failed(job, &why),
         }
         self.flush(&mut effects);
         debug_assert!(

@@ -20,6 +20,7 @@ const fn up(serving: bool) -> Held {
         agent: Some(Agent::Claude),
         running: true,
         serving,
+        port: None,
     }
 }
 
@@ -236,6 +237,7 @@ fn waking_removes_what_is_ours_and_over_and_leaves_the_rest() {
             agent: Some(Agent::Claude),
             running: true,
             serving: false,
+            port: None,
         },
     );
     world.container(
@@ -245,6 +247,7 @@ fn waking_removes_what_is_ours_and_over_and_leaves_the_rest() {
             agent: None,
             running: false,
             serving: false,
+            port: None,
         },
     );
 
@@ -354,6 +357,7 @@ fn settling_asks_only_about_what_is_ours() {
             agent: Some(Agent::Claude),
             running: true,
             serving: false,
+            port: None,
         },
     );
     let mut instance = world.wake(seed(1));

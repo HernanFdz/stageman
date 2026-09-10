@@ -5,7 +5,9 @@
 //! gives every job's container one published port; the forwarding that turns
 //! a request into a connection is the world's, and this is the deciding half.
 
-use stageman_core::JobId;
+use stageman_core::{JobId, Progress};
+
+use crate::vocabulary::{Effect, RequestId};
 
 /// The domain assumed when nothing names one.
 ///
@@ -192,6 +194,65 @@ fn hostname(host: &str) -> String {
         .map(|(inside, _)| inside);
     let bare = bracketed.unwrap_or_else(|| host.split_once(':').map_or(host, |(name, _)| name));
     bare.trim_end_matches('.').to_ascii_lowercase()
+}
+
+impl crate::Instance {
+    /// Answers where a job's tunnel is: from what was last found, or from
+    /// the runtime once it has been asked.
+    ///
+    /// A job this instance has no record of, or one that is over, is
+    /// answered at once with nothing, without asking the runtime: a retired
+    /// job's container is gone by decision, and a stale browser tab asking
+    /// after one is ordinary. Requests that arrive while the runtime is being
+    /// asked wait for the one answer rather than each asking again.
+    pub fn tunnel_asked(&mut self, id: RequestId, job: JobId, effects: &mut Vec<Effect>) {
+        let showing = self
+            .state
+            .job(job)
+            .is_some_and(|recorded| !matches!(recorded.progress, Progress::Retired(_)));
+        if !showing {
+            effects.push(Effect::Route { id, port: None });
+            return;
+        }
+        if let Some(port) = self.tunnels.get(&job) {
+            effects.push(Effect::Route {
+                id,
+                port: Some(*port),
+            });
+            return;
+        }
+        let waiting = self.routing.entry(job).or_default();
+        waiting.push(id);
+        if waiting.len() == 1 {
+            effects.push(Effect::FindPort { job });
+        }
+    }
+
+    /// Records where a job's tunnel was found, and answers everyone waiting.
+    pub fn port_found(&mut self, job: JobId, port: Option<u16>, effects: &mut Vec<Effect>) {
+        if let Some(port) = port {
+            self.tunnels.insert(job, port);
+        }
+        for id in self.routing.remove(&job).unwrap_or_default() {
+            effects.push(Effect::Route { id, port });
+        }
+    }
+
+    /// Forgets where a job's tunnel was, so the next request asks again.
+    ///
+    /// The ordinary cause is a container that was restarted and is now on
+    /// another host port, which is what the runtime does on every start.
+    pub fn tunnel_failed(&mut self, job: JobId, why: &str) {
+        tracing::debug!(%job, why, "a job's tunnel did not answer");
+        self.forget_tunnel(job);
+    }
+
+    /// Forgets where a job's tunnel was: on a failed connection, and at every
+    /// moment the container is stopped, restarted or removed, so that a look
+    /// afterwards asks the runtime rather than trusting a port that has moved.
+    pub fn forget_tunnel(&mut self, job: JobId) {
+        self.tunnels.remove(&job);
+    }
 }
 
 #[cfg(test)]

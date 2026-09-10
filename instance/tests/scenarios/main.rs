@@ -15,4 +15,5 @@ mod foreman;
 mod replies;
 mod simulation;
 mod tools;
+mod tunnel;
 mod waking;

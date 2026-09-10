@@ -31,6 +31,9 @@ pub struct Held {
     pub running: bool,
     /// Whether something inside is answering on the tunnel.
     pub serving: bool,
+    /// The host port its tunnel is published on, once it has been started.
+    /// A new one on every start, as the runtime does.
+    pub port: Option<u16>,
 }
 
 pub struct Simulation {
@@ -53,6 +56,10 @@ pub struct Simulation {
     tool_answers: BTreeMap<RequestId, (u16, Option<serde_json::Value>)>,
     /// What each person's request was answered with, by identifier.
     responses: BTreeMap<RequestId, Response>,
+    /// Where each tunnel request was sent, by identifier.
+    routes: BTreeMap<RequestId, Sent>,
+    /// The last host port handed out.
+    ports: u16,
     /// Threads opened so far, so each gets a number of its own.
     threads_opened: u32,
     /// Jobs whose first turn the world has been asked to run. A job is on the
@@ -67,6 +74,15 @@ pub struct Simulation {
     reclaims: usize,
     warrants: Vec<Secret>,
     key: Key,
+}
+
+/// Where a tunnel request was sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sent {
+    /// Nothing answers on that name.
+    Nowhere,
+    /// Forwarded to this host port.
+    To(u16),
 }
 
 /// The identity every simulated instance has.
@@ -219,6 +235,14 @@ pub fn holding_a_message(state: &mut State, n: u32, text: &str) {
         });
 }
 
+/// A request arriving for a job's name under the domain.
+pub const fn tunnel_asked(id: u64, job: JobId) -> Event {
+    Event::TunnelAsked {
+        id: RequestId(id),
+        job,
+    }
+}
+
 /// A person asking something of the dashboard.
 pub const fn request(id: u64, request: Request) -> Event {
     Event::Request {
@@ -260,6 +284,8 @@ impl Simulation {
             post_failures: VecDeque::new(),
             tool_answers: BTreeMap::new(),
             responses: BTreeMap::new(),
+            routes: BTreeMap::new(),
+            ports: 40_000,
             threads_opened: 100,
             begun: BTreeSet::new(),
             turn_takes: 1_000,
@@ -301,6 +327,7 @@ impl Simulation {
                 agent: Some(Agent::Claude),
                 running: false,
                 serving: false,
+                port: None,
             },
         )
     }
@@ -323,6 +350,19 @@ impl Simulation {
     /// What a person's request was answered with, if it has been.
     pub fn response(&self, id: u64) -> Option<&Response> {
         self.responses.get(&RequestId(id))
+    }
+
+    /// Where a tunnel request was sent, if it has been answered.
+    pub fn route(&self, id: u64) -> Option<Sent> {
+        self.routes.get(&RequestId(id)).copied()
+    }
+
+    /// The host port a container's tunnel is on now, if it is running.
+    pub fn port_of(&self, name: &str) -> Option<u16> {
+        self.containers
+            .get(name)
+            .filter(|held| held.running)
+            .and_then(|held| held.port)
     }
 
     /// The virtual instant.
@@ -392,6 +432,9 @@ impl Simulation {
                     | Event::Posted { .. }
                     | Event::Woke { .. }
                     | Event::Request { .. }
+                    | Event::TunnelAsked { .. }
+                    | Event::PortFound { .. }
+                    | Event::TunnelFailed { .. }
             )
         });
         self.landing.clear();
@@ -472,12 +515,18 @@ impl Simulation {
                     agent: Some(Agent::Claude),
                     running: true,
                     serving: false,
+                    port: None,
                 },
             );
         }
+        // A start publishes the tunnel on a fresh host port, as the runtime
+        // does, whether the container is new or restarted.
+        self.ports += 1;
+        let port = self.ports;
         let outcome = match self.containers.get_mut(&container) {
             Some(held) => {
                 held.running = true;
+                held.port = Some(port);
                 self.answers.pop_front().unwrap_or_else(|| {
                     Ok(Answer {
                         text: "done".to_owned(),
@@ -490,6 +539,38 @@ impl Simulation {
         };
         let at = self.now + self.turn_takes;
         self.schedule(at, Event::TurnEnded { speaker, outcome });
+    }
+
+    /// Answers whether a container exists, and whose it is.
+    fn inspect(&mut self, container: String) {
+        let (present, agent) = self
+            .containers
+            .get(&container)
+            .map_or((false, None), |held| (true, held.agent));
+        self.schedule(
+            self.now,
+            Event::Inspected {
+                container,
+                present,
+                agent,
+            },
+        );
+    }
+
+    /// Answers with every container that is running.
+    fn list_running(&mut self) {
+        let running = self
+            .containers
+            .iter()
+            .filter(|(_, held)| held.running)
+            .map(|(name, held)| Container {
+                name: name.clone(),
+                instance: held.instance,
+                agent: held.agent,
+                running: true,
+            })
+            .collect();
+        self.schedule(self.now, Event::Listed { running });
     }
 
     /// Ends the agent process, so the turn it was running ends with that
@@ -532,34 +613,8 @@ impl Simulation {
                     .is_some_and(|held| held.running && held.serving);
                 self.schedule(self.now, Event::Probed { job, answering });
             }
-            Effect::Inspect { container } => {
-                let (present, agent) = self
-                    .containers
-                    .get(&container)
-                    .map_or((false, None), |held| (true, held.agent));
-                self.schedule(
-                    self.now,
-                    Event::Inspected {
-                        container,
-                        present,
-                        agent,
-                    },
-                );
-            }
-            Effect::ListRunning => {
-                let running = self
-                    .containers
-                    .iter()
-                    .filter(|(_, held)| held.running)
-                    .map(|(name, held)| Container {
-                        name: name.clone(),
-                        instance: held.instance,
-                        agent: held.agent,
-                        running: true,
-                    })
-                    .collect();
-                self.schedule(self.now, Event::Listed { running });
-            }
+            Effect::Inspect { container } => self.inspect(container),
+            Effect::ListRunning => self.list_running(),
             Effect::Halt { container } => {
                 if let Some(held) = self.containers.get_mut(&container) {
                     held.running = false;
@@ -579,6 +634,13 @@ impl Simulation {
             }
             Effect::Respond { id, response } => {
                 self.responses.insert(id, response);
+            }
+            Effect::Route { id, port } => {
+                self.routes.insert(id, port.map_or(Sent::Nowhere, Sent::To));
+            }
+            Effect::FindPort { job } => {
+                let port = self.port_of(&stageman_job::container(job));
+                self.schedule(self.now, Event::PortFound { job, port });
             }
             Effect::StopTurn { speaker } => self.stop_turn(speaker),
             Effect::OpenThread {

@@ -219,6 +219,34 @@ pub enum Event {
         /// What was asked.
         request: crate::requests::Request,
     },
+    /// A request arrived for a name one label below the domain, and that
+    /// label is a job's identifier. Answered by [`Effect::Route`], in this
+    /// step or once the runtime has said where the tunnel is. The world
+    /// decodes the hostname, which is shape; whether the job is one of this
+    /// instance's is state, and so is asked here.
+    TunnelAsked {
+        /// What the world is waiting to answer.
+        id: RequestId,
+        /// The job the name identifies.
+        job: JobId,
+    },
+    /// Answers [`Effect::FindPort`]: where the job's tunnel is published, if
+    /// its container is running with one.
+    PortFound {
+        /// Which job.
+        job: JobId,
+        /// The host port, or none if nothing can be reached.
+        port: Option<u16>,
+    },
+    /// A connection to where a job's tunnel was last found did not go
+    /// through. Only failures are reported: a relay that worked needs no
+    /// decision, and one per request would be noise.
+    TunnelFailed {
+        /// Which job.
+        job: JobId,
+        /// What went wrong, for the log.
+        why: String,
+    },
 }
 
 /// One thing the instance asks of the world.
@@ -288,6 +316,21 @@ pub enum Effect {
         thread: Thread,
         /// What.
         text: String,
+    },
+    /// Answer a tunnel request: where to forward it, or that nothing
+    /// answers on that name. Unanswered, except by [`Event::TunnelFailed`]
+    /// when the forwarding does not go through.
+    Route {
+        /// Which request.
+        id: RequestId,
+        /// The host port to forward to, or none for a name nothing answers on.
+        port: Option<u16>,
+    },
+    /// Ask the runtime where a job's tunnel is published. Answered by
+    /// [`Event::PortFound`].
+    FindPort {
+        /// Which job.
+        job: JobId,
     },
     /// Answer a person's request. Unanswered.
     Respond {
@@ -429,6 +472,12 @@ impl fmt::Debug for Effect {
                 .field("project", project)
                 .field("address", &speaking.address)
                 .finish(),
+            Self::Route { id, port } => f
+                .debug_struct("Route")
+                .field("id", id)
+                .field("port", port)
+                .finish(),
+            Self::FindPort { job } => f.debug_struct("FindPort").field("job", job).finish(),
             Self::Respond { id, response } => f
                 .debug_struct("Respond")
                 .field("id", id)

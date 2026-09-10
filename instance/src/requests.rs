@@ -354,15 +354,16 @@ impl Instance {
                 working,
             });
         }
-        let containers: Vec<String> = watched
-            .jobs
-            .keys()
-            .map(|job| stageman_job::container(*job))
-            .chain(std::iter::once(stageman_foreman::container(identifier)))
-            .collect();
-        for container in containers {
-            self.defer(Effect::Discard { container });
+        let jobs: Vec<JobId> = watched.jobs.keys().copied().collect();
+        for job in &jobs {
+            self.forget_tunnel(*job);
+            self.defer(Effect::Discard {
+                container: stageman_job::container(*job),
+            });
         }
+        self.defer(Effect::Discard {
+            container: stageman_foreman::container(identifier),
+        });
         self.defer(Effect::Reclaim);
         self.state.projects.remove(&identifier);
         self.dirty = true;
@@ -468,6 +469,7 @@ impl Instance {
                 self.dirty = true;
             }
         }
+        self.forget_tunnel(named);
         self.defer(Effect::Discard {
             container: stageman_job::container(named),
         });
