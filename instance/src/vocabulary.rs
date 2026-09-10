@@ -13,8 +13,10 @@ use std::time::Duration;
 
 use stageman_agent::Answer;
 use stageman_core::{
-    Agent, Channel, Handout, InstanceId, JobId, Kit, ProjectId, Secret, Speaking, Thread,
+    Agent, Channel, Handout, InstanceId, JobId, Kit, ProjectId, Secret, Speaking, Thread, Timestamp,
 };
+
+use crate::tunnel::Domain;
 
 /// What the world seeds the instance's randomness with, once.
 ///
@@ -32,7 +34,21 @@ pub struct Startup {
     /// Every container the runtime holds that this project started, running
     /// or not, with the labels it was given.
     pub containers: Vec<Container>,
+    /// The domain this instance answers on, which a job is told so that what
+    /// it shows can be reached.
+    pub domain: Domain,
+    /// The port the dashboard is actually bound to, for the same reason.
+    pub serving: u16,
+    /// What this build calls itself, for whoever asks the tools endpoint.
+    pub build: String,
 }
+
+/// What identifies one request the world is waiting to answer.
+///
+/// Minted by the world, carried in and echoed back, and opaque here: the
+/// instance decides nothing from its value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RequestId(pub u64);
 
 /// One container the runtime holds, as the world reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,6 +175,40 @@ pub enum Event {
         /// Which agent it was made for, if it is there and its label says.
         agent: Option<Agent>,
     },
+    /// An agent called the tools endpoint. Answered by
+    /// [`Effect::ToolAnswered`], in this step or a later one.
+    ///
+    /// The whole request, because everything the endpoint decides is
+    /// instance state: whether the credential names anyone, what its bearer
+    /// may be offered, and what each tool does.
+    ToolCalled {
+        /// What the world is waiting to answer.
+        id: RequestId,
+        /// When it arrived. Kept on a job the call creates.
+        at: Timestamp,
+        /// Whether the caller is on this machine, which is the only place a
+        /// container of ours can be.
+        nearby: bool,
+        /// The bearer credential presented, if any.
+        bearer: Option<String>,
+        /// The request body, as JSON.
+        body: serde_json::Value,
+    },
+    /// Answers [`Effect::OpenThread`]: where a job's conversation happens,
+    /// or why it could not be opened.
+    ThreadOpened {
+        /// Whose thread.
+        job: JobId,
+        /// The thread, or why not.
+        outcome: Result<Thread, String>,
+    },
+    /// Answers [`Effect::Post`]: whether the platform took the message.
+    Posted {
+        /// Which request it was said for.
+        request: RequestId,
+        /// Why not, if not.
+        outcome: Result<(), String>,
+    },
 }
 
 /// One thing the instance asks of the world.
@@ -222,6 +272,38 @@ pub enum Effect {
     /// Unanswered: this is a notice about an outcome, and the outcome does
     /// not change because the notice of it did not arrive.
     Say {
+        /// The channel and the credential that posts on it.
+        speaking: Speaking,
+        /// Where in it.
+        thread: Thread,
+        /// What.
+        text: String,
+    },
+    /// Answer a request the world is waiting on. Unanswered.
+    ToolAnswered {
+        /// Which request.
+        id: RequestId,
+        /// The HTTP status to answer with.
+        status: u16,
+        /// The body, if the status carries one.
+        body: Option<serde_json::Value>,
+    },
+    /// Open the thread a job's conversation happens in, by posting its
+    /// announcement at the root of the channel. Answered by
+    /// [`Event::ThreadOpened`].
+    OpenThread {
+        /// Whose thread.
+        job: JobId,
+        /// The channel and the credential that posts on it.
+        speaking: Speaking,
+        /// What the thread hangs from.
+        announcement: String,
+    },
+    /// Post on a channel on an agent's behalf. Answered by [`Event::Posted`],
+    /// because the agent is told whether it was heard.
+    Post {
+        /// Which request is waiting on it.
+        request: RequestId,
         /// The channel and the credential that posts on it.
         speaking: Speaking,
         /// Where in it.
@@ -322,6 +404,34 @@ impl fmt::Debug for Effect {
                 .debug_struct("Listen")
                 .field("project", project)
                 .field("address", &speaking.address)
+                .finish(),
+            Self::ToolAnswered { id, status, body } => f
+                .debug_struct("ToolAnswered")
+                .field("id", id)
+                .field("status", status)
+                .field("body", body)
+                .finish(),
+            Self::OpenThread {
+                job,
+                speaking,
+                announcement,
+            } => f
+                .debug_struct("OpenThread")
+                .field("job", job)
+                .field("address", &speaking.address)
+                .field("announcement", announcement)
+                .finish(),
+            Self::Post {
+                request,
+                speaking,
+                thread,
+                text,
+            } => f
+                .debug_struct("Post")
+                .field("request", request)
+                .field("address", &speaking.address)
+                .field("thread", thread)
+                .field("text", text)
                 .finish(),
         }
     }

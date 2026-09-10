@@ -7,7 +7,7 @@
 //! a method: turns, timers and unanswered writes die, containers stay as they
 //! are, and the disk is what landed.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use stageman_agent::{Answer, StopReason};
 use stageman_core::{
@@ -15,7 +15,9 @@ use stageman_core::{
     KitConfig, KitName, NONCE_LEN, Nonce, Progress, Project, ProjectId, Secret, Snapshot, State,
     Thread, Timestamp, Uuid,
 };
-use stageman_instance::{Container, Effect, Event, Instance, Message, Run, Seed, Startup};
+use stageman_instance::{
+    Container, Domain, Effect, Event, Instance, Message, RequestId, Run, Seed, Startup,
+};
 
 /// Virtual milliseconds.
 pub type Now = u64;
@@ -44,6 +46,16 @@ pub struct Simulation {
     /// How the next turns end, front first; a turn with nothing scripted ends
     /// cleanly having said nothing.
     answers: VecDeque<Result<Answer, String>>,
+    /// Why the next posts on an agent's behalf fail, front first.
+    post_failures: VecDeque<String>,
+    /// What each request was answered with, by identifier.
+    tool_answers: BTreeMap<RequestId, (u16, Option<serde_json::Value>)>,
+    /// Threads opened so far, so each gets a number of its own.
+    threads_opened: u32,
+    /// Jobs whose first turn the world has been asked to run. A job is on the
+    /// record before its container exists, so only after this may the oracle
+    /// expect the container.
+    begun: BTreeSet<JobId>,
     /// How long a turn takes.
     turn_takes: Now,
     trace: Vec<String>,
@@ -204,6 +216,17 @@ pub fn holding_a_message(state: &mut State, n: u32, text: &str) {
         });
 }
 
+/// A call on the tools endpoint from this machine, presenting a credential.
+pub fn tool_call(id: u64, bearer: &Secret, body: serde_json::Value) -> Event {
+    Event::ToolCalled {
+        id: RequestId(id),
+        at: Timestamp::UNIX_EPOCH,
+        nearby: true,
+        bearer: Some(bearer.expose().to_owned()),
+        body,
+    }
+}
+
 pub const fn key() -> Key {
     Key::new([7; 32])
 }
@@ -223,6 +246,10 @@ impl Simulation {
             landing: VecDeque::new(),
             write_failures: VecDeque::new(),
             answers: VecDeque::new(),
+            post_failures: VecDeque::new(),
+            tool_answers: BTreeMap::new(),
+            threads_opened: 100,
+            begun: BTreeSet::new(),
             turn_takes: 1_000,
             trace: Vec::new(),
             posts: Vec::new(),
@@ -271,6 +298,16 @@ impl Simulation {
         self.write_failures.push_back(why.to_owned());
     }
 
+    /// Scripts the next post on an agent's behalf to fail.
+    pub fn next_post_fails(&mut self, why: &str) {
+        self.post_failures.push_back(why.to_owned());
+    }
+
+    /// What a request was answered with, if it has been.
+    pub fn tool_answer(&self, id: RequestId) -> Option<&(u16, Option<serde_json::Value>)> {
+        self.tool_answers.get(&id)
+    }
+
     /// Scripts how the next turn ends.
     pub fn next_turn_ends(&mut self, outcome: Result<Answer, String>) {
         self.answers.push_back(outcome);
@@ -290,6 +327,9 @@ impl Simulation {
                     running: held.running,
                 })
                 .collect(),
+            domain: Domain::local(),
+            serving: 8080,
+            build: "a test build".to_owned(),
         }
     }
 
@@ -320,10 +360,13 @@ impl Simulation {
                     | Event::Probed { .. }
                     | Event::Listed { .. }
                     | Event::Inspected { .. }
+                    | Event::ThreadOpened { .. }
+                    | Event::Posted { .. }
                     | Event::Woke { .. }
             )
         });
         self.landing.clear();
+        self.begun.clear();
         self.trace.push(format!("{}: CRASH", self.now));
         self.wake(seed)
     }
@@ -365,8 +408,12 @@ impl Simulation {
     /// What must hold between the instance and the world after every step.
     fn oracle(&self, instance: &Instance) {
         for job in instance.state().working() {
+            // A working job has a container, unless its first turn has not
+            // been asked for yet: the record is written before the container
+            // exists, on purpose, and the container is made by the turn.
             assert!(
-                self.containers.contains_key(&stageman_job::container(job)),
+                self.containers.contains_key(&stageman_job::container(job))
+                    || !self.begun.contains(&job),
                 "job {job} is working with no container"
             );
         }
@@ -375,6 +422,9 @@ impl Simulation {
     /// Runs a turn: beginning makes the container, resuming needs one, and
     /// how it ends is the next scripted answer or a clean ending.
     fn run_turn(&mut self, speaker: stageman_instance::Speaker, run: &Run) {
+        if let stageman_instance::Speaker::Job(job) = speaker {
+            self.begun.insert(job);
+        }
         let (container, warrant) = match &run {
             Run::Begin {
                 container, warrant, ..
@@ -413,19 +463,23 @@ impl Simulation {
         self.schedule(at, Event::TurnEnded { speaker, outcome });
     }
 
+    /// Accepts a write: it lands as its completion is delivered, unless it
+    /// was scripted to fail.
+    fn write(&mut self, bytes: Vec<u8>) {
+        let outcome = if let Some(why) = self.write_failures.pop_front() {
+            self.landing.push_back(None);
+            Err(why)
+        } else {
+            self.landing.push_back(Some(bytes));
+            Ok(())
+        };
+        self.schedule(self.now + 1, Event::Persisted { outcome });
+    }
+
     pub fn perform(&mut self, effect: Effect) {
         self.trace.push(format!("{}: -> {effect:?}", self.now));
         match effect {
-            Effect::Persist { bytes } => {
-                let outcome = if let Some(why) = self.write_failures.pop_front() {
-                    self.landing.push_back(None);
-                    Err(why)
-                } else {
-                    self.landing.push_back(Some(bytes));
-                    Ok(())
-                };
-                self.schedule(self.now + 1, Event::Persisted { outcome });
-            }
+            Effect::Persist { bytes } => self.write(bytes),
             Effect::RunTurn { speaker, run } => self.run_turn(speaker, &run),
             Effect::Probe { job } => {
                 let answering = self
@@ -476,6 +530,37 @@ impl Simulation {
                 self.schedule(at, Event::Woke { timer });
             }
             Effect::Say { thread, text, .. } => self.posts.push((thread, text)),
+            Effect::ToolAnswered { id, status, body } => {
+                self.tool_answers.insert(id, (status, body));
+            }
+            Effect::OpenThread {
+                job, announcement, ..
+            } => {
+                self.threads_opened += 1;
+                let opened = thread(self.threads_opened);
+                self.posts.push((opened.clone(), announcement));
+                self.schedule(
+                    self.now,
+                    Event::ThreadOpened {
+                        job,
+                        outcome: Ok(opened),
+                    },
+                );
+            }
+            Effect::Post {
+                request,
+                thread,
+                text,
+                ..
+            } => {
+                let outcome = if let Some(why) = self.post_failures.pop_front() {
+                    Err(why)
+                } else {
+                    self.posts.push((thread, text));
+                    Ok(())
+                };
+                self.schedule(self.now, Event::Posted { request, outcome });
+            }
             Effect::Listen { project, .. } => {
                 self.listening.push(project);
                 self.trace.push(format!(

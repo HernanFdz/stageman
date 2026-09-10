@@ -13,4 +13,5 @@
 mod foreman;
 mod replies;
 mod simulation;
+mod tools;
 mod waking;

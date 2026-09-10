@@ -21,8 +21,10 @@
 
 mod file;
 mod foreman;
+mod jobs;
 mod replies;
 mod sweep;
+mod tools;
 mod tunnel;
 mod turns;
 mod vocabulary;
@@ -40,7 +42,7 @@ pub use file::LoadError;
 pub use sweep::Swept;
 pub use tunnel::{DEFAULT_DOMAIN, Domain, Routed, address, decode};
 pub use vocabulary::{
-    Container, Effect, Event, Message, Run, Seed, Speaker, Startup, Timer, Warranted,
+    Container, Effect, Event, Message, RequestId, Run, Seed, Speaker, Startup, Timer, Warranted,
 };
 
 use turns::Turn;
@@ -60,6 +62,12 @@ pub struct Instance {
     id: InstanceId,
     /// What seals the file.
     key: Key,
+    /// The domain this instance answers on.
+    domain: Domain,
+    /// The port the dashboard is bound to.
+    serving: u16,
+    /// What this build calls itself.
+    build: String,
     /// The only randomness there is.
     rng: StdRng,
     /// The turns running right now, by whose they are.
@@ -69,6 +77,9 @@ pub struct Instance {
     /// Projects whose foreman was found holding a message on waking, and
     /// whose next turn is therefore told it was interrupted.
     interrupted: BTreeSet<ProjectId>,
+    /// Tool calls waiting on the platform before they can be answered, with
+    /// the identifier the agent sent, to answer under.
+    asking: BTreeMap<RequestId, Option<serde_json::Value>>,
     /// Effects waiting for a write to land, one entry per write asked for.
     deferred: VecDeque<Vec<Effect>>,
     /// Whether the kept state changed since it was last written.
@@ -115,10 +126,14 @@ impl Instance {
             state,
             id,
             key,
+            domain: startup.domain.clone(),
+            serving: startup.serving,
+            build: startup.build.clone(),
             rng,
             turns: BTreeMap::new(),
             warrants: BTreeMap::new(),
             interrupted: BTreeSet::new(),
+            asking: BTreeMap::new(),
             deferred: VecDeque::new(),
             // Written before anything can depend on this instance: a file
             // that had no identity has one from the moment it is opened, and
@@ -181,6 +196,15 @@ impl Instance {
                 present,
                 agent,
             } => self.inspected(&container, present, agent, &mut effects),
+            Event::ToolCalled {
+                id,
+                at,
+                nearby,
+                bearer,
+                body,
+            } => self.tool_called(id, at, nearby, bearer.as_deref(), &body, &mut effects),
+            Event::ThreadOpened { job, outcome } => self.thread_opened(job, outcome),
+            Event::Posted { request, outcome } => self.posted(request, outcome),
         }
         self.flush(&mut effects);
         debug_assert!(
