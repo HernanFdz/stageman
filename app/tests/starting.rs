@@ -617,6 +617,49 @@ fn a_key_that_is_not_key_material_is_refused_without_echoing_it() {
     assert!(!said.contains("far-too-short"), "it echoed the key: {said}");
 }
 
+/// A file that exists and cannot be read is refused as such, rather than
+/// treated as a first run and written over.
+///
+/// A directory where the file should be is the cheapest unreadable file
+/// there is, and the failure it must not produce is the quiet one: an
+/// instance that could not be read, replaced by an empty one that could.
+#[test]
+fn an_instance_that_cannot_be_read_is_not_mistaken_for_a_first_run() {
+    let (kept, _) = scratch();
+
+    let finished = run(&kept.path().to_path_buf(), &[("STAGEMAN_KEY", KEY)]);
+
+    assert!(!finished.status.success());
+    let said = String::from_utf8_lossy(&finished.stderr);
+    assert!(said.contains("could not be read"), "{said}");
+}
+
+/// Two instances started from nothing are two instances.
+///
+/// The identity is minted from the seed the daemon draws for the instance,
+/// and a seed that was not drawn would give every fresh instance the same
+/// one — which is how one development instance's sweep would come to remove
+/// the real one's containers. Read off the files, because the identity is
+/// the one thing on them the state does not carry.
+#[test]
+fn two_instances_started_from_nothing_are_told_apart() {
+    let (_one_kept, one) = scratch();
+    let (_two_kept, two) = scratch();
+    drop(serving(&one, &[("STAGEMAN_KEY", KEY)]));
+    drop(serving(&two, &[("STAGEMAN_KEY", KEY)]));
+
+    let identity = |path: &Path| {
+        let text = std::fs::read_to_string(path).expect("it wrote an instance");
+        let snapshot: serde_json::Value = serde_json::from_str(&text).expect("it is JSON");
+        snapshot
+            .get("instance")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .expect("an instance names itself")
+    };
+    assert_ne!(identity(&one), identity(&two));
+}
+
 /// The whole of what this first piece of the dashboard claims: a page, served,
 /// with real state already rendered into it.
 ///

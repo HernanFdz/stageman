@@ -627,6 +627,37 @@ mod tests {
         assert!(identify(&state, "not-an-identifier").is_err());
     }
 
+    /// A project counts its running jobs apart from all of them.
+    #[test]
+    fn a_project_is_shown_with_its_working_jobs_counted_apart() {
+        let mut state = watching("aviary");
+        let watched = state
+            .projects
+            .get_mut(&ProjectId::from_uuid(Uuid::nil()))
+            .expect("the project");
+        for (which, progress) in [
+            (1_u128, Progress::Working),
+            (2, Progress::Idle(Waiting::Silent)),
+            (3, Progress::Retired(Outcome::Done)),
+        ] {
+            let mut job = Job::new(
+                Kit::defaults(Agent::Claude),
+                "because".to_owned(),
+                "do the thing".to_owned(),
+                Timestamp::UNIX_EPOCH,
+            );
+            job.progress = progress;
+            watched
+                .jobs
+                .insert(JobId::from_uuid(Uuid::from_u128(which)), job);
+        }
+
+        let shown = super::projected(ProjectId::from_uuid(Uuid::nil()), watched);
+        assert_eq!(shown.working, 1);
+        assert_eq!(shown.jobs, 3);
+        assert_eq!(shown.name, "aviary");
+    }
+
     /// The query the whole removal guard rests on.
     #[test]
     fn a_project_naming_an_agent_is_named_as_depending_on_it() {

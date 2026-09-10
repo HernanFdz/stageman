@@ -47,12 +47,6 @@ pub use endpoint::{bind as bind_tools, serve as serve_tools};
 #[cfg(feature = "server")]
 pub use serving::{RUNTIME, serve};
 #[cfg(feature = "server")]
-pub use world::world;
-
-/// Where a container reaches the tools this instance serves, on the port the
-/// environment chose.
+pub use tooling::served_at as tools_endpoint;
 #[cfg(feature = "server")]
-#[must_use]
-pub fn tools_endpoint() -> String {
-    tooling::endpoint(*endpoint::PORT)
-}
+pub use world::world;

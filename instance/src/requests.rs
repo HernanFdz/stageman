@@ -1067,6 +1067,101 @@ mod tests {
         assert_eq!(offered(&project, ""), None);
     }
 
+    /// A request formats as what was asked, and never as a credential.
+    ///
+    /// `docs/conventions.md` §4, for the one bare credential a request
+    /// carries and the two a draft does.
+    #[test]
+    fn a_request_names_what_was_asked_and_never_a_credential() {
+        use super::Request;
+        use stageman_wire::Draft;
+
+        let shown = format!(
+            "{:?}",
+            Request::Configure {
+                agent: "claude".to_owned(),
+                credential: "not-a-real-credential".to_owned(),
+            }
+        );
+        assert!(shown.contains("Configure"), "{shown}");
+        assert!(shown.contains("claude"), "{shown}");
+        assert!(shown.contains("<redacted>"), "{shown}");
+        assert!(!shown.contains("not-a-real-credential"), "{shown}");
+
+        let shown = format!(
+            "{:?}",
+            Request::Create {
+                draft: Draft {
+                    name: "aviary".to_owned(),
+                    credential: "ghp-not-a-real-token".to_owned(),
+                    ..Draft::default()
+                },
+            }
+        );
+        assert!(shown.contains("Create"), "{shown}");
+        assert!(shown.contains("aviary"), "{shown}");
+        assert!(!shown.contains("ghp-not-a-real-token"), "{shown}");
+
+        let named = [
+            (Request::Instance, "Instance"),
+            (Request::Agents, "Agents"),
+            (Request::Projects, "Projects"),
+            (
+                Request::ForgetAgent {
+                    agent: "claude".to_owned(),
+                },
+                "ForgetAgent",
+            ),
+            (
+                Request::Amend {
+                    project: "p".to_owned(),
+                    draft: Draft::default(),
+                },
+                "Amend",
+            ),
+            (
+                Request::Forget {
+                    project: "p".to_owned(),
+                },
+                "Forget",
+            ),
+            (
+                Request::Jobs {
+                    project: "p".to_owned(),
+                },
+                "Jobs",
+            ),
+            (
+                Request::Start {
+                    project: "p".to_owned(),
+                    kit: "Claude".to_owned(),
+                    work: "fix it".to_owned(),
+                    at: Timestamp::UNIX_EPOCH,
+                },
+                "Start",
+            ),
+            (
+                Request::Stop {
+                    project: "p".to_owned(),
+                    job: "j".to_owned(),
+                },
+                "Stop",
+            ),
+            (
+                Request::Retire {
+                    project: "p".to_owned(),
+                    job: "j".to_owned(),
+                    ending: stageman_wire::Ending::Done,
+                },
+                "Retire",
+            ),
+        ];
+        for (request, name) in named {
+            let shown = format!("{request:?}");
+            assert!(shown.contains(name), "{shown}");
+        }
+    }
+
     /// A job is found on its own project and on no other.
     #[test]
     fn a_job_is_found_on_its_own_project_and_nowhere_else() {

@@ -131,13 +131,7 @@ impl Instance {
                 Err(why) => Progress::Idle(Waiting::Failed(why)),
             }
         };
-        match &progress {
-            Progress::Idle(Waiting::Failed(why)) => {
-                tracing::warn!(%job, %why, "the turn did not finish");
-            }
-            Progress::Idle(Waiting::Paused) => tracing::info!(%job, "a person stopped it"),
-            _ => {}
-        }
+        said_about(job, &progress);
         self.record(job, progress);
 
         // The container is asked whether it is still showing something, at
@@ -158,6 +152,22 @@ impl Instance {
                 text: stageman_foreman::attention_notice().to_owned(),
             });
         }
+    }
+}
+
+/// Says what became of a turn, where it is worth saying.
+///
+/// Skipped by mutation testing: it chooses a diagnostic and decides nothing,
+/// and a test of which level a line is logged at would be a test of the
+/// logging.
+#[mutants::skip]
+fn said_about(job: JobId, progress: &Progress) {
+    match progress {
+        Progress::Idle(Waiting::Failed(why)) => {
+            tracing::warn!(%job, %why, "the turn did not finish");
+        }
+        Progress::Idle(Waiting::Paused) => tracing::info!(%job, "a person stopped it"),
+        _ => {}
     }
 }
 

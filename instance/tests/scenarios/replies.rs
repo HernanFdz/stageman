@@ -54,6 +54,49 @@ fn a_reply_to_an_idle_job_resumes_it_after_the_record_lands() {
     );
 }
 
+/// A turn dropped because its record did not land forgets its own warrant
+/// and nobody else's: the other speaker's goes on answering.
+#[test]
+fn a_dropped_turn_forgets_only_its_own_warrant() {
+    let mut world = Simulation::new();
+    let idle = job(1);
+    let running = job(2);
+    world.holding(&watching_a_channel(&[
+        (idle, Progress::Idle(Waiting::Asked), 1),
+        (running, Progress::Working, 2),
+    ]));
+    for which in [idle, running] {
+        let (name, held) = Simulation::ours(&stageman_job::container(which));
+        world.container(&name, held);
+    }
+    let mut instance = world.wake(seed(1));
+    world.run_until(&mut instance, 10);
+    let kept = world
+        .warrants()
+        .last()
+        .cloned()
+        .expect("the resumed job's warrant");
+    assert!(instance.warranted(kept.expose()).is_some());
+
+    // The reply is taken, and the write that would let it resume fails.
+    world.next_write_fails("the disk is full");
+    world.schedule(100, said_in(1, "use postgres"));
+    world.run_until(&mut instance, 200);
+
+    assert!(
+        matches!(
+            progress_of(instance.state(), idle),
+            Progress::Idle(Waiting::Failed(_))
+        ),
+        "the turn that was not started is recorded as such"
+    );
+    assert!(
+        instance.warranted(kept.expose()).is_some(),
+        "the other speaker's warrant still answers"
+    );
+    assert_eq!(progress_of(instance.state(), running), Progress::Working);
+}
+
 /// A reply to a working job is refused and the thread is told, and the job is
 /// not moved.
 #[test]

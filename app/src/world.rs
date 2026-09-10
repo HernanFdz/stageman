@@ -622,7 +622,155 @@ fn because(failure: &dyn std::error::Error) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{because, write_atomically};
+    use super::{Answered, Located, Performer, World, because, write_atomically};
+    use stageman_instance::{Effect, Event, Request, Response};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// A bounded wait, because the failure these look for is an answer that
+    /// never arrives — which does not error, it hangs.
+    async fn soon<T>(waiting: impl std::future::Future<Output = T>) -> T {
+        tokio::time::timeout(Duration::from_secs(5), waiting)
+            .await
+            .expect("an answer within the wait")
+    }
+
+    /// Every kind of request is answered by the effect carrying its
+    /// identifier, and by nothing else.
+    #[tokio::test]
+    async fn a_request_is_answered_by_the_effect_carrying_its_identifier() {
+        let (world, mut events) = World::new();
+        let job = stageman_core::JobId::from_uuid(stageman_core::Uuid::from_u128(7));
+
+        let asking = {
+            let world = Arc::clone(&world);
+            tokio::spawn(async move { world.ask(Request::Instance).await })
+        };
+        let Some(Event::Request {
+            id,
+            request: Request::Instance,
+        }) = soon(events.recv()).await
+        else {
+            panic!("the request, as an event");
+        };
+        world.answered(id, Answered::Person(Response::Agents(Vec::new())));
+        assert_eq!(
+            soon(asking).await.expect("the task"),
+            Some(Response::Agents(Vec::new()))
+        );
+
+        let calling = {
+            let world = Arc::clone(&world);
+            tokio::spawn(async move {
+                world
+                    .call(
+                        stageman_core::Timestamp::UNIX_EPOCH,
+                        true,
+                        Some("not-a-real-credential".to_owned()),
+                        serde_json::json!({"method": "ping"}),
+                    )
+                    .await
+            })
+        };
+        let Some(Event::ToolCalled {
+            id, nearby, bearer, ..
+        }) = soon(events.recv()).await
+        else {
+            panic!("the call, as an event");
+        };
+        assert!(nearby);
+        assert_eq!(bearer.as_deref(), Some("not-a-real-credential"));
+        world.answered(id, Answered::Tool(202, None));
+        assert_eq!(soon(calling).await.expect("the task"), Some((202, None)));
+
+        let locating = {
+            let world = Arc::clone(&world);
+            tokio::spawn(async move { world.tunnel(job).await })
+        };
+        let Some(Event::TunnelAsked { id, job: asked }) = soon(events.recv()).await else {
+            panic!("the question, as an event");
+        };
+        assert_eq!(asked, job);
+        world.answered(id, Answered::Tunnel(Located::At(4242)));
+        assert_eq!(
+            soon(locating).await.expect("the task"),
+            Some(Located::At(4242))
+        );
+    }
+
+    /// An answer of the wrong kind reaches nobody, and the one waiting is
+    /// told there is no answer rather than left waiting.
+    #[tokio::test]
+    async fn an_answer_of_the_wrong_kind_answers_nobody() {
+        let (world, mut events) = World::new();
+        let asking = {
+            let world = Arc::clone(&world);
+            tokio::spawn(async move { world.ask(Request::Agents).await })
+        };
+        let Some(Event::Request { id, .. }) = soon(events.recv()).await else {
+            panic!("the request, as an event");
+        };
+        world.answered(id, Answered::Tunnel(Located::Nowhere));
+        assert_eq!(soon(asking).await.expect("the task"), None);
+    }
+
+    /// An effect is performed on a task of its own and comes back as an
+    /// event, and a write lands before it is answered.
+    #[tokio::test]
+    async fn an_effect_is_performed_and_answered_as_an_event() {
+        let (world, mut events) = World::new();
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let path = directory.path().join("instance.json");
+        let runtime: &'static stageman_agent::ContainerRuntime = Box::leak(Box::new(
+            stageman_agent::ContainerRuntime::new(std::path::PathBuf::from("/nowhere/docker")),
+        ));
+        let performer = Performer::new(
+            runtime,
+            path.clone(),
+            "http://host.docker.internal:1/mcp".to_owned(),
+            Arc::clone(&world),
+        );
+
+        performer
+            .perform(Effect::Wake {
+                after: Duration::from_millis(1),
+                timer: stageman_instance::Timer::Settle,
+            })
+            .await;
+        assert!(matches!(
+            soon(events.recv()).await,
+            Some(Event::Woke {
+                timer: stageman_instance::Timer::Settle
+            })
+        ));
+
+        performer
+            .perform(Effect::Persist {
+                bytes: b"landed".to_vec(),
+            })
+            .await;
+        assert!(matches!(
+            soon(events.recv()).await,
+            Some(Event::Persisted { outcome: Ok(()) })
+        ));
+        assert_eq!(std::fs::read(&path).expect("it landed"), b"landed");
+
+        let elsewhere = Performer::new(
+            runtime,
+            directory.path().join("nowhere").join("instance.json"),
+            String::new(),
+            Arc::clone(&world),
+        );
+        elsewhere
+            .perform(Effect::Persist {
+                bytes: b"lost".to_vec(),
+            })
+            .await;
+        assert!(matches!(
+            soon(events.recv()).await,
+            Some(Event::Persisted { outcome: Err(_) })
+        ));
+    }
 
     /// The chain is what there is to read.
     #[test]

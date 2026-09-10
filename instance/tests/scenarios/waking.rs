@@ -92,6 +92,40 @@ fn an_instance_writes_once_on_waking_and_then_only_when_something_changed() {
     assert_eq!(written(&world), 1, "{:?}", world.shape());
 }
 
+/// What a job's session reports it was set to is written down beside the
+/// kit, this turn, and reaches the disk.
+#[test]
+fn what_a_session_reported_is_recorded_beside_the_kit() {
+    let mut world = Simulation::new();
+    world.holding(&watching(&[(job(1), Progress::Working)]));
+    let (name, held) = Simulation::ours(&stageman_job::container(job(1)));
+    world.container(&name, held);
+    world.next_turn_ends(Ok(Answer {
+        text: "done".to_owned(),
+        stop_reason: StopReason::EndTurn,
+        reported: std::collections::BTreeMap::from([(
+            "model".to_owned(),
+            "claude-opus-4".to_owned(),
+        )]),
+    }));
+    let mut instance = world.wake(seed(1));
+    world.run_until(&mut instance, 5_000);
+
+    let reported = |state: &stageman_core::State| {
+        state
+            .job(job(1))
+            .expect("the job")
+            .reported
+            .get("model")
+            .cloned()
+    };
+    assert_eq!(reported(instance.state()), Some("claude-opus-4".to_owned()));
+    assert_eq!(
+        reported(&world.disk().expect("landed")),
+        Some("claude-opus-4".to_owned())
+    );
+}
+
 /// A working job with a container is put back to work, and what its turn
 /// comes to is recorded and reaches the disk.
 #[test]

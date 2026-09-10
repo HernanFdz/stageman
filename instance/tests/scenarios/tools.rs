@@ -124,6 +124,14 @@ fn a_foreman_is_greeted_and_offered_the_tools_that_start_jobs() {
         163,
         tool_call(4, &warrant, serde_json::json!({"not": "a request"})),
     );
+    world.schedule(
+        164,
+        tool_call(
+            5,
+            &warrant,
+            body("notifications/initialized", serde_json::json!({})),
+        ),
+    );
     world.run_until(&mut instance, 200);
 
     let greeting = world.tool_answer(RequestId(1)).expect("answered");
@@ -155,6 +163,71 @@ fn a_foreman_is_greeted_and_offered_the_tools_that_start_jobs() {
     );
 
     assert_eq!(world.tool_answer(RequestId(4)).map(|a| a.0), Some(400));
+
+    // A notification that nonetheless carries an identifier is answering
+    // something, and is answered with nothing rather than merely accepted.
+    let noted = world.tool_answer(RequestId(5)).expect("answered");
+    assert_eq!(noted.0, 200);
+    assert_eq!(
+        noted.1.as_ref().expect("a body")["result"],
+        serde_json::json!({})
+    );
+}
+
+/// Minting a warrant forgets only that speaker's previous one: another
+/// speaker's goes on answering, and the speaker's own old one stops.
+#[test]
+fn minting_a_warrant_forgets_only_that_speakers_previous_one() {
+    let (mut world, mut instance, first) = with_a_foreman_working();
+
+    // The foreman starts a job, which mints the job its own warrant.
+    world.schedule(
+        160,
+        tool_call(
+            1,
+            &first,
+            call(
+                "start_job",
+                serde_json::json!({
+                    "reason": "the parser is flaky",
+                    "instructions": "Fix the flaky test in the parser.",
+                    "kit": "Claude",
+                }),
+            ),
+        ),
+    );
+    world.run_until(&mut instance, 300);
+    assert!(
+        world.warrants().len() >= 2,
+        "the job's turn has begun with a warrant of its own: {:?}",
+        world.shape()
+    );
+
+    // Another speaker's minting leaves the foreman's answering.
+    world.schedule(
+        400,
+        tool_call(2, &first, body("tools/list", serde_json::json!({}))),
+    );
+    world.run_until(&mut instance, 500);
+    assert_eq!(world.tool_answer(RequestId(2)).map(|a| a.0), Some(200));
+
+    // The foreman's next turn mints it a new one, and the old one stops.
+    world.run_until(&mut instance, 2_000);
+    world.schedule(2_100, said_at_root(2, "and look at the tests"));
+    world.run_until(&mut instance, 2_200);
+    let second = world.warrants().last().cloned().expect("the new warrant");
+    assert_ne!(second.expose(), first.expose());
+    world.schedule(
+        2_300,
+        tool_call(3, &first, body("tools/list", serde_json::json!({}))),
+    );
+    world.schedule(
+        2_301,
+        tool_call(4, &second, body("tools/list", serde_json::json!({}))),
+    );
+    world.run_until(&mut instance, 2_400);
+    assert_eq!(world.tool_answer(RequestId(3)).map(|a| a.0), Some(403));
+    assert_eq!(world.tool_answer(RequestId(4)).map(|a| a.0), Some(200));
 }
 
 /// A foreman starts a job: the job is recorded, its thread is opened once

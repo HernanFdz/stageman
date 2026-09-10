@@ -50,6 +50,13 @@ pub fn endpoint(port: u16) -> String {
     format!("http://host.docker.internal:{port}/mcp")
 }
 
+/// Where a container reaches the tools this instance serves, on the port
+/// the environment chose.
+#[must_use]
+pub fn served_at() -> String {
+    endpoint(*crate::endpoint::PORT)
+}
+
 /// The tools endpoint, for the listener `endpoint` binds.
 pub fn served() -> axum::routing::MethodRouter {
     axum::routing::post(called).get(declining).delete(closing)
@@ -113,7 +120,7 @@ async fn called(
 
 #[cfg(test)]
 mod tests {
-    use super::{axum, endpoint, presented};
+    use super::{axum, endpoint, presented, served_at};
 
     /// The credential is read from the one header and the one scheme.
     #[test]
@@ -141,5 +148,17 @@ mod tests {
     #[test]
     fn the_endpoint_names_the_host_as_a_container_sees_it() {
         assert_eq!(endpoint(47_113), "http://host.docker.internal:47113/mcp");
+    }
+
+    /// What this process serves is that address on the port it was told.
+    #[test]
+    fn the_endpoint_served_here_is_on_the_port_the_environment_chose() {
+        let served = served_at();
+        assert_eq!(served, endpoint(*crate::endpoint::PORT));
+        assert!(served.ends_with("/mcp"), "{served}");
+        assert!(
+            served.contains(&crate::endpoint::PORT.to_string()),
+            "{served}"
+        );
     }
 }
