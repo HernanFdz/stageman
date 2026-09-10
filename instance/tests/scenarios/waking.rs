@@ -1,75 +1,13 @@
 //! What an instance does on waking, on settling, and when a turn ends, run
 //! against the simulated world.
 
-#![expect(
-    clippy::expect_used,
-    clippy::arithmetic_side_effects,
-    reason = "test support in an integration-test crate is not seen as test code by the \
-              lints' allowances, and a world that cannot open its own file has nothing to \
-              report to; the virtual clock adds"
-)]
-
-mod simulation;
-
 use std::collections::BTreeMap;
 
-use simulation::{Held, Simulation, another_instance, seed, this_instance};
-use stageman_agent::{Answer, StopReason};
-use stageman_core::{
-    Agent, AgentConfig, Job, JobId, Kit, KitConfig, KitName, Outcome, Progress, Project, ProjectId,
-    Secret, State, Timestamp, Uuid, Waiting,
+use crate::simulation::{
+    Held, Simulation, another_instance, job, project, seed, this_instance, watching,
 };
-
-const fn project() -> ProjectId {
-    ProjectId::from_uuid(Uuid::from_u128(11))
-}
-
-const fn job(n: u128) -> JobId {
-    JobId::from_uuid(Uuid::from_u128(n))
-}
-
-/// An instance watching one project whose jobs are in the given states.
-fn watching(jobs: &[(JobId, Progress)]) -> State {
-    let mut state = State {
-        agents: BTreeMap::from([(
-            Agent::Claude,
-            AgentConfig {
-                auth_token: Secret::new("agent-token".to_owned()),
-            },
-        )]),
-        ..State::default()
-    };
-    state.projects.insert(
-        project(),
-        Project {
-            name: "example".to_owned(),
-            repository: "https://example.invalid/repo".to_owned(),
-            foreman_kit: Kit::defaults(Agent::Claude),
-            kits: BTreeMap::from([(
-                KitName::new("Claude").expect("a name"),
-                KitConfig::defaults(Agent::Claude),
-            )]),
-            credentials: BTreeMap::new(),
-            channels: BTreeMap::new(),
-            jobs: jobs
-                .iter()
-                .map(|(id, progress)| {
-                    let mut job = Job::new(
-                        Kit::defaults(Agent::Claude),
-                        "a reason".to_owned(),
-                        "some work".to_owned(),
-                        Timestamp::UNIX_EPOCH,
-                    );
-                    job.progress = progress.clone();
-                    (*id, job)
-                })
-                .collect(),
-            variables: BTreeMap::new(),
-            attending: stageman_core::Attending::default(),
-        },
-    );
-    state
-}
+use stageman_agent::{Answer, StopReason};
+use stageman_core::{Agent, JobId, Outcome, Progress, ProjectId, State, Uuid, Waiting};
 
 fn progress_of(state: &State, id: JobId) -> Progress {
     state.job(id).expect("the job").progress.clone()

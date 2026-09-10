@@ -1,0 +1,279 @@
+//! A reply arriving on a job's thread, run against the simulated world.
+
+use crate::simulation::{Simulation, job, said_in, seed, thread, watching_a_channel};
+use stageman_core::{JobId, Outcome, Progress, State, Waiting};
+
+fn progress_of(state: &State, id: JobId) -> Progress {
+    state.job(id).expect("the job").progress.clone()
+}
+
+/// A reply to an idle job resumes it with the person's words framed as a
+/// reply, once the record that it is working has landed, and its thread is
+/// told when the turn ends.
+#[test]
+fn a_reply_to_an_idle_job_resumes_it_after_the_record_lands() {
+    let mut world = Simulation::new();
+    let idle = job(1);
+    world.holding(&watching_a_channel(&[(
+        idle,
+        Progress::Idle(Waiting::Asked),
+        1,
+    )]));
+    let (name, held) = Simulation::ours(&stageman_job::container(idle));
+    world.container(&name, held);
+    let mut instance = world.wake(seed(1));
+    world.run_until(&mut instance, 10);
+
+    world.schedule(100, said_in(1, "use postgres"));
+    world.run_until(&mut instance, 5_000);
+
+    let shape = world.shape();
+    let persisted = shape
+        .iter()
+        .position(|line| line.starts_with("<- Persisted"))
+        .expect("the record was written");
+    let resumed = shape
+        .iter()
+        .position(|line| line.starts_with("-> RunTurn"))
+        .expect("the job was resumed");
+    assert!(
+        persisted < resumed,
+        "the turn waits for the record to land: {shape:?}"
+    );
+    let run = &shape[resumed];
+    assert!(run.contains("A person replied on the channel:"), "{run}");
+    assert!(run.contains("use postgres"), "{run}");
+    assert_eq!(
+        progress_of(instance.state(), idle),
+        Progress::Idle(Waiting::Silent)
+    );
+    assert_eq!(
+        world.posts(),
+        [(thread(1), stageman_foreman::attention_notice().to_owned())],
+        "the thread is told once, when the turn ends"
+    );
+}
+
+/// A reply to a working job is refused and the thread is told, and the job is
+/// not moved.
+#[test]
+fn a_reply_to_a_working_job_is_refused_and_said_so() {
+    let mut world = Simulation::new();
+    let working = job(1);
+    world.holding(&watching_a_channel(&[(working, Progress::Working, 1)]));
+    let (name, held) = Simulation::ours(&stageman_job::container(working));
+    world.container(&name, held);
+    let mut instance = world.wake(seed(1));
+
+    // Before its resumed turn ends.
+    world.schedule(100, said_in(1, "also check the tests"));
+    world.run_until(&mut instance, 200);
+
+    assert_eq!(
+        world.posts(),
+        [(thread(1), stageman_foreman::busy_notice().to_owned())]
+    );
+    assert_eq!(progress_of(instance.state(), working), Progress::Working);
+    assert_eq!(
+        world
+            .shape()
+            .iter()
+            .filter(|line| line.starts_with("-> RunTurn"))
+            .count(),
+        1,
+        "only the resume waking asked for: {:?}",
+        world.shape()
+    );
+}
+
+/// Two replies arriving together: the first is taken and the second is
+/// refused, because taking is one step.
+#[test]
+fn two_replies_arriving_together_resume_one_turn() {
+    let mut world = Simulation::new();
+    let idle = job(1);
+    world.holding(&watching_a_channel(&[(
+        idle,
+        Progress::Idle(Waiting::Silent),
+        1,
+    )]));
+    let (name, held) = Simulation::ours(&stageman_job::container(idle));
+    world.container(&name, held);
+    let mut instance = world.wake(seed(1));
+
+    world.schedule(100, said_in(1, "first"));
+    world.schedule(100, said_in(1, "second"));
+    world.run_until(&mut instance, 5_000);
+
+    let shape = world.shape();
+    let runs: Vec<&String> = shape
+        .iter()
+        .filter(|line| line.starts_with("-> RunTurn"))
+        .collect();
+    assert_eq!(runs.len(), 1, "{shape:?}");
+    assert!(runs.first().expect("one").contains("first"));
+    assert_eq!(
+        world.posts().first().map(|(_, text)| text.as_str()),
+        Some(stageman_foreman::busy_notice()),
+        "the second was refused and told"
+    );
+}
+
+/// A reply to a job that is over is refused with the notice that says so.
+#[test]
+fn a_reply_to_a_job_that_is_over_is_refused_with_its_own_notice() {
+    let mut world = Simulation::new();
+    let over = job(1);
+    world.holding(&watching_a_channel(&[(
+        over,
+        Progress::Retired(Outcome::Done),
+        1,
+    )]));
+    let mut instance = world.wake(seed(1));
+
+    world.schedule(100, said_in(1, "one more thing"));
+    world.run_until(&mut instance, 200);
+
+    assert_eq!(
+        world.posts(),
+        [(thread(1), stageman_foreman::over_notice().to_owned())]
+    );
+    assert_eq!(
+        progress_of(instance.state(), over),
+        Progress::Retired(Outcome::Done),
+        "a verdict is never overwritten"
+    );
+}
+
+/// A mention in a thread that belongs to no job is answered rather than
+/// ignored, and nothing else is said to.
+#[test]
+fn a_mention_in_a_thread_belonging_to_nothing_is_answered() {
+    let mut world = Simulation::new();
+    world.holding(&watching_a_channel(&[(
+        job(1),
+        Progress::Idle(Waiting::Silent),
+        1,
+    )]));
+    let (name, held) = Simulation::ours(&stageman_job::container(job(1)));
+    world.container(&name, held);
+    let mut instance = world.wake(seed(1));
+
+    world.schedule(100, said_in(7, "hello?"));
+    world.run_until(&mut instance, 200);
+
+    assert_eq!(
+        world.posts(),
+        [(thread(7), stageman_foreman::no_such_job_notice().to_owned())]
+    );
+}
+
+/// What is not addressed to this instance reaches nobody.
+#[test]
+fn a_message_without_a_mention_or_from_this_instance_reaches_nobody() {
+    let mut world = Simulation::new();
+    let idle = job(1);
+    world.holding(&watching_a_channel(&[(
+        idle,
+        Progress::Idle(Waiting::Silent),
+        1,
+    )]));
+    let (name, held) = Simulation::ours(&stageman_job::container(idle));
+    world.container(&name, held);
+    let mut instance = world.wake(seed(1));
+
+    let mut plain = said_in(1, "people talking to each other");
+    if let stageman_instance::Event::Heard { message, .. } = &mut plain {
+        message.mentions = false;
+    }
+    let mut ours = said_in(1, "something this instance posted");
+    if let stageman_instance::Event::Heard { message, .. } = &mut ours {
+        message.from_us = true;
+    }
+    world.schedule(100, plain);
+    world.schedule(101, ours);
+    world.run_until(&mut instance, 200);
+
+    assert!(world.posts().is_empty());
+    assert_eq!(
+        progress_of(instance.state(), idle),
+        Progress::Idle(Waiting::Silent)
+    );
+}
+
+/// A crash between a reply being taken and its record landing loses the
+/// reply: on waking the job is resumed with the resumption notice instead,
+/// which is what today's daemon does too.
+#[test]
+fn a_crash_before_the_record_lands_loses_the_reply_but_not_the_job() {
+    let mut world = Simulation::new();
+    let idle = job(1);
+    world.holding(&watching_a_channel(&[(
+        idle,
+        Progress::Idle(Waiting::Silent),
+        1,
+    )]));
+    let (name, held) = Simulation::ours(&stageman_job::container(idle));
+    world.container(&name, held);
+    let mut instance = world.wake(seed(1));
+
+    world.schedule(100, said_in(1, "use postgres"));
+    // The reply is taken at 100 and its write lands at 101; the daemon dies
+    // in between.
+    world.run_until(&mut instance, 100);
+    assert_eq!(progress_of(instance.state(), idle), Progress::Working);
+    let mut instance = world.crash(seed(2));
+
+    assert_eq!(
+        progress_of(instance.state(), idle),
+        Progress::Idle(Waiting::Silent),
+        "the disk never learned of the reply"
+    );
+    world.run_until(&mut instance, 5_000);
+    assert!(
+        !world
+            .shape()
+            .iter()
+            .any(|line| line.contains("use postgres") && line.starts_with("-> RunTurn")),
+        "{:?}",
+        world.shape()
+    );
+}
+
+/// A write that fails after a reply was taken fails the turn before it
+/// starts, records why, and leaves the job able to take the next reply.
+#[test]
+fn a_failed_write_fails_the_turn_before_it_starts() {
+    let mut world = Simulation::new();
+    let idle = job(1);
+    world.holding(&watching_a_channel(&[(
+        idle,
+        Progress::Idle(Waiting::Silent),
+        1,
+    )]));
+    let (name, held) = Simulation::ours(&stageman_job::container(idle));
+    world.container(&name, held);
+    let mut instance = world.wake(seed(1));
+    world.next_write_fails("the disk is full");
+
+    world.schedule(100, said_in(1, "use postgres"));
+    world.run_until(&mut instance, 5_000);
+
+    assert!(
+        !world
+            .shape()
+            .iter()
+            .any(|line| line.starts_with("-> RunTurn")),
+        "{:?}",
+        world.shape()
+    );
+    let Progress::Idle(Waiting::Failed(why)) = progress_of(instance.state(), idle) else {
+        panic!("the turn that never started is a failure");
+    };
+    assert!(why.contains("could not be written"), "{why}");
+    assert_eq!(
+        world.disk().map(|state| progress_of(&state, idle)),
+        Some(Progress::Idle(Waiting::Failed(why))),
+        "the next write carried the record"
+    );
+}

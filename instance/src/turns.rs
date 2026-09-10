@@ -33,6 +33,15 @@ impl Turn {
             notify: false,
         }
     }
+
+    /// A turn whose ending is said on the job's thread.
+    pub const fn noticed() -> Self {
+        Self {
+            stopping: false,
+            claimed: None,
+            notify: true,
+        }
+    }
 }
 
 /// What an agent's answer means for the job that produced it.

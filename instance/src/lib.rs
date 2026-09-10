@@ -20,6 +20,7 @@
 //! truth, and a job's record is on the disk before its container exists.
 
 mod file;
+mod replies;
 mod sweep;
 mod tunnel;
 mod turns;
@@ -35,7 +36,9 @@ use stageman_core::{InstanceId, JobId, Key, Kit, Progress, Secret, State, Thread
 pub use file::LoadError;
 pub use sweep::Swept;
 pub use tunnel::{DEFAULT_DOMAIN, Domain, Routed, address, decode};
-pub use vocabulary::{Container, Effect, Event, Run, Seed, Speaker, Startup, Timer, Warranted};
+pub use vocabulary::{
+    Container, Effect, Event, Message, Run, Seed, Speaker, Startup, Timer, Warranted,
+};
 
 use turns::Turn;
 
@@ -165,6 +168,7 @@ impl Instance {
                 effects.push(Effect::ListRunning);
                 effects.push(sweep::settle_later());
             }
+            Event::Heard { channel, message } => self.heard(channel, &message, &mut effects),
         }
         self.flush(&mut effects);
         debug_assert!(
@@ -188,11 +192,41 @@ impl Instance {
         };
         match outcome {
             Ok(()) => effects.extend(waiting),
-            Err(why) => tracing::error!(
-                %why,
-                dropped = waiting.len(),
-                "the instance could not be written; what waited on the write is dropped"
-            ),
+            Err(why) => {
+                tracing::error!(%why, "the instance could not be written");
+                self.dropped(waiting);
+            }
+        }
+    }
+
+    /// What becomes of effects that waited on a write that never landed.
+    ///
+    /// Notices are simply not said. A turn that was to start is not started,
+    /// and the job it was for is recorded as failed for that reason: the
+    /// alternative is a job that says working with nothing running in it,
+    /// which a reply could never reach. The record is a change of its own,
+    /// so the next write carries it — and if that one lands, the job can be
+    /// given something again.
+    fn dropped(&mut self, effects: Vec<Effect>) {
+        tracing::warn!(
+            dropped = effects.len(),
+            "what waited on the write is dropped"
+        );
+        for effect in effects {
+            if let Effect::RunTurn {
+                speaker: speaker @ Speaker::Job(job),
+                ..
+            } = effect
+            {
+                self.turns.remove(&speaker);
+                self.warrants.retain(|_, known| known.speaker != speaker);
+                self.record(
+                    job,
+                    Progress::Idle(stageman_core::Waiting::Failed(
+                        "the instance could not be written, so the turn was not started".to_owned(),
+                    )),
+                );
+            }
         }
     }
 
@@ -213,12 +247,10 @@ impl Instance {
                 self.deferred.push_back(staged);
                 effects.push(Effect::Persist { bytes });
             }
-            Err(why) => tracing::error!(
-                %why,
-                dropped = staged.len(),
-                "the instance could not be sealed; nothing is written and what waited on the \
-                 write is dropped"
-            ),
+            Err(why) => {
+                tracing::error!(%why, "the instance could not be sealed, so nothing is written");
+                self.dropped(staged);
+            }
         }
     }
 

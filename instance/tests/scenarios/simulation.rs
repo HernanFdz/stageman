@@ -11,9 +11,11 @@ use std::collections::{BTreeMap, VecDeque};
 
 use stageman_agent::{Answer, StopReason};
 use stageman_core::{
-    Agent, InstanceId, Key, NONCE_LEN, Nonce, Secret, Snapshot, State, Thread, Uuid,
+    Agent, AgentConfig, Channel, ChannelConfig, InstanceId, Job, JobId, Key, Kit, KitConfig,
+    KitName, NONCE_LEN, Nonce, Progress, Project, ProjectId, Secret, Snapshot, State, Thread,
+    Timestamp, Uuid,
 };
-use stageman_instance::{Container, Effect, Event, Instance, Run, Seed, Startup};
+use stageman_instance::{Container, Effect, Event, Instance, Message, Run, Seed, Startup};
 
 /// Virtual milliseconds.
 pub type Now = u64;
@@ -34,8 +36,11 @@ pub struct Simulation {
     queue: BTreeMap<(Now, u64), Event>,
     containers: BTreeMap<String, Held>,
     disk: Option<Vec<u8>>,
-    /// Writes asked for and not yet landed, in order.
-    landing: VecDeque<Vec<u8>>,
+    /// Writes asked for and not yet answered, in order; `None` is one that
+    /// will fail rather than land.
+    landing: VecDeque<Option<Vec<u8>>>,
+    /// Why the next writes fail, front first.
+    write_failures: VecDeque<String>,
     /// How the next turns end, front first; a turn with nothing scripted ends
     /// cleanly having said nothing.
     answers: VecDeque<Result<Answer, String>>,
@@ -59,6 +64,116 @@ pub const fn another_instance() -> InstanceId {
     InstanceId::from_uuid(Uuid::from_u128(0xdef))
 }
 
+/// The one project every scenario watches.
+pub const fn project() -> ProjectId {
+    ProjectId::from_uuid(Uuid::from_u128(11))
+}
+
+/// Where that project's channel is.
+pub const CHANNEL: &str = "C0123456789";
+
+/// A job of that project, by number.
+pub const fn job(n: u128) -> JobId {
+    JobId::from_uuid(Uuid::from_u128(n))
+}
+
+/// A thread on the project's channel, named by number.
+pub fn thread(n: u32) -> Thread {
+    Thread {
+        channel: Channel::Slack,
+        id: format!("1788000000.{n:06}"),
+    }
+}
+
+fn a_job(progress: &Progress, thread: Option<Thread>) -> Job {
+    let mut job = Job::new(
+        Kit::defaults(Agent::Claude),
+        "a reason".to_owned(),
+        "some work".to_owned(),
+        Timestamp::UNIX_EPOCH,
+    );
+    job.progress = progress.clone();
+    job.thread = thread;
+    job
+}
+
+fn a_project(jobs: BTreeMap<JobId, Job>, bound: bool) -> Project {
+    let mut channels = BTreeMap::new();
+    if bound {
+        channels.insert(
+            Channel::Slack,
+            ChannelConfig {
+                address: CHANNEL.to_owned(),
+                credential: Secret::new("xoxb-not-a-real-token".to_owned()),
+                listen_credential: Some(Secret::new("xapp-not-a-real-token".to_owned())),
+            },
+        );
+    }
+    Project {
+        name: "example".to_owned(),
+        repository: "https://example.invalid/repo".to_owned(),
+        foreman_kit: Kit::defaults(Agent::Claude),
+        kits: BTreeMap::from([(
+            KitName::new("Claude").expect("a name"),
+            KitConfig::defaults(Agent::Claude),
+        )]),
+        credentials: BTreeMap::new(),
+        channels,
+        jobs,
+        variables: BTreeMap::new(),
+        attending: stageman_core::Attending::default(),
+    }
+}
+
+fn configured(project: Project) -> State {
+    State {
+        agents: BTreeMap::from([(
+            Agent::Claude,
+            AgentConfig {
+                auth_token: Secret::new("agent-token".to_owned()),
+            },
+        )]),
+        projects: BTreeMap::from([(self::project(), project)]),
+    }
+}
+
+/// An instance watching one project with no channel, whose jobs are in the
+/// given states.
+pub fn watching(jobs: &[(JobId, Progress)]) -> State {
+    configured(a_project(
+        jobs.iter()
+            .map(|(id, progress)| (*id, a_job(progress, None)))
+            .collect(),
+        false,
+    ))
+}
+
+/// An instance watching one project with a channel bound, each job speaking
+/// in the thread numbered for it.
+pub fn watching_a_channel(jobs: &[(JobId, Progress, u32)]) -> State {
+    configured(a_project(
+        jobs.iter()
+            .map(|(id, progress, thread)| (*id, a_job(progress, Some(self::thread(*thread)))))
+            .collect(),
+        true,
+    ))
+}
+
+/// Somebody mentioning this instance in a thread on the project's channel.
+pub fn said_in(thread: u32, text: &str) -> Event {
+    Event::Heard {
+        channel: Channel::Slack,
+        message: Message {
+            address: CHANNEL.to_owned(),
+            id: "1788000099.000001".to_owned(),
+            thread: Some(self::thread(thread).id),
+            text: text.to_owned(),
+            mentions: true,
+            from_us: false,
+        },
+    }
+}
+
 pub const fn key() -> Key {
     Key::new([7; 32])
 }
@@ -76,6 +191,7 @@ impl Simulation {
             containers: BTreeMap::new(),
             disk: None,
             landing: VecDeque::new(),
+            write_failures: VecDeque::new(),
             answers: VecDeque::new(),
             turn_takes: 1_000,
             trace: Vec::new(),
@@ -118,6 +234,11 @@ impl Simulation {
                 serving: false,
             },
         )
+    }
+
+    /// Scripts the next write to fail.
+    pub fn next_write_fails(&mut self, why: &str) {
+        self.write_failures.push_back(why.to_owned());
     }
 
     /// Scripts how the next turn ends.
@@ -186,8 +307,10 @@ impl Simulation {
     pub fn next(&mut self) -> Option<Event> {
         let ((at, _), event) = self.queue.pop_first()?;
         self.now = at;
-        if matches!(event, Event::Persisted { .. }) {
-            self.disk = self.landing.pop_front();
+        if matches!(event, Event::Persisted { .. })
+            && let Some(Some(bytes)) = self.landing.pop_front()
+        {
+            self.disk = Some(bytes);
         }
         self.trace.push(format!("{at}: <- {event:?}"));
         Some(event)
@@ -222,8 +345,14 @@ impl Simulation {
         self.trace.push(format!("{}: -> {effect:?}", self.now));
         match effect {
             Effect::Persist { bytes } => {
-                self.landing.push_back(bytes);
-                self.schedule(self.now + 1, Event::Persisted { outcome: Ok(()) });
+                let outcome = if let Some(why) = self.write_failures.pop_front() {
+                    self.landing.push_back(None);
+                    Err(why)
+                } else {
+                    self.landing.push_back(Some(bytes));
+                    Ok(())
+                };
+                self.schedule(self.now + 1, Event::Persisted { outcome });
             }
             Effect::RunTurn { speaker, run } => {
                 let (container, warrant) = match &run {

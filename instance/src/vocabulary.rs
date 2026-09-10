@@ -12,7 +12,9 @@ use std::fmt;
 use std::time::Duration;
 
 use stageman_agent::Answer;
-use stageman_core::{Agent, Handout, InstanceId, JobId, Kit, ProjectId, Secret, Speaking, Thread};
+use stageman_core::{
+    Agent, Channel, Handout, InstanceId, JobId, Kit, ProjectId, Secret, Speaking, Thread,
+};
 
 /// What the world seeds the instance's randomness with, once.
 ///
@@ -79,6 +81,29 @@ pub struct Warranted {
     pub thread: Option<Thread>,
 }
 
+/// One message heard on a channel, as the world decoded it.
+///
+/// What routing needs and nothing else: where it was said, what identifies
+/// it, the thread it was in if any, the words, and the two facts about the
+/// speaker the rule in
+/// `docs/decisions/0031-a-mention-is-what-makes-it-ours.md` turns on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Message {
+    /// Where it was said.
+    pub address: String,
+    /// What identifies this message, which is the thread a foreman answers
+    /// in when the message is at the root.
+    pub id: String,
+    /// The thread it was in, if it was in one.
+    pub thread: Option<String>,
+    /// What was said, as the person wrote it.
+    pub text: String,
+    /// Whether it named this instance.
+    pub mentions: bool,
+    /// Whether this instance is what said it.
+    pub from_us: bool,
+}
+
 /// One thing the world tells the instance.
 ///
 /// Time appears only where a handler keeps it, which in this set is nowhere:
@@ -116,6 +141,13 @@ pub enum Event {
     Woke {
         /// Which timer.
         timer: Timer,
+    },
+    /// Somebody said something on a channel this instance listens to.
+    Heard {
+        /// Which channel.
+        channel: Channel,
+        /// What was heard.
+        message: Message,
     },
 }
 
