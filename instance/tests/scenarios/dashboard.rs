@@ -66,6 +66,7 @@ fn the_instance_screen_counts_what_it_may_and_never_a_credential() {
     let mut sim = Simulation::new();
     sim.holding(&watching(&[]));
     let mut instance = sim.wake(seed(1));
+    let written = count(&sim, "-> Persist");
 
     let Response::Instance(shown) = ask(&mut sim, &mut instance, 1, Request::Instance) else {
         panic!("the instance screen");
@@ -75,7 +76,7 @@ fn the_instance_screen_counts_what_it_may_and_never_a_credential() {
     assert_eq!(shown.projects.len(), 1);
     let served = serde_json::to_string(&shown).expect("it serialises");
     assert!(!served.contains("agent-token"), "{served}");
-    assert_eq!(count(&sim, "-> Persist"), 0, "a read writes nothing");
+    assert_eq!(count(&sim, "-> Persist"), written, "a read writes nothing");
 }
 
 /// The answer follows the write, and a refusal changes nothing.

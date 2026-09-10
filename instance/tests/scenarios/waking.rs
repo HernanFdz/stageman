@@ -68,23 +68,28 @@ fn a_first_run_writes_its_file_and_settles_later() {
     assert!(world.disk().is_some(), "a first run has a file");
 }
 
-/// A file that names its instance and holds nothing to reconcile is not
-/// rewritten on waking.
+/// An instance writes itself once on waking, whether or not the file
+/// changed — so a path that cannot be written fails at startup rather than
+/// at the first change, `docs/conventions.md` §3 — and after that only when
+/// something changed.
 #[test]
-fn an_instance_writes_only_when_something_changed() {
+fn an_instance_writes_once_on_waking_and_then_only_when_something_changed() {
     let mut world = Simulation::new();
     world.holding(&watching(&[]));
     let mut instance = world.wake(seed(1));
     world.run_until(&mut instance, 10);
-
-    assert!(
-        !world
+    let written = |world: &Simulation| {
+        world
             .shape()
             .iter()
-            .any(|line| line.starts_with("-> Persist")),
-        "{:?}",
-        world.shape()
-    );
+            .filter(|line| line.starts_with("-> Persist"))
+            .count()
+    };
+    assert_eq!(written(&world), 1, "{:?}", world.shape());
+
+    // A settle that finds nothing to do changes nothing, and writes nothing.
+    world.run_until(&mut instance, 60_000);
+    assert_eq!(written(&world), 1, "{:?}", world.shape());
 }
 
 /// A working job with a container is put back to work, and what its turn

@@ -19,12 +19,17 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use stageman::Store;
+use std::sync::Arc;
+use std::time::Duration;
+
+use stageman::world::{Performer, World};
 use stageman_agent::ContainerRuntime;
 use stageman_core::{
-    Agent, AgentConfig, Key, Kit, KitConfig, KitName, Platform, Project, ProjectId, Secret, State,
-    Uuid,
+    Agent, AgentConfig, JobId, Key, Kit, KitConfig, KitName, NONCE_LEN, Platform, Project,
+    ProjectId, Secret, State, Timestamp, Uuid,
 };
+use stageman_instance::{Domain, Instance, Request, Response, Seed, Startup};
+use stageman_wire::Standing;
 
 /// The work this job is asked to do.
 ///
@@ -42,9 +47,6 @@ Document the three that are missing. Read AGENTS.md and docs/conventions.md \
 first: this project has strong conventions about how it is written, and a \
 change that ignores them is worse than no change. Match the voice of the \
 surrounding prose, and do not restate anything the README already says.";
-
-/// Why this job was created, for whoever reads it afterwards.
-const REASON: &str = "the first proposal this system has ever made, run by hand";
 
 fn main() -> ExitCode {
     tracing_subscriber::fmt()
@@ -114,37 +116,133 @@ async fn propose() -> Result<(), String> {
 
     let scratch = std::env::temp_dir().join(format!("stageman-propose-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&scratch).map_err(|error| format!("no scratch directory: {error}"))?;
-    let store = Store::create(scratch.join("state.json"), throwaway_key(), state)
-        .map_err(|error| format!("the instance could not be created: {error}"))?;
+    let path = scratch.join("state.json");
+    let key = throwaway_key();
+    let file = sealed(&state, &key)?;
+
+    let world = stood_up(runtime, path, &file, key).await?;
 
     println!("Proposing against {repository}");
     println!("This runs a real agent and opens a real pull request. It takes a few minutes.");
     println!();
 
-    let (job, progress) = stageman::run(
-        &store,
-        &runtime,
-        project,
-        Kit::defaults(Agent::Claude),
-        REASON,
-        WORK,
-    )
-    .await
-    .map_err(|error| format!("the job could not be created: {error}"))?;
+    let asked = world
+        .ask(Request::Start {
+            project: project.to_string(),
+            kit: "Claude".to_owned(),
+            work: WORK.to_owned(),
+            at: Timestamp::now(),
+        })
+        .await;
+    let job = match asked {
+        Some(Response::Jobs(working)) => working
+            .jobs
+            .first()
+            .map(|job| job.id.clone())
+            .ok_or("the job was not listed")?,
+        Some(Response::Refused(why)) => return Err(format!("the job was refused: {why}")),
+        _ => return Err("the instance did not answer".to_owned()),
+    };
+
+    let outcome = finished(&world, project, &job).await?;
+    let container = Uuid::parse_str(&job)
+        .map(JobId::from_uuid)
+        .map(stageman_job::container)
+        .map_err(|error| format!("the job's identifier: {error}"))?;
 
     println!();
     println!("  job        {job}");
-    println!("  container  {}", stageman_job::container(job));
-    println!("  outcome    {progress:?}");
+    println!("  container  {container}");
+    println!("  outcome    {outcome:?}");
     println!();
     println!("The container is kept, because nothing retires one yet. Look inside it with:");
-    println!(
-        "  docker cp {}:/workspace ./somewhere",
-        stageman_job::container(job)
-    );
+    println!("  docker cp {container}:/workspace ./somewhere");
     println!("and remove it with:");
-    println!("  docker rm -f {}", stageman_job::container(job));
+    println!("  docker rm -f {container}");
     Ok(())
+}
+
+/// Stands the world up the way the daemon stands it up, less the dashboard:
+/// the instance opens the state, the loop steps it, and the tools endpoint
+/// answers the job's own calls.
+async fn stood_up(
+    runtime: ContainerRuntime,
+    path: PathBuf,
+    file: &[u8],
+    key: Key,
+) -> Result<Arc<World>, String> {
+    // The runtime lives as long as the process, which is what the world asks
+    // of it.
+    let runtime: &'static ContainerRuntime = Box::leak(Box::new(runtime));
+    let listening = stageman::bind_tools()
+        .await
+        .map_err(|error| format!("the tools endpoint could not be bound: {error}"))?;
+    drop(tokio::spawn(async move {
+        drop(stageman::serve_tools(listening).await);
+    }));
+    let startup = Startup {
+        containers: Vec::new(),
+        domain: Domain::local(),
+        serving: 0,
+        build: "propose".to_owned(),
+        runtime: runtime.path().display().to_string(),
+    };
+    let woken = Instance::open(Some(file), key, seed(), &startup)
+        .map_err(|error| format!("the instance could not be opened: {error}"))?;
+    let (world, events) = World::new();
+    stageman::world::adopt(Arc::clone(&world));
+    let performer = Performer::new(
+        runtime,
+        path,
+        stageman::tools_endpoint(),
+        Arc::clone(&world),
+    );
+    stageman::world::run(woken.instance, woken.effects, performer, events);
+    Ok(world)
+}
+
+/// Waits for the job to stop working, by asking: nothing else in this process
+/// is watching it, and the instance answers between one turn and the next.
+async fn finished(world: &World, project: ProjectId, job: &str) -> Result<Standing, String> {
+    loop {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let Some(Response::Jobs(working)) = world
+            .ask(Request::Jobs {
+                project: project.to_string(),
+            })
+            .await
+        else {
+            return Err("the instance stopped answering".to_owned());
+        };
+        let Some(listed) = working.jobs.iter().find(|listed| listed.id == job) else {
+            return Err("the job vanished from its project".to_owned());
+        };
+        if listed.standing != Standing::Working {
+            return Ok(listed.standing.clone());
+        }
+    }
+}
+
+/// The state, sealed as the instance would seal it, for the instance to open.
+fn sealed(state: &State, key: &Key) -> Result<Vec<u8>, String> {
+    let mut nonces = || {
+        let mut nonce = [0_u8; NONCE_LEN];
+        nonce.copy_from_slice(&Uuid::new_v4().into_bytes()[..NONCE_LEN]);
+        nonce
+    };
+    let snapshot = state
+        .seal(key, &mut nonces)
+        .map_err(|error| format!("the state could not be sealed: {error}"))?;
+    serde_json::to_vec_pretty(&snapshot)
+        .map_err(|error| format!("the state could not be encoded: {error}"))
+}
+
+/// A seed for the instance, from the same well the identifiers come from.
+fn seed() -> Seed {
+    let mut seed = [0_u8; 32];
+    seed[..16].copy_from_slice(&Uuid::new_v4().into_bytes());
+    seed[16..].copy_from_slice(&Uuid::new_v4().into_bytes());
+    seed
 }
 
 /// A credential, from the gitignored file this project keeps it in.

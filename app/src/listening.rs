@@ -12,7 +12,12 @@
 //! can be tested against every combination rather than the ones a live
 //! workspace happens to produce.
 
-use stageman_core::Arriving;
+use std::sync::Arc;
+
+use stageman_core::{Channel, ProjectId, Secret, Speaking};
+use stageman_instance::{Event, Message};
+
+use crate::world::World;
 
 /// Who this instance is on a channel, so it can recognise itself.
 ///
@@ -119,21 +124,26 @@ pub fn decode(frame: &str, us: &Identity) -> Incoming {
 }
 
 impl Incoming {
-    /// The message as the routing rule wants it, if this is one.
+    /// The message this frame carries, as the instance hears it.
+    ///
+    /// Everything routing needs and nothing that decides it: which job or
+    /// foreman a message is for is `State::recipient`, asked by the instance.
     #[must_use]
-    pub fn arriving(&self) -> Option<Arriving<'_>> {
+    pub fn message(&self) -> Option<Message> {
         match self {
             Self::Said {
                 id,
+                text,
                 address,
                 thread,
                 mentions,
                 from_us,
                 ..
-            } => Some(Arriving {
-                address,
-                id,
-                thread: thread.as_deref(),
+            } => Some(Message {
+                address: address.clone(),
+                id: id.clone(),
+                thread: thread.clone(),
+                text: text.clone(),
                 mentions: *mentions,
                 from_us: *from_us,
             }),
@@ -142,7 +152,6 @@ impl Incoming {
     }
 }
 
-/// One frame, as much of it as anything here reads.
 #[derive(serde::Deserialize)]
 struct Envelope {
     #[serde(rename = "type")]
@@ -183,29 +192,27 @@ struct Said {
 /// Held together because a listener needs all three and none of them alone:
 /// the app-level credential opens the socket, the speaking half answers on it,
 /// and the project is what a message is routed against.
-#[cfg(feature = "server")]
+/// One project's channel: what opens the socket, and what speaks on it.
 pub struct Listening {
     /// The project whose channel this is.
-    pub project: stageman_core::ProjectId,
+    pub project: ProjectId,
     /// What opens the socket. Never leaves this process.
-    pub opening: stageman_core::Secret,
+    pub opening: Secret,
     /// What posts, and what asks the platform who this instance is.
-    pub speaking: stageman_core::Speaking,
+    pub speaking: Speaking,
 }
 
-/// Asks the platform for somewhere to connect, and for who this instance is.
+/// Asks the platform for who this instance is.
 ///
-/// Two calls rather than one, because they answer with different credentials:
-/// the app-level one opens a socket and knows nothing about a channel, and the
-/// bot one is what a mention names. Both happen once per connection rather than
-/// once per message.
+/// Once per connection rather than once per message, and with the bot's
+/// credential rather than the app-level one: the app-level one opens a socket
+/// and knows nothing about a channel, and the bot one is what a mention names.
 ///
 /// # Errors
 ///
-/// Fails if either call cannot be reached or is refused.
-#[cfg(feature = "server")]
+/// Fails if the call cannot be reached or is refused.
 #[mutants::skip]
-pub async fn introduce(listening: &Listening) -> Result<Identity, crate::channel::ChannelError> {
+async fn introduce(listening: &Listening) -> Result<Identity, crate::channel::ChannelError> {
     let told = crate::channel::ask(
         "https://slack.com/api/auth.test",
         &listening.speaking.credential,
@@ -225,11 +232,8 @@ pub async fn introduce(listening: &Listening) -> Result<Identity, crate::channel
 /// # Errors
 ///
 /// Fails if the platform cannot be reached or refuses the credential.
-#[cfg(feature = "server")]
 #[mutants::skip]
-async fn open_socket(
-    opening: &stageman_core::Secret,
-) -> Result<String, crate::channel::ChannelError> {
+async fn open_socket(opening: &Secret) -> Result<String, crate::channel::ChannelError> {
     let told = crate::channel::ask("https://slack.com/api/apps.connections.open", opening).await?;
     told.get("url")
         .and_then(serde_json::Value::as_str)
@@ -238,7 +242,6 @@ async fn open_socket(
 }
 
 /// The socket one connection is read from.
-#[cfg(feature = "server")]
 type Socket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -248,7 +251,6 @@ type Socket =
 /// identity is what a mention resolves against, and it is asked for with a
 /// different credential from the one that opens the socket. Fetched once per
 /// connection rather than once per message.
-#[cfg(feature = "server")]
 struct Connected {
     /// What frames arrive on.
     socket: Socket,
@@ -257,7 +259,6 @@ struct Connected {
 }
 
 /// Why one connection stopped being read.
-#[cfg(feature = "server")]
 enum Ended {
     /// The platform asked for a replacement, and left this one open.
     ///
@@ -281,7 +282,6 @@ enum Ended {
 /// # Errors
 ///
 /// Fails if either credential is refused, or the socket cannot be opened.
-#[cfg(feature = "server")]
 #[mutants::skip]
 async fn connect(listening: &Listening) -> Result<Connected, crate::channel::ChannelError> {
     let us = introduce(listening).await?;
@@ -310,23 +310,21 @@ async fn connect(listening: &Listening) -> Result<Connected, crate::channel::Cha
 /// answered in milliseconds, and a loop that did both would spend those
 /// minutes answering no pings, reading no frames and missing the platform's
 /// warning that it is about to close — see
-/// `docs/decisions/0044-a-listener-only-listens.md`. So [`act`] is
-/// synchronous, and what it starts finishes on tasks of its own.
+/// `docs/decisions/0044-a-listener-only-listens.md`. So every message is
+/// handed to the instance as an event and nothing is awaited on it, which is
+/// also what keeps two messages in the order they arrived: one channel,
+/// written from one task.
 ///
 /// **Skipped by mutation testing, and thin enough to justify it.** Every
-/// decision is in [`decode`], in `State::recipient` and in the two transitions
-/// [`act`] performs, all tested; what is here is a socket and a loop that
-/// hands over.
+/// decision is in [`decode`] and in the instance; what is here is a socket
+/// and a loop that hands over.
 ///
 /// # Errors
 ///
 /// Fails if the socket breaks in a way that is not an ordinary ending.
-#[cfg(feature = "server")]
 #[mutants::skip]
 async fn read(
-    store: &std::sync::Arc<crate::Store>,
-    runtime: &'static stageman_agent::ContainerRuntime,
-    listening: &std::sync::Arc<Listening>,
+    world: &Arc<World>,
     connected: Connected,
 ) -> Result<Ended, crate::channel::ChannelError> {
     use futures_util::{SinkExt as _, StreamExt as _};
@@ -358,8 +356,8 @@ async fn read(
         // that can say whether the platform is sending anything at all, which
         // is the first question when a reply does not arrive.
         tracing::debug!(frame = %text.as_str(), "heard a frame");
-        // Before acting, always. The platform redelivers what is not
-        // acknowledged, and acting can take as long as an agent takes.
+        // Before handing over, always. The platform redelivers what is not
+        // acknowledged, and what follows can take as long as an agent takes.
         if let Some(envelope) = acknowledging(&heard) {
             let answer = serde_json::json!({ "envelope_id": envelope });
             socket
@@ -379,30 +377,27 @@ async fn read(
             Incoming::Reconnect => {
                 return Ok(Ended::Refresh(Box::new(Connected { socket, us })));
             }
-            Incoming::Said {
-                ref text,
-                ref address,
-                ref thread,
-                mentions,
-                from_us,
-                ..
-            } => {
-                // Anything this instance said is the loop guard working, and
-                // there is one of these for every message it sends. Said at
-                // debug so that what is left at info is somebody talking to
-                // it.
-                if from_us {
-                    tracing::debug!(%address, "heard itself, and ignored it");
-                } else {
-                    tracing::info!(
-                        %address,
-                        thread = thread.as_deref().unwrap_or("(root)"),
-                        mentions,
-                        "heard somebody speak"
-                    );
+            Incoming::Said { .. } => {
+                if let Some(message) = heard.message() {
+                    // Anything this instance said is the loop guard working,
+                    // and there is one of these for every message it sends.
+                    // Said at debug so that what is left at info is somebody
+                    // talking to it.
+                    if message.from_us {
+                        tracing::debug!(address = %message.address, "heard itself, and ignored it");
+                    } else {
+                        tracing::info!(
+                            address = %message.address,
+                            thread = message.thread.as_deref().unwrap_or("(root)"),
+                            mentions = message.mentions,
+                            "heard somebody speak"
+                        );
+                    }
+                    world.send(Event::Heard {
+                        channel: Channel::Slack,
+                        message,
+                    });
                 }
-                let text = text.clone();
-                act(store, runtime, listening, &heard, &text);
             }
             Incoming::Ready | Incoming::Acknowledge(_) | Incoming::Ignore => {}
         }
@@ -416,23 +411,16 @@ async fn read(
 /// carrying messages, and dropping it to open the new one would lose whatever
 /// arrives in between. It is read on a task of its own so that opening the
 /// replacement does not wait for it, and it ends when the platform closes it.
-#[cfg(feature = "server")]
 #[mutants::skip]
-fn drain(
-    store: &std::sync::Arc<crate::Store>,
-    runtime: &'static stageman_agent::ContainerRuntime,
-    listening: &std::sync::Arc<Listening>,
-    replaced: Box<Connected>,
-) {
-    let store = std::sync::Arc::clone(store);
-    let listening = std::sync::Arc::clone(listening);
-    tokio::spawn(async move {
-        if let Err(why) = read(&store, runtime, &listening, *replaced).await {
+fn drain(world: &Arc<World>, project: ProjectId, replaced: Box<Connected>) {
+    let world = Arc::clone(world);
+    drop(tokio::spawn(async move {
+        if let Err(why) = read(&world, *replaced).await {
             // Not a warning. This connection has already been replaced, so
             // whatever it does on its way out costs nothing.
-            tracing::debug!(project = %listening.project, %why, "a replaced connection ended badly");
+            tracing::debug!(%project, %why, "a replaced connection ended badly");
         }
-    });
+    }));
 }
 
 /// Whether a socket ending this way is the ordinary case.
@@ -475,143 +463,6 @@ fn acknowledging(heard: &Incoming) -> Option<&str> {
     }
 }
 
-/// Hands one message to whoever it is for.
-///
-/// **Synchronous, and every await it would have made happens on a task of its
-/// own.** This runs on the task reading the socket, so anything it waited for
-/// would be time that socket spent unattended — which is what
-/// `docs/decisions/0044-a-listener-only-listens.md` exists to prevent.
-///
-/// What it does *not* hand off is the one state change each recipient makes
-/// on arrival: the foreman's inbox taking the message, and a job accepting or
-/// refusing a reply. Both are already one operation under one lock, and doing
-/// them here is what keeps them in the order the messages arrived — spawned,
-/// two frames read back to back would race, and the runtime polls the most
-/// recently spawned task first, so the usual outcome would be the wrong one.
-#[cfg(feature = "server")]
-#[mutants::skip]
-fn act(
-    store: &std::sync::Arc<crate::Store>,
-    runtime: &'static stageman_agent::ContainerRuntime,
-    listening: &std::sync::Arc<Listening>,
-    heard: &Incoming,
-    said: &str,
-) {
-    let Some(arriving) = heard.arriving() else {
-        return;
-    };
-    let destination = {
-        let state = store.read();
-        let found = state.recipient(stageman_core::Channel::Slack, &arriving);
-        drop(state);
-        found
-    };
-
-    match destination {
-        stageman_core::Recipient::Job(job) => {
-            tracing::info!(%job, "handing a reply to the job whose thread it is in");
-            let framed = stageman_foreman::reply(said);
-            // Decided here and carried across, because whether this job is
-            // busy is a fact about the moment the reply arrived.
-            let taken = crate::accepting_reply(store, job);
-            let store = std::sync::Arc::clone(store);
-            tokio::spawn(async move {
-                drop(crate::deliver(&store, runtime, job, &framed, taken).await);
-            });
-        }
-        stageman_core::Recipient::Foreman(project) => {
-            // A message at the root is the parent of the thread its answer
-            // belongs under; one in a thread is answered where it was said.
-            // Either way the thread is decided here, when the message arrives,
-            // rather than when its turn starts — by then it may be several
-            // turns back.
-            let thread = stageman_core::Thread {
-                channel: stageman_core::Channel::Slack,
-                id: arriving.thread.unwrap_or(arriving.id).to_owned(),
-            };
-            tracing::info!(%project, "a message for the foreman");
-            let arrived = crate::arriving(
-                store,
-                project,
-                stageman_core::Errand {
-                    said: said.to_owned(),
-                    thread,
-                },
-            );
-            let store = std::sync::Arc::clone(store);
-            tokio::spawn(async move {
-                crate::attend(&store, runtime, project, arrived).await;
-            });
-        }
-        // Answered rather than ignored. They addressed this instance, so
-        // silence would read as broken — and this is where somebody lands by
-        // replying to a foreman's own message.
-        stageman_core::Recipient::NoSuchJob(project) => {
-            let Some(thread) = arriving.thread.map(|id| stageman_core::Thread {
-                channel: stageman_core::Channel::Slack,
-                id: id.to_owned(),
-            }) else {
-                return;
-            };
-            tracing::info!(%project, "a message in a thread belonging to no job");
-            let listening = std::sync::Arc::clone(listening);
-            tokio::spawn(async move {
-                if let Err(why) = crate::channel::say_in(
-                    &listening.speaking,
-                    &thread,
-                    stageman_foreman::no_such_job_notice(),
-                )
-                .await
-                {
-                    tracing::warn!(%why, "the thread could not be answered");
-                }
-            });
-        }
-        // Ordinary — most of what is said in a project's channel is people
-        // talking to each other. Said at debug so that "nothing happened" can
-        // be told apart from "nothing arrived".
-        stageman_core::Recipient::Nobody => {
-            tracing::debug!("nobody that message was for");
-        }
-    }
-}
-
-/// Starts listening on every project that has somewhere to listen.
-///
-/// One task per project, each reopening its own connection: the platform ends
-/// a connection on a schedule of its own, so reconnecting is the ordinary case
-/// rather than error handling. A project whose credential has stopped working
-/// keeps trying and says so in the log, because
-/// `docs/conventions.md` §3 puts a broken credential in front of an operator
-/// rather than stopping the instance that would let them fix it.
-///
-/// Reads the projects once, which is all a startup needs. A project bound
-/// *afterwards* gets its own listener from [`listen_to`], called where the
-/// binding is made — because a listener that only ever started at startup made
-/// binding a channel appear to do nothing until the daemon was restarted, and
-/// nothing said so.
-#[cfg(feature = "server")]
-#[mutants::skip]
-pub fn listen(
-    store: &std::sync::Arc<crate::Store>,
-    runtime: &'static stageman_agent::ContainerRuntime,
-) {
-    let listening: Vec<Listening> = {
-        let state = store.read();
-        let found = state
-            .projects
-            .keys()
-            .filter_map(|project| listening_on(&state, *project))
-            .collect();
-        drop(state);
-        found
-    };
-
-    for one in listening {
-        listen_to(store, runtime, one);
-    }
-}
-
 /// How long to wait before trying a connection that failed again.
 ///
 /// A fixed wait rather than a backoff. Reconnecting is the ordinary case here,
@@ -619,14 +470,15 @@ pub fn listen(
 /// is simply wrong retries at this rate for ever, which is cheap and visible
 /// in the log. It is only ever waited *after* something went wrong — a
 /// connection the platform replaced on schedule does not pass through it.
-#[cfg(feature = "server")]
 const BEFORE_TRYING_AGAIN: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Listens on one project's channel, reopening its connection for ever.
 ///
-/// Split out so that binding a channel can start listening on it immediately.
-/// The platform ends a connection on a schedule of its own, so reopening is
-/// the ordinary case rather than error handling.
+/// Asked for by the instance, as an effect: once for every bound project on
+/// waking, and again for a project bound afterwards, so that binding a
+/// channel is heard from the moment its record lands rather than from the
+/// next restart. The platform ends a connection on a schedule of its own, so
+/// reopening is the ordinary case rather than error handling.
 ///
 /// **A replacement is opened before the connection it replaces is let go.**
 /// The platform warns about ten seconds ahead and allows an app several
@@ -636,16 +488,9 @@ const BEFORE_TRYING_AGAIN: std::time::Duration = std::time::Duration::from_secs(
 /// is the one thing here worth an operator's attention: it is measured and
 /// reported, because a message said into it reaches nobody and the platform
 /// does not send it again.
-#[cfg(feature = "server")]
 #[mutants::skip]
-pub fn listen_to(
-    store: &std::sync::Arc<crate::Store>,
-    runtime: &'static stageman_agent::ContainerRuntime,
-    one: Listening,
-) {
-    let store = std::sync::Arc::clone(store);
-    let one = std::sync::Arc::new(one);
-    tokio::spawn(async move {
+pub fn listen_to(world: Arc<World>, one: Listening) {
+    drop(tokio::spawn(async move {
         let project = one.project;
         // When this project stopped having a connection, and `None` while it
         // has one. The instance is the only thing that knows it went deaf, and
@@ -668,13 +513,13 @@ pub fn listen_to(
                              not send it again"
                         );
                     }
-                    match read(&store, runtime, &one, connected).await {
+                    match read(&world, connected).await {
                         // The platform is replacing this one and has left it
                         // open. It goes on being read while the loop opens the
                         // replacement, so there is no moment with none — and
                         // no wait, because nothing went wrong.
                         Ok(Ended::Refresh(replaced)) => {
-                            drain(&store, runtime, &one, replaced);
+                            drain(&world, project, replaced);
                             continue;
                         }
                         Ok(Ended::Closed) => deaf_since = Some(std::time::Instant::now()),
@@ -699,30 +544,7 @@ pub fn listen_to(
             }
             tokio::time::sleep(BEFORE_TRYING_AGAIN).await;
         }
-    });
-}
-
-/// What to listen to on one project, if there is anything.
-///
-/// The same selection [`listen`] makes across every project, as a function so
-/// that a project bound after startup is heard by exactly the rule that would
-/// have heard it at startup — rather than by a second one written beside it.
-#[cfg(feature = "server")]
-#[must_use]
-pub fn listening_on(
-    state: &stageman_core::State,
-    project: stageman_core::ProjectId,
-) -> Option<Listening> {
-    let bound = state
-        .projects
-        .get(&project)?
-        .channels
-        .get(&stageman_core::Channel::Slack)?;
-    Some(Listening {
-        project,
-        opening: bound.listen_credential.clone()?,
-        speaking: bound.speaking(),
-    })
+    }));
 }
 
 #[cfg(test)]
@@ -799,14 +621,14 @@ mod tests {
 
         let mentioned = said(&frame("<@U0BOT> what is happening"));
         assert!(
-            mentioned.arriving().expect("a message").mentions,
+            mentioned.message().expect("a message").mentions,
             "{mentioned:?}"
         );
 
         for missing in ["stageman what is happening", "<@U0SOMEBODYELSE> hello"] {
             let plain = said(&frame(missing));
             assert!(
-                !plain.arriving().expect("a message").mentions,
+                !plain.message().expect("a message").mentions,
                 "{missing} is not a mention"
             );
         }
@@ -823,13 +645,13 @@ mod tests {
             r#"{"envelope_id":"e-3","payload":{"event":{"type":"message","subtype":"bot_message",
             "channel":"C0123","bot_id":"B0SELF","ts":"1788000003.000003","text":"⚠️ Check this out."}}}"#,
         );
-        assert!(by_bot.arriving().expect("a message").from_us);
+        assert!(by_bot.message().expect("a message").from_us);
 
         let by_user = said(
             r#"{"envelope_id":"e-4","payload":{"event":{"type":"message",
             "channel":"C0123","user":"U0BOT","ts":"1788000004.000004","text":"hello"}}}"#,
         );
-        assert!(by_user.arriving().expect("a message").from_us);
+        assert!(by_user.message().expect("a message").from_us);
 
         // Either marker alone is enough, and both have to be, because they do
         // not always arrive together: a message posted through the API carries
@@ -841,7 +663,7 @@ mod tests {
             "channel":"C0123","bot_id":"B0SELF","ts":"1788000005.000005","text":"posted"}}}"#,
         );
         assert!(
-            identifier_only.arriving().expect("a message").from_us,
+            identifier_only.message().expect("a message").from_us,
             "{identifier_only:?}"
         );
 
@@ -850,7 +672,7 @@ mod tests {
             "subtype":"bot_message","channel":"C0123","ts":"1788000006.000006","text":"rendered"}}}"#,
         );
         assert!(
-            subtype_only.arriving().expect("a message").from_us,
+            subtype_only.message().expect("a message").from_us,
             "{subtype_only:?}"
         );
     }
@@ -905,59 +727,6 @@ mod tests {
                 "{frame} must still be acknowledged"
             );
         }
-    }
-
-    /// A project is listened to only when it has both halves.
-    #[test]
-    fn a_project_is_listened_to_only_when_it_can_be() {
-        use stageman_core::{
-            Agent, Channel, ChannelConfig, Project, ProjectId, Secret, State, Uuid,
-        };
-        use std::collections::BTreeMap;
-
-        let bound = |listens: bool| Project {
-            name: "aviary".to_owned(),
-            repository: "https://example.invalid/aviary".to_owned(),
-            foreman_kit: stageman_core::Kit::defaults(Agent::Claude),
-            kits: BTreeMap::from([(
-                stageman_core::KitName::new("Claude").expect("a name"),
-                stageman_core::KitConfig::defaults(Agent::Claude),
-            )]),
-            credentials: BTreeMap::new(),
-            channels: BTreeMap::from([(
-                Channel::Slack,
-                ChannelConfig {
-                    address: "C0123456789".to_owned(),
-                    credential: Secret::new("xoxb-token".to_owned()),
-                    listen_credential: listens.then(|| Secret::new("xapp-token".to_owned())),
-                },
-            )]),
-            jobs: BTreeMap::new(),
-            variables: BTreeMap::new(),
-            attending: stageman_core::Attending::default(),
-        };
-        let id = ProjectId::from_uuid(Uuid::from_u128(1));
-
-        let mut state = State::default();
-        assert!(
-            super::listening_on(&state, id).is_none(),
-            "a project this instance does not have"
-        );
-
-        state.projects.insert(id, bound(false));
-        assert!(
-            super::listening_on(&state, id).is_none(),
-            "bound is not the same as listening"
-        );
-
-        state.projects.insert(id, bound(true));
-        let listening = super::listening_on(&state, id).expect("somewhere to listen");
-        assert_eq!(listening.project, id);
-        assert_eq!(listening.speaking.address, "C0123456789");
-        // The speaking half, so the credential that opens the socket cannot
-        // travel with the one that posts.
-        assert_eq!(listening.speaking.credential.expose(), "xoxb-token");
-        assert_eq!(listening.opening.expose(), "xapp-token");
     }
 
     /// A connection ending is usually nothing, and has to be told apart.

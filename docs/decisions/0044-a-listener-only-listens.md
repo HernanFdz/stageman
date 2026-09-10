@@ -57,19 +57,26 @@ evidence that neither answer was visible.
 
 **The task that reads a channel does nothing else.** Concretely, three things.
 
-- **Handling is dispatched, not awaited.** `act` is synchronous and every await
-  it used to make now happens on a task of its own, so the read loop returns to
-  the socket immediately.
+- **Handling is dispatched, not awaited.** Handing a message over is
+  synchronous and every await handling it makes happens elsewhere, so the read
+  loop returns to the socket immediately.
 
   **With one deliberate exception, and it is the interesting half.** The state
-  change each recipient makes *on arrival* stays on the reading task: the
-  foreman's inbox taking the message (`arriving`), and a job accepting or
-  refusing a reply (`accepting_reply`). Both were already one operation under
-  one lock, so moving them would not have broken anything by racing — it would
-  have broken the *order*. Two frames read back to back would be two spawned
-  tasks, and the runtime polls the most recently spawned first, so the usual
-  outcome would be the second message taking the inbox ahead of the first. An
-  inbox whose only promise is arrival order cannot be filled in polling order.
+  change each recipient makes *on arrival* has to happen in arrival order: the
+  foreman's inbox taking the message, and a job accepting or refusing a reply
+  (`accepting`). Both are one operation, so spawning them would not have
+  broken anything by racing — it would have broken the *order*. Two frames
+  read back to back would be two spawned tasks, and the runtime polls the most
+  recently spawned first, so the usual outcome would be the second message
+  taking the inbox ahead of the first. An inbox whose only promise is arrival
+  order cannot be filled in polling order.
+
+  When this was decided the reading task made those two changes itself, under
+  a lock. Since
+  `docs/decisions/0056-the-instance-decides-and-the-world-performs.md` it
+  sends each message to the instance as an event, on one channel from one
+  task, and the instance makes them in the order the events arrive — the same
+  property, kept by the channel rather than by the lock.
 
 - **A replacement is opened before the connection it replaces is let go.** The
   ten-second warning and the platform's allowance of several concurrent
@@ -132,16 +139,16 @@ limit that cannot be removed.
 allowance, and each event is still delivered once, to one of them; both are
 read by this process, so nothing is duplicated.
 
-**The read loop's not awaiting is a property nobody can see.** `act` being
-synchronous is what enforces it, and that is worth stating because it is
+**The read loop's not awaiting is a property nobody can see.** Handing over
+being synchronous is what enforces it, and that is worth stating because it is
 invisible in the way that matters: adding an `await` there would compile,
 behave perfectly under test, and reintroduce exactly this. `docs/architecture.md`
 §2 carries it as an invariant so that it is defended by a reviewer who has been
 told what to look for.
 
-**Reversing** is small and well isolated — recombining two halves in
-`app/src/instance.rs` and awaiting in `app/src/listening.rs` — and there is no
-data to migrate, because none of this is recorded anywhere.
+**Reversing** is small and well isolated — awaiting in `app/src/listening.rs`
+rather than handing the instance an event — and there is no data to migrate,
+because none of this is recorded anywhere.
 
 **Revisit if** a channel arrives whose transport redelivers what it could not
 deliver, which would make the gap warning noise rather than news; or if the

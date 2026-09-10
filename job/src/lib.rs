@@ -13,8 +13,8 @@
 //! itself. What belongs here is everything around the agent: the workspace it
 //! runs in, the credentials it is handed, and the supervision that ends it.
 
-use stageman_agent::{AgentError, Answer, ContainerRuntime};
-use stageman_core::{Handout, InstanceId, JobId, Kit, Uuid};
+use stageman_agent::{AgentError, ContainerRuntime};
+use stageman_core::{JobId, Uuid};
 
 /// What every one of this project's containers is named for.
 ///
@@ -71,24 +71,12 @@ pub fn job_of(container: &str) -> Option<JobId> {
 /// exist to avoid.
 const ANSWERING_WITHIN: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// Whether a job is still showing something, and so whether it stays up.
+/// Whether a job's tunnel is answering: something is behind the port the
+/// runtime published for it, and so the container is showing something.
 ///
-/// Named for what it says rather than for what a caller does about it, because
-/// the two are different questions and only the first is a fact.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Showing {
-    /// Something answered on its tunnel, so the container was left running.
-    Still,
-    /// Nothing answered, so the container was stopped.
-    Nothing,
-}
-
-/// Stops a job's container unless its tunnel is still answering.
-///
-/// The whole of
-/// `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`
-/// in one function, called at each of the three moments that record names: a
-/// turn ending, a sweep of what was left up, and startup.
+/// The question `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`
+/// asks at each of the three moments it names; what to do about the answer is
+/// the instance's, which is why this only asks.
 ///
 /// **Answering is asked of the tunnel, not of the container.** A connection is
 /// opened to the port the runtime published, from here, and something has to
@@ -104,20 +92,17 @@ pub enum Showing {
 /// anything inside is listening. So this reads as well as connects.
 ///
 /// **Total, and that is the honest signature rather than a convenience.** Every
-/// way this can go wrong means the same thing and admits the same response: a
-/// container that is gone, one that never had a mapping, and one the runtime
-/// will not answer questions about are all showing nothing, and there is
-/// nothing else a caller would do about any of them. A runtime broken badly
-/// enough to matter fails loudly everywhere else in the same breath.
-pub async fn rest(runtime: &ContainerRuntime, job: JobId) -> Showing {
+/// way this can go wrong means the same thing: a container that is gone, one
+/// that never had a mapping, and one the runtime will not answer questions
+/// about are all showing nothing. A runtime broken badly enough to matter
+/// fails loudly everywhere else in the same breath.
+#[mutants::skip]
+pub async fn answering(runtime: &ContainerRuntime, job: JobId) -> bool {
     let name = container(job);
-    if let Ok(Some(port)) = stageman_agent::tunnel_port(runtime, &name).await
-        && answering(port).await
-    {
-        return Showing::Still;
+    match stageman_agent::tunnel_port(runtime, &name).await {
+        Ok(Some(port)) => reachable(port).await,
+        Ok(None) | Err(_) => false,
     }
-    drop(stageman_agent::halt(runtime, &name).await);
-    Showing::Nothing
 }
 
 /// Whether anything is behind a published port, rather than merely in front
@@ -143,7 +128,7 @@ pub async fn rest(runtime: &ContainerRuntime, job: JobId) -> Showing {
 ///   containers this exists to keep. Nothing is written to find out, because
 ///   the far side is somebody else's server and a made-up request is not ours
 ///   to send.
-async fn answering(port: u16) -> bool {
+async fn reachable(port: u16) -> bool {
     use tokio::io::AsyncReadExt as _;
 
     let Ok(Ok(mut tunnel)) = tokio::time::timeout(
@@ -182,63 +167,6 @@ pub enum JobError {
     Agent(#[source] AgentError),
 }
 
-/// Starts a job: one agent, in one container, on one project.
-///
-/// The container outlives this call and this process, under a name derived
-/// from `job`. Nothing here removes it — that is retention, deliberately
-/// unanswered in `docs/open-questions.md` until there is a finished job to
-/// retire.
-///
-/// `kickoff` is composed by the foreman and never here. A job executes
-/// instructions it did not write, which is what keeps every prompt in this
-/// system reviewable in one place — see `docs/architecture.md` §1.
-///
-/// # Errors
-///
-/// Fails if the container cannot be started or the agent will not answer.
-pub async fn start(
-    runtime: &ContainerRuntime,
-    handout: &Handout,
-    job: JobId,
-    instance: InstanceId,
-    tools: Option<&stageman_agent::Tools>,
-    kickoff: &str,
-) -> Result<Answer, JobError> {
-    stageman_agent::begin(runtime, handout, &container(job), instance, tools, kickoff)
-        .await
-        .map_err(JobError::Agent)
-}
-
-/// Puts a job back to work after its container stopped.
-///
-/// Takes no handout: what a container was given at creation is part of it, so
-/// a restart is already authenticated. It does take the job's kit, because
-/// that is the one thing a container cannot keep — a loaded session comes back
-/// with every setting at the agent's default, measured in
-/// `docs/decisions/0048-a-job-runs-on-a-kit.md` — and the kit is the job's own
-/// record of what it runs on, so the caller reads it off the job rather than
-/// deciding it again. `notice` is what the agent is told about having been
-/// interrupted, and like every other instruction it is composed by the foreman
-/// rather than invented here.
-///
-/// # Errors
-///
-/// Fails as [`start`] does, and if the container holds no session to continue
-/// — which is what a job stopped before its agent said anything looks like.
-/// That job has nothing to resume and needs starting over as a new job, since
-/// `docs/conventions.md` §2 has no retry.
-pub async fn resume(
-    runtime: &ContainerRuntime,
-    job: JobId,
-    kit: &Kit,
-    tools: Option<&stageman_agent::Tools>,
-    notice: &str,
-) -> Result<Answer, JobError> {
-    stageman_agent::resume(runtime, &container(job), kit, tools, notice)
-        .await
-        .map_err(JobError::Agent)
-}
-
 /// Every container this project has left behind.
 ///
 /// Read from the runtime rather than from the instance, which is the whole
@@ -261,32 +189,6 @@ pub async fn left_behind(runtime: &ContainerRuntime) -> Result<Vec<Abandoned>, J
         .collect())
 }
 
-/// Every job whose container is running right now.
-///
-/// The set [`left_behind`] narrows to, and a different question since
-/// `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`:
-/// a container is no longer stopped by the turn inside it ending, so what is
-/// up and what exists have come apart. Only jobs are returned — a container
-/// whose name says nothing this version understands has no job to rest, and a
-/// foreman's is not a job's to stop.
-///
-/// # Errors
-///
-/// Fails if the runtime cannot be run, or refuses the query.
-///
-/// Skipped by mutation testing: it asks the runtime and maps the answer
-/// through the private inverse of [`container`], which is total, reversible
-/// and tested directly.
-#[mutants::skip]
-pub async fn still_running(runtime: &ContainerRuntime) -> Result<Vec<JobId>, JobError> {
-    Ok(stageman_agent::running(runtime)
-        .await
-        .map_err(JobError::Agent)?
-        .iter()
-        .filter_map(|container| job_of(container))
-        .collect())
-}
-
 /// Removes a job's container and everything in it.
 ///
 /// # Errors
@@ -300,7 +202,7 @@ pub async fn discard(runtime: &ContainerRuntime, job: JobId) -> Result<(), JobEr
 
 #[cfg(test)]
 mod tests {
-    use super::{Abandoned, ContainerRuntime, answering, container, discard, job_of, left_behind};
+    use super::{Abandoned, ContainerRuntime, container, discard, job_of, left_behind, reachable};
     use stageman_core::{JobId, Uuid};
 
     /// Something listening answers; nothing listening does not.
@@ -331,11 +233,11 @@ mod tests {
             .expect("a port");
         let port = listener.local_addr().expect("an address").port();
 
-        assert!(answering(port).await, "something is listening on {port}");
+        assert!(reachable(port).await, "something is listening on {port}");
 
         drop(listener);
         assert!(
-            !answering(port).await,
+            !reachable(port).await,
             "nothing is listening on {port} any more",
         );
     }
@@ -412,7 +314,7 @@ mod tests {
             .await
             .is_ok();
         assert!(
-            !answering(port).await,
+            !reachable(port).await,
             "nothing is listening inside, so the proxy on {port} answers for nobody \
              (a bare connection to it succeeds here: {trapped})"
         );
@@ -470,7 +372,7 @@ mod tests {
             .expect("the runtime answers")
             .expect("a mapping was published");
         assert!(
-            answering(port).await,
+            reachable(port).await,
             "something is listening inside, so {port} is showing it"
         );
 

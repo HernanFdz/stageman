@@ -26,10 +26,11 @@ use etcetera::BaseStrategy as _;
 use rand::rngs::{StdRng, SysRng};
 use rand::{Rng as _, SeedableRng as _};
 use stageman_agent::{AgentError, ContainerRuntime};
-use stageman_core::{Key, KeyError, State};
+use stageman_core::{Key, KeyError};
+use stageman_instance::{Effect, Event, Instance, Seed, Startup};
 
 use crate::Dashboard;
-use crate::{LoadError, Store};
+use crate::world::{Performer, World};
 
 /// The variable the snapshot's encryption key arrives in, as base64.
 ///
@@ -88,14 +89,6 @@ const INSTANCE_DIRECTORY: &str = "stageman";
 /// What the instance's file is called.
 const INSTANCE_FILE: &str = "instance.json";
 
-/// How often to ask whether a container held open is still worth holding.
-///
-/// A minute, which is slow for a poll and correct for this: what it is waiting
-/// for is a person losing interest in a page, and the cost of noticing late is
-/// a container running for another minute. Anything faster would spend a
-/// subprocess per running job to learn nothing.
-const SETTLING_INTERVAL: std::time::Duration = std::time::Duration::from_mins(1);
-
 /// How much is reported, when the environment does not say.
 const DEFAULT_VERBOSITY: &str = "warn";
 
@@ -122,14 +115,38 @@ enum StartupError {
         #[source]
         source: io::Error,
     },
-    /// The instance could not be opened or created.
+    /// The instance's file exists and could not be read.
+    #[error("the instance at {path} could not be read")]
+    Read {
+        /// Where it was looked for.
+        path: PathBuf,
+        /// Why it could not be read.
+        #[source]
+        source: io::Error,
+    },
+    /// The instance could not be opened.
     #[error("the instance at {path} could not be opened")]
     Instance {
         /// Where it was looked for.
         path: PathBuf,
         /// Why it could not be opened.
         #[source]
-        source: LoadError,
+        source: stageman_instance::LoadError,
+    },
+    /// The instance opened and could not be written, so it would fail later.
+    ///
+    /// A bad path, a missing directory, a read-only filesystem or wrong
+    /// permissions all fail here rather than at the first change — which is
+    /// what `docs/conventions.md` §3 asks of anything that can fail at
+    /// startup. What that leaves is a full disk, which is transient and
+    /// fixable without stopping.
+    #[error("the instance at {path} could not be written")]
+    Write {
+        /// Where it tried to write.
+        path: PathBuf,
+        /// Why it could not.
+        #[source]
+        source: io::Error,
     },
     /// There is no container runtime on this machine.
     ///
@@ -184,7 +201,7 @@ enum StartupError {
     ///
     /// Refused rather than substituted. A predictable key is worse than no
     /// key, because it encrypts and looks like it worked.
-    #[error("no source of randomness, so an instance key cannot be generated")]
+    #[error("no source of randomness, so neither a key nor a seed can be drawn")]
     NoRandomness,
     /// There is no home directory to put an instance under.
     #[error("no home directory, so there is nowhere to keep an instance — set {STATE_VARIABLE}")]
@@ -224,20 +241,6 @@ pub static RUNTIME: LazyLock<ContainerRuntime> = LazyLock::new(|| {
     stageman_agent::first_present(stageman_agent::candidates())
         .unwrap_or_else(|| ContainerRuntime::new(PathBuf::new()))
 });
-
-/// Which credential means what, for the sessions running right now.
-///
-/// A process-wide value like [`RUNTIME`] above, and for a plainer reason: it
-/// is written where a session is declared and read where a tool is called, and
-/// those are on opposite sides of the daemon with nothing but the request
-/// between them. Threading it through every caller would put an argument in a
-/// dozen signatures to reach two of them.
-///
-/// Ephemeral by design — see `crate::tooling::Sessions`. Nothing here is
-/// persisted, so restarting invalidates every credential outstanding, and each
-/// container is handed a current one on its next turn.
-pub static SESSIONS: LazyLock<Arc<crate::tooling::Sessions>> =
-    LazyLock::new(|| Arc::new(crate::tooling::Sessions::default()));
 
 /// Whether discovery came back with nothing.
 ///
@@ -361,24 +364,19 @@ async fn start() -> Result<(), StartupError> {
 
     let (key, source) = instance_key()?;
     let path = instance_path()?;
-
-    let existing =
-        Store::load(path.clone(), key.clone()).map_err(|source| StartupError::Instance {
-            path: path.clone(),
-            source,
-        })?;
-
-    // `Ok(None)` is a first run rather than a failure, and a first run now
-    // produces an instance with nothing in it rather than asking questions.
-    let store = if let Some(store) = existing {
-        store
-    } else {
-        Store::create(path.clone(), key, State::default()).map_err(|source| {
-            StartupError::Instance {
+    // Read whole and handed over as bytes: the instance opens its own file,
+    // because the key and the cipher are its and the world only carries.
+    // Absent is a first run rather than a failure, and a first run produces
+    // an instance with nothing in it rather than asking questions.
+    let file = match fs::read(&path) {
+        Ok(bytes) => Some(bytes),
+        Err(why) if why.kind() == io::ErrorKind::NotFound => None,
+        Err(source) => {
+            return Err(StartupError::Read {
                 path: path.clone(),
                 source,
-            }
-        })?
+            });
+        }
     };
 
     // Being found is not being usable, and both are checked. `RUNTIME` has
@@ -393,17 +391,11 @@ async fn start() -> Result<(), StartupError> {
     // fails `version`, which is why this asks for the latter.
     runtime.verify().await.map_err(StartupError::Runtime)?;
 
-    // The work matters and the tally does not: everything it finds worth acting
-    // on, it warns about by name as it goes.
-    crate::reconcile(&store, runtime)
-        .await
-        .map_err(StartupError::Sweep)?;
-
-    // Bound before anything is printed, so that the address reported is the
-    // one in use rather than the one intended — a port of zero is an ordinary
-    // request for whichever port is free, and the answer is only known here.
-    // It is also what makes the summary below a readiness signal: the socket
-    // is already accepting by the time the line naming it appears.
+    // Bound before the instance opens, because what a job is told to show
+    // somebody names the port in use — a port of zero is an ordinary request
+    // for whichever port is free, and the answer is only known here. It is
+    // also what makes the summary below a readiness signal: the socket is
+    // already accepting by the time the line naming it appears.
     let address = dioxus::cli_config::fullstack_address_or_localhost();
     let listener = tokio::net::TcpListener::bind(address)
         .await
@@ -411,16 +403,8 @@ async fn start() -> Result<(), StartupError> {
     let serving = listener
         .local_addr()
         .map_err(|source| StartupError::Listen { address, source })?;
-    // Recorded rather than recomputed, so that the address a job is told to
-    // show somebody names the port in use. A port of zero is an ordinary
-    // request for whichever one is free, and only this knows the answer.
-    crate::tunnel::SERVING.get_or_init(|| serving.port());
 
-    // Handed to the dashboard's route rather than reached for through a
-    // global. One process operates one instance, so a global would even be
-    // true — and it would make a route's dependencies invisible at the point
-    // somebody has to test one.
-    let store = Arc::new(store);
+    awaken(runtime, key, &path, file.as_deref(), serving.port()).await?;
 
     // Three states, and which one holds is a question about how this binary
     // was built rather than about how it is configured.
@@ -459,29 +443,6 @@ async fn start() -> Result<(), StartupError> {
         );
     }
 
-    // The same treatment, for the same reason. This used to be a count of
-    // channels with somewhere to listen, which told an operator that one of
-    // three was misconfigured without telling them which. A binding with no
-    // credential to listen with produces no error and looks exactly like a
-    // platform that has sent nothing, so it has to be said — by name.
-    // Bound before the loop so the read guard is dropped at this statement
-    // rather than held across it: warning is not a reason to keep the instance
-    // locked, and the gate is right to say so.
-    let deaf = unheard(&store.read());
-    for project in deaf {
-        tracing::warn!(
-            %project,
-            "a channel is bound with no credential to listen with, so nothing it says \
-             will be heard — which is indistinguishable from nobody saying anything"
-        );
-    }
-
-    // Reached by the dashboard's route as an extension rather than as a
-    // context, because a context only exists while a page is being rendered —
-    // see `crate::dashboard::instance`. A layer is on every request, which is
-    // both paths.
-    let router = router.layer(axum::Extension(Arc::clone(&store)));
-
     // Outermost, and that is the whole of it: a job's tunnel serves an
     // application somebody else's agent wrote, so it must not pass through the
     // server-function and static-file machinery on its way — a path collision
@@ -490,27 +451,11 @@ async fn start() -> Result<(), StartupError> {
     // `docs/decisions/0042-a-job-shows-its-work-on-a-subdomain.md`.
     let router = router.layer(axum::middleware::from_fn(crate::tunnel::route));
 
-    // One task per project that has somewhere to listen. Spawned rather than
-    // awaited, and after the sweep rather than before: a reply arriving for a
-    // job the sweep has not yet placed would be routed against a state that is
-    // still being repaired.
-    //
-    // `docs/conventions.md` §3 keeps this off the request path, which matters
-    // more here than anywhere — a socket is open for as long as the process is,
-    // and awaiting one would mean the dashboard never starts.
-    crate::listen(&store, runtime);
-
-    settling(&store);
-
-    resuming(&store, runtime);
-
     // Where a foreman asks for a job. Its own listener, on its own port and
     // every interface — the dashboard stays on loopback, and this cannot,
     // because a container reaches nothing else on every platform. See
     // `docs/decisions/0033-the-job-endpoint-listens-beyond-loopback.md`.
     //
-    // Spawned rather than awaited, for the reason everything else here is: it
-    // runs for as long as the process does.
     // Bound before anything is announced, so that a port already taken is
     // reported on the startup block rather than logged into a scrolling
     // terminal. That failure leaves a foreman able to talk and unable to work,
@@ -527,14 +472,11 @@ async fn start() -> Result<(), StartupError> {
 
     match tools {
         Ok(listening) => {
-            let store = Arc::clone(&store);
-            tokio::spawn(async move {
-                if let Err(why) =
-                    crate::endpoint::serve(listening, store, Arc::clone(&SESSIONS)).await
-                {
+            drop(tokio::spawn(async move {
+                if let Err(why) = crate::endpoint::serve(listening).await {
                     tracing::error!(%why, "the job endpoint stopped");
                 }
-            });
+            }));
         }
         Err(why) => tracing::error!(%why, "no foreman can ask for a job"),
     }
@@ -544,58 +486,96 @@ async fn start() -> Result<(), StartupError> {
         .map_err(StartupError::Serving)
 }
 
-/// Puts back to work every foreman that was mid-turn when this last stopped.
+/// Opens the instance and sets the world stepping it.
 ///
-/// The counterpart of `crate::reconcile` for the deciding half rather than the
-/// doing one — see
-/// `docs/decisions/0045-a-foremans-turn-survives-the-daemon-dying.md`. Without
-/// it a project whose foreman was working when the process died stays that way
-/// for ever: only an arrival that finds a foreman idle drives its loop, and no
-/// arrival ever will again.
-///
-/// One task per project rather than one for all of them, because each waits on
-/// an agent and a project's turn is nobody else's to wait for. Spawned rather
-/// than awaited, for the reason everything else started here is: several
-/// foremen thinking is several minutes, and `docs/conventions.md` §3 keeps
-/// that off the path that serves the dashboard.
-///
-/// After the sweep, and after the listeners, because both are true of it: a
-/// turn it resumes may look at a job the sweep has just placed, and a message
-/// arriving meanwhile is queued behind what it picks up rather than racing it.
-#[mutants::skip]
-fn resuming(store: &Arc<crate::Store>, runtime: &'static ContainerRuntime) {
-    let waiting = crate::interrupted(&store.read());
-    for project in waiting {
-        // Said because it is not the ordinary case and an operator reading a
-        // startup has no other way to know a turn is being picked up rather
-        // than begun.
-        tracing::info!(%project, "its foreman was interrupted mid-turn; picking it up");
-        let store = Arc::clone(store);
-        tokio::spawn(async move {
-            crate::resumed(&store, runtime, project).await;
-        });
+/// The one place an instance is made in this process: what the last run left
+/// behind is asked once and handed over, the file is opened, and the loop is
+/// started with whatever waking asked for.
+async fn awaken(
+    runtime: &'static ContainerRuntime,
+    key: Key,
+    path: &Path,
+    file: Option<&[u8]>,
+    serving: u16,
+) -> Result<(), StartupError> {
+    // What the last run left behind, asked once and handed to the instance,
+    // which decides what to do about each container it is told of.
+    let containers = crate::world::found(runtime)
+        .await
+        .map_err(StartupError::Sweep)?;
+    let startup = Startup {
+        containers,
+        domain: crate::tunnel::DOMAIN.clone(),
+        serving,
+        build: crate::release::described(),
+        runtime: runtime.path().display().to_string(),
+    };
+    let woken =
+        Instance::open(file, key, seed()?, &startup).map_err(|source| StartupError::Instance {
+            path: path.to_owned(),
+            source,
+        })?;
+    // The tally, for whoever is reading a start. Everything it found worth
+    // acting on, the instance has already warned about by name.
+    tracing::info!(swept = ?woken.swept, "the instance is awake");
+
+    // Said by name rather than counted, which is the whole change: an
+    // operator told that two of three projects are listening still has to
+    // work out which one is not. A binding with no credential to listen with
+    // is not an error and produces no warning of its own — it looks exactly
+    // like a platform that has sent nothing — so this is the only thing that
+    // tells the two apart.
+    for project in unheard(woken.instance.state()) {
+        tracing::warn!(
+            %project,
+            "a channel is bound with no credential to listen with, so nothing it says \
+             will be heard — which is indistinguishable from nobody saying anything"
+        );
     }
+
+    let (world, events) = World::new();
+    crate::world::adopt(Arc::clone(&world));
+
+    // The instance writes itself once on waking, and that first write is
+    // performed here rather than in the loop so that a path which cannot be
+    // written fails the start with a reason — `docs/conventions.md` §3.
+    // Everything else it asked for on waking is performed by the loop, in
+    // order, before the first event is read.
+    let mut pending = Vec::new();
+    for effect in woken.effects {
+        match effect {
+            Effect::Persist { bytes } => {
+                crate::world::write_atomically(path, &bytes).map_err(|source| {
+                    StartupError::Write {
+                        path: path.to_owned(),
+                        source,
+                    }
+                })?;
+                world.send(Event::Persisted { outcome: Ok(()) });
+            }
+            other => pending.push(other),
+        }
+    }
+    let performer = Performer::new(
+        runtime,
+        path.to_owned(),
+        crate::tooling::endpoint(*crate::endpoint::PORT),
+        Arc::clone(&world),
+    );
+    crate::world::run(woken.instance, pending, performer, events);
+    Ok(())
 }
 
-/// Asks, for as long as this process runs, whether a container held open still
-/// deserves to be.
+/// The seed the instance draws everything random from.
 ///
-/// A server an agent left running does not tell this instance when it stops,
-/// so the only way to notice is to look — see
-/// `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`.
-///
-/// Spawned rather than awaited, like everything else started here, and off the
-/// request path for the reason `docs/conventions.md` §3 gives.
-#[mutants::skip]
-fn settling(store: &Arc<crate::Store>) {
-    let resting = Arc::clone(store);
-    tokio::spawn(async move {
-        let mut every = tokio::time::interval(SETTLING_INTERVAL);
-        loop {
-            every.tick().await;
-            crate::settle(&resting, &RUNTIME).await;
-        }
-    });
+/// Drawn once, here, from the system: the instance takes no entropy of its
+/// own, so this is the one place in the process a random number is made for
+/// it — see `docs/decisions/0056-the-instance-decides-and-the-world-performs.md`.
+fn seed() -> Result<Seed, StartupError> {
+    let mut rng = StdRng::try_from_rng(&mut SysRng).map_err(|_| StartupError::NoRandomness)?;
+    let mut seed: Seed = [0_u8; 32];
+    rng.fill_bytes(&mut seed);
+    Ok(seed)
 }
 
 /// Whether this build has no browser half anywhere.

@@ -112,16 +112,13 @@ pub async fn bind() -> std::io::Result<tokio::net::TcpListener> {
 /// failure here — another instance, or something of somebody else's — and it
 /// leaves a foreman able to talk and unable to work, which is indistinguishable
 /// from a foreman that has decided not to.
+///
+/// # Errors
+///
+/// Fails if serving stops on something other than being asked to.
 #[mutants::skip]
-pub async fn serve(
-    listening: tokio::net::TcpListener,
-    store: std::sync::Arc<crate::Store>,
-    sessions: std::sync::Arc<crate::tooling::Sessions>,
-) -> std::io::Result<()> {
-    let router = axum::Router::new()
-        .route("/mcp", crate::tooling::served())
-        .layer(axum::Extension(store))
-        .layer(axum::Extension(sessions));
+pub async fn serve(listening: tokio::net::TcpListener) -> std::io::Result<()> {
+    let router = axum::Router::new().route("/mcp", crate::tooling::served());
 
     axum::serve(
         listening,

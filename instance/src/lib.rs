@@ -149,10 +149,12 @@ impl Instance {
             tunnels: BTreeMap::new(),
             routing: BTreeMap::new(),
             deferred: VecDeque::new(),
-            // Written before anything can depend on this instance: a file
-            // that had no identity has one from the moment it is opened, and
-            // a first run has a file at all.
-            dirty: named.is_none(),
+            // Written once on waking, before anything can depend on this
+            // instance: a first run has a file at all, a file that had no
+            // identity has one from the moment it is opened, and a path that
+            // cannot be written fails at startup rather than at the first
+            // change — `docs/conventions.md` §3.
+            dirty: true,
             staged: Vec::new(),
         };
         let (mut effects, swept) = instance.waking(startup);

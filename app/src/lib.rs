@@ -7,6 +7,11 @@
 //! belongs to a channel, so no conversational state lives here — see
 //! `docs/decisions/0005-conversation-happens-on-channels.md`.
 //!
+//! **It is the world.** The instance decides and this crate performs — see
+//! `docs/decisions/0056-the-instance-decides-and-the-world-performs.md` —
+//! so what is here is a loop, the listeners and servers that turn what
+//! happens into events, and the adapters that perform effects.
+//!
 //! **It is compiled twice, for two machines.** The daemon gets everything;
 //! the browser gets [`dashboard`] and nothing else. That split is a feature
 //! selection in `Cargo.toml` rather than a `cfg` here, because a `cfg` hides
@@ -20,8 +25,6 @@ mod channel;
 #[cfg(feature = "server")]
 pub(crate) mod endpoint;
 #[cfg(feature = "server")]
-mod instance;
-#[cfg(feature = "server")]
 mod listening;
 #[cfg(feature = "server")]
 pub mod release;
@@ -31,6 +34,8 @@ mod serving;
 pub(crate) mod tooling;
 #[cfg(feature = "server")]
 pub(crate) mod tunnel;
+#[cfg(feature = "server")]
+pub mod world;
 
 pub mod dashboard;
 pub mod ui;
@@ -38,12 +43,16 @@ pub mod ui;
 pub use dashboard::Dashboard;
 
 #[cfg(feature = "server")]
-pub use instance::{
-    Accepted, Arrived, LoadError, Refused, RunError, SaveError, Started, StateGuard, StateRef,
-    Store, Swept, accepting_reply, arriving, attend, begin, claimed, deliver, interrupted,
-    reconcile, release, resumed, retire, run, settle, stop, supervise,
-};
+pub use endpoint::{bind as bind_tools, serve as serve_tools};
 #[cfg(feature = "server")]
-pub use listening::{listen, listen_to, listening_on};
+pub use serving::{RUNTIME, serve};
 #[cfg(feature = "server")]
-pub use serving::{RUNTIME, SESSIONS, serve};
+pub use world::world;
+
+/// Where a container reaches the tools this instance serves, on the port the
+/// environment chose.
+#[cfg(feature = "server")]
+#[must_use]
+pub fn tools_endpoint() -> String {
+    tooling::endpoint(*endpoint::PORT)
+}

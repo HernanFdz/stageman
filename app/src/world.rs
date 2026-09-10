@@ -1,0 +1,654 @@
+//! The world: everything the instance is not.
+//!
+//! One loop owns the instance and steps it, one event at a time, on a task of
+//! its own. Everything that happens — a turn ending, a message heard, a
+//! person's request, a timer — is an event sent to that loop, and everything
+//! the instance asks for comes back as an effect this module performs: the
+//! runtime through the agent crate, the channels, the disk, and the answers
+//! to whoever is waiting on a request. Nothing here decides; see
+//! `docs/decisions/0056-the-instance-decides-and-the-world-performs.md`.
+//!
+//! **A request is a question with an identifier.** A server function, the
+//! tools endpoint and the tunnel layer each send an event carrying one and
+//! wait on a channel for the effect that carries it back, which is what lets
+//! the instance answer a person's request between two turns ending without
+//! either side holding a lock.
+//!
+//! **The disk is written inline and everything else on a task.** A write is
+//! the one effect the instance waits on before anything outward-facing, so
+//! it is performed in the loop and answered in order; a turn takes minutes,
+//! and `docs/conventions.md` §3 keeps that off the loop that answers the
+//! dashboard.
+
+use std::collections::BTreeMap;
+use std::fs;
+use std::io::{self, Write as _};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
+
+use stageman_agent::ContainerRuntime;
+use stageman_core::{Channel, JobId, Timestamp};
+use stageman_instance::{
+    Container, Effect, Event, Instance, Request, RequestId, Response, Run, Speaker,
+};
+
+/// The world this process runs, once it has an instance.
+///
+/// A process-wide value, because the things that send to it — a server
+/// function, a request on the tools endpoint, the tunnel layer — are handed
+/// nothing by anybody: each is called by a framework with a request and
+/// nothing else. One process operates one instance, so this is even true.
+static WORLD: OnceLock<Arc<World>> = OnceLock::new();
+
+/// The world, if an instance has been opened in this process.
+#[must_use]
+pub fn world() -> Option<&'static Arc<World>> {
+    WORLD.get()
+}
+
+/// Makes a world the one this process runs.
+///
+/// Once. A second is a fault in startup rather than a request to honour, and
+/// is said rather than silently replaced.
+pub fn adopt(world: Arc<World>) {
+    if WORLD.set(world).is_err() {
+        tracing::error!("this process already has a world; the second was not adopted");
+    }
+}
+
+/// Where a job's tunnel is, as the instance answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Located {
+    /// Forward to this host port.
+    At(u16),
+    /// Nothing answers on that name.
+    Nowhere,
+}
+
+/// Somebody waiting for an answer, by what they asked.
+enum Answering {
+    /// A person, through a server function.
+    Person(tokio::sync::oneshot::Sender<Response>),
+    /// An agent, through the tools endpoint.
+    Tool(tokio::sync::oneshot::Sender<(u16, Option<serde_json::Value>)>),
+    /// A browser, through the tunnel layer.
+    Tunnel(tokio::sync::oneshot::Sender<Located>),
+}
+
+/// What the instance answered, by what was asked.
+enum Answered {
+    Person(Response),
+    Tool(u16, Option<serde_json::Value>),
+    Tunnel(Located),
+}
+
+/// The way in to the instance: events go one way, and answers come back to
+/// whoever asked.
+pub struct World {
+    /// What the loop reads.
+    events: tokio::sync::mpsc::UnboundedSender<Event>,
+    /// The next request identifier. Never reused while this process runs.
+    next: AtomicU64,
+    /// Everyone waiting on an answer, by the identifier it will carry.
+    waiting: parking_lot::Mutex<BTreeMap<RequestId, Answering>>,
+}
+
+impl World {
+    /// A world nothing is stepping yet, and the events it will send.
+    #[must_use]
+    pub fn new() -> (Arc<Self>, tokio::sync::mpsc::UnboundedReceiver<Event>) {
+        let (events, receiving) = tokio::sync::mpsc::unbounded_channel();
+        let world = Arc::new(Self {
+            events,
+            next: AtomicU64::new(1),
+            waiting: parking_lot::Mutex::new(BTreeMap::new()),
+        });
+        (world, receiving)
+    }
+
+    /// Tells the instance something happened.
+    pub fn send(&self, event: Event) {
+        if self.events.send(event).is_err() {
+            tracing::error!("the instance is no longer stepping, so an event was lost");
+        }
+    }
+
+    /// A request identifier nothing else in this process has.
+    fn minted(&self) -> RequestId {
+        RequestId(self.next.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// Asks the instance something on a person's behalf.
+    ///
+    /// `None` if the instance stopped before answering, which is a fault in
+    /// this process rather than a refusal.
+    pub async fn ask(&self, request: Request) -> Option<Response> {
+        let (answer, waiting) = tokio::sync::oneshot::channel();
+        let id = self.minted();
+        self.waiting.lock().insert(id, Answering::Person(answer));
+        self.send(Event::Request { id, request });
+        waiting.await.ok()
+    }
+
+    /// Hands the instance a call on the tools endpoint, whole.
+    ///
+    /// The status and the body the endpoint answers with, or `None` if the
+    /// instance stopped before answering.
+    pub async fn call(
+        &self,
+        at: Timestamp,
+        nearby: bool,
+        bearer: Option<String>,
+        body: serde_json::Value,
+    ) -> Option<(u16, Option<serde_json::Value>)> {
+        let (answer, waiting) = tokio::sync::oneshot::channel();
+        let id = self.minted();
+        self.waiting.lock().insert(id, Answering::Tool(answer));
+        self.send(Event::ToolCalled {
+            id,
+            at,
+            nearby,
+            bearer,
+            body,
+        });
+        waiting.await.ok()
+    }
+
+    /// Asks where a job's tunnel is.
+    pub async fn tunnel(&self, job: JobId) -> Option<Located> {
+        let (answer, waiting) = tokio::sync::oneshot::channel();
+        let id = self.minted();
+        self.waiting.lock().insert(id, Answering::Tunnel(answer));
+        self.send(Event::TunnelAsked { id, job });
+        waiting.await.ok()
+    }
+
+    /// Delivers an answer to whoever asked.
+    ///
+    /// Nobody waiting is not an error: a browser that gave up has already
+    /// dropped its end, and the answer has nowhere to go.
+    fn answered(&self, id: RequestId, answered: Answered) {
+        let Some(waiting) = self.waiting.lock().remove(&id) else {
+            tracing::debug!(?id, "an answer arrived for a request nobody is waiting on");
+            return;
+        };
+        match (waiting, answered) {
+            (Answering::Person(reply), Answered::Person(response)) => drop(reply.send(response)),
+            (Answering::Tool(reply), Answered::Tool(status, body)) => {
+                drop(reply.send((status, body)));
+            }
+            (Answering::Tunnel(reply), Answered::Tunnel(located)) => drop(reply.send(located)),
+            _ => tracing::error!(
+                ?id,
+                "the instance answered a request with the wrong kind of answer"
+            ),
+        }
+    }
+}
+
+/// What performs the instance's effects.
+pub struct Performer {
+    /// The runtime every container effect goes through.
+    runtime: &'static ContainerRuntime,
+    /// Where the instance is kept.
+    path: PathBuf,
+    /// Where a container reaches the tools this instance serves.
+    endpoint: String,
+    /// Where events go back.
+    world: Arc<World>,
+    /// The turns running right now, by whose they are, each with the handle
+    /// that stops it. In memory and never written down: a turn does not
+    /// survive this process, so neither should anything about one.
+    turns: parking_lot::Mutex<BTreeMap<Speaker, Arc<tokio::sync::Notify>>>,
+}
+
+impl Performer {
+    /// A performer for this runtime, this file and this world.
+    #[must_use]
+    pub fn new(
+        runtime: &'static ContainerRuntime,
+        path: PathBuf,
+        endpoint: String,
+        world: Arc<World>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            runtime,
+            path,
+            endpoint,
+            world,
+            turns: parking_lot::Mutex::new(BTreeMap::new()),
+        })
+    }
+
+    /// Performs one effect: on a task of its own, or inline where the
+    /// instance waits on the answer before doing anything else.
+    ///
+    /// Skipped by mutation testing, like everything here that drives the
+    /// runtime or the network: every arm performs an effect and decides
+    /// nothing a test could check without one.
+    #[mutants::skip]
+    async fn perform(self: &Arc<Self>, effect: Effect) {
+        match effect {
+            Effect::Persist { bytes } => self.persist(bytes).await,
+            Effect::RunTurn { speaker, run } => self.turn(speaker, run),
+            Effect::StopTurn { speaker } => {
+                // A permit rather than a wake-up, so that a stop arriving in
+                // the instant between the turn starting and it waiting is not
+                // dropped on the floor.
+                if let Some(stopping) = self.turns.lock().get(&speaker) {
+                    stopping.notify_one();
+                }
+            }
+            Effect::Probe { job } => self.probe(job),
+            Effect::ListRunning => self.list_running(),
+            Effect::Inspect { container } => self.inspect(container),
+            Effect::Halt { container } => self.halt(container),
+            Effect::Discard { container } => self.discard(container),
+            Effect::Reclaim => self.reclaim(),
+            Effect::Wake { after, timer } => self.spawn(move |performer| async move {
+                tokio::time::sleep(after).await;
+                performer.world.send(Event::Woke { timer });
+            }),
+            Effect::Say {
+                speaking,
+                thread,
+                text,
+            } => self.spawn(move |_| async move {
+                if let Err(why) = crate::channel::say_in(&speaking, &thread, &text).await {
+                    tracing::warn!(%why, "the thread could not be spoken to");
+                }
+            }),
+            Effect::OpenThread {
+                job,
+                speaking,
+                announcement,
+            } => self.spawn(move |performer| async move {
+                let outcome = crate::channel::open_thread(&speaking, Channel::Slack, &announcement)
+                    .await
+                    .map_err(|why| why.to_string());
+                performer.world.send(Event::ThreadOpened { job, outcome });
+            }),
+            Effect::Post {
+                request,
+                speaking,
+                thread,
+                text,
+            } => self.spawn(move |performer| async move {
+                let outcome = crate::channel::say_in(&speaking, &thread, &text)
+                    .await
+                    .map_err(|why| why.to_string());
+                performer.world.send(Event::Posted { request, outcome });
+            }),
+            Effect::Listen {
+                project,
+                opening,
+                speaking,
+            } => crate::listening::listen_to(
+                Arc::clone(&self.world),
+                crate::listening::Listening {
+                    project,
+                    opening,
+                    speaking,
+                },
+            ),
+            Effect::FindPort { job } => self.find_port(job),
+            Effect::Respond { id, response } => self.world.answered(id, Answered::Person(response)),
+            Effect::ToolAnswered { id, status, body } => {
+                self.world.answered(id, Answered::Tool(status, body));
+            }
+            Effect::Route { id, port } => self.world.answered(
+                id,
+                Answered::Tunnel(port.map_or(Located::Nowhere, Located::At)),
+            ),
+        }
+    }
+
+    /// Asks whether a job's tunnel is answering.
+    #[mutants::skip]
+    fn probe(self: &Arc<Self>, job: JobId) {
+        self.spawn(move |performer| async move {
+            let answering = stageman_job::answering(performer.runtime, job).await;
+            performer.world.send(Event::Probed { job, answering });
+        });
+    }
+
+    /// Asks which containers are running, and whose each is.
+    #[mutants::skip]
+    fn list_running(self: &Arc<Self>) {
+        self.spawn(|performer| async move {
+            let names = match stageman_agent::running(performer.runtime).await {
+                Ok(names) => names,
+                Err(why) => {
+                    tracing::warn!(%why, "could not ask which containers are running");
+                    return;
+                }
+            };
+            let mut running = Vec::with_capacity(names.len());
+            for name in names {
+                running.push(described(performer.runtime, name, true).await);
+            }
+            performer.world.send(Event::Listed { running });
+        });
+    }
+
+    /// Asks whether a container exists, and which agent it was made for.
+    ///
+    /// A container that is not there refuses, and so does a runtime that will
+    /// not answer; either way nothing can be resumed in it.
+    #[mutants::skip]
+    fn inspect(self: &Arc<Self>, container: String) {
+        self.spawn(move |performer| async move {
+            let (present, agent) = stageman_agent::made_for(performer.runtime, &container)
+                .await
+                .map_or((false, None), |agent| (true, agent));
+            performer.world.send(Event::Inspected {
+                container,
+                present,
+                agent,
+            });
+        });
+    }
+
+    /// Stops a container, keeping it.
+    #[mutants::skip]
+    fn halt(self: &Arc<Self>, container: String) {
+        self.spawn(move |performer| async move {
+            if let Err(why) = stageman_agent::halt(performer.runtime, &container).await {
+                tracing::warn!(%container, %why, "a container could not be stopped");
+            }
+        });
+    }
+
+    /// Removes a container and everything in it.
+    ///
+    /// Not fatal, and deliberately not retried here: what is left is a
+    /// container nothing needs, which is exactly what waking looks for.
+    #[mutants::skip]
+    fn discard(self: &Arc<Self>, container: String) {
+        self.spawn(move |performer| async move {
+            if let Err(why) = stageman_agent::discard(performer.runtime, &container).await {
+                tracing::warn!(%container, %why, "a container could not be removed; waking will try again");
+            }
+        });
+    }
+
+    /// Reclaims the images nothing needs.
+    ///
+    /// Housekeeping rather than work, so a runtime that will not answer is
+    /// warned about and nothing else changes.
+    #[mutants::skip]
+    fn reclaim(self: &Arc<Self>) {
+        self.spawn(|performer| async move {
+            match stageman_agent::reclaim(performer.runtime).await {
+                Ok(gone) if gone > 0 => {
+                    tracing::info!(images = gone, "reclaimed images no container needed");
+                }
+                Ok(_) => {}
+                Err(why) => tracing::warn!(%why, "could not reclaim the images nothing is using"),
+            }
+        });
+    }
+
+    /// Asks the runtime where a job's tunnel is published.
+    #[mutants::skip]
+    fn find_port(self: &Arc<Self>, job: JobId) {
+        self.spawn(move |performer| async move {
+            let port = stageman_agent::tunnel_port(
+                performer.runtime,
+                &stageman_job::container(job),
+            )
+            .await
+            .unwrap_or_else(|why| {
+                tracing::debug!(%job, %why, "the runtime could not say where a job's tunnel is");
+                None
+            });
+            performer.world.send(Event::PortFound { job, port });
+        });
+    }
+
+    /// Performs an effect on a task of its own.
+    fn spawn<F, Fut>(self: &Arc<Self>, effect: F)
+    where
+        F: FnOnce(Arc<Self>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let performer = Arc::clone(self);
+        drop(tokio::spawn(effect(performer)));
+    }
+
+    /// Writes the instance, and says whether it landed.
+    ///
+    /// Inline rather than on a task, and awaited: writes are answered in the
+    /// order they were asked for, and nothing outward-facing happens on the
+    /// strength of one that has not landed. Failure is reported to the
+    /// instance rather than to anybody else: no caller can repair a full
+    /// disk, the state in memory is still right, and the next change asks
+    /// again.
+    #[mutants::skip]
+    async fn persist(&self, bytes: Vec<u8>) {
+        let path = self.path.clone();
+        let outcome =
+            match tokio::task::spawn_blocking(move || write_atomically(&path, &bytes)).await {
+                Ok(written) => written.map_err(|why| why.to_string()),
+                Err(why) => Err(why.to_string()),
+            };
+        if let Err(why) = &outcome {
+            tracing::error!(%why, "the instance could not be written");
+        }
+        self.world.send(Event::Persisted { outcome });
+    }
+
+    /// Runs one turn on a task of its own, and reports how it ended.
+    ///
+    /// **Asking rather than killing** is what stopping means: the future
+    /// running the agent is dropped, which closes the pipe the agent is
+    /// speaking on and ends it, and the container carries on because the
+    /// agent is no longer what it runs — see
+    /// `docs/decisions/0053-a-job-is-stopped-or-retired-by-a-person.md`.
+    #[mutants::skip]
+    fn turn(self: &Arc<Self>, speaker: Speaker, run: Run) {
+        let stopping = Arc::new(tokio::sync::Notify::new());
+        self.turns.lock().insert(speaker, Arc::clone(&stopping));
+        self.spawn(move |performer| async move {
+            let tools = |warrant| stageman_agent::Tools::new(performer.endpoint.clone(), warrant);
+            let running = async {
+                match run {
+                    Run::Begin {
+                        container,
+                        handout,
+                        instance,
+                        warrant,
+                        kickoff,
+                    } => {
+                        stageman_agent::begin(
+                            performer.runtime,
+                            &handout,
+                            &container,
+                            instance,
+                            Some(&tools(warrant)),
+                            &kickoff,
+                        )
+                        .await
+                    }
+                    Run::Resume {
+                        container,
+                        kit,
+                        warrant,
+                        text,
+                    } => {
+                        stageman_agent::resume(
+                            performer.runtime,
+                            &container,
+                            &kit,
+                            Some(&tools(warrant)),
+                            &text,
+                        )
+                        .await
+                    }
+                }
+            };
+            let outcome = tokio::select! {
+                answered = running => answered.map_err(|why| because(&why)),
+                () = stopping.notified() => Err("stopped".to_owned()),
+            };
+            performer.turns.lock().remove(&speaker);
+            performer.world.send(Event::TurnEnded { speaker, outcome });
+        });
+    }
+}
+
+/// Steps the instance for as long as this process runs.
+///
+/// `pending` is what the instance asked for on waking, performed before the
+/// first event is read. The loop ends when every sender is gone, which is
+/// never while the world is adopted.
+#[mutants::skip]
+pub fn run(
+    instance: Instance,
+    pending: Vec<Effect>,
+    performer: Arc<Performer>,
+    mut events: tokio::sync::mpsc::UnboundedReceiver<Event>,
+) {
+    drop(tokio::spawn(async move {
+        let mut instance = instance;
+        for effect in pending {
+            performer.perform(effect).await;
+        }
+        while let Some(event) = events.recv().await {
+            for effect in instance.step(event) {
+                performer.perform(effect).await;
+            }
+        }
+        tracing::error!("the world stopped sending events, so the instance stopped stepping");
+    }));
+}
+
+/// One container, as the instance is told about it: its name, and what its
+/// labels say about whose it is and what it was made for.
+///
+/// Two questions of the runtime per container, because the two runtimes
+/// format a listing's labels differently and an inspection is the one shape
+/// both take. A label that cannot be read is reported as absent, which is the
+/// safe direction: an unlabelled container is left alone.
+#[mutants::skip]
+pub async fn described(runtime: &ContainerRuntime, name: String, running: bool) -> Container {
+    let instance = stageman_agent::started_by(runtime, &name)
+        .await
+        .unwrap_or_else(|why| {
+            tracing::warn!(container = %name, %why, "could not ask which instance started a container");
+            None
+        });
+    let agent = stageman_agent::made_for(runtime, &name)
+        .await
+        .unwrap_or_else(|why| {
+            tracing::warn!(container = %name, %why, "could not ask which agent a container was made for");
+            None
+        });
+    Container {
+        name,
+        instance,
+        agent,
+        running,
+    }
+}
+
+/// Every container this project left behind, as the instance is told about
+/// them on waking.
+///
+/// # Errors
+///
+/// Fails if the runtime will not say what containers it has, which is worth
+/// failing a start over: an instance that cannot see what it left behind
+/// cannot keep `docs/conventions.md` §4's bar.
+#[mutants::skip]
+pub async fn found(runtime: &ContainerRuntime) -> Result<Vec<Container>, stageman_job::JobError> {
+    let left = stageman_job::left_behind(runtime).await?;
+    let running = stageman_agent::running(runtime)
+        .await
+        .map_err(stageman_job::JobError::Agent)?;
+    let mut containers = Vec::with_capacity(left.len());
+    for abandoned in left {
+        let up = running.contains(&abandoned.container);
+        containers.push(described(runtime, abandoned.container, up).await);
+    }
+    Ok(containers)
+}
+
+/// Replaces a file in one step, so a crash mid-write cannot truncate it.
+///
+/// Written beside the target rather than in a temporary directory, because
+/// renaming across filesystems is not atomic and would silently become a copy.
+///
+/// # Errors
+///
+/// Fails if the file cannot be created, written, synced or renamed.
+pub fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let temporary = path.with_extension("tmp");
+    let outcome = (|| {
+        let mut file = fs::File::create(&temporary)?;
+        file.write_all(bytes)?;
+        // Rename is atomic, but only orders against data that has reached the
+        // disk. Without this a crash can leave an intact name over empty
+        // contents, which is the failure this function exists to prevent.
+        file.sync_all()?;
+        fs::rename(&temporary, path)
+    })();
+    if outcome.is_err() {
+        // Best effort: the write already failed, and failing to tidy up after
+        // it is not worth reporting over the failure itself.
+        drop(fs::remove_file(&temporary));
+    }
+    outcome
+}
+
+/// A failure and everything underneath it, as one line of prose.
+///
+/// `to_string` on an error renders only its outermost line, and every error
+/// that reaches a job's record wraps a more specific one — so recording the
+/// outer line alone throws away the only part that says what actually went
+/// wrong. One line rather than several, because this goes into a record a
+/// dashboard shows as prose.
+fn because(failure: &dyn std::error::Error) -> String {
+    let mut told = failure.to_string();
+    let mut cause = std::error::Error::source(failure);
+    while let Some(reason) = cause {
+        told.push_str(": ");
+        told.push_str(&reason.to_string());
+        cause = reason.source();
+    }
+    told
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{because, write_atomically};
+
+    /// The chain is what there is to read.
+    #[test]
+    fn a_failure_is_recorded_with_everything_underneath_it() {
+        let inner = std::io::Error::other("the disk is full");
+        let outer = stageman_agent::AgentError::Runtime {
+            path: std::path::PathBuf::from("/usr/local/bin/docker"),
+            source: inner,
+        };
+        let told = because(&outer);
+        assert!(told.contains("the disk is full"), "{told}");
+        assert!(told.contains(": "), "{told}");
+    }
+
+    /// A write lands whole, and a failed one leaves nothing beside the file.
+    #[test]
+    fn a_write_lands_whole_and_leaves_no_temporary_behind() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let path = directory.path().join("instance.json");
+        write_atomically(&path, b"first").expect("it writes");
+        write_atomically(&path, b"second").expect("it writes again");
+        assert_eq!(std::fs::read(&path).expect("it is there"), b"second");
+        assert!(!path.with_extension("tmp").exists());
+
+        let missing = directory.path().join("nowhere").join("instance.json");
+        assert!(write_atomically(&missing, b"third").is_err());
+        assert!(!missing.with_extension("tmp").exists());
+    }
+}

@@ -451,7 +451,7 @@ justify is usually obsolete.
   The server-function macro emits `#[cfg(feature = "server")]` literally, so a
   feature spelled anything else silently moves every server function's body to
   the client. Everything the daemon needs is an optional dependency behind it —
-  including the four internal crates — because a `cfg` hides code from the
+  including the internal crates — because a `cfg` hides code from the
   compiler and only the manifest hides a dependency from cargo. Reasoning in
   `docs/decisions/0022-the-browser-never-sees-the-domain.md`.
 
@@ -494,11 +494,11 @@ justify is usually obsolete.
   to somebody else's output. A substitution that stops matching leaves a page
   that works and a console line that came back; a flag that stops being
   accepted stops the build and says which one.
-- **Typed errors per crate, and no `anyhow` in core, agent, foreman or
-  job.** That is the gate's bar restated only where it bites: **app** is a
-  binary and may do as it likes internally, but the other four are libraries
-  whose errors cross a boundary, and a boxed error at that boundary makes the
-  caller's handling untestable.
+- **Typed errors per crate, and no `anyhow` in any crate but app.** That is
+  the gate's bar restated only where it bites: **app** is a binary and may do
+  as it likes internally, but the others are libraries whose errors cross a
+  boundary, and a boxed error at that boundary makes the caller's handling
+  untestable.
 - **The agent is third-party, and its quirks stop at the job boundary.** How the
   agent process is launched, spoken to and cleaned up is entirely the **job**
   crate's problem. If a change to that agent's interface would touch **core**,
