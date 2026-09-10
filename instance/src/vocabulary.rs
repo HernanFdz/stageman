@@ -41,6 +41,8 @@ pub struct Startup {
     pub serving: u16,
     /// What this build calls itself, for whoever asks the tools endpoint.
     pub build: String,
+    /// Where this machine's container runtime was found, for the dashboard.
+    pub runtime: String,
 }
 
 /// What identifies one request the world is waiting to answer.
@@ -209,6 +211,14 @@ pub enum Event {
         /// Why not, if not.
         outcome: Result<(), String>,
     },
+    /// A person asked something of the dashboard. Answered by
+    /// [`Effect::Respond`], in this step or a later one.
+    Request {
+        /// What the world is waiting to answer.
+        id: RequestId,
+        /// What was asked.
+        request: crate::requests::Request,
+    },
 }
 
 /// One thing the instance asks of the world.
@@ -278,6 +288,20 @@ pub enum Effect {
         thread: Thread,
         /// What.
         text: String,
+    },
+    /// Answer a person's request. Unanswered.
+    Respond {
+        /// Which request.
+        id: RequestId,
+        /// The answer, typed for the screen that asked.
+        response: crate::requests::Response,
+    },
+    /// Stop the turn running for a speaker: the agent process is ended and
+    /// the container carries on. Answered by [`Event::TurnEnded`], like the
+    /// turn it stops.
+    StopTurn {
+        /// Whose turn.
+        speaker: Speaker,
     },
     /// Answer a request the world is waiting on. Unanswered.
     ToolAnswered {
@@ -404,6 +428,15 @@ impl fmt::Debug for Effect {
                 .debug_struct("Listen")
                 .field("project", project)
                 .field("address", &speaking.address)
+                .finish(),
+            Self::Respond { id, response } => f
+                .debug_struct("Respond")
+                .field("id", id)
+                .field("response", response)
+                .finish(),
+            Self::StopTurn { speaker } => f
+                .debug_struct("StopTurn")
+                .field("speaker", speaker)
                 .finish(),
             Self::ToolAnswered { id, status, body } => f
                 .debug_struct("ToolAnswered")

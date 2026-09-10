@@ -1,0 +1,26 @@
+# The plain serialisable types that cross to a browser: views, drafts, and
+# the dashboard's refusal. Its own crate rather than a module of the app
+# because the instance answers a request with one and the app is the world
+# that carries it, and neither may name the other for it — see
+# `docs/decisions/0056-the-instance-decides-and-the-world-performs.md`.
+#
+# It names nothing but what serialises, which is what keeps
+# `docs/decisions/0022-the-browser-never-sees-the-domain.md` true from the
+# other side: there is nowhere on any of these types to put a credential.
+
+[package]
+name = "stageman-wire"
+description = "What crosses between stageman's dashboard and its instance. Internal to the workspace."
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+thiserror = "2.0.20"
+
+[lints]
+workspace = true

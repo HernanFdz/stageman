@@ -3771,6 +3771,7 @@ dependencies = [
  "stageman-core",
  "stageman-foreman",
  "stageman-job",
+ "stageman-wire",
  "thiserror 2.0.20",
  "tracing",
  "uuid",
@@ -3785,6 +3786,14 @@ dependencies = [
  "stageman-core",
  "thiserror 2.0.20",
  "tokio",
+]
+
+[[package]]
+name = "stageman-wire"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

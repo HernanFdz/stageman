@@ -23,10 +23,12 @@ mod file;
 mod foreman;
 mod jobs;
 mod replies;
+mod requests;
 mod sweep;
 mod tools;
 mod tunnel;
 mod turns;
+mod views;
 mod vocabulary;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -39,6 +41,7 @@ use stageman_core::{
 };
 
 pub use file::LoadError;
+pub use requests::{Request, Response};
 pub use sweep::Swept;
 pub use tunnel::{DEFAULT_DOMAIN, Domain, Routed, address, decode};
 pub use vocabulary::{
@@ -68,6 +71,8 @@ pub struct Instance {
     serving: u16,
     /// What this build calls itself.
     build: String,
+    /// Where the container runtime was found, for the dashboard.
+    runtime: String,
     /// The only randomness there is.
     rng: StdRng,
     /// The turns running right now, by whose they are.
@@ -129,6 +134,7 @@ impl Instance {
             domain: startup.domain.clone(),
             serving: startup.serving,
             build: startup.build.clone(),
+            runtime: startup.runtime.clone(),
             rng,
             turns: BTreeMap::new(),
             warrants: BTreeMap::new(),
@@ -205,6 +211,7 @@ impl Instance {
             } => self.tool_called(id, at, nearby, bearer.as_deref(), &body, &mut effects),
             Event::ThreadOpened { job, outcome } => self.thread_opened(job, outcome),
             Event::Posted { request, outcome } => self.posted(request, outcome),
+            Event::Request { id, request } => self.requested(id, request, &mut effects),
         }
         self.flush(&mut effects);
         debug_assert!(

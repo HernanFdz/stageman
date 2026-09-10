@@ -16,7 +16,8 @@ use stageman_core::{
     Thread, Timestamp, Uuid,
 };
 use stageman_instance::{
-    Container, Domain, Effect, Event, Instance, Message, RequestId, Run, Seed, Startup,
+    Container, Domain, Effect, Event, Instance, Message, Request, RequestId, Response, Run, Seed,
+    Startup,
 };
 
 /// Virtual milliseconds.
@@ -50,6 +51,8 @@ pub struct Simulation {
     post_failures: VecDeque<String>,
     /// What each request was answered with, by identifier.
     tool_answers: BTreeMap<RequestId, (u16, Option<serde_json::Value>)>,
+    /// What each person's request was answered with, by identifier.
+    responses: BTreeMap<RequestId, Response>,
     /// Threads opened so far, so each gets a number of its own.
     threads_opened: u32,
     /// Jobs whose first turn the world has been asked to run. A job is on the
@@ -216,6 +219,14 @@ pub fn holding_a_message(state: &mut State, n: u32, text: &str) {
         });
 }
 
+/// A person asking something of the dashboard.
+pub const fn request(id: u64, request: Request) -> Event {
+    Event::Request {
+        id: RequestId(id),
+        request,
+    }
+}
+
 /// A call on the tools endpoint from this machine, presenting a credential.
 pub fn tool_call(id: u64, bearer: &Secret, body: serde_json::Value) -> Event {
     Event::ToolCalled {
@@ -248,6 +259,7 @@ impl Simulation {
             answers: VecDeque::new(),
             post_failures: VecDeque::new(),
             tool_answers: BTreeMap::new(),
+            responses: BTreeMap::new(),
             threads_opened: 100,
             begun: BTreeSet::new(),
             turn_takes: 1_000,
@@ -308,6 +320,21 @@ impl Simulation {
         self.tool_answers.get(&id)
     }
 
+    /// What a person's request was answered with, if it has been.
+    pub fn response(&self, id: u64) -> Option<&Response> {
+        self.responses.get(&RequestId(id))
+    }
+
+    /// The virtual instant.
+    pub const fn now(&self) -> Now {
+        self.now
+    }
+
+    /// The projects listened on so far, in the order listening began.
+    pub fn listening(&self) -> &[ProjectId] {
+        &self.listening
+    }
+
     /// Scripts how the next turn ends.
     pub fn next_turn_ends(&mut self, outcome: Result<Answer, String>) {
         self.answers.push_back(outcome);
@@ -330,6 +357,7 @@ impl Simulation {
             domain: Domain::local(),
             serving: 8080,
             build: "a test build".to_owned(),
+            runtime: "/usr/local/bin/docker".to_owned(),
         }
     }
 
@@ -363,6 +391,7 @@ impl Simulation {
                     | Event::ThreadOpened { .. }
                     | Event::Posted { .. }
                     | Event::Woke { .. }
+                    | Event::Request { .. }
             )
         });
         self.landing.clear();
@@ -463,6 +492,21 @@ impl Simulation {
         self.schedule(at, Event::TurnEnded { speaker, outcome });
     }
 
+    /// Ends the agent process, so the turn it was running ends with that
+    /// rather than with whatever the agent would have said.
+    fn stop_turn(&mut self, speaker: stageman_instance::Speaker) {
+        self.queue.retain(|_, event| {
+            !matches!(event, Event::TurnEnded { speaker: whose, .. } if *whose == speaker)
+        });
+        self.schedule(
+            self.now,
+            Event::TurnEnded {
+                speaker,
+                outcome: Err("stopped".to_owned()),
+            },
+        );
+    }
+
     /// Accepts a write: it lands as its completion is delivered, unless it
     /// was scripted to fail.
     fn write(&mut self, bytes: Vec<u8>) {
@@ -533,6 +577,10 @@ impl Simulation {
             Effect::ToolAnswered { id, status, body } => {
                 self.tool_answers.insert(id, (status, body));
             }
+            Effect::Respond { id, response } => {
+                self.responses.insert(id, response);
+            }
+            Effect::StopTurn { speaker } => self.stop_turn(speaker),
             Effect::OpenThread {
                 job, announcement, ..
             } => {
