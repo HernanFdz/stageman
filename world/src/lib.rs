@@ -268,3 +268,126 @@ async fn run_once(
         Err(why) => Finished::Failed(why.to_string()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use serde::{Deserialize, Serialize};
+    use stageman_vocabulary::{App, EffectId, Named};
+
+    use super::{Bytes, Event, World, read, write, write_atomically};
+
+    /// An application that adds nothing, so what is tested here is the
+    /// mechanisms and nothing of anybody's domain.
+    #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+    struct Nothing;
+
+    impl Named for Nothing {
+        fn kind(&self) -> &'static str {
+            "Nothing"
+        }
+    }
+
+    impl App for Nothing {
+        type Event = Self;
+        type Effect = Self;
+    }
+
+    /// Absent is an answer, and unreadable is a different one.
+    ///
+    /// The whole of what stands between "this is a first run" and "your
+    /// instance cannot be read": one of those writes a new file over
+    /// nothing and the other must refuse. A directory is the cheapest
+    /// unreadable file there is, and it fails with something that is not
+    /// absence.
+    #[test]
+    fn a_read_tells_absent_from_unreadable() {
+        let scratch = tempfile::tempdir().expect("a temporary directory");
+
+        let missing = scratch.path().join("not-here");
+        assert!(read(&missing) == Ok(None), "absent is not a failure");
+
+        let present = scratch.path().join("here");
+        fs::write(&present, b"contents").expect("it writes");
+        assert_eq!(
+            read(&present).expect("it reads").map(Bytes::into_inner),
+            Some(b"contents".to_vec())
+        );
+
+        let directory = scratch.path().join("a-directory");
+        fs::create_dir(&directory).expect("it is made");
+        assert!(
+            read(&directory).is_err(),
+            "a file that cannot be read is not an absent one"
+        );
+    }
+
+    /// A write makes the directory it was told to write into, and replaces
+    /// what was there.
+    ///
+    /// An instance is kept under a directory nobody made, so a first run
+    /// that refused for want of one would refuse on every fresh machine.
+    #[test]
+    fn a_write_makes_the_directory_it_needs_and_replaces_what_is_there() {
+        let scratch = tempfile::tempdir().expect("a temporary directory");
+        let path = scratch.path().join("nested").join("deeper").join("file");
+
+        write(&path, b"first", false).expect("it writes");
+        assert_eq!(fs::read(&path).expect("it is there"), b"first");
+
+        write(&path, b"second", false).expect("it writes again");
+        assert_eq!(
+            fs::read(&path).expect("still there"),
+            b"second",
+            "a write replaces rather than appends"
+        );
+        assert!(
+            !path.with_extension("tmp").exists(),
+            "and leaves nothing beside it"
+        );
+    }
+
+    /// A private write is readable by its owner and by nobody else.
+    #[cfg(unix)]
+    #[test]
+    fn a_private_write_is_readable_by_nobody_else() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let scratch = tempfile::tempdir().expect("a temporary directory");
+        let path = scratch.path().join("key");
+        write(&path, b"material", true).expect("it writes");
+
+        let mode = fs::metadata(&path)
+            .expect("it is there")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+    }
+
+    /// A write that cannot happen says so rather than reporting success.
+    #[test]
+    fn a_write_that_cannot_happen_fails_and_tidies_up() {
+        let scratch = tempfile::tempdir().expect("a temporary directory");
+        // No directory, and this is the function that does not make one, so
+        // what fails is creating the temporary beside the target.
+        let path = scratch.path().join("absent").join("file");
+
+        assert!(write_atomically(&path, b"x", false).is_err());
+        assert!(!path.exists());
+        assert!(
+            !path.with_extension("tmp").exists(),
+            "nothing is left behind"
+        );
+    }
+
+    /// An event sent reaches whoever is stepping, whole.
+    #[test]
+    fn an_event_sent_is_an_event_received() {
+        let (world, mut events) = World::<Nothing>::new();
+        world.send(Event::Woke { id: EffectId(7) });
+
+        let heard = events.try_recv().expect("it arrived");
+        assert!(heard == Event::Woke { id: EffectId(7) });
+    }
+}

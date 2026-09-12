@@ -215,6 +215,11 @@ impl Performer {
     /// Performs an effect on a task of its own, with the runtime the
     /// instance found; one asked for before that is a fault in the instance
     /// and is said rather than performed.
+    ///
+    /// Skipped by mutation testing, like the performer it serves: what it
+    /// does is spawn, and everything decided is inside the effect that task
+    /// performs, which cannot run without a container runtime.
+    #[mutants::skip]
     fn spawn<F, Fut>(&self, effect: F)
     where
         F: FnOnce(Arc<Inner>, &'static ContainerRuntime) -> Fut + Send + 'static,
@@ -228,6 +233,10 @@ impl Performer {
     }
 
     /// Performs an effect on a task of its own, needing no runtime.
+    ///
+    /// Skipped for the reason [`Performer::spawn`] is: it spawns, and what
+    /// the task does reaches a channel over the network.
+    #[mutants::skip]
     fn spawn_plain<F, Fut>(&self, effect: F)
     where
         F: FnOnce(Arc<Inner>) -> Fut + Send + 'static,

@@ -316,6 +316,13 @@ impl Simulation {
     }
 
     /// Puts a state on the disk, sealed as the instance would seal it.
+    /// Puts bytes where the instance keeps its file, for the starts that
+    /// turn on what is already on the disk rather than on what it says.
+    pub fn holding_bytes(&mut self, bytes: &[u8]) {
+        self.files
+            .insert(PathBuf::from(INSTANCE_FILE), bytes.to_vec());
+    }
+
     pub fn holding(&mut self, state: &State) {
         let mut counter: u8 = 0;
         let mut nonces = || {

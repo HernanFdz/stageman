@@ -21,5 +21,11 @@ stageman-vocabulary = { workspace = true }
 tokio = { version = "1.53.1", features = ["io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1.44"
 
+# Only what the tests need: an application to instantiate the generic types
+# with, and somewhere to write files that is not this repository.
+[dev-dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+tempfile = "3.27.0"
+
 [lints]
 workspace = true

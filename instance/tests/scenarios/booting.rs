@@ -3,7 +3,20 @@
 
 use stageman_core::Progress;
 
+use stageman_instance::{Effect, Event, Instance};
+use stageman_vocabulary::{Bytes, EffectId, Finished};
+
 use crate::simulation::{Simulation, job, seed, watching};
+
+/// A program that ran and said nothing, which is what a runtime answering
+/// its version check looks like to everything downstream of the parsing.
+const fn exited() -> Finished {
+    Finished::Exited {
+        status: Some(0),
+        stdout: Bytes::new(Vec::new()),
+        stderr: Bytes::new(Vec::new()),
+    }
+}
 
 /// The startup block is printed once, after the first write has landed, and
 /// its address is the last line: what anything supervising a start waits
@@ -135,4 +148,302 @@ fn a_file_that_cannot_be_written_refuses_the_start() {
     assert!(refused.contains("could not be written"), "{refused}");
     assert!(refused.contains("/sim/instance.json"), "{refused}");
     assert!(world.printed().is_empty(), "nothing is announced");
+}
+
+/// An answer to a question booting did not ask moves nothing.
+///
+/// Every phase carries the identifier it is waiting on, and the world
+/// answers with the identifier it was given. A phase that took whatever
+/// arrived would walk on the strength of a timer going off, or of a read it
+/// had already been handed, and a start would be decided by ordering rather
+/// than by what it asked. Driven event by event rather than through the
+/// simulation, because what is under test is exactly the answers a world
+/// would never send.
+#[test]
+fn an_answer_to_another_question_moves_nothing() {
+    let stray = EffectId(9999);
+    // No key in the environment, so the key file is asked for and written:
+    // the two phases that would otherwise be skipped.
+    let mut environment = Simulation::environment();
+    environment.remove("STAGEMAN_KEY");
+    let (mut instance, effects) = Instance::boot(seed(1), environment);
+
+    let [Effect::Run { id: version, .. }] = effects.as_slice() else {
+        panic!("one runtime question, and this is not it");
+    };
+
+    let mut walked = |at: &str, stray_event: Event, real: Event| {
+        assert_eq!(instance.snapshot(), serde_json::json!({ "booting": at }));
+        assert!(
+            instance.step(stray_event).is_empty(),
+            "a stray answer asked for something at {at}"
+        );
+        assert_eq!(
+            instance.snapshot(),
+            serde_json::json!({ "booting": at }),
+            "a stray answer moved booting on from {at}"
+        );
+        instance.step(real)
+    };
+
+    let asked = walked(
+        "runtime",
+        Event::Ran {
+            id: stray,
+            finished: exited(),
+        },
+        Event::Ran {
+            id: *version,
+            finished: exited(),
+        },
+    );
+    let [Effect::Read { id: key, .. }] = asked.as_slice() else {
+        panic!("the key file is asked for");
+    };
+
+    let asked = walked(
+        "key",
+        Event::Read {
+            id: stray,
+            contents: Ok(None),
+        },
+        Event::Read {
+            id: *key,
+            contents: Ok(None),
+        },
+    );
+    let [Effect::Write { id: minted, .. }] = asked.as_slice() else {
+        panic!("a key is minted and written");
+    };
+
+    let asked = walked(
+        "key written",
+        Event::Written {
+            id: stray,
+            outcome: Ok(()),
+        },
+        Event::Written {
+            id: *minted,
+            outcome: Ok(()),
+        },
+    );
+    let [Effect::Read { id: file, .. }] = asked.as_slice() else {
+        panic!("then the instance's own file");
+    };
+
+    let asked = walked(
+        "file",
+        Event::Read {
+            id: stray,
+            contents: Ok(None),
+        },
+        Event::Read {
+            id: *file,
+            contents: Ok(None),
+        },
+    );
+    assert_eq!(asked.len(), 2, "both listings at once");
+
+    assert_eq!(
+        instance.snapshot(),
+        serde_json::json!({ "booting": "listing" })
+    );
+    assert!(
+        instance
+            .step(Event::Ran {
+                id: stray,
+                finished: exited(),
+            })
+            .is_empty(),
+        "a stray answer asked for something while listing"
+    );
+    assert_eq!(
+        instance.snapshot(),
+        serde_json::json!({ "booting": "listing" })
+    );
+}
+
+/// A file that is there and cannot be opened says why, underneath.
+///
+/// The reason is the whole message: "the instance could not be opened" on
+/// its own sends somebody to read the source, where the line underneath
+/// says whether it was the key or the file.
+#[test]
+fn an_instance_that_cannot_be_opened_says_what_went_wrong_underneath() {
+    let mut world = Simulation::new();
+    world.holding_bytes(b"{\"this\": \"is not a snapshot\"}");
+    let mut instance = world.wake(seed(1));
+    world.run_until(&mut instance, 1);
+
+    let refused = world.exited().expect("refused");
+    assert!(refused.contains("could not be opened"), "{refused}");
+    // Every level of it, to the bottom: the outermost says which part of
+    // opening failed and only the innermost says what was actually wrong
+    // with the file, which is the line somebody can act on.
+    assert!(
+        refused.contains("caused by: the file is not valid JSON"),
+        "{refused}"
+    );
+    assert!(refused.contains("missing field"), "{refused}");
+    assert!(world.printed().is_empty(), "nothing is announced");
+}
+
+/// A runtime command is given this process's environment, less this
+/// project's own.
+///
+/// Constructed rather than inherited, which `docs/conventions.md` §3 asks
+/// of every child process — and narrower than what this process was given,
+/// because a container runtime reads a host or a context out of its
+/// environment and has no business with the key that opens an instance.
+#[test]
+fn a_runtime_command_is_given_this_environment_less_this_projects_own() {
+    let (_, effects) = Instance::boot(seed(1), Simulation::environment());
+
+    let [
+        Effect::Run {
+            environment: given, ..
+        },
+    ] = effects.as_slice()
+    else {
+        panic!("one runtime question, and this is not it");
+    };
+    assert_eq!(given.get("HOME").map(String::as_str), Some("/sim/home"));
+    assert!(
+        !given.keys().any(|name| name.starts_with("STAGEMAN_")),
+        "a runtime was handed this project's own: {given:?}"
+    );
+}
+
+/// The deciding half a replay drives is this instance.
+///
+/// A replay steps the instance through the vocabulary's own trait rather
+/// than through its type, so a trait that answered differently would make
+/// every recorded file agree with a run nobody performed.
+#[test]
+fn the_deciding_half_a_replay_drives_is_this_instance() {
+    use stageman_vocabulary::Deciding;
+
+    let (mut instance, effects) =
+        <Instance as stageman_vocabulary::Deciding>::boot(seed(1), Simulation::environment());
+    let [Effect::Run { id, .. }] = effects.as_slice() else {
+        panic!("one runtime question, and this is not it");
+    };
+
+    let caused = Deciding::step(
+        &mut instance,
+        Event::Ran {
+            id: *id,
+            finished: exited(),
+        },
+    );
+    assert!(
+        matches!(caused.as_slice(), [Effect::Read { .. }]),
+        "the instance's own file is asked for through the trait"
+    );
+    assert_eq!(Deciding::snapshot(&instance), instance.snapshot());
+    assert_eq!(
+        Deciding::snapshot(&instance),
+        serde_json::json!({ "booting": "file" })
+    );
+}
+
+/// Everything an awake instance holds reads in full, credentials included.
+///
+/// This is what a scenario compares and a reviewer reads, so a snapshot
+/// that quietly dropped a half would make every replay agree with itself
+/// and with nothing else. The credentials are in the clear on purpose: the
+/// kept state's own types refuse to serialise one, and every file a test
+/// writes holds fakes.
+#[test]
+fn what_an_awake_instance_holds_reads_in_full() {
+    let mut world = Simulation::new();
+    world.holding(&watching(&[(job(1), Progress::Working)]));
+    let mut instance = world.wake(seed(1));
+    world.run_until(&mut instance, 1);
+
+    let held = instance.snapshot();
+    assert_eq!(held["held"]["key_source"], "STAGEMAN_KEY");
+    assert_eq!(held["held"]["path"], "/sim/instance.json");
+    assert_eq!(held["held"]["domain"], "localhost");
+    assert_eq!(held["held"]["serving"], 8080);
+    assert_eq!(held["held"]["announced"], true);
+
+    let agents = held["kept"]["agents"].as_object().expect("the agents");
+    assert!(
+        agents
+            .values()
+            .all(|configured| configured["auth_token"].is_string()),
+        "a credential reads as itself: {agents:?}"
+    );
+    let projects = held["kept"]["projects"].as_object().expect("the projects");
+    let project = projects.values().next().expect("one project");
+    assert_eq!(project["name"], "example");
+    assert_eq!(project["repository"], "https://example.invalid/repo");
+    assert!(
+        !project["jobs"].as_object().expect("its jobs").is_empty(),
+        "and the job it is watching: {project:?}"
+    );
+}
+
+/// One listing is not both.
+///
+/// Booting asks two questions of the runtime at once — everything left
+/// behind, and what is up — and cannot place a container until both have
+/// answered. Each carries its own identifier, and a phase that took
+/// whichever arrived would walk on with one listing counted twice: every
+/// container would look stopped, and the sweep would act on it.
+#[test]
+fn one_listing_is_not_both() {
+    let stray = EffectId(9999);
+    let (mut instance, effects) = Instance::boot(seed(1), Simulation::environment());
+
+    let [Effect::Run { id: version, .. }] = effects.as_slice() else {
+        panic!("one runtime question, and this is not it");
+    };
+    let asked = instance.step(Event::Ran {
+        id: *version,
+        finished: exited(),
+    });
+    let [Effect::Read { id: file, .. }] = asked.as_slice() else {
+        panic!("the key is in the environment, so the file is next");
+    };
+    let asked = instance.step(Event::Read {
+        id: *file,
+        contents: Ok(None),
+    });
+    let [Effect::Run { id: all, .. }, Effect::Run { id: up, .. }] = asked.as_slice() else {
+        panic!("both listings, asked at once");
+    };
+
+    let listing = serde_json::json!({ "booting": "listing" });
+    assert_eq!(instance.snapshot(), listing);
+    assert!(
+        instance
+            .step(Event::Ran {
+                id: stray,
+                finished: exited(),
+            })
+            .is_empty()
+    );
+    assert_eq!(instance.snapshot(), listing, "a stray answer was counted");
+
+    instance.step(Event::Ran {
+        id: *all,
+        finished: exited(),
+    });
+    assert_eq!(
+        instance.snapshot(),
+        listing,
+        "one listing answered is not both"
+    );
+
+    instance.step(Event::Ran {
+        id: *up,
+        finished: exited(),
+    });
+    assert_eq!(
+        instance.snapshot(),
+        serde_json::json!({ "booting": "ready" }),
+        "and both is everything booting was waiting on"
+    );
 }

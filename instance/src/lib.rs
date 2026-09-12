@@ -115,6 +115,19 @@ fn rendered(
 
 use turns::Turn;
 
+/// Says so when a write was answered out of order.
+///
+/// Skipped by mutation testing because it is equivalent under one: what the
+/// comparison decides is which line is logged, and a log line is not
+/// something a test can see. What keeps the order is the queue, and that is
+/// tested.
+#[mutants::skip]
+fn out_of_order(asked: EffectId, id: EffectId) {
+    if asked != id {
+        tracing::error!("writes were answered out of order; carrying on in the order asked");
+    }
+}
+
 /// How often the instance asks which containers still deserve to be up.
 ///
 /// A server an agent left running does not say when it stops, so the only
@@ -474,9 +487,7 @@ impl Running {
             tracing::warn!("the world answered a write nobody asked for; ignored");
             return;
         };
-        if asked != id {
-            tracing::error!("writes were answered out of order; carrying on in the order asked");
-        }
+        out_of_order(asked, id);
         match outcome {
             Ok(()) => {
                 effects.extend(waiting);

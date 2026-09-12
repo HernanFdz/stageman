@@ -57,6 +57,33 @@ fn a_first_message_opens_a_session_and_is_acknowledged_first() {
     );
 }
 
+/// What a container's agent may see is decided here and nowhere else.
+///
+/// `docs/conventions.md` §3 asks that what a child process is handed be
+/// constructed rather than inherited, and this is where the construction
+/// happens: the variable a credential arrives in is the adapter's knowledge,
+/// the decision about which credential is this instance's, and a turn that
+/// began with an empty environment would run an agent authenticating as
+/// whoever started the daemon — no error, no log line, and a bill.
+#[test]
+fn what_a_containers_agent_may_see_is_decided_here() {
+    let mut world = Simulation::new();
+    world.holding(&watching_a_channel(&[]));
+    let mut instance = world.wake(seed(1));
+
+    world.schedule(100, said_at_root(1, "look at the parser"));
+    world.run_until(&mut instance, 5_000);
+
+    let runs = runs(&world);
+    let [run] = runs.as_slice() else {
+        panic!("one turn: {runs:?}");
+    };
+    assert!(
+        run.contains(r#""ANTHROPIC_API_KEY":"agent-token""#),
+        "the agent's own credential, in the variable its adapter reads: {run}"
+    );
+}
+
 /// A foreman with a container continues its session rather than opening one.
 #[test]
 fn a_foreman_with_a_container_continues_its_session() {

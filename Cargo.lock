@@ -3954,7 +3954,9 @@ name = "stageman-world"
 version = "0.0.0"
 dependencies = [
  "mutants",
+ "serde",
  "stageman-vocabulary",
+ "tempfile",
  "tokio",
  "tracing",
 ]

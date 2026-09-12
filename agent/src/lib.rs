@@ -2709,6 +2709,17 @@ mod tests {
         );
         assert_eq!(
             Command::parse(&[
+                "ps".to_owned(),
+                "--filter".to_owned(),
+                "label=other".to_owned(),
+                "--format".to_owned(),
+                "{{.Names}}".to_owned()
+            ]),
+            None,
+            "and no more so when only the running ones are asked for"
+        );
+        assert_eq!(
+            Command::parse(&[
                 "inspect".to_owned(),
                 "--format".to_owned(),
                 "{{index .Config.Labels \"other\"}}".to_owned(),

@@ -415,5 +415,9 @@ mod tests {
                 .contains("the state differs after turn 1"),
             "{failure}"
         );
+        // A test runner prints the failure it was handed through `Debug`, so
+        // a mismatch that renders only through `Display` would report a
+        // difference and say nothing about what it was.
+        assert_eq!(format!("{failure:?}"), failure.to_string());
     }
 }

@@ -718,5 +718,72 @@ mod tests {
 
         assert!(serde_json::from_str::<Bytes>(r#"{"hex":"abc"}"#).is_err());
         assert!(serde_json::from_str::<Bytes>(r#"{"hex":"zz"}"#).is_err());
+
+        // What comes out is what went in, both ways round: these are what a
+        // file is written from and what a program's output is read through,
+        // so bytes invented here would be bytes on somebody's disk.
+        assert_eq!(binary.as_slice(), [0xff, 0x00, 0x7f]);
+        assert_eq!(binary.clone().into_inner(), vec![0xff, 0x00, 0x7f]);
+        let none = Bytes::new(Vec::new());
+        assert!(none.is_empty(), "nothing is empty");
+        assert!(!binary.is_empty(), "and something is not");
+        assert_eq!(none.len(), 0);
+        assert!(none.as_slice().is_empty());
+        assert_eq!(none.into_inner(), Vec::<u8>::new());
+    }
+
+    /// One field apart is a different value, on both enumerations.
+    ///
+    /// The whole of what a replay rests on: a comparison satisfied by an
+    /// identifier alone would call an answer to one effect the answer to
+    /// another, and a file would agree with a run that had done something
+    /// else. Written as pairs differing in exactly one place, because that
+    /// is the comparison a weakened one gets wrong.
+    #[test]
+    fn one_field_apart_is_not_the_same_value() {
+        let read = |id: u64, contents: Result<Option<Bytes>, String>| Event::<Doorbell>::Read {
+            id: EffectId(id),
+            contents,
+        };
+        let some = || Ok(Some(Bytes::new(b"x".to_vec())));
+        assert!(read(1, Ok(None)) == read(1, Ok(None)));
+        assert!(
+            read(1, Ok(None)) != read(1, some()),
+            "the same read, answered differently"
+        );
+        assert!(
+            read(1, Ok(None)) != read(2, Ok(None)),
+            "a different read, answered the same"
+        );
+
+        let written = |id: u64, outcome: Result<(), String>| Event::<Doorbell>::Written {
+            id: EffectId(id),
+            outcome,
+        };
+        assert!(written(1, Ok(())) == written(1, Ok(())));
+        assert!(written(1, Ok(())) != written(1, Err("full".to_owned())));
+        assert!(written(1, Ok(())) != written(2, Ok(())));
+
+        let ran = |id: u64, finished: Finished| Event::<Doorbell>::Ran {
+            id: EffectId(id),
+            finished,
+        };
+        assert!(ran(1, Finished::NotFound) == ran(1, Finished::NotFound));
+        assert!(ran(1, Finished::NotFound) != ran(1, Finished::Failed("no".to_owned())));
+        assert!(ran(1, Finished::NotFound) != ran(2, Finished::NotFound));
+
+        // Effects compare through the one representation both sides share,
+        // so the field that differs here is the one a reader would miss.
+        let write = |private: bool| Effect::<Doorbell>::Write {
+            id: EffectId(1),
+            path: "/tmp/x".into(),
+            bytes: Bytes::new(b"x".to_vec()),
+            private,
+        };
+        assert!(write(true) == write(true));
+        assert!(
+            write(true) != write(false),
+            "a private write is not a public one"
+        );
     }
 }
