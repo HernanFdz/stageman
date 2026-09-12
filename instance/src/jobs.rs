@@ -6,7 +6,7 @@ use stageman_core::{
 };
 use stageman_foreman::Voice;
 
-use crate::Instance;
+use crate::Running;
 use crate::turns::{Turn, speaking_for};
 use crate::vocabulary::{AppEffect, Run, Speaker};
 
@@ -21,7 +21,7 @@ pub enum BeginError {
     Handout(#[source] HandoutError),
 }
 
-impl Instance {
+impl Running {
     /// Records a job on a project and sets it going.
     ///
     /// **The record is written before anything else exists, and the order is

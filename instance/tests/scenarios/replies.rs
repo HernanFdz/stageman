@@ -30,7 +30,7 @@ fn a_reply_to_an_idle_job_resumes_it_after_the_record_lands() {
     let shape = world.shape();
     let persisted = shape
         .iter()
-        .position(|line| line.starts_with("<- Persisted"))
+        .position(|line| line.starts_with("<- Written"))
         .expect("the record was written");
     let resumed = shape
         .iter()

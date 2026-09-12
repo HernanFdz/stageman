@@ -42,7 +42,6 @@ repository.workspace = true
 [features]
 default = ["server"]
 server = [
-    "dep:etcetera",
     "dep:parking_lot",
     "dep:rand",
     "dep:futures-util",
@@ -116,7 +115,6 @@ lucide-dioxus = { version = "2.43.0", features = [
     "shapes",
 ] }
 
-etcetera = { version = "0.11.0", optional = true }
 parking_lot = { version = "0.12.5", optional = true }
 rand = { version = "0.10.2", optional = true }
 # The daemon's own half of a channel. A job's agent posts through a tool in its

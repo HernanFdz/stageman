@@ -66,7 +66,7 @@ fn the_instance_screen_counts_what_it_may_and_never_a_credential() {
     let mut sim = Simulation::new();
     sim.holding(&watching(&[]));
     let mut instance = sim.wake(seed(1));
-    let written = count(&sim, "-> Persist");
+    let written = count(&sim, "-> Write");
 
     let Response::Instance(shown) = ask(&mut sim, &mut instance, 1, Request::Instance) else {
         panic!("the instance screen");
@@ -76,7 +76,7 @@ fn the_instance_screen_counts_what_it_may_and_never_a_credential() {
     assert_eq!(shown.projects.len(), 1);
     let served = serde_json::to_string(&shown).expect("it serialises");
     assert!(!served.contains("agent-token"), "{served}");
-    assert_eq!(count(&sim, "-> Persist"), written, "a read writes nothing");
+    assert_eq!(count(&sim, "-> Write"), written, "a read writes nothing");
 }
 
 /// The answer follows the write, and a refusal changes nothing.
@@ -102,7 +102,7 @@ fn configuring_an_agent_is_answered_once_the_credential_has_landed() {
             .iter()
             .any(|agent| agent.id == "claude" && agent.configured)
     );
-    assert!(first(&sim, "-> Persist") < first(&sim, "-> Respond"));
+    assert!(first(&sim, "-> Write") < first(&sim, "-> Respond"));
     let landed = sim.disk().expect("the write landed");
     assert_eq!(
         landed
@@ -112,7 +112,7 @@ fn configuring_an_agent_is_answered_once_the_credential_has_landed() {
         Some("a-new-token")
     );
 
-    let written = count(&sim, "-> Persist");
+    let written = count(&sim, "-> Write");
     assert_eq!(
         ask(
             &mut sim,
@@ -138,7 +138,7 @@ fn configuring_an_agent_is_answered_once_the_credential_has_landed() {
             name: "gpt".to_owned()
         })
     );
-    assert_eq!(count(&sim, "-> Persist"), written, "refusals write nothing");
+    assert_eq!(count(&sim, "-> Write"), written, "refusals write nothing");
 
     let Response::Agents(agents) = ask(
         &mut sim,
@@ -212,7 +212,7 @@ fn creating_a_project_listens_on_its_channel_once_the_record_has_landed() {
     assert_eq!(burrow.platforms, vec!["github".to_owned()]);
     let created = ProjectId::from_uuid(Uuid::parse_str(&burrow.id).expect("an identifier"));
     assert_eq!(sim.listening(), [created]);
-    assert!(first(&sim, "-> Persist") < first(&sim, "-> Listen"));
+    assert!(first(&sim, "-> Write") < first(&sim, "-> Listen"));
     assert!(first(&sim, "-> Listen") < first(&sim, "-> Respond"));
     assert!(sim.disk().expect("landed").projects.contains_key(&created));
 
@@ -385,7 +385,7 @@ fn forgetting_a_project_removes_its_containers_and_refuses_while_busy() {
     assert!(!sim.exists(&stageman_job::container(job(1))));
     assert!(!sim.exists(&stageman_job::container(job(2))));
     assert!(!sim.exists(&stageman_foreman::container(project())));
-    assert!(first(&sim, "-> Persist") < first(&sim, "-> Discard"));
+    assert!(first(&sim, "-> Write") < first(&sim, "-> Discard"));
     assert!(sim.reclaims() >= 1);
     assert!(sim.disk().expect("landed").projects.is_empty());
 }
@@ -422,7 +422,7 @@ fn starting_a_job_by_hand_runs_its_first_turn_once_the_record_has_landed() {
     );
     assert_eq!(started.reason, "started by hand from the dashboard");
     assert!(started.tunnel.contains(&started.id));
-    assert!(first(&sim, "-> Persist") < first(&sim, "-> RunTurn"));
+    assert!(first(&sim, "-> Write") < first(&sim, "-> RunTurn"));
     let begun = JobId::from_uuid(Uuid::parse_str(&started.id).expect("an identifier"));
     assert!(sim.is_running(&stageman_job::container(begun)));
 
@@ -617,7 +617,7 @@ fn retiring_a_job_records_the_verdict_before_its_container_goes() {
         .find(|listed| listed.id == job(1).to_string())
         .expect("still listed");
     assert_eq!(retired.standing, Standing::Done);
-    assert!(first(&sim, "-> Persist") < first(&sim, "-> Discard"));
+    assert!(first(&sim, "-> Write") < first(&sim, "-> Discard"));
     assert!(!sim.exists(&stageman_job::container(job(1))));
     assert_eq!(sim.reclaims(), reclaimed + 1);
     assert_eq!(

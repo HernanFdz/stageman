@@ -41,3 +41,6 @@ uuid = { version = "1.26.0", features = ["serde"] }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+libtest-mimic = "0.8.2"

@@ -134,7 +134,10 @@ fn a_foreman_is_greeted_and_offered_the_tools_that_start_jobs() {
     let result = &greeting.1.as_ref().expect("a body")["result"];
     assert_eq!(result["protocolVersion"], "2024-11-05");
     assert_eq!(result["serverInfo"]["name"], "stageman");
-    assert_eq!(result["serverInfo"]["version"], "a test build");
+    assert_eq!(
+        result["serverInfo"]["version"],
+        stageman_instance::release::described()
+    );
 
     assert_eq!(
         world.tool_answer(RequestId(2)),
@@ -262,7 +265,7 @@ fn a_foreman_starts_a_job_whose_thread_is_opened_before_its_agent_speaks() {
     let shape = world.shape();
     let persisted = shape
         .iter()
-        .position(|line| line.starts_with("<- Persisted"))
+        .position(|line| line.starts_with("<- Written"))
         .expect("written");
     let opened = shape
         .iter()

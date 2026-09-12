@@ -10,6 +10,7 @@
               report to; the virtual clock adds"
 )]
 
+mod booting;
 mod dashboard;
 mod foreman;
 mod replies;

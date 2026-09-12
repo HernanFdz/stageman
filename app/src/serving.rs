@@ -12,83 +12,23 @@
 //! instance unusable has to fail at startup, with an exit code and a reason,
 //! and that is not available inside a function that cannot return.
 
-use std::fmt;
 use std::fs;
-use std::io::{self, Write as _};
+use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 use dioxus::prelude::{DioxusRouterExt as _, ServeConfig};
 use dioxus::server::axum;
-use etcetera::BaseStrategy as _;
 use rand::rngs::{StdRng, SysRng};
 use rand::{Rng as _, SeedableRng as _};
-use stageman_agent::{AgentError, ContainerRuntime};
-use stageman_core::{Key, KeyError};
-use stageman_instance::{AppEffect, AppEvent, Effect, Instance, Seed, Startup};
+use stageman_instance::{AppEvent, Instance, Seed};
+use stageman_vocabulary::Environment;
 use stageman_world::World;
 
 use crate::Dashboard;
 use crate::world::{Asking, Performer};
-
-/// The variable the snapshot's encryption key arrives in, as base64.
-///
-/// An override rather than a requirement since
-/// `docs/decisions/0037-the-instance-key-is-generated-on-first-run.md`, and
-/// still what a deliberate deployment sets — a service manager passing a
-/// secret in has somewhere to put it, and nothing about that changed.
-///
-/// What it is *not* is the only way of saying. Requiring it made a downloaded
-/// binary refuse to start until somebody generated thirty-two bytes by hand,
-/// which is the last thing between "put this somewhere and run it" and the
-/// truth.
-const KEY_VARIABLE: &str = "STAGEMAN_KEY";
-
-/// What the generated key is called, in the platform's configuration
-/// directory.
-///
-/// A different directory from the instance, not merely a different name. The
-/// rule it answers is that a key beside the file it protects protects nothing,
-/// and 0037 records exactly how much of that survives per platform: two
-/// directories on Linux and macOS, one on Windows, where the platform defines
-/// its configuration directory as its data directory. The property `README.md`
-/// actually claims is about the *file*, and a separate file keeps it
-/// everywhere.
-const KEY_FILE: &str = "key";
-
-/// How a generated key file is created, where the platform has an opinion.
-///
-/// Owner read and write and nothing else. It does not make the key private
-/// from anything running as this user — 0037 is explicit that nothing can,
-/// and that a variable is no better — but a key file readable by every account
-/// on a shared machine would be worse than what it replaced, and that is worth
-/// one constant.
-#[cfg(unix)]
-const KEY_PERMISSIONS: u32 = 0o600;
-
-/// The variable naming the file the instance is kept in.
-///
-/// An override rather than a requirement, and it used to be the only way of
-/// saying. Where an instance lives is an operational detail rather than a
-/// choice anybody should have to make, so there is now a per-platform default
-/// and this exists for the cases that genuinely differ: a second instance on
-/// one machine, and a test that must not touch the real one.
-///
-/// The reasoning that made it mandatory is intact and is what rules out
-/// defaulting to the *working directory*. A daemon started by a service
-/// manager has one nobody chose, so a relative default would be the same trap
-/// as searching `PATH` — right when tested by hand, wrong in service. What
-/// replaced it is absolute and derived from the platform rather than from
-/// wherever the process happens to have been started.
-const STATE_VARIABLE: &str = "STAGEMAN_STATE";
-
-/// The directory this instance's file goes in, under the platform's own.
-const INSTANCE_DIRECTORY: &str = "stageman";
-
-/// What the instance's file is called.
-const INSTANCE_FILE: &str = "instance.json";
 
 /// How much is reported, when the environment does not say.
 const DEFAULT_VERBOSITY: &str = "warn";
@@ -96,76 +36,10 @@ const DEFAULT_VERBOSITY: &str = "warn";
 /// The variable that overrides how much is reported.
 const VERBOSITY_VARIABLE: &str = "STAGEMAN_LOG";
 
-/// An instance could not be started.
+/// An instance could not be started, for a reason the instance itself
+/// cannot say: everything it can say, it says as an exit effect.
 #[derive(Debug, thiserror::Error)]
 enum StartupError {
-    /// The key is set but is not key material.
-    #[error("the instance key is not usable")]
-    Key(#[source] KeyError),
-    /// The key could not be read from, or written to, where it is kept.
-    ///
-    /// The same class as an instance file that cannot be opened: an instance
-    /// cannot run without one, so `docs/conventions.md` §3 puts it at startup
-    /// rather than in the dashboard. It says the path, because the repair is
-    /// almost always a permission on that directory.
-    #[error("the instance key at {path} could not be read or written")]
-    KeyFile {
-        /// Where it is kept.
-        path: PathBuf,
-        /// Why it could not be.
-        #[source]
-        source: io::Error,
-    },
-    /// The instance's file exists and could not be read.
-    #[error("the instance at {path} could not be read")]
-    Read {
-        /// Where it was looked for.
-        path: PathBuf,
-        /// Why it could not be read.
-        #[source]
-        source: io::Error,
-    },
-    /// The instance could not be opened.
-    #[error("the instance at {path} could not be opened")]
-    Instance {
-        /// Where it was looked for.
-        path: PathBuf,
-        /// Why it could not be opened.
-        #[source]
-        source: stageman_instance::LoadError,
-    },
-    /// The instance opened and could not be written, so it would fail later.
-    ///
-    /// A bad path, a missing directory, a read-only filesystem or wrong
-    /// permissions all fail here rather than at the first change — which is
-    /// what `docs/conventions.md` §3 asks of anything that can fail at
-    /// startup. What that leaves is a full disk, which is transient and
-    /// fixable without stopping.
-    #[error("the instance at {path} could not be written")]
-    Write {
-        /// Where it tried to write.
-        path: PathBuf,
-        /// Why it could not.
-        #[source]
-        source: io::Error,
-    },
-    /// There is no container runtime on this machine.
-    ///
-    /// Several lines, because it is the one startup failure that is a fact
-    /// about the machine rather than about this instance, and the useful part
-    /// of it is the list of places that were looked in.
-    #[error(
-        "no container runtime found.\n  Every agent runs in a container, including the \
-         one a foreman thinks with,\n  so nothing here can run without one. Install Docker \
-         or Podman.\n  Looked in:\n{0}"
-    )]
-    NoRuntime(String),
-    /// The container runtime is there and not working.
-    #[error("the container runtime is not usable")]
-    Runtime(#[source] AgentError),
-    /// The runtime would not say what containers it has.
-    #[error("what the last run left behind could not be established")]
-    Sweep(#[source] stageman_job::JobError),
     /// The address the dashboard would be served on could not be taken.
     #[error("the dashboard cannot listen on {address}")]
     Listen {
@@ -198,59 +72,12 @@ enum StartupError {
         #[source]
         source: io::Error,
     },
-    /// There is no randomness to generate a key from.
+    /// There is no randomness to seed the instance from.
     ///
-    /// Refused rather than substituted. A predictable key is worse than no
-    /// key, because it encrypts and looks like it worked.
-    #[error("no source of randomness, so neither a key nor a seed can be drawn")]
+    /// Refused rather than substituted. A predictable seed is worse than no
+    /// seed, because everything unguessable the instance mints comes from it.
+    #[error("no source of randomness, so the instance cannot be seeded")]
     NoRandomness,
-    /// There is no home directory to put an instance under.
-    #[error("no home directory, so there is nowhere to keep an instance — set {STATE_VARIABLE}")]
-    NoHome(#[source] etcetera::HomeDirError),
-    /// The directory the instance goes in could not be made.
-    #[error("the directory for the instance at {path} could not be created")]
-    Directory {
-        /// Where it tried to put it.
-        path: PathBuf,
-        /// Why it could not.
-        #[source]
-        source: io::Error,
-    },
-}
-
-/// The container runtime this process uses.
-///
-/// A value rather than an `Option`, which is the point of it being here: every
-/// reader — startup, a server function, whatever comes next — gets a runtime
-/// and none of them writes a branch for a state that
-/// `docs/decisions/0023-the-container-runtime-is-discovered-once.md` makes
-/// impossible. A machine with no runtime cannot run stageman at all, so there
-/// is nothing a later caller could do about it.
-///
-/// **There is exactly one moment at which that guarantee is not yet true**, and
-/// it is between this being initialised and startup checking it. Discovery
-/// finding nothing yields a runtime with an empty path, and one private
-/// function in this module is the definition of what that means; startup asks
-/// before doing anything else and stops if the answer is yes, so nothing
-/// downstream ever holds one. Anything reading this without a start in front of
-/// it is outside that guarantee — which is why nothing does.
-///
-/// Read once per process. A runtime installed while this is running is picked
-/// up by restarting, which is the answer for everything else checked at
-/// startup too.
-pub static RUNTIME: LazyLock<ContainerRuntime> = LazyLock::new(|| {
-    stageman_agent::first_present(stageman_agent::candidates())
-        .unwrap_or_else(|| ContainerRuntime::new(PathBuf::new()))
-});
-
-/// Whether discovery came back with nothing.
-///
-/// The empty path is a sentinel, and this is the only place that knows it. A
-/// function rather than a comparison written at each site, because a sentinel
-/// nobody names is one somebody eventually forgets to check — and the whole
-/// cost of this shape is that the compiler will not remind them.
-fn missing(runtime: &ContainerRuntime) -> bool {
-    runtime.path().as_os_str().is_empty()
 }
 
 /// Starts an instance and serves its dashboard until the process is stopped.
@@ -269,7 +96,7 @@ pub fn serve() -> ExitCode {
     // — and it has to be answerable on a machine where none of the rest would
     // work. Asking a binary what it is must never require it to be able to run.
     if asked_what_it_is(std::env::args().skip(1)) {
-        print!("{}", crate::release::detailed());
+        print!("{}", stageman_instance::release::detailed());
         return ExitCode::SUCCESS;
     }
 
@@ -289,10 +116,12 @@ pub fn serve() -> ExitCode {
         .with_writer(io::stderr)
         .init();
 
-    // Before the async runtime, the instance file, or anything else that could
-    // fail first. A machine with no container runtime cannot run stageman, and
-    // the useful thing to say about that is the only thing worth saying — so
-    // it is said before any other failure can get in front of it.
+    // Everything after this needs one, including every way a start refuses:
+    // since
+    // `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`
+    // the instance says why it will not run by asking the world to exit, and
+    // the world performs that here. So not having a runtime is the one failure
+    // that has to be reported without one.
     match tokio::runtime::Runtime::new() {
         Ok(runtime) => match runtime.block_on(start()) {
             Ok(()) => ExitCode::SUCCESS,
@@ -347,56 +176,12 @@ fn report(failure: &StartupError) {
 }
 
 async fn start() -> Result<(), StartupError> {
-    // First, before the instance file or anything configurable. A machine with
-    // no container runtime cannot run stageman at all, so that is the failure
-    // worth reporting even when something else is also wrong: telling somebody
-    // their key is unset, when the answer is that they need Docker, sends them
-    // to fix the wrong thing.
-    let runtime: &ContainerRuntime = &RUNTIME;
-    if missing(runtime) {
-        return Err(StartupError::NoRuntime(
-            stageman_agent::candidates()
-                .iter()
-                .map(|candidate| format!("    {candidate}"))
-                .collect::<Vec<_>>()
-                .join("\n"),
-        ));
-    }
-
-    let (key, source) = instance_key()?;
-    let path = instance_path()?;
-    // Read whole and handed over as bytes: the instance opens its own file,
-    // because the key and the cipher are its and the world only carries.
-    // Absent is a first run rather than a failure, and a first run produces
-    // an instance with nothing in it rather than asking questions.
-    let file = match fs::read(&path) {
-        Ok(bytes) => Some(bytes),
-        Err(why) if why.kind() == io::ErrorKind::NotFound => None,
-        Err(source) => {
-            return Err(StartupError::Read {
-                path: path.clone(),
-                source,
-            });
-        }
-    };
-
-    // Being found is not being usable, and both are checked. `RUNTIME` has
-    // already established that something is installed — see the touch in
-    // `serve` — and this establishes that it answers. The two are different
-    // failures and an operator does something different about each: nothing
-    // installed, versus a client installed with no daemon behind it, which
-    // looks perfectly healthy to anything that merely looks for the file.
-    //
-    // That second one is not hypothetical here. A container with the Docker
-    // client installed and no daemon reachable answers `--version` happily and
-    // fails `version`, which is why this asks for the latter.
-    runtime.verify().await.map_err(StartupError::Runtime)?;
-
-    // Bound before the instance opens, because what a job is told to show
-    // somebody names the port in use — a port of zero is an ordinary request
-    // for whichever port is free, and the answer is only known here. It is
-    // also what makes the summary below a readiness signal: the socket is
-    // already accepting by the time the line naming it appears.
+    // Bound before the instance is constructed, because where the dashboard
+    // is served is the one thing the instance is told rather than asks for:
+    // a port of zero is an ordinary request for whichever port is free, and
+    // the answer is only known here. It is also what makes the address the
+    // instance announces a readiness signal: the socket is already accepting
+    // by the time the line naming it appears.
     let address = dioxus::cli_config::fullstack_address_or_localhost();
     let listener = tokio::net::TcpListener::bind(address)
         .await
@@ -405,7 +190,20 @@ async fn start() -> Result<(), StartupError> {
         .local_addr()
         .map_err(|source| StartupError::Listen { address, source })?;
 
-    awaken(runtime, key, &path, file.as_deref(), serving.port()).await?;
+    // Everything else the instance learns by asking: whether a runtime
+    // answers, its key, its file, what was left behind. Every way a start
+    // can refuse is an exit effect with its reason, performed by the world.
+    let environment: Environment = std::env::vars().collect();
+    let (instance, effects) = Instance::boot(seed()?, environment);
+    let (world, events) = World::new();
+    let asking = Asking::new(Arc::clone(&world));
+    crate::world::adopt(Arc::clone(&asking));
+    asking.send(AppEvent::Serving {
+        address: serving.to_string(),
+        port: serving.port(),
+    });
+    let performer = Performer::new(crate::tooling::endpoint(*crate::endpoint::PORT), asking);
+    stageman_world::run(instance, effects, world, Arc::new(performer), events);
 
     // Three states, and which one holds is a question about how this binary
     // was built rather than about how it is configured.
@@ -456,22 +254,7 @@ async fn start() -> Result<(), StartupError> {
     // every interface — the dashboard stays on loopback, and this cannot,
     // because a container reaches nothing else on every platform. See
     // `docs/decisions/0033-the-job-endpoint-listens-beyond-loopback.md`.
-    //
-    // Bound before anything is announced, so that a port already taken is
-    // reported on the startup block rather than logged into a scrolling
-    // terminal. That failure leaves a foreman able to talk and unable to work,
-    // which reads exactly like a foreman that decided not to — and it is not
-    // hypothetical: a leaked test process held this port and a real instance
-    // quietly could not have it.
-    let tools = crate::endpoint::bind().await;
-
-    let kept = Kept {
-        file: path,
-        key: source,
-    };
-    announce(runtime, serving, &kept)?;
-
-    match tools {
+    match crate::endpoint::bind().await {
         Ok(listening) => {
             drop(tokio::spawn(async move {
                 if let Err(why) = crate::endpoint::serve(listening).await {
@@ -487,92 +270,15 @@ async fn start() -> Result<(), StartupError> {
         .map_err(StartupError::Serving)
 }
 
-/// Opens the instance and sets the world stepping it.
-///
-/// The one place an instance is made in this process: what the last run left
-/// behind is asked once and handed over, the file is opened, and the loop is
-/// started with whatever waking asked for.
-async fn awaken(
-    runtime: &'static ContainerRuntime,
-    key: Key,
-    path: &Path,
-    file: Option<&[u8]>,
-    serving: u16,
-) -> Result<(), StartupError> {
-    // What the last run left behind, asked once and handed to the instance,
-    // which decides what to do about each container it is told of.
-    let containers = crate::world::found(runtime)
-        .await
-        .map_err(StartupError::Sweep)?;
-    let startup = Startup {
-        containers,
-        domain: crate::tunnel::DOMAIN.clone(),
-        serving,
-        build: crate::release::described(),
-        runtime: runtime.path().display().to_string(),
-    };
-    let woken =
-        Instance::open(file, key, seed()?, &startup).map_err(|source| StartupError::Instance {
-            path: path.to_owned(),
-            source,
-        })?;
-    // The tally, for whoever is reading a start. Everything it found worth
-    // acting on, the instance has already warned about by name.
-    tracing::info!(swept = ?woken.swept, "the instance is awake");
-
-    // Said by name rather than counted, which is the whole change: an
-    // operator told that two of three projects are listening still has to
-    // work out which one is not. A binding with no credential to listen with
-    // is not an error and produces no warning of its own — it looks exactly
-    // like a platform that has sent nothing — so this is the only thing that
-    // tells the two apart.
-    for project in unheard(woken.instance.state()) {
-        tracing::warn!(
-            %project,
-            "a channel is bound with no credential to listen with, so nothing it says \
-             will be heard — which is indistinguishable from nobody saying anything"
-        );
-    }
-
-    let (world, events) = World::new();
-    let asking = Asking::new(world);
-    crate::world::adopt(Arc::clone(&asking));
-
-    // The instance writes itself once on waking, and that first write is
-    // performed here rather than in the loop so that a path which cannot be
-    // written fails the start with a reason — `docs/conventions.md` §3.
-    // Everything else it asked for on waking is performed by the loop, in
-    // order, before the first event is read.
-    let mut pending = Vec::new();
-    for effect in woken.effects {
-        match effect {
-            Effect::App(AppEffect::Persist { bytes }) => {
-                crate::world::write_atomically(path, bytes.as_slice()).map_err(|source| {
-                    StartupError::Write {
-                        path: path.to_owned(),
-                        source,
-                    }
-                })?;
-                asking.send(AppEvent::Persisted { outcome: Ok(()) });
-            }
-            other @ Effect::App(_) => pending.push(other),
-        }
-    }
-    let performer = Performer::new(
-        runtime,
-        path.to_owned(),
-        crate::tooling::endpoint(*crate::endpoint::PORT),
-        asking,
-    );
-    stageman_world::run(woken.instance, pending, Arc::new(performer), events);
-    Ok(())
-}
-
 /// The seed the instance draws everything random from.
 ///
 /// Drawn once, here, from the system: the instance takes no entropy of its
 /// own, so this is the one place in the process a random number is made for
 /// it — see `docs/decisions/0056-the-instance-decides-and-the-world-performs.md`.
+/// From the system and never from a clock, because a warrant a container
+/// presents is minted from this, and a seed anybody could reconstruct from a
+/// start time would let one job forge another's — see
+/// `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`.
 fn seed() -> Result<Seed, StartupError> {
     let mut rng = StdRng::try_from_rng(&mut SysRng).map_err(|_| StartupError::NoRandomness)?;
     let mut seed: Seed = [0_u8; 32];
@@ -583,345 +289,11 @@ fn seed() -> Result<Seed, StartupError> {
 /// Whether this build has no browser half anywhere.
 ///
 /// Both halves of the question, and a named function rather than a condition
-/// written where it is used, for the reason [`missing`] above is one: the two
-/// sources are not interchangeable and getting the combination wrong is
-/// silent. Warning when only one is absent would fire on every ordinary
+/// written where it is used: the two sources are not interchangeable, and
+/// getting the combination wrong is silent. Warning when only one is absent would fire on every ordinary
 /// development build, which is how a warning stops being read.
 const fn clientless(carried: Option<&[u8]>, beside: Option<&Path>) -> bool {
     carried.is_none() && beside.is_none()
-}
-
-/// Every project whose channels it cannot hear replies on.
-///
-/// By name rather than by count, which is the whole change: an operator told
-/// that two of three projects are listening still has to work out which one is
-/// not. A binding with no credential to listen with is not an error and
-/// produces no warning of its own — it looks exactly like a platform that has
-/// sent nothing — so this is the only thing that tells the two apart.
-fn unheard(state: &stageman_core::State) -> Vec<String> {
-    state
-        .projects
-        .values()
-        .filter(|project| {
-            project
-                .channels
-                .values()
-                .any(|bound| bound.listen_credential.is_none())
-        })
-        .map(|project| project.name.clone())
-        .collect()
-}
-
-#[cfg(test)]
-mod unheard_tests {
-    use super::unheard;
-    use stageman_core::{Agent, Channel, ChannelConfig, Project, ProjectId, Secret, State, Uuid};
-    use std::collections::BTreeMap;
-
-    /// A project with a channel, and a credential to listen with or not.
-    fn watching(name: &str, listens: bool) -> Project {
-        Project {
-            name: name.to_owned(),
-            repository: "https://example.invalid/repo".to_owned(),
-            foreman_kit: stageman_core::Kit::defaults(Agent::Claude),
-            kits: BTreeMap::from([(
-                stageman_core::KitName::new("Claude").expect("a name"),
-                stageman_core::KitConfig::defaults(Agent::Claude),
-            )]),
-            credentials: BTreeMap::new(),
-            channels: BTreeMap::from([(
-                Channel::Slack,
-                ChannelConfig {
-                    address: format!("C-{name}"),
-                    credential: Secret::new("xoxb-token".to_owned()),
-                    listen_credential: listens.then(|| Secret::new("xapp-token".to_owned())),
-                },
-            )]),
-            jobs: BTreeMap::new(),
-            variables: BTreeMap::new(),
-            attending: stageman_core::Attending::default(),
-        }
-    }
-
-    /// It names the projects that cannot be heard, and only those.
-    ///
-    /// By name, which is the point of it: this replaced a count, and a count
-    /// told an operator that something was misconfigured without telling them
-    /// what. Bound is not the same as listening — a channel with no credential
-    /// to listen with is a project that speaks and is never answered, and it
-    /// looks exactly like a platform that has sent nothing.
-    #[test]
-    fn only_a_project_that_cannot_be_heard_is_named() {
-        let mut state = State::default();
-        assert!(unheard(&state).is_empty());
-
-        state.projects.insert(
-            ProjectId::from_uuid(Uuid::from_u128(1)),
-            watching("heard", true),
-        );
-        assert!(
-            unheard(&state).is_empty(),
-            "a listening channel is not a problem"
-        );
-
-        state.projects.insert(
-            ProjectId::from_uuid(Uuid::from_u128(2)),
-            watching("deaf", false),
-        );
-        assert_eq!(unheard(&state), vec!["deaf".to_owned()]);
-
-        state.projects.insert(
-            ProjectId::from_uuid(Uuid::from_u128(3)),
-            watching("also-deaf", false),
-        );
-        let mut named = unheard(&state);
-        named.sort();
-        assert_eq!(named, vec!["also-deaf".to_owned(), "deaf".to_owned()]);
-    }
-}
-
-/// Says what this is and where the dashboard is, on standard output.
-///
-/// Not through `tracing`, for the same reason [`report`] is not: this is what
-/// somebody who typed the command is waiting to read, and a verbosity setting
-/// must not be able to withhold it.
-///
-/// **Five facts and an address, and nothing that is merely true right now.**
-/// It used to count agents, projects, listening channels, swept jobs and
-/// containers left alone. Those are state at one arbitrary moment — no more
-/// worth printing than the same numbers a second later — and every one of them
-/// that an operator could act on is already a warning naming the thing it is
-/// about, which a count never could. What is left is what does not change
-/// while the process runs: what this binary is, what it needs, what opens its
-/// instance, where that instance is, and what it answers to.
-fn announce(
-    runtime: &ContainerRuntime,
-    serving: SocketAddr,
-    kept: &Kept,
-) -> Result<(), StartupError> {
-    println!();
-    println!("stageman is running.");
-    // Outward from the program to this instance's data: what it is, what it
-    // needs in order to work, what opens its file, and where that file is.
-    println!("  version    {}", crate::release::described());
-    println!("  runtime    {}", runtime.path().display());
-    println!("  key        {}", kept.key);
-    println!("  instance   {}", kept.file.display());
-    // Last of the facts, and the one most likely to be wrong on a machine
-    // this was deployed to: an instance nobody told a domain tells people to
-    // look at a name that resolves to their own loopback. It fails as a wrong
-    // answer rather than as an absent feature, so it is said out loud.
-    println!("  domain     {}", *crate::tunnel::DOMAIN);
-    println!();
-    // Last, and that ordering is load-bearing rather than cosmetic: this line
-    // is what anything supervising a start waits for, so everything worth
-    // reading has to be above it. The integration tests stop reading here.
-    println!("  dashboard  http://{serving}");
-    println!();
-    // Rust's standard output is line-buffered rather than terminal-aware, so
-    // the lines above have already left. Flushed anyway because the line
-    // naming the address is what anything supervising this process waits for,
-    // and depending on a buffering policy for that would be depending on an
-    // implementation detail.
-    io::stdout().flush().map_err(StartupError::Serving)
-}
-
-/// Where this instance is kept, and what opens it.
-///
-/// One value rather than two arguments, and the grouping is the honest one: a
-/// file opened at the right path under the wrong key is indistinguishable from
-/// an instance that lost its projects, so the summary names both or the line
-/// naming one of them is a trap.
-struct Kept {
-    /// The file this instance lives in.
-    file: PathBuf,
-    /// Where the key that opens it came from.
-    key: KeySource,
-}
-
-/// Where the instance key came from, for the line that says so at startup.
-///
-/// Worth reporting rather than assuming, and the reason is the failure it
-/// prevents: an operator who believes they set the variable, and did not,
-/// otherwise sees an instance that opens perfectly and holds none of their
-/// projects — because it was opened under a different key and created afresh.
-/// Naming the source makes that one line of output instead of an evening.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum KeySource {
-    /// Supplied in the environment, which is what a service manager does.
-    Environment,
-    /// Read from where a previous start generated it.
-    Kept(PathBuf),
-    /// Generated by this start, because there was none.
-    Generated(PathBuf),
-}
-
-impl fmt::Display for KeySource {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Environment => write!(f, "{KEY_VARIABLE}"),
-            Self::Kept(path) => write!(f, "{}", path.display()),
-            Self::Generated(path) => write!(f, "{} (generated just now)", path.display()),
-        }
-    }
-}
-
-/// The key this instance's file is encrypted under, and where it came from.
-///
-/// The environment first, because an operator who said so meant it and because
-/// that is the path a service manager takes. Otherwise the platform's
-/// configuration directory, where a previous start left one or where this
-/// start puts one — see
-/// `docs/decisions/0037-the-instance-key-is-generated-on-first-run.md` for what
-/// that buys and what it gives up.
-///
-/// Generating is not a fallback hiding a failure, which is the distinction
-/// `.quality/gate-reference.md` cares about. A first run genuinely has no key,
-/// and thirty-two fresh bytes are the true answer rather than a substituted
-/// default: what would be wrong is generating a *second* one over an instance
-/// that already has a file, and that cannot happen here because a key is only
-/// ever created when the file holding it does not exist.
-///
-/// # Errors
-///
-/// Fails if the variable is set to something that is not key material, if
-/// there is no home directory to keep one under, or if the file cannot be read
-/// or written. A key that cannot be established is an instance that cannot
-/// open, so all three stop the start.
-fn instance_key() -> Result<(Key, KeySource), StartupError> {
-    if let Some(said) = optional(KEY_VARIABLE) {
-        return Ok((
-            Key::from_base64(&said).map_err(StartupError::Key)?,
-            KeySource::Environment,
-        ));
-    }
-
-    let path = configuration_directory()?.join(KEY_FILE);
-    if let Some(text) = kept(fs::read_to_string(&path), &path)? {
-        return Ok((
-            Key::from_base64(text.trim()).map_err(StartupError::Key)?,
-            KeySource::Kept(path),
-        ));
-    }
-    let key = minted()?;
-    write_key(&path, &key)?;
-    Ok((key, KeySource::Generated(path)))
-}
-
-/// What a read of the key file meant: the key, or that there is not one yet.
-///
-/// Deciding, split from reading, for the reason [`missing`] above is a named
-/// function rather than a comparison at its one call site — except that this
-/// one earns it twice over. The distinction is the whole of what stands
-/// between "this is a first run" and "your key file cannot be read", and those
-/// want opposite answers: generating over the second would report that the
-/// file already exists, which is true, useless, and points away from the
-/// permission that actually failed.
-///
-/// Taking the read rather than performing it is what makes that assertable. A
-/// test can hand this a permission failure; a test that had to *produce* one
-/// on a real filesystem would depend on not being run as root.
-///
-/// Mutation testing found this, and then found it again: naming the comparison
-/// left the guard that used it still uncovered, because nothing exercised the
-/// site. Only moving the decision somewhere a test could reach it closed both.
-fn kept(read: Result<String, io::Error>, path: &Path) -> Result<Option<String>, StartupError> {
-    match read {
-        Ok(text) => Ok(Some(text)),
-        Err(why) if why.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(source) => Err(StartupError::KeyFile {
-            path: path.to_owned(),
-            source,
-        }),
-    }
-}
-
-/// Thirty-two bytes from the operating system.
-///
-/// The randomness is supplied here rather than inside the domain crate, which
-/// is the same split `State::seal` already makes for nonces: what a key is
-/// belongs to the type, and where entropy comes from is a property of the
-/// machine this happens to run on.
-fn minted() -> Result<Key, StartupError> {
-    let mut rng = StdRng::try_from_rng(&mut SysRng).map_err(|_| StartupError::NoRandomness)?;
-    let mut material = [0_u8; 32];
-    rng.fill_bytes(&mut material);
-    Ok(Key::new(material))
-}
-
-/// Writes a generated key where it will be looked for next time.
-///
-/// Created with an explicit mode where the platform has one, rather than
-/// written and then adjusted: a file that is briefly world-readable and then
-/// tightened is readable for as long as it takes, and the window is the whole
-/// of what this is guarding.
-fn write_key(path: &Path, key: &Key) -> Result<(), StartupError> {
-    let failed = |source| StartupError::KeyFile {
-        path: path.to_owned(),
-        source,
-    };
-    let mut opening = fs::OpenOptions::new();
-    opening.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut opening, KEY_PERMISSIONS);
-    let mut file = opening.open(path).map_err(failed)?;
-    file.write_all(key.to_base64().as_bytes()).map_err(failed)?;
-    file.write_all(b"\n").map_err(failed)?;
-    file.sync_all().map_err(failed)
-}
-
-/// The platform's configuration directory for this instance, created if absent.
-///
-/// Separate from the data directory, which is where the instance file goes.
-/// On Windows the platform defines those as the same place and this returns
-/// it, which 0037 records as a documented consequence rather than something to
-/// work around.
-fn configuration_directory() -> Result<PathBuf, StartupError> {
-    let directory = etcetera::choose_base_strategy()
-        .map_err(StartupError::NoHome)?
-        .config_dir()
-        .join(INSTANCE_DIRECTORY);
-    fs::create_dir_all(&directory).map_err(|source| StartupError::Directory {
-        path: directory.clone(),
-        source,
-    })?;
-    Ok(directory)
-}
-
-/// Where this instance is kept.
-///
-/// The platform's own data directory unless [`STATE_VARIABLE`] says otherwise
-/// — the XDG data directory under a home on Linux *and on macOS*, the roaming
-/// application data directory on Windows — according to the machine rather
-/// than to a list maintained here.
-///
-/// macOS is named explicitly because the obvious guess is wrong and this said
-/// it for a while: `choose_base_strategy` is the CLI convention and returns
-/// XDG everywhere except Windows, so an instance lands beside the Linux one
-/// rather than under Application Support. The sibling function that returns
-/// Apple's own directories is the one this deliberately does not call.
-///
-/// Written without the literal Linux path on purpose: this repository has a
-/// gitignored scratch directory whose name is a prefix of it, and `just drift`
-/// cannot tell a home directory from a repository-relative one. It reports the
-/// false positive rather than missing the real case, which is the right way
-/// round.
-///
-/// The directory is created, because the alternative is a first run that fails
-/// on a path the operator never chose and cannot be expected to have made.
-fn instance_path() -> Result<PathBuf, StartupError> {
-    if let Some(said) = optional(STATE_VARIABLE) {
-        return Ok(PathBuf::from(said));
-    }
-    let directory = etcetera::choose_base_strategy()
-        .map_err(StartupError::NoHome)?
-        .data_dir()
-        .join(INSTANCE_DIRECTORY);
-    fs::create_dir_all(&directory).map_err(|source| StartupError::Directory {
-        path: directory.clone(),
-        source,
-    })?;
-    Ok(directory.join(INSTANCE_FILE))
 }
 
 /// The directory the framework resolves a browser half from.
@@ -1146,23 +518,8 @@ fn serving_embedded(mut router: axum::Router) -> axum::Router {
     router
 }
 
-/// The value of a variable, when it is set to something.
-///
-/// Set-but-empty counts as unset, because a variable cleared by a wrapper
-/// script is meant as *do not use this* rather than as a path of no
-/// characters.
-fn optional(name: &'static str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{RUNTIME, missing};
-    use stageman_agent::ContainerRuntime;
-    use std::path::PathBuf;
 
     /// A browser half from either source is a browser half.
     ///
@@ -1467,66 +824,5 @@ mod tests {
             "a browser refuses a module served as anything else",
         );
         assert_eq!(wasm.2, b"\0asm", "the route serves the bytes it was given");
-    }
-
-    /// Only a key file that is not there means there is no key yet.
-    ///
-    /// All three branches, because the failure this guards is one-sided: a
-    /// decision that called every failure a first run would silently mint a
-    /// second key over an unreadable one, and one that called none of them a
-    /// first run would make a first run impossible.
-    #[test]
-    fn only_a_missing_key_file_means_there_is_no_key_yet() {
-        use super::{StartupError, kept};
-        use std::io::{Error, ErrorKind};
-
-        let path = PathBuf::from("/nowhere/stageman/key");
-
-        assert_eq!(
-            kept(Ok("a key".to_owned()), &path).expect("a key that read is not a failure"),
-            Some("a key".to_owned()),
-        );
-        assert_eq!(
-            kept(Err(Error::from(ErrorKind::NotFound)), &path)
-                .expect("a first run is not a failure"),
-            None,
-            "a key file that is not there is a first run",
-        );
-        for refused in [ErrorKind::PermissionDenied, ErrorKind::IsADirectory] {
-            assert!(
-                matches!(
-                    kept(Err(Error::from(refused)), &path),
-                    Err(StartupError::KeyFile { .. })
-                ),
-                "{refused:?} must not read as a first run — it would mint a second key",
-            );
-        }
-    }
-
-    /// The sentinel means what the one function that reads it says it means.
-    ///
-    /// Worth a test precisely because the compiler cannot check it: an empty
-    /// path is a perfectly ordinary value, so nothing but this says that it is
-    /// how discovery reports having found nothing.
-    #[test]
-    fn an_empty_path_is_how_a_missing_runtime_is_spelled() {
-        assert!(missing(&ContainerRuntime::new(PathBuf::new())));
-        assert!(!missing(&ContainerRuntime::new(PathBuf::from(
-            "/usr/local/bin/docker"
-        ))));
-    }
-
-    /// On a machine that can run these tests, discovery found something.
-    ///
-    /// Not a tautology: `just check` now requires a container runtime, so this
-    /// asserts the requirement is actually met rather than merely declared —
-    /// and it is the only test that would fail on a machine without one for a
-    /// reason that names the cause.
-    #[test]
-    fn the_gate_runs_where_a_runtime_was_found() {
-        assert!(
-            !missing(&RUNTIME),
-            "no container runtime on this machine — see docs/conventions.md §5"
-        );
     }
 }

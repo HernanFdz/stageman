@@ -1,28 +1,34 @@
 //! The simulated world: everything the instance is not, in memory, stepped
 //! deterministically.
 //!
-//! It performs effects by changing its own picture of the runtime and
-//! scheduling the events that answer them at virtual instants, and it
-//! records every event and effect as a trace a test can compare. A crash is
-//! a method: turns, timers and unanswered writes die, containers stay as they
-//! are, and the disk is what landed.
+//! It performs effects by changing its own picture of the disk and the
+//! runtime and scheduling the events that answer them at virtual instants,
+//! and it records every event and effect as a trace a test can compare. The
+//! runtime's questions are recognised through the agent crate's own inverse
+//! of their rendering, never by matching on strings. A crash is a method:
+//! turns, timers and unanswered writes die, containers stay as they are, and
+//! the disk is what landed.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::path::{Path, PathBuf};
 
-use stageman_agent::{Answer, StopReason};
+use stageman_agent::{Answer, Command, Label, StopReason};
 use stageman_core::{
     Agent, AgentConfig, Channel, ChannelConfig, Errand, InstanceId, Job, JobId, Key, Kit,
     KitConfig, KitName, NONCE_LEN, Nonce, Progress, Project, ProjectId, Secret, Snapshot, State,
     Thread, Timestamp, Uuid,
 };
 use stageman_instance::{
-    AppEffect, AppEvent, Container, Domain, Effect, Event, Instance, Message, Request, RequestId,
-    Response, Run, Seed, Startup,
+    AppEffect, AppEvent, Container, Effect, Event, Instance, Message, Request, RequestId, Response,
+    Run, Seed,
 };
-use stageman_vocabulary::Named as _;
+use stageman_vocabulary::{Bytes, EffectId, Environment, Finished, Named as _};
 
 /// Virtual milliseconds.
 pub type Now = u64;
+
+/// Where every simulated instance keeps its file.
+const INSTANCE_FILE: &str = "/sim/instance.json";
 
 /// One container as the simulated runtime holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,15 +43,31 @@ pub struct Held {
     pub port: Option<u16>,
 }
 
+/// Where a tunnel request was sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sent {
+    /// Nothing answers on that name.
+    Nowhere,
+    /// Forwarded to this host port.
+    To(u16),
+}
+
 pub struct Simulation {
     now: Now,
     seq: u64,
     queue: BTreeMap<(Now, u64), Event>,
     containers: BTreeMap<String, Held>,
-    disk: Option<Vec<u8>>,
+    /// The disk: every file by path.
+    files: BTreeMap<PathBuf, Vec<u8>>,
     /// Writes asked for and not yet answered, in order; `None` is one that
     /// will fail rather than land.
-    landing: VecDeque<Option<Vec<u8>>>,
+    landing: VecDeque<Option<(PathBuf, Vec<u8>)>>,
+    /// Whether a container runtime is installed.
+    has_runtime: bool,
+    /// Everything printed to standard output, in order.
+    printed: Vec<String>,
+    /// The reason the process was told to stop, if it was.
+    exited: Option<String>,
     /// Why the next writes fail, front first.
     write_failures: VecDeque<String>,
     /// How the next turns end, front first; a turn with nothing scripted ends
@@ -71,19 +93,10 @@ pub struct Simulation {
     turn_takes: Now,
     trace: Vec<String>,
     posts: Vec<(Thread, String)>,
-    listening: Vec<stageman_core::ProjectId>,
+    listening: Vec<ProjectId>,
     reclaims: usize,
     warrants: Vec<String>,
     key: Key,
-}
-
-/// Where a tunnel request was sent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Sent {
-    /// Nothing answers on that name.
-    Nowhere,
-    /// Forwarded to this host port.
-    To(u16),
 }
 
 /// The identity every simulated instance has.
@@ -278,8 +291,11 @@ impl Simulation {
             seq: 0,
             queue: BTreeMap::new(),
             containers: BTreeMap::new(),
-            disk: None,
+            files: BTreeMap::new(),
             landing: VecDeque::new(),
+            has_runtime: true,
+            printed: Vec::new(),
+            exited: None,
             write_failures: VecDeque::new(),
             answers: VecDeque::new(),
             post_failures: VecDeque::new(),
@@ -311,7 +327,26 @@ impl Simulation {
             .seal(&self.key, &mut nonces)
             .expect("a well-formed state seals");
         snapshot.instance = Some(this_instance());
-        self.disk = Some(serde_json::to_vec_pretty(&snapshot).expect("a snapshot encodes"));
+        self.files.insert(
+            PathBuf::from(INSTANCE_FILE),
+            serde_json::to_vec_pretty(&snapshot).expect("a snapshot encodes"),
+        );
+    }
+
+    /// Takes the runtime away, so that booting finds no candidate answering.
+    pub const fn without_a_runtime(&mut self) {
+        self.has_runtime = false;
+    }
+
+    /// The environment every simulated instance is constructed with: a home,
+    /// its key, and where its file is.
+    pub fn environment() -> Environment {
+        [
+            ("HOME".to_owned(), "/sim/home".to_owned()),
+            ("STAGEMAN_KEY".to_owned(), key().to_base64()),
+            ("STAGEMAN_STATE".to_owned(), INSTANCE_FILE.to_owned()),
+        ]
+        .into()
     }
 
     /// Puts a container in the runtime.
@@ -376,47 +411,47 @@ impl Simulation {
         &self.listening
     }
 
+    /// Everything printed to standard output so far.
+    pub fn printed(&self) -> &[String] {
+        &self.printed
+    }
+
+    /// Why the process was told to stop, if it was.
+    pub fn exited(&self) -> Option<&str> {
+        self.exited.as_deref()
+    }
+
     /// Scripts how the next turn ends.
     pub fn next_turn_ends(&mut self, outcome: Result<Answer, String>) {
         self.answers.push_back(outcome);
     }
 
-    /// What the runtime holds, as the world reports it before the instance
-    /// exists.
-    pub fn startup(&self) -> Startup {
-        Startup {
-            containers: self
-                .containers
-                .iter()
-                .map(|(name, held)| Container {
-                    name: name.clone(),
-                    instance: held.instance,
-                    agent: held.agent,
-                    running: held.running,
-                })
-                .collect(),
-            domain: Domain::local(),
-            serving: 8080,
-            build: "a test build".to_owned(),
-            runtime: "/usr/local/bin/docker".to_owned(),
-        }
+    /// Boots an instance and answers everything it asks on the way to being
+    /// awake, which is everything scheduled for this instant.
+    pub fn wake(&mut self, seed: Seed) -> Instance {
+        self.wake_given(seed, Self::environment())
     }
 
-    /// Opens the instance from the disk and performs what it does on waking.
-    pub fn wake(&mut self, seed: Seed) -> Instance {
-        let woken = Instance::open(
-            self.disk.as_deref(),
-            self.key.clone(),
-            seed,
-            &self.startup(),
-        )
-        .expect("the file opens");
-        self.trace
-            .push(format!("{}: woke, swept {:?}", self.now, woken.swept));
-        for effect in woken.effects {
+    /// Boots with an environment of the caller's own, for the starts that
+    /// turn on what a variable says.
+    pub fn wake_given(&mut self, seed: Seed, environment: Environment) -> Instance {
+        let (mut instance, effects) = Instance::boot(seed, environment);
+        self.trace.push(format!("{}: booted", self.now));
+        for effect in effects {
             self.perform(effect);
         }
-        woken.instance
+        for effect in instance.step(
+            AppEvent::Serving {
+                address: "127.0.0.1:8080".to_owned(),
+                port: 8080,
+            }
+            .into(),
+        ) {
+            self.perform(effect);
+        }
+        let now = self.now;
+        self.run_until(&mut instance, now);
+        instance
     }
 
     /// Kills the daemon and starts it again.
@@ -424,20 +459,23 @@ impl Simulation {
         self.queue.retain(|_, event| {
             !matches!(
                 event,
-                Event::App(
-                    AppEvent::Persisted { .. }
-                        | AppEvent::TurnEnded { .. }
-                        | AppEvent::Probed { .. }
-                        | AppEvent::Listed { .. }
-                        | AppEvent::Inspected { .. }
-                        | AppEvent::ThreadOpened { .. }
-                        | AppEvent::Posted { .. }
-                        | AppEvent::Woke { .. }
-                        | AppEvent::Request { .. }
-                        | AppEvent::TunnelAsked { .. }
-                        | AppEvent::PortFound { .. }
-                        | AppEvent::TunnelFailed { .. }
-                )
+                Event::Read { .. }
+                    | Event::Written { .. }
+                    | Event::Ran { .. }
+                    | Event::Woke { .. }
+                    | Event::App(
+                        AppEvent::Serving { .. }
+                            | AppEvent::TurnEnded { .. }
+                            | AppEvent::Probed { .. }
+                            | AppEvent::Listed { .. }
+                            | AppEvent::Inspected { .. }
+                            | AppEvent::ThreadOpened { .. }
+                            | AppEvent::Posted { .. }
+                            | AppEvent::Request { .. }
+                            | AppEvent::TunnelAsked { .. }
+                            | AppEvent::PortFound { .. }
+                            | AppEvent::TunnelFailed { .. }
+                    )
             )
         });
         self.landing.clear();
@@ -456,10 +494,10 @@ impl Simulation {
     pub fn next(&mut self) -> Option<Event> {
         let ((at, _), event) = self.queue.pop_first()?;
         self.now = at;
-        if matches!(event, Event::App(AppEvent::Persisted { .. }))
-            && let Some(Some(bytes)) = self.landing.pop_front()
+        if matches!(event, Event::Written { .. })
+            && let Some(Some((path, bytes))) = self.landing.pop_front()
         {
-            self.disk = Some(bytes);
+            self.files.insert(path, bytes);
         }
         self.trace
             .push(format!("{at}: <- {}{}", event.kind(), serialised(&event)));
@@ -545,6 +583,68 @@ impl Simulation {
         self.schedule(at, AppEvent::TurnEnded { speaker, outcome });
     }
 
+    /// Accepts a write: it lands as its completion is delivered, unless it
+    /// was scripted to fail.
+    fn write(&mut self, id: EffectId, path: PathBuf, bytes: Vec<u8>) {
+        let outcome = if let Some(why) = self.write_failures.pop_front() {
+            self.landing.push_back(None);
+            Err(why)
+        } else {
+            self.landing.push_back(Some((path, bytes)));
+            Ok(())
+        };
+        self.schedule(self.now + 1, Event::Written { id, outcome });
+    }
+
+    /// Runs a program: the runtime's own questions are answered from what the
+    /// simulation holds, recognised through the agent crate's own inverse
+    /// rather than by matching on strings.
+    fn ran(&mut self, id: EffectId, program: &Path, arguments: &[String]) {
+        let exited = |stdout: String| Finished::Exited {
+            status: Some(0),
+            stdout: stdout.into(),
+            stderr: Bytes::new(Vec::new()),
+        };
+        let finished = if self.has_runtime {
+            match Command::parse(arguments) {
+                Some(Command::Version) => {
+                    exited(format!("{} version 0.0-simulated\n", program.display()))
+                }
+                Some(Command::Containers { running_only }) => exited(
+                    self.containers
+                        .iter()
+                        .filter(|(_, held)| held.running || !running_only)
+                        .fold(String::new(), |mut listed, (name, _)| {
+                            listed.push_str(name);
+                            listed.push('\n');
+                            listed
+                        }),
+                ),
+                Some(Command::Label { name, label }) => self.containers.get(&name).map_or_else(
+                    || Finished::Exited {
+                        status: Some(1),
+                        stdout: Bytes::new(Vec::new()),
+                        stderr: format!("Error: No such object: {name}\n").into(),
+                    },
+                    |held| {
+                        exited(match label {
+                            Label::Instance => held
+                                .instance
+                                .map_or_else(String::new, |instance| format!("{instance}\n")),
+                            Label::Agent => held
+                                .agent
+                                .map_or_else(String::new, |_| "claude\n".to_owned()),
+                        })
+                    },
+                ),
+                None => Finished::Failed("the simulation does not know this command".to_owned()),
+            }
+        } else {
+            Finished::NotFound
+        };
+        self.schedule(self.now, Event::Ran { id, finished });
+    }
+
     /// Answers whether a container exists, and whose it is.
     fn inspect(&mut self, container: String) {
         let (present, agent) = self
@@ -592,19 +692,6 @@ impl Simulation {
         );
     }
 
-    /// Accepts a write: it lands as its completion is delivered, unless it
-    /// was scripted to fail.
-    fn write(&mut self, bytes: Vec<u8>) {
-        let outcome = if let Some(why) = self.write_failures.pop_front() {
-            self.landing.push_back(None);
-            Err(why)
-        } else {
-            self.landing.push_back(Some(bytes));
-            Ok(())
-        };
-        self.schedule(self.now + 1, AppEvent::Persisted { outcome });
-    }
-
     pub fn perform(&mut self, effect: Effect) {
         self.trace.push(format!(
             "{}: -> {}{}",
@@ -612,9 +699,11 @@ impl Simulation {
             effect.kind(),
             serialised(&effect)
         ));
-        let Effect::App(effect) = effect;
+        let Some(effect) = self.generic(effect) else {
+            return;
+        };
         match effect {
-            AppEffect::Persist { bytes } => self.write(bytes.into_inner()),
+            AppEffect::Booted { .. } => {}
             AppEffect::RunTurn { speaker, run } => self.run_turn(speaker, &run),
             AppEffect::Probe { job } => {
                 let answering = self
@@ -634,10 +723,6 @@ impl Simulation {
                 self.containers.remove(&container);
             }
             AppEffect::Reclaim => self.reclaims += 1,
-            AppEffect::Wake { after, timer } => {
-                let at = self.now + u64::try_from(after.as_millis()).expect("a short wait");
-                self.schedule(at, AppEvent::Woke { timer });
-            }
             AppEffect::Say { thread, text, .. } => self.posts.push((thread, text)),
             AppEffect::ToolAnswered { id, status, body } => {
                 self.tool_answers.insert(id, (status, body));
@@ -692,6 +777,33 @@ impl Simulation {
         }
     }
 
+    /// Performs a generic effect, and hands back an application one.
+    fn generic(&mut self, effect: Effect) -> Option<AppEffect> {
+        match effect {
+            Effect::Read { id, path } => {
+                let contents = Ok(self.files.get(&path).cloned().map(Bytes::new));
+                self.schedule(self.now, Event::Read { id, contents });
+            }
+            Effect::Write {
+                id, path, bytes, ..
+            } => self.write(id, path, bytes.into_inner()),
+            Effect::Run {
+                id,
+                program,
+                arguments,
+                ..
+            } => self.ran(id, &program, &arguments),
+            Effect::Wake { id, after } => {
+                let at = self.now + u64::try_from(after.as_millis()).expect("a short wait");
+                self.schedule(at, Event::Woke { id });
+            }
+            Effect::Print { text } => self.printed.push(text),
+            Effect::Exit { message } => self.exited = Some(message),
+            Effect::App(effect) => return Some(effect),
+        }
+        None
+    }
+
     pub fn trace(&self) -> &[String] {
         &self.trace
     }
@@ -725,7 +837,7 @@ impl Simulation {
 
     /// What is on the disk, opened.
     pub fn disk(&self) -> Option<State> {
-        let bytes = self.disk.as_deref()?;
+        let bytes = self.files.get(Path::new(INSTANCE_FILE))?;
         let snapshot: Snapshot = serde_json::from_slice(bytes).expect("the disk holds JSON");
         Some(snapshot.open(&self.key).expect("and it opens"))
     }
@@ -737,26 +849,28 @@ impl Simulation {
 }
 
 /// A value's fields as one line of JSON after a space, which is what a trace
-/// holds beside the kind: the application's variant is unwrapped, and a
+/// holds beside the kind: the hole and the variant are unwrapped, and a
 /// variant with no fields is nothing at all.
-fn serialised(value: &impl serde::Serialize) -> String {
+fn serialised(value: &(impl serde::Serialize + stageman_vocabulary::Named)) -> String {
+    let kind = value.kind();
     let mut value = serde_json::to_value(value).expect("everything in the vocabulary serialises");
-    // Down through the hole and the variant, to the fields.
-    for _ in 0..2 {
+    for wrapper in ["App", kind] {
         value = match value {
-            serde_json::Value::Object(mut wrapped) if wrapped.len() == 1 => wrapped
-                .values_mut()
-                .next()
-                .map(serde_json::Value::take)
-                .expect("one value"),
-            serde_json::Value::String(_) => return String::new(),
+            serde_json::Value::Object(mut wrapped)
+                if wrapped.len() == 1 && wrapped.contains_key(wrapper) =>
+            {
+                wrapped.remove(wrapper).expect("just checked")
+            }
             other => other,
         };
     }
-    format!(
-        " {}",
-        serde_json::to_string(&value).expect("a value serialises")
-    )
+    match value {
+        serde_json::Value::String(_) | serde_json::Value::Null => String::new(),
+        fields => format!(
+            " {}",
+            serde_json::to_string(&fields).expect("a value serialises")
+        ),
+    }
 }
 
 impl Default for Simulation {

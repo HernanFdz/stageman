@@ -58,11 +58,26 @@ fn a_first_run_writes_its_file_and_settles_later() {
     assert_eq!(
         shape_of(&world),
         [
-            "woke, swept Swept { resumed: 0, lost: 0, cleared: 0, unidentified: 0, forgotten: 0, unclaimed: 0, elsewhere: 0 }",
+            // Booting: the runtime answers, the key is in the environment so
+            // only the file is read, the listings find nothing to inspect.
+            "booted",
+            "-> Run",
+            "<- Ran",
+            "-> Read",
+            "<- Read",
+            "-> Run",
+            "-> Run",
+            "<- Ran",
+            "<- Ran",
+            // Awake: the world is told what was found, the sweep asks for
+            // its housekeeping, the file is written, and the address is
+            // announced only once that write has landed.
+            "-> Booted",
             "-> Reclaim",
             "-> Wake",
-            "-> Persist",
-            "<- Persisted",
+            "-> Write",
+            "<- Written",
+            "-> Print",
             "<- Woke",
             "-> ListRunning",
             "-> Wake",
@@ -86,7 +101,7 @@ fn an_instance_writes_once_on_waking_and_then_only_when_something_changed() {
         world
             .shape()
             .iter()
-            .filter(|line| line.starts_with("-> Persist"))
+            .filter(|line| line.starts_with("-> Write"))
             .count()
     };
     assert_eq!(written(&world), 1, "{:?}", world.shape());
@@ -236,15 +251,10 @@ fn a_job_whose_container_is_gone_is_lost_once() {
     );
 
     let again = world.crash(seed(2));
-    let woke = world
-        .trace()
-        .iter()
-        .rev()
-        .find(|line| line.contains("woke, swept"))
-        .expect("a second waking");
-    assert!(
-        woke.contains("lost: 0"),
-        "a second waking finds nothing to lose: {woke}"
+    assert_eq!(
+        again.swept().map(|swept| swept.lost),
+        Some(0),
+        "a second waking finds nothing to lose"
     );
     assert_eq!(
         progress_of(again.state(), idle),
@@ -330,10 +340,18 @@ fn waking_removes_what_is_ours_and_over_and_leaves_the_rest() {
         1,
         "images are reclaimed once, after the removals"
     );
-    let woke = world.trace().first().expect("the waking line");
-    assert!(
-        woke.contains("Swept { resumed: 0, lost: 0, cleared: 1, unidentified: 2, forgotten: 1, unclaimed: 1, elsewhere: 1 }"),
-        "{woke}"
+    let swept = instance.swept().expect("awake");
+    assert_eq!(
+        (
+            swept.resumed,
+            swept.lost,
+            swept.cleared,
+            swept.unidentified,
+            swept.forgotten,
+            swept.unclaimed,
+            swept.elsewhere
+        ),
+        (0, 0, 1, 2, 1, 1, 1)
     );
 }
 

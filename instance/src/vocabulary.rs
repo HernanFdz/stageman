@@ -16,37 +16,14 @@
 //! vocabulary as the instance starts speaking the mechanism instead.
 
 use std::collections::BTreeMap;
-use std::time::Duration;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use stageman_agent::Answer;
 use stageman_core::{
     Agent, Channel, InstanceId, JobId, Kit, Platform, ProjectId, Role, Speaking, Thread, Timestamp,
 };
-use stageman_vocabulary::{Bytes, Named};
-
-use crate::tunnel::Domain;
-
-/// What the world knows before the instance exists.
-///
-/// The facts the first decisions need and no later event could supply,
-/// because absence is only visible in a complete listing: a working job with
-/// *no* container is lost, and nothing per container could say so.
-#[derive(Debug, Clone)]
-pub struct Startup {
-    /// Every container the runtime holds that this project started, running
-    /// or not, with the labels it was given.
-    pub containers: Vec<Container>,
-    /// The domain this instance answers on, which a job is told so that what
-    /// it shows can be reached.
-    pub domain: Domain,
-    /// The port the dashboard is actually bound to, for the same reason.
-    pub serving: u16,
-    /// What this build calls itself, for whoever asks the tools endpoint.
-    pub build: String,
-    /// Where this machine's container runtime was found, for the dashboard.
-    pub runtime: String,
-}
+use stageman_vocabulary::Named;
 
 /// What identifies one request the world is waiting to answer.
 ///
@@ -82,19 +59,12 @@ pub enum Speaker {
     Job(JobId),
 }
 
-/// What a timer the instance asked for was for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Timer {
-    /// Time to ask which containers are still showing something.
-    Settle,
-}
-
 /// What a credential presented to the tools endpoint entitles its bearer to.
 ///
 /// Minted when a turn starts and forgotten when it ends, so a warrant from
 /// before a crash names nothing. The thread is where anything the bearer says
 /// lands: a job's for its whole life, a foreman's per turn.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Warranted {
     /// Who holds it.
     pub speaker: Speaker,
@@ -162,14 +132,17 @@ impl From<Posting> for Speaking {
 /// nothing here is recorded with a timestamp.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AppEvent {
-    /// Answers [`AppEffect::Persist`]: the bytes reached the disk, or did
-    /// not.
+    /// Where the dashboard is being served, once the world has bound it.
     ///
-    /// Answered in the order the persists were asked for, which is the one
-    /// ordering obligation the world has beyond answering only when done.
-    Persisted {
-        /// Why the write failed, if it did.
-        outcome: Result<(), String>,
+    /// The one application fact that exists before the instance and is not
+    /// in its environment: a port of zero there is a request for whichever
+    /// is free, and only the bind knows the answer. Until the listener is
+    /// the instance's own to bind, the world says.
+    Serving {
+        /// The address, as a person would type it after the scheme.
+        address: String,
+        /// The port, for what a job is told about its tunnel.
+        port: u16,
     },
     /// Answers [`AppEffect::RunTurn`]: the agent stopped, or could not be run.
     TurnEnded {
@@ -190,11 +163,6 @@ pub enum AppEvent {
     Listed {
         /// Every running container this project started, with its labels.
         running: Vec<Container>,
-    },
-    /// Answers [`AppEffect::Wake`].
-    Woke {
-        /// Which timer.
-        timer: Timer,
     },
     /// Somebody said something on a channel this instance listens to.
     Heard {
@@ -288,11 +256,10 @@ pub enum AppEvent {
 impl Named for AppEvent {
     fn kind(&self) -> &'static str {
         match self {
-            Self::Persisted { .. } => "Persisted",
+            Self::Serving { .. } => "Serving",
             Self::TurnEnded { .. } => "TurnEnded",
             Self::Probed { .. } => "Probed",
             Self::Listed { .. } => "Listed",
-            Self::Woke { .. } => "Woke",
             Self::Heard { .. } => "Heard",
             Self::Inspected { .. } => "Inspected",
             Self::ToolCalled { .. } => "ToolCalled",
@@ -312,11 +279,16 @@ impl Named for AppEvent {
 /// unanswered effect's failure is the world's to log.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AppEffect {
-    /// Write these bytes over the instance's file, atomically. Answered by
-    /// [`AppEvent::Persisted`], in order.
-    Persist {
-        /// The sealed snapshot, whole.
-        bytes: Bytes,
+    /// What booting found, for the world's own performers: which runtime
+    /// answers, and which domain this instance answers on. Unanswered, and
+    /// on its way out: every effect that needs the runtime will carry its
+    /// path, and the domain is the instance's to decide on once it binds
+    /// its own listeners.
+    Booted {
+        /// The container runtime that answered.
+        runtime: PathBuf,
+        /// The domain, as it is compared and printed.
+        domain: String,
     },
     /// Run one turn of an agent. Answered by [`AppEvent::TurnEnded`].
     RunTurn {
@@ -356,13 +328,6 @@ pub enum AppEffect {
     },
     /// Reclaim the images nothing needs any more. Unanswered.
     Reclaim,
-    /// Wake the instance later. Answered by [`AppEvent::Woke`].
-    Wake {
-        /// How long from now.
-        after: Duration,
-        /// What for.
-        timer: Timer,
-    },
     /// Post on a channel, in a thread, on the instance's own behalf.
     /// Unanswered: this is a notice about an outcome, and the outcome does
     /// not change because the notice of it did not arrive.
@@ -450,7 +415,7 @@ pub enum AppEffect {
 impl Named for AppEffect {
     fn kind(&self) -> &'static str {
         match self {
-            Self::Persist { .. } => "Persist",
+            Self::Booted { .. } => "Booted",
             Self::RunTurn { .. } => "RunTurn",
             Self::Probe { .. } => "Probe",
             Self::ListRunning => "ListRunning",
@@ -458,7 +423,6 @@ impl Named for AppEffect {
             Self::Halt { .. } => "Halt",
             Self::Discard { .. } => "Discard",
             Self::Reclaim => "Reclaim",
-            Self::Wake { .. } => "Wake",
             Self::Say { .. } => "Say",
             Self::Route { .. } => "Route",
             Self::FindPort { .. } => "FindPort",

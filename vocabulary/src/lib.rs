@@ -1,10 +1,11 @@
 //! What the instance and the world say to each other.
 //!
 //! An [`Event`] is what the world tells the instance and an [`Effect`] is
-//! what the instance asks of the world. Both are plain data, generic over an
-//! [`App`] that fills the one hole an application needs: its own events and
-//! effects, which the world never interprets and hands to whatever the
-//! application supplied to perform them. See
+//! what the instance asks of the world. Both are plain data: the mechanisms a
+//! process reaches the outside through — a file, a process, a timer, its own
+//! standard output, its own exit — and one hole an [`App`] fills with its own
+//! events and effects, which the world never interprets and hands to whatever
+//! the application supplied to perform them. See
 //! `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`.
 //!
 //! **Everything here serialises in full and formats not at all.** A scenario
@@ -15,10 +16,15 @@
 //! kind, from [`Named`]. That absence is a rule rather than an omission, and
 //! `docs/conventions.md` §4 says why.
 //!
-//! The mechanisms the vocabulary carries — a file, a process, a request, a
-//! socket, a port, a timer — arrive one family at a time as the instance
-//! starts speaking them, so that each family's shape is decided by its use.
-//! Until then the application's own variants carry everything.
+//! The remaining mechanisms — a request, a socket, a port — arrive one family
+//! at a time as the instance starts speaking them, so that each family's
+//! shape is decided by its use.
+
+pub mod scenario;
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::time::Duration;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -29,6 +35,14 @@ use serde::{Deserialize, Serialize};
 /// which is the whole difference between the two. Never from anything
 /// guessable: every unguessable value the instance mints comes from it.
 pub type Seed = [u8; 32];
+
+/// The environment the process was given, as the instance is constructed
+/// with it.
+///
+/// What it was actually given and nothing synthesised, so that a scenario's
+/// author knows exactly what to write: the application's own facts arrive as
+/// the application's own events.
+pub type Environment = BTreeMap<String, String>;
 
 /// Something whose kind can be named, for a log line.
 ///
@@ -44,17 +58,79 @@ pub trait Named {
 /// The world never looks inside either type. It carries an event of the
 /// application's to the instance like any other, and hands an effect of the
 /// application's to whatever the entry point supplied for them.
-pub trait App {
+pub trait App: Send + Sync + 'static {
     /// What the application's own world tells the instance.
     type Event: Serialize + DeserializeOwned + Clone + PartialEq + Named + Send + 'static;
     /// What the instance asks of the application's own world.
     type Effect: Serialize + DeserializeOwned + Clone + PartialEq + Named + Send + 'static;
 }
 
+/// What identifies an effect the instance is waiting to have answered.
+///
+/// Minted by the instance, from a counter, so that it is as deterministic as
+/// everything else it does; carried on the effect and echoed on the event
+/// that answers it. Opaque to the world.
+///
+/// It has to be unique among the effects still *waiting*, and nothing more
+/// than that: an identifier is spent the moment its answer arrives, and a
+/// handful are outstanding at a time. So the counter is cyclic rather than
+/// bounded, and there is no exhausting it — coming round would take more
+/// effects than a run can perform, and even then it could only meet an
+/// identifier answered long before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct EffectId(pub u64);
+
+/// How a process that was run once came to an end.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Finished {
+    /// It ran and exited.
+    Exited {
+        /// Its exit status, or none if a signal ended it.
+        status: Option<i32>,
+        /// Everything it wrote to its standard output.
+        stdout: Bytes,
+        /// Everything it wrote to its standard error.
+        stderr: Bytes,
+    },
+    /// There is no such program, which is an answer of its own: it is how a
+    /// candidate for something is found to be absent.
+    NotFound,
+    /// It could not be started for some other reason.
+    Failed(String),
+}
+
 /// One thing the world tells the instance.
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "")]
 pub enum Event<A: App> {
+    /// Answers [`Effect::Read`]: the file's contents, or that there is no
+    /// such file, or why it could not be read. Absent is its own answer
+    /// rather than a failure, because a first run is not a failure.
+    Read {
+        /// Which read.
+        id: EffectId,
+        /// The contents, none for a file that is not there, or the reason.
+        contents: Result<Option<Bytes>, String>,
+    },
+    /// Answers [`Effect::Write`]: the bytes reached the disk, or did not.
+    Written {
+        /// Which write.
+        id: EffectId,
+        /// Why not, if not.
+        outcome: Result<(), String>,
+    },
+    /// Answers [`Effect::Run`]: how the process came to an end.
+    Ran {
+        /// Which run.
+        id: EffectId,
+        /// How.
+        finished: Finished,
+    },
+    /// Answers [`Effect::Wake`].
+    Woke {
+        /// Which wake.
+        id: EffectId,
+    },
     /// Something of the application's own.
     App(A::Event),
 }
@@ -64,6 +140,19 @@ pub enum Event<A: App> {
 impl<A: App> Clone for Event<A> {
     fn clone(&self) -> Self {
         match self {
+            Self::Read { id, contents } => Self::Read {
+                id: *id,
+                contents: contents.clone(),
+            },
+            Self::Written { id, outcome } => Self::Written {
+                id: *id,
+                outcome: outcome.clone(),
+            },
+            Self::Ran { id, finished } => Self::Ran {
+                id: *id,
+                finished: finished.clone(),
+            },
+            Self::Woke { id } => Self::Woke { id: *id },
             Self::App(event) => Self::App(event.clone()),
         }
     }
@@ -72,7 +161,30 @@ impl<A: App> Clone for Event<A> {
 impl<A: App> PartialEq for Event<A> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
+            (
+                Self::Read { id, contents },
+                Self::Read {
+                    id: their_id,
+                    contents: theirs,
+                },
+            ) => id == their_id && contents == theirs,
+            (
+                Self::Written { id, outcome },
+                Self::Written {
+                    id: their_id,
+                    outcome: theirs,
+                },
+            ) => id == their_id && outcome == theirs,
+            (
+                Self::Ran { id, finished },
+                Self::Ran {
+                    id: their_id,
+                    finished: theirs,
+                },
+            ) => id == their_id && finished == theirs,
+            (Self::Woke { id }, Self::Woke { id: their_id }) => id == their_id,
             (Self::App(mine), Self::App(theirs)) => mine == theirs,
+            _ => false,
         }
     }
 }
@@ -80,15 +192,77 @@ impl<A: App> PartialEq for Event<A> {
 impl<A: App> Named for Event<A> {
     fn kind(&self) -> &'static str {
         match self {
+            Self::Read { .. } => "Read",
+            Self::Written { .. } => "Written",
+            Self::Ran { .. } => "Ran",
+            Self::Woke { .. } => "Woke",
             Self::App(event) => event.kind(),
         }
     }
 }
 
 /// One thing the instance asks of the world.
+///
+/// The doc comment on each says whether it is answered, and by what. An
+/// unanswered effect's failure is the world's to log.
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "")]
 pub enum Effect<A: App> {
+    /// Read a file whole. Answered by [`Event::Read`].
+    Read {
+        /// Which read, on the answer.
+        id: EffectId,
+        /// The file.
+        path: PathBuf,
+    },
+    /// Write a file whole and atomically — a temporary beside it, flushed,
+    /// then renamed over it — making its directory if need be. Answered by
+    /// [`Event::Written`], in the order writes were asked for.
+    Write {
+        /// Which write, on the answer.
+        id: EffectId,
+        /// The file.
+        path: PathBuf,
+        /// Its whole new contents.
+        bytes: Bytes,
+        /// Whether nobody but this user may read it, where the platform can
+        /// say so. A property rather than a mode, because a mode is a
+        /// mechanism.
+        private: bool,
+    },
+    /// Run a program once, to its end. Answered by [`Event::Ran`].
+    Run {
+        /// Which run, on the answer.
+        id: EffectId,
+        /// The program, by path.
+        program: PathBuf,
+        /// Its arguments, none being a legitimate number of them.
+        arguments: Vec<String>,
+        /// Exactly the environment it is given, and nothing inherited.
+        environment: Environment,
+        /// What it is given on its standard input, then end of file.
+        stdin: Option<Bytes>,
+    },
+    /// Wake the instance later. Answered by [`Event::Woke`].
+    Wake {
+        /// Which wake, on the answer.
+        id: EffectId,
+        /// How long from now.
+        after: Duration,
+    },
+    /// Write to the process's standard output, which is where whoever
+    /// started it is reading. Unanswered.
+    Print {
+        /// What to write, whole; a trailing newline is the instance's to
+        /// include.
+        text: String,
+    },
+    /// Stop the process, with the reason as its last word. Unanswered, since
+    /// there is nobody left to answer.
+    Exit {
+        /// The reason, for whoever started it.
+        message: String,
+    },
     /// Something of the application's own.
     App(A::Effect),
 }
@@ -96,6 +270,42 @@ pub enum Effect<A: App> {
 impl<A: App> Clone for Effect<A> {
     fn clone(&self) -> Self {
         match self {
+            Self::Read { id, path } => Self::Read {
+                id: *id,
+                path: path.clone(),
+            },
+            Self::Write {
+                id,
+                path,
+                bytes,
+                private,
+            } => Self::Write {
+                id: *id,
+                path: path.clone(),
+                bytes: bytes.clone(),
+                private: *private,
+            },
+            Self::Run {
+                id,
+                program,
+                arguments,
+                environment,
+                stdin,
+            } => Self::Run {
+                id: *id,
+                program: program.clone(),
+                arguments: arguments.clone(),
+                environment: environment.clone(),
+                stdin: stdin.clone(),
+            },
+            Self::Wake { id, after } => Self::Wake {
+                id: *id,
+                after: *after,
+            },
+            Self::Print { text } => Self::Print { text: text.clone() },
+            Self::Exit { message } => Self::Exit {
+                message: message.clone(),
+            },
             Self::App(effect) => Self::App(effect.clone()),
         }
     }
@@ -103,30 +313,48 @@ impl<A: App> Clone for Effect<A> {
 
 impl<A: App> PartialEq for Effect<A> {
     fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::App(mine), Self::App(theirs)) => mine == theirs,
-        }
+        // Through the one representation both sides share, which is what a
+        // scenario compares anyway.
+        serde_json::to_value(self).ok() == serde_json::to_value(other).ok()
     }
 }
 
 impl<A: App> Named for Effect<A> {
     fn kind(&self) -> &'static str {
         match self {
+            Self::Read { .. } => "Read",
+            Self::Write { .. } => "Write",
+            Self::Run { .. } => "Run",
+            Self::Wake { .. } => "Wake",
+            Self::Print { .. } => "Print",
+            Self::Exit { .. } => "Exit",
             Self::App(effect) => effect.kind(),
         }
     }
 }
 
-/// Something the world steps: one event in, effects out.
+/// Something the world steps: constructed from a seed and an environment,
+/// then one event in and effects out, for as long as the process runs.
 ///
 /// The only way anything reaches the deciding half, and the only way it
-/// answers. The world calls this and nothing else.
-pub trait Deciding {
+/// answers. The world calls these and nothing else.
+pub trait Deciding: Sized {
     /// The application whose events and effects this speaks.
     type App: App;
 
+    /// Constructs the deciding half from the two facts that exist before
+    /// anything happens, and answers with what it asks for first.
+    ///
+    /// Everything else — a key, a file, what is installed — it asks for
+    /// through effects and learns from their answers.
+    fn boot(seed: Seed, environment: Environment) -> (Self, Vec<Effect<Self::App>>);
+
     /// Handles one event and answers with what to do about it.
     fn step(&mut self, event: Event<Self::App>) -> Vec<Effect<Self::App>>;
+
+    /// Everything it holds, as a value a scenario compares and a reviewer
+    /// reads, credentials in the clear.
+    fn snapshot(&self) -> serde_json::Value;
 }
 
 /// Bytes that cross the vocabulary, readable where they are text.
@@ -168,11 +396,23 @@ impl Bytes {
     pub const fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    /// The bytes as text, where they are text.
+    #[must_use]
+    pub fn as_text(&self) -> Option<&str> {
+        std::str::from_utf8(&self.0).ok()
+    }
 }
 
 impl From<Vec<u8>> for Bytes {
     fn from(bytes: Vec<u8>) -> Self {
         Self(bytes)
+    }
+}
+
+impl From<String> for Bytes {
+    fn from(text: String) -> Self {
+        Self(text.into_bytes())
     }
 }
 
@@ -228,12 +468,15 @@ impl<'de> Deserialize<'de> for Bytes {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{App, Bytes, Effect, Event, Named};
+pub(crate) mod doorbell {
+    //! The smallest application there is, for the tests here: a bell that
+    //! counts its rings and asks the world to print each one.
+
+    use super::{App, Deciding, Effect, EffectId, Environment, Event, Named, Seed};
     use serde::{Deserialize, Serialize};
 
-    #[derive(Clone, PartialEq, Serialize, Deserialize)]
-    enum Told {
+    #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum Told {
         Rang { times: u32 },
     }
 
@@ -245,12 +488,87 @@ mod tests {
         }
     }
 
-    struct Doorbell;
+    pub struct Doorbell;
 
     impl App for Doorbell {
         type Event = Told;
         type Effect = Told;
     }
+
+    /// Counts rings, and reads a file of its own name at boot to know how
+    /// many it had heard before.
+    #[derive(Serialize)]
+    pub struct Bell {
+        pub heard: u32,
+        pub next: u64,
+        pub booted: bool,
+    }
+
+    impl Deciding for Bell {
+        type App = Doorbell;
+
+        fn boot(_seed: Seed, environment: Environment) -> (Self, Vec<Effect<Doorbell>>) {
+            let path = environment
+                .get("BELL")
+                .map_or_else(|| "bell".to_owned(), Clone::clone);
+            (
+                Self {
+                    heard: 0,
+                    next: 2,
+                    booted: false,
+                },
+                vec![Effect::Read {
+                    id: EffectId(1),
+                    path: path.into(),
+                }],
+            )
+        }
+
+        #[expect(
+            clippy::arithmetic_side_effects,
+            reason = "a bell that counted past its type should fail this crate's tests rather than clamp"
+        )]
+        fn step(&mut self, event: Event<Doorbell>) -> Vec<Effect<Doorbell>> {
+            match event {
+                Event::Read { contents, .. } => {
+                    self.heard = contents
+                        .ok()
+                        .flatten()
+                        .and_then(|bytes| bytes.as_text().and_then(|text| text.parse().ok()))
+                        .unwrap_or(0);
+                    self.booted = true;
+                    Vec::new()
+                }
+                Event::App(Told::Rang { times }) => {
+                    self.heard += times;
+                    let id = EffectId(self.next);
+                    self.next += 1;
+                    vec![
+                        Effect::Print {
+                            text: format!("rang {times}, heard {} in all\n", self.heard),
+                        },
+                        Effect::Write {
+                            id,
+                            path: "bell".into(),
+                            bytes: self.heard.to_string().into(),
+                            private: false,
+                        },
+                    ]
+                }
+                Event::Written { .. } | Event::Ran { .. } | Event::Woke { .. } => Vec::new(),
+            }
+        }
+
+        fn snapshot(&self) -> serde_json::Value {
+            serde_json::to_value(self).expect("a bell serialises")
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::doorbell::{Doorbell, Told};
+    use super::{Bytes, Effect, EffectId, Event, Finished, Named};
 
     /// The hole carries the application's own, and the kind is what a log
     /// may say.
@@ -268,6 +586,81 @@ mod tests {
         let served = serde_json::to_string(&effect).expect("it serialises");
         let back: Effect<Doorbell> = serde_json::from_str(&served).expect("and back");
         assert!(back == effect);
+    }
+
+    /// Every mechanism crosses whole and names its kind.
+    #[test]
+    fn every_mechanism_crosses_whole_and_names_its_kind() {
+        let effects: Vec<Effect<Doorbell>> = vec![
+            Effect::Read {
+                id: EffectId(1),
+                path: "/etc/hostname".into(),
+            },
+            Effect::Write {
+                id: EffectId(2),
+                path: "/tmp/x".into(),
+                bytes: Bytes::new(b"x".to_vec()),
+                private: true,
+            },
+            Effect::Run {
+                id: EffectId(3),
+                program: "/usr/bin/true".into(),
+                arguments: vec!["--version".to_owned()],
+                environment: [("HOME".to_owned(), "/home/x".to_owned())].into(),
+                stdin: None,
+            },
+            Effect::Wake {
+                id: EffectId(4),
+                after: std::time::Duration::from_secs(1),
+            },
+            Effect::Print {
+                text: "hello\n".to_owned(),
+            },
+            Effect::Exit {
+                message: "bye".to_owned(),
+            },
+        ];
+        let kinds: Vec<&str> = effects.iter().map(Named::kind).collect();
+        assert_eq!(kinds, ["Read", "Write", "Run", "Wake", "Print", "Exit"]);
+        for effect in &effects {
+            let served = serde_json::to_string(effect).expect("it serialises");
+            let back: Effect<Doorbell> = serde_json::from_str(&served).expect("and back");
+            assert!(back == *effect, "{served}");
+            assert!(back.clone() == *effect);
+        }
+
+        let events: Vec<Event<Doorbell>> = vec![
+            Event::Read {
+                id: EffectId(1),
+                contents: Ok(None),
+            },
+            Event::Written {
+                id: EffectId(2),
+                outcome: Err("full".to_owned()),
+            },
+            Event::Ran {
+                id: EffectId(3),
+                finished: Finished::Exited {
+                    status: Some(0),
+                    stdout: Bytes::new(Vec::new()),
+                    stderr: Bytes::new(Vec::new()),
+                },
+            },
+            Event::Ran {
+                id: EffectId(3),
+                finished: Finished::NotFound,
+            },
+            Event::Woke { id: EffectId(4) },
+        ];
+        let kinds: Vec<&str> = events.iter().map(Named::kind).collect();
+        assert_eq!(kinds, ["Read", "Written", "Ran", "Ran", "Woke"]);
+        for event in &events {
+            let served = serde_json::to_string(event).expect("it serialises");
+            let back: Event<Doorbell> = serde_json::from_str(&served).expect("and back");
+            assert!(back == *event, "{served}");
+            assert!(back.clone() == *event);
+        }
+        assert!(events[0] != events[4]);
     }
 
     /// Neither enumeration formats, and this is what keeps it so: an
@@ -312,6 +705,7 @@ mod tests {
         );
         let back: Bytes = serde_json::from_str(r#"{"text":"{\"kept\": true}"}"#).expect("back");
         assert!(back == text);
+        assert_eq!(back.as_text(), Some("{\"kept\": true}"));
 
         let binary = Bytes::new(vec![0xff, 0x00, 0x7f]);
         let served = serde_json::to_string(&binary).expect("it serialises");
@@ -320,6 +714,7 @@ mod tests {
         assert!(back == binary);
         assert_eq!(back.len(), 3);
         assert!(!back.is_empty());
+        assert_eq!(back.as_text(), None);
 
         assert!(serde_json::from_str::<Bytes>(r#"{"hex":"abc"}"#).is_err());
         assert!(serde_json::from_str::<Bytes>(r#"{"hex":"zz"}"#).is_err());

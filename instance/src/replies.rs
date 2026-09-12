@@ -7,7 +7,7 @@
 
 use stageman_core::{Arriving, Channel, ChannelConfig, JobId, Progress, Recipient, State, Thread};
 
-use crate::Instance;
+use crate::Running;
 use crate::turns::{Turn, speaking_for};
 use crate::vocabulary::{AppEffect, Message, Run, Speaker};
 use crate::{Effect, Emit as _};
@@ -53,7 +53,7 @@ pub fn accepting(state: &mut State, job: JobId) -> Accepted {
     }
 }
 
-impl Instance {
+impl Running {
     /// Hands one message to whoever it is for.
     pub fn heard(&mut self, channel: Channel, message: &Message, effects: &mut Vec<Effect>) {
         let arriving = Arriving {

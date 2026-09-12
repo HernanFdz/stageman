@@ -197,7 +197,7 @@ fn hostname(host: &str) -> String {
     bare.trim_end_matches('.').to_ascii_lowercase()
 }
 
-impl crate::Instance {
+impl crate::Running {
     /// Answers where a job's tunnel is: from what was last found, or from
     /// the runtime once it has been asked.
     ///

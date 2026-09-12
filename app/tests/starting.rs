@@ -56,7 +56,13 @@ const KEY: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
 /// meant to set.
 fn run(snapshot: &PathBuf, variables: &[(&str, &str)]) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_stageman"));
-    command.env_clear().env("STAGEMAN_STATE", snapshot);
+    // The dashboard is bound before the instance boots, so a refusal these
+    // tests look for is reached only if the port was free: whichever is.
+    command
+        .env_clear()
+        .env("IP", "127.0.0.1")
+        .env("PORT", "0")
+        .env("STAGEMAN_STATE", snapshot);
     for (name, value) in variables {
         command.env(name, value);
     }

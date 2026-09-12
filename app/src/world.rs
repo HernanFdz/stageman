@@ -10,16 +10,11 @@
 //! the map below is where they wait. See
 //! `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`.
 //!
-//! **The disk is written inline and everything else on a task.** A write is
-//! the one effect the instance waits on before anything outward-facing, so
-//! it is performed where the loop can await it and answered in order; a turn
-//! takes minutes, and `docs/conventions.md` §3 keeps that off the loop that
-//! answers the dashboard.
+//! Everything here runs on a task of its own: a turn takes minutes, and
+//! `docs/conventions.md` §3 keeps that off the loop that answers the
+//! dashboard. The disk is the world crate's, written inline there.
 
 use std::collections::BTreeMap;
-use std::fs;
-use std::io::{self, Write as _};
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -186,11 +181,16 @@ impl Asking {
 #[derive(Clone)]
 pub struct Performer(Arc<Inner>);
 
+/// The runtime every container effect goes through, once the instance has
+/// found one and said so.
+///
+/// A static rather than a field, for the reason the domain beside it is one:
+/// what borrows it is a task that outlives the call that spawned it, and a
+/// process has exactly one running instance to have found one. On its way
+/// out either way — every effect that needs a runtime will carry its path.
+static RUNTIME: OnceLock<ContainerRuntime> = OnceLock::new();
+
 struct Inner {
-    /// The runtime every container effect goes through.
-    runtime: &'static ContainerRuntime,
-    /// Where the instance is kept.
-    path: PathBuf,
     /// Where a container reaches the tools this instance serves.
     endpoint: String,
     /// Where events go back, and where answers are matched to askers.
@@ -202,25 +202,33 @@ struct Inner {
 }
 
 impl Performer {
-    /// A performer for this runtime, this file and this way in.
+    /// A performer for this way in.
     #[must_use]
-    pub fn new(
-        runtime: &'static ContainerRuntime,
-        path: PathBuf,
-        endpoint: String,
-        asking: Arc<Asking>,
-    ) -> Self {
+    pub fn new(endpoint: String, asking: Arc<Asking>) -> Self {
         Self(Arc::new(Inner {
-            runtime,
-            path,
             endpoint,
             asking,
             turns: parking_lot::Mutex::new(BTreeMap::new()),
         }))
     }
 
-    /// Performs an effect on a task of its own.
+    /// Performs an effect on a task of its own, with the runtime the
+    /// instance found; one asked for before that is a fault in the instance
+    /// and is said rather than performed.
     fn spawn<F, Fut>(&self, effect: F)
+    where
+        F: FnOnce(Arc<Inner>, &'static ContainerRuntime) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let Some(runtime) = RUNTIME.get() else {
+            tracing::error!("asked to drive a runtime before the instance found one");
+            return;
+        };
+        drop(tokio::spawn(effect(Arc::clone(&self.0), runtime)));
+    }
+
+    /// Performs an effect on a task of its own, needing no runtime.
+    fn spawn_plain<F, Fut>(&self, effect: F)
     where
         F: FnOnce(Arc<Inner>) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
@@ -231,16 +239,24 @@ impl Performer {
 }
 
 impl Perform<Stageman> for Performer {
-    /// Performs one effect: on a task of its own, or inline where the
-    /// instance waits on the answer before doing anything else.
+    /// Performs one of the application's own effects, on a task of its own.
     ///
     /// Skipped by mutation testing, like everything here that drives the
     /// runtime or the network: every arm performs an effect and decides
     /// nothing a test could check without one.
     #[mutants::skip]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per effect the application adds, each a few lines; it shortens as families leave the hole"
+    )]
     async fn perform(&self, effect: AppEffect) {
         match effect {
-            AppEffect::Persist { bytes } => self.persist(bytes.into_inner()).await,
+            AppEffect::Booted { runtime, domain } => {
+                if RUNTIME.set(ContainerRuntime::new(runtime)).is_err() {
+                    tracing::error!("the instance booted twice; the second runtime is ignored");
+                }
+                crate::tunnel::adopt(&domain);
+            }
             AppEffect::RunTurn { speaker, run } => self.turn(speaker, run),
             AppEffect::StopTurn { speaker } => {
                 // A permit rather than a wake-up, so that a stop arriving in
@@ -250,21 +266,66 @@ impl Perform<Stageman> for Performer {
                     stopping.notify_one();
                 }
             }
-            AppEffect::Probe { job } => self.probe(job),
-            AppEffect::ListRunning => self.list_running(),
-            AppEffect::Inspect { container } => self.inspect(container),
-            AppEffect::Halt { container } => self.halt(container),
-            AppEffect::Discard { container } => self.discard(container),
-            AppEffect::Reclaim => self.reclaim(),
-            AppEffect::Wake { after, timer } => self.spawn(move |inner| async move {
-                tokio::time::sleep(after).await;
-                inner.asking.send(AppEvent::Woke { timer });
+            AppEffect::Probe { job } => self.spawn(move |inner, runtime| async move {
+                let answering = stageman_job::answering(runtime, job).await;
+                inner.asking.send(AppEvent::Probed { job, answering });
+            }),
+            AppEffect::ListRunning => self.spawn(|inner, runtime| async move {
+                let names = match stageman_agent::running(runtime).await {
+                    Ok(names) => names,
+                    Err(why) => {
+                        tracing::warn!(%why, "could not ask which containers are running");
+                        return;
+                    }
+                };
+                let mut running = Vec::with_capacity(names.len());
+                for name in names {
+                    running.push(described(runtime, name, true).await);
+                }
+                inner.asking.send(AppEvent::Listed { running });
+            }),
+            AppEffect::Inspect { container } => self.spawn(move |inner, runtime| async move {
+                // A container that is not there refuses, and so does a
+                // runtime that will not answer; either way nothing can be
+                // resumed in it.
+                let (present, agent) = stageman_agent::made_for(runtime, &container)
+                    .await
+                    .map_or((false, None), |agent| (true, agent));
+                inner.asking.send(AppEvent::Inspected {
+                    container,
+                    present,
+                    agent,
+                });
+            }),
+            AppEffect::Halt { container } => self.spawn(move |_, runtime| async move {
+                if let Err(why) = stageman_agent::halt(runtime, &container).await {
+                    tracing::warn!(%container, %why, "a container could not be stopped");
+                }
+            }),
+            AppEffect::Discard { container } => self.spawn(move |_, runtime| async move {
+                // Not fatal, and deliberately not retried here: what is left
+                // is a container nothing needs, which is exactly what waking
+                // looks for.
+                if let Err(why) = stageman_agent::discard(runtime, &container).await {
+                    tracing::warn!(%container, %why, "a container could not be removed; waking will try again");
+                }
+            }),
+            AppEffect::Reclaim => self.spawn(|_, runtime| async move {
+                // Housekeeping rather than work, so a runtime that will not
+                // answer is warned about and nothing else changes.
+                match stageman_agent::reclaim(runtime).await {
+                    Ok(gone) if gone > 0 => {
+                        tracing::info!(images = gone, "reclaimed images no container needed");
+                    }
+                    Ok(_) => {}
+                    Err(why) => tracing::warn!(%why, "could not reclaim the images nothing is using"),
+                }
             }),
             AppEffect::Say {
                 speaking,
                 thread,
                 text,
-            } => self.spawn(move |_| async move {
+            } => self.spawn_plain(move |_| async move {
                 let speaking: Speaking = speaking.into();
                 if let Err(why) = crate::channel::say_in(&speaking, &thread, &text).await {
                     tracing::warn!(%why, "the thread could not be spoken to");
@@ -274,7 +335,7 @@ impl Perform<Stageman> for Performer {
                 job,
                 speaking,
                 announcement,
-            } => self.spawn(move |inner| async move {
+            } => self.spawn_plain(move |inner| async move {
                 let speaking: Speaking = speaking.into();
                 let outcome = crate::channel::open_thread(&speaking, Channel::Slack, &announcement)
                     .await
@@ -286,7 +347,7 @@ impl Perform<Stageman> for Performer {
                 speaking,
                 thread,
                 text,
-            } => self.spawn(move |inner| async move {
+            } => self.spawn_plain(move |inner| async move {
                 let speaking: Speaking = speaking.into();
                 let outcome = crate::channel::say_in(&speaking, &thread, &text)
                     .await
@@ -305,144 +366,30 @@ impl Perform<Stageman> for Performer {
                     speaking: speaking.into(),
                 },
             ),
-            AppEffect::FindPort { job } => self.find_port(job),
+            AppEffect::FindPort { job } => self.spawn(move |inner, runtime| async move {
+                let port = stageman_agent::tunnel_port(runtime, &stageman_job::container(job))
+                    .await
+                    .unwrap_or_else(|why| {
+                        tracing::debug!(%job, %why, "the runtime could not say where a job's tunnel is");
+                        None
+                    });
+                inner.asking.send(AppEvent::PortFound { job, port });
+            }),
             AppEffect::Respond { id, response } => {
                 self.0.asking.answered(id, Answered::Person(response));
             }
             AppEffect::ToolAnswered { id, status, body } => {
                 self.0.asking.answered(id, Answered::Tool(status, body));
             }
-            AppEffect::Route { id, port } => self.0.asking.answered(
-                id,
-                Answered::Tunnel(port.map_or(Located::Nowhere, Located::At)),
-            ),
+            AppEffect::Route { id, port } => self
+                .0
+                .asking
+                .answered(id, Answered::Tunnel(port.map_or(Located::Nowhere, Located::At))),
         }
     }
 }
 
 impl Performer {
-    /// Asks whether a job's tunnel is answering.
-    #[mutants::skip]
-    fn probe(&self, job: JobId) {
-        self.spawn(move |inner| async move {
-            let answering = stageman_job::answering(inner.runtime, job).await;
-            inner.asking.send(AppEvent::Probed { job, answering });
-        });
-    }
-
-    /// Asks which containers are running, and whose each is.
-    #[mutants::skip]
-    fn list_running(&self) {
-        self.spawn(|inner| async move {
-            let names = match stageman_agent::running(inner.runtime).await {
-                Ok(names) => names,
-                Err(why) => {
-                    tracing::warn!(%why, "could not ask which containers are running");
-                    return;
-                }
-            };
-            let mut running = Vec::with_capacity(names.len());
-            for name in names {
-                running.push(described(inner.runtime, name, true).await);
-            }
-            inner.asking.send(AppEvent::Listed { running });
-        });
-    }
-
-    /// Asks whether a container exists, and which agent it was made for.
-    ///
-    /// A container that is not there refuses, and so does a runtime that will
-    /// not answer; either way nothing can be resumed in it.
-    #[mutants::skip]
-    fn inspect(&self, container: String) {
-        self.spawn(move |inner| async move {
-            let (present, agent) = stageman_agent::made_for(inner.runtime, &container)
-                .await
-                .map_or((false, None), |agent| (true, agent));
-            inner.asking.send(AppEvent::Inspected {
-                container,
-                present,
-                agent,
-            });
-        });
-    }
-
-    /// Stops a container, keeping it.
-    #[mutants::skip]
-    fn halt(&self, container: String) {
-        self.spawn(move |inner| async move {
-            if let Err(why) = stageman_agent::halt(inner.runtime, &container).await {
-                tracing::warn!(%container, %why, "a container could not be stopped");
-            }
-        });
-    }
-
-    /// Removes a container and everything in it.
-    ///
-    /// Not fatal, and deliberately not retried here: what is left is a
-    /// container nothing needs, which is exactly what waking looks for.
-    #[mutants::skip]
-    fn discard(&self, container: String) {
-        self.spawn(move |inner| async move {
-            if let Err(why) = stageman_agent::discard(inner.runtime, &container).await {
-                tracing::warn!(%container, %why, "a container could not be removed; waking will try again");
-            }
-        });
-    }
-
-    /// Reclaims the images nothing needs.
-    ///
-    /// Housekeeping rather than work, so a runtime that will not answer is
-    /// warned about and nothing else changes.
-    #[mutants::skip]
-    fn reclaim(&self) {
-        self.spawn(|inner| async move {
-            match stageman_agent::reclaim(inner.runtime).await {
-                Ok(gone) if gone > 0 => {
-                    tracing::info!(images = gone, "reclaimed images no container needed");
-                }
-                Ok(_) => {}
-                Err(why) => tracing::warn!(%why, "could not reclaim the images nothing is using"),
-            }
-        });
-    }
-
-    /// Asks the runtime where a job's tunnel is published.
-    #[mutants::skip]
-    fn find_port(&self, job: JobId) {
-        self.spawn(move |inner| async move {
-            let port = stageman_agent::tunnel_port(inner.runtime, &stageman_job::container(job))
-                .await
-                .unwrap_or_else(|why| {
-                    tracing::debug!(%job, %why, "the runtime could not say where a job's tunnel is");
-                    None
-                });
-            inner.asking.send(AppEvent::PortFound { job, port });
-        });
-    }
-
-    /// Writes the instance, and says whether it landed.
-    ///
-    /// Inline rather than on a task, and awaited: writes are answered in the
-    /// order they were asked for, and nothing outward-facing happens on the
-    /// strength of one that has not landed. Failure is reported to the
-    /// instance rather than to anybody else: no caller can repair a full
-    /// disk, the state in memory is still right, and the next change asks
-    /// again.
-    #[mutants::skip]
-    async fn persist(&self, bytes: Vec<u8>) {
-        let path = self.0.path.clone();
-        let outcome =
-            match tokio::task::spawn_blocking(move || write_atomically(&path, &bytes)).await {
-                Ok(written) => written.map_err(|why| why.to_string()),
-                Err(why) => Err(why.to_string()),
-            };
-        if let Err(why) = &outcome {
-            tracing::error!(%why, "the instance could not be written");
-        }
-        self.0.asking.send(AppEvent::Persisted { outcome });
-    }
-
     /// Runs one turn on a task of its own, and reports how it ended.
     ///
     /// **Asking rather than killing** is what stopping means: the future
@@ -454,7 +401,7 @@ impl Performer {
     fn turn(&self, speaker: Speaker, run: Run) {
         let stopping = Arc::new(tokio::sync::Notify::new());
         self.0.turns.lock().insert(speaker, Arc::clone(&stopping));
-        self.spawn(move |inner| async move {
+        self.spawn(move |inner, runtime| async move {
             let tools = |warrant: String| {
                 stageman_agent::Tools::new(inner.endpoint.clone(), Secret::new(warrant))
             };
@@ -484,7 +431,7 @@ impl Performer {
                             kit,
                         };
                         stageman_agent::begin(
-                            inner.runtime,
+                            runtime,
                             &launch,
                             &container,
                             instance,
@@ -500,7 +447,7 @@ impl Performer {
                         text,
                     } => {
                         stageman_agent::resume(
-                            inner.runtime,
+                            runtime,
                             &container,
                             &kit,
                             Some(&tools(warrant)),
@@ -549,55 +496,6 @@ pub async fn described(runtime: &ContainerRuntime, name: String, running: bool) 
     }
 }
 
-/// Every container this project left behind, as the instance is told about
-/// them on waking.
-///
-/// # Errors
-///
-/// Fails if the runtime will not say what containers it has, which is worth
-/// failing a start over: an instance that cannot see what it left behind
-/// cannot keep `docs/conventions.md` §4's bar.
-#[mutants::skip]
-pub async fn found(runtime: &ContainerRuntime) -> Result<Vec<Container>, stageman_job::JobError> {
-    let left = stageman_job::left_behind(runtime).await?;
-    let running = stageman_agent::running(runtime)
-        .await
-        .map_err(stageman_job::JobError::Agent)?;
-    let mut containers = Vec::with_capacity(left.len());
-    for abandoned in left {
-        let up = running.contains(&abandoned.container);
-        containers.push(described(runtime, abandoned.container, up).await);
-    }
-    Ok(containers)
-}
-
-/// Replaces a file in one step, so a crash mid-write cannot truncate it.
-///
-/// Written beside the target rather than in a temporary directory, because
-/// renaming across filesystems is not atomic and would silently become a copy.
-///
-/// # Errors
-///
-/// Fails if the file cannot be created, written, synced or renamed.
-pub fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let temporary = path.with_extension("tmp");
-    let outcome = (|| {
-        let mut file = fs::File::create(&temporary)?;
-        file.write_all(bytes)?;
-        // Rename is atomic, but only orders against data that has reached the
-        // disk. Without this a crash can leave an intact name over empty
-        // contents, which is the failure this function exists to prevent.
-        file.sync_all()?;
-        fs::rename(&temporary, path)
-    })();
-    if outcome.is_err() {
-        // Best effort: the write already failed, and failing to tidy up after
-        // it is not worth reporting over the failure itself.
-        drop(fs::remove_file(&temporary));
-    }
-    outcome
-}
-
 /// A failure and everything underneath it, as one line of prose.
 ///
 /// `to_string` on an error renders only its outermost line, and every error
@@ -618,9 +516,9 @@ fn because(failure: &dyn std::error::Error) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Answered, Asking, Located, Performer, because, write_atomically};
-    use stageman_instance::{AppEffect, AppEvent, Event, Request, Response};
-    use stageman_world::{Perform as _, World};
+    use super::{Answered, Asking, Located, because};
+    use stageman_instance::{AppEvent, Event, Request, Response};
+    use stageman_world::World;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -714,65 +612,6 @@ mod tests {
         assert_eq!(soon(asked).await.expect("the task"), None);
     }
 
-    /// An effect is performed on a task of its own and comes back as an
-    /// event, and a write lands before it is answered.
-    #[tokio::test]
-    async fn an_effect_is_performed_and_answered_as_an_event() {
-        let (world, mut events) = World::new();
-        let asking = Asking::new(world);
-        let directory = tempfile::tempdir().expect("a temporary directory");
-        let path = directory.path().join("instance.json");
-        let runtime: &'static stageman_agent::ContainerRuntime = Box::leak(Box::new(
-            stageman_agent::ContainerRuntime::new(std::path::PathBuf::from("/nowhere/docker")),
-        ));
-        let performer = Performer::new(
-            runtime,
-            path.clone(),
-            "http://host.docker.internal:1/mcp".to_owned(),
-            Arc::clone(&asking),
-        );
-
-        performer
-            .perform(AppEffect::Wake {
-                after: Duration::from_millis(1),
-                timer: stageman_instance::Timer::Settle,
-            })
-            .await;
-        assert!(matches!(
-            soon(events.recv()).await,
-            Some(Event::App(AppEvent::Woke {
-                timer: stageman_instance::Timer::Settle
-            }))
-        ));
-
-        performer
-            .perform(AppEffect::Persist {
-                bytes: stageman_vocabulary::Bytes::new(b"landed".to_vec()),
-            })
-            .await;
-        assert!(matches!(
-            soon(events.recv()).await,
-            Some(Event::App(AppEvent::Persisted { outcome: Ok(()) }))
-        ));
-        assert_eq!(std::fs::read(&path).expect("it landed"), b"landed");
-
-        let elsewhere = Performer::new(
-            runtime,
-            directory.path().join("nowhere").join("instance.json"),
-            String::new(),
-            Arc::clone(&asking),
-        );
-        elsewhere
-            .perform(AppEffect::Persist {
-                bytes: stageman_vocabulary::Bytes::new(b"lost".to_vec()),
-            })
-            .await;
-        assert!(matches!(
-            soon(events.recv()).await,
-            Some(Event::App(AppEvent::Persisted { outcome: Err(_) }))
-        ));
-    }
-
     /// The chain is what there is to read.
     #[test]
     fn a_failure_is_recorded_with_everything_underneath_it() {
@@ -784,20 +623,5 @@ mod tests {
         let told = because(&outer);
         assert!(told.contains("the disk is full"), "{told}");
         assert!(told.contains(": "), "{told}");
-    }
-
-    /// A write lands whole, and a failed one leaves nothing beside the file.
-    #[test]
-    fn a_write_lands_whole_and_leaves_no_temporary_behind() {
-        let directory = tempfile::tempdir().expect("a temporary directory");
-        let path = directory.path().join("instance.json");
-        write_atomically(&path, b"first").expect("it writes");
-        write_atomically(&path, b"second").expect("it writes again");
-        assert_eq!(std::fs::read(&path).expect("it is there"), b"second");
-        assert!(!path.with_extension("tmp").exists());
-
-        let missing = directory.path().join("nowhere").join("instance.json");
-        assert!(write_atomically(&missing, b"third").is_err());
-        assert!(!missing.with_extension("tmp").exists());
     }
 }

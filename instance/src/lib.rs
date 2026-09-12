@@ -1,12 +1,14 @@
 //! The deciding and the doing as one deterministic value.
 //!
 //! An [`Instance`] holds everything one running stageman knows and makes every
-//! decision it makes. It is built from the bytes of its file, if there is one,
-//! and from what the runtime holds; after that it has one method, which takes
-//! one [`Event`] and answers with [`Effect`]s. It never reads a clock, never
-//! draws on entropy beyond the generator it was seeded with, and performs
-//! nothing: the world does, and reports back as events. See
-//! `docs/decisions/0056-the-instance-decides-and-the-world-performs.md`.
+//! decision it makes. It is constructed from a seed and the environment, and
+//! learns everything else — whether a runtime answers, its key, its own file,
+//! what the runtime holds — by asking the world and hearing back. After that
+//! it has one method, which takes one [`Event`] and answers with [`Effect`]s.
+//! It never reads a clock, never draws on entropy beyond the generator it was
+//! seeded with, and performs nothing: the world does, and reports back. See
+//! `docs/decisions/0056-the-instance-decides-and-the-world-performs.md` and
+//! `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`.
 //!
 //! **What it keeps and what it holds are two things.** The kept state goes to
 //! the disk, sealed by this crate. The held state — turns in flight, warrants
@@ -17,13 +19,19 @@
 //! step that changes the kept state ends by asking the world to write, and any
 //! effect of that step that faces outward is held back until the world says
 //! the bytes have landed. So a client told a change succeeded was told the
-//! truth, and a job's record is on the disk before its container exists.
+//! truth, and a job's record is on the disk before its container exists. The
+//! first write is the one a start depends on: it is what says the file can be
+//! written at all, and the address is announced only once it has landed.
 
+mod boot;
 mod file;
 mod foreman;
 mod jobs;
+mod paths;
+pub mod release;
 mod replies;
 mod requests;
+mod snapshot;
 mod sweep;
 mod tools;
 mod tunnel;
@@ -32,20 +40,23 @@ mod views;
 mod vocabulary;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::path::PathBuf;
 use std::time::Duration;
 
+use rand::Rng as _;
 use rand::rngs::StdRng;
-use rand::{Rng as _, SeedableRng as _};
 use stageman_core::{InstanceId, JobId, Key, Kit, Progress, ProjectId, State, Thread, Uuid};
+use stageman_vocabulary::{Effect as Generic, EffectId, Environment};
 
+pub use boot::KeySource;
 pub use file::LoadError;
+pub use paths::{DOMAIN_VARIABLE, KEY_VARIABLE, STATE_VARIABLE};
 pub use requests::{Request, Response};
 pub use stageman_vocabulary::Seed;
 pub use sweep::Swept;
 pub use tunnel::{DEFAULT_DOMAIN, Domain, Routed, address, decode};
 pub use vocabulary::{
-    AppEffect, AppEvent, Container, Message, Posting, RequestId, Run, Speaker, Startup, Timer,
-    Warranted,
+    AppEffect, AppEvent, Container, Message, Posting, RequestId, Run, Speaker, Warranted,
 };
 
 /// This application, as the vocabulary sees it: what fills its hole.
@@ -87,14 +98,6 @@ impl Emit for Vec<Effect> {
     }
 }
 
-impl stageman_vocabulary::Deciding for Instance {
-    type App = Stageman;
-
-    fn step(&mut self, event: Event) -> Vec<Effect> {
-        Self::step(self, event)
-    }
-}
-
 /// Exactly the environment a container is given, rendered from what its
 /// handout decides, credentials in the clear for the wire.
 ///
@@ -119,91 +122,230 @@ use turns::Turn;
 /// `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`.
 const SETTLING_INTERVAL: Duration = Duration::from_mins(1);
 
-/// Everything one running stageman knows, and every decision it makes.
+/// The instance: booting, and then awake.
+///
+/// Two stages rather than one struct of optional facts, so that everything
+/// an awake instance needs is a plain field of [`Running`] and nothing has
+/// to be checked for absence at every use.
 pub struct Instance {
-    /// What goes to the disk.
-    state: State,
-    /// Which instance this is, for as long as this file is the instance.
-    id: InstanceId,
-    /// What seals the file.
-    key: Key,
-    /// The domain this instance answers on.
-    domain: Domain,
-    /// The port the dashboard is bound to.
-    serving: u16,
-    /// What this build calls itself.
-    build: String,
-    /// Where the container runtime was found, for the dashboard.
-    runtime: String,
-    /// The only randomness there is.
-    rng: StdRng,
-    /// The turns running right now, by whose they are.
-    turns: BTreeMap<Speaker, Turn>,
-    /// Which credential the tools endpoint may be shown, and by whom.
-    warrants: BTreeMap<String, Warranted>,
-    /// Projects whose foreman was found holding a message on waking, and
-    /// whose next turn is therefore told it was interrupted.
-    interrupted: BTreeSet<ProjectId>,
-    /// Tool calls waiting on the platform before they can be answered, with
-    /// the identifier the agent sent, to answer under.
-    asking: BTreeMap<RequestId, Option<serde_json::Value>>,
-    /// Where each job's tunnel was last found. Held, not kept: the runtime
-    /// publishes on a fresh port at every start, so what survives a restart
-    /// is wrong by construction.
-    tunnels: BTreeMap<JobId, u16>,
-    /// Tunnel requests waiting for the runtime to say where a job is.
-    routing: BTreeMap<JobId, Vec<RequestId>>,
-    /// Effects waiting for a write to land, one entry per write asked for.
-    deferred: VecDeque<Vec<Effect>>,
-    /// Whether the kept state changed since it was last written.
-    dirty: bool,
-    /// Effects this step wants held back until its write lands.
-    staged: Vec<Effect>,
+    stage: Stage,
 }
 
-/// An instance that has just been opened, and what it does about it.
-pub struct Woken {
-    /// The instance.
-    pub instance: Instance,
-    /// What it asks of the world on waking.
-    pub effects: Vec<Effect>,
-    /// What waking found.
-    pub swept: Swept,
+enum Stage {
+    Booting(Box<boot::Boot>),
+    Awake(Box<Running>),
 }
 
 impl Instance {
-    /// Opens an instance from its file, or starts one where there is no file,
-    /// and reconciles it with what the runtime holds.
+    /// Constructs an instance from the two facts that exist before anything
+    /// happens, and answers with what it asks for first.
+    #[must_use]
+    pub fn boot(seed: Seed, environment: Environment) -> (Self, Vec<Effect>) {
+        let (booting, effects) = boot::Boot::new(seed, environment);
+        (
+            Self {
+                stage: Stage::Booting(Box::new(booting)),
+            },
+            effects,
+        )
+    }
+
+    /// Handles one event and answers with what to do about it.
     ///
-    /// Nothing can reach [`Instance::step`] before this has run, which is why
-    /// the facts the sweep needs are an argument rather than a first event.
+    /// While booting, an answer moves booting along and anything of the
+    /// application's own waits; the moment the instance is awake, whatever
+    /// waited is handled in the order it arrived.
+    pub fn step(&mut self, event: Event) -> Vec<Effect> {
+        match &mut self.stage {
+            Stage::Awake(running) => running.step(event),
+            Stage::Booting(booting) => match booting.step(event) {
+                boot::Booting::Asking(effects) => effects,
+                boot::Booting::Awake(mut running, mut effects, waiting) => {
+                    for event in waiting {
+                        effects.extend(running.step(Event::App(event)));
+                    }
+                    self.stage = Stage::Awake(running);
+                    effects
+                }
+            },
+        }
+    }
+
+    /// What this instance knows: nothing until it is awake.
+    #[must_use]
+    pub fn state(&self) -> &State {
+        match &self.stage {
+            Stage::Booting(booting) => booting.state(),
+            Stage::Awake(running) => &running.state,
+        }
+    }
+
+    /// Which instance this is, once it knows.
+    #[must_use]
+    pub fn id(&self) -> Option<InstanceId> {
+        match &self.stage {
+            Stage::Booting(_) => None,
+            Stage::Awake(running) => Some(running.id),
+        }
+    }
+
+    /// Who holds a credential presented to the tools endpoint, if anyone.
+    #[must_use]
+    pub fn warranted(&self, presented: &str) -> Option<&Warranted> {
+        match &self.stage {
+            Stage::Booting(_) => None,
+            Stage::Awake(running) => running.warrants.get(presented),
+        }
+    }
+
+    /// What waking found, once it has.
+    #[must_use]
+    pub fn swept(&self) -> Option<&Swept> {
+        match &self.stage {
+            Stage::Booting(_) => None,
+            Stage::Awake(running) => running.swept.as_ref(),
+        }
+    }
+
+    /// Everything this instance holds, as a value.
+    #[must_use]
+    pub fn snapshot(&self) -> serde_json::Value {
+        match &self.stage {
+            Stage::Booting(booting) => serde_json::json!({ "booting": booting.phase_name() }),
+            Stage::Awake(running) => snapshot::of(running),
+        }
+    }
+}
+
+impl stageman_vocabulary::Deciding for Instance {
+    type App = Stageman;
+
+    fn boot(seed: Seed, environment: Environment) -> (Self, Vec<Effect>) {
+        Self::boot(seed, environment)
+    }
+
+    fn step(&mut self, event: Event) -> Vec<Effect> {
+        Self::step(self, event)
+    }
+
+    fn snapshot(&self) -> serde_json::Value {
+        Self::snapshot(self)
+    }
+}
+
+/// What booting hands an awake instance.
+pub struct Facts {
+    /// What the file held, or nothing on a first run.
+    pub state: State,
+    /// What the file named itself, if it did.
+    pub named: Option<InstanceId>,
+    /// What opens the file.
+    pub key: Key,
+    /// Where the key came from.
+    pub source: KeySource,
+    /// The one generator, carried on.
+    pub rng: StdRng,
+    /// The next effect identifier, carried on.
+    pub next: u64,
+    /// The domain this instance answers on.
+    pub domain: Domain,
+    /// Where the file is.
+    pub path: PathBuf,
+    /// The runtime that answered.
+    pub runtime: PathBuf,
+    /// Where the dashboard is served, as a person would type it.
+    pub address: String,
+    /// The port it is served on.
+    pub port: u16,
+}
+
+/// An awake instance: everything it knows, and everything it holds.
+pub struct Running {
+    /// What is kept.
+    state: State,
+    /// Which instance this is.
+    id: InstanceId,
+    /// What seals the file.
+    key: Key,
+    /// Where the key came from, for the startup block.
+    source: KeySource,
+    /// Where the file is.
+    path: PathBuf,
+    /// The domain this instance answers on.
+    domain: Domain,
+    /// The port the dashboard is served on.
+    serving: u16,
+    /// The address the dashboard is served on, for the startup block.
+    address: String,
+    /// The runtime that answered.
+    runtime: PathBuf,
+    /// The one generator.
+    rng: StdRng,
+    /// The next effect identifier.
+    next: u64,
+    /// The turns in flight, by whose they are.
+    turns: BTreeMap<Speaker, Turn>,
+    /// The credentials minted for those turns.
+    warrants: BTreeMap<String, Warranted>,
+    /// The foremen found mid-turn on waking, until each is picked up.
+    interrupted: BTreeSet<ProjectId>,
+    /// Requests on the tools endpoint waiting on a post.
+    asking: BTreeMap<RequestId, Option<serde_json::Value>>,
+    /// Where each job's tunnel was last found.
+    tunnels: BTreeMap<JobId, u16>,
+    /// Tunnel requests waiting for the runtime to say where a job is.
+    routing: BTreeMap<JobId, Vec<RequestId>>,
+    /// Effects waiting on a write, by the write they wait on, in order.
+    deferred: VecDeque<(EffectId, Vec<Effect>)>,
+    /// The wakes asked for that have not gone off, each one the settling
+    /// timer; a second kind of timer is what would make this a map again.
+    timers: BTreeSet<EffectId>,
+    /// Whether this step changed what is kept.
+    dirty: bool,
+    /// Effects of this step held back until the write lands.
+    staged: Vec<Effect>,
+    /// Whether the startup block has been printed, which happens once the
+    /// first write has landed.
+    announced: bool,
+    /// What waking found.
+    swept: Option<Swept>,
+}
+
+impl Running {
+    /// An awake instance, from what booting learned.
     ///
-    /// # Errors
-    ///
-    /// Fails if the file is not JSON, cannot be opened with `key`, or
-    /// describes an instance that cannot exist.
-    pub fn open(
-        file: Option<&[u8]>,
-        key: Key,
-        seed: Seed,
-        startup: &Startup,
-    ) -> Result<Woken, LoadError> {
-        let (state, named) = file::opened(file, &key)?;
-        let mut rng = StdRng::from_seed(seed);
+    /// A file that had no identity has one from the moment it is opened.
+    pub(crate) fn woken(facts: Facts) -> Self {
+        let Facts {
+            state,
+            named,
+            key,
+            source,
+            mut rng,
+            next,
+            domain,
+            path,
+            runtime,
+            address,
+            port,
+        } = facts;
         let id = named.unwrap_or_else(|| {
             let minted = InstanceId::from_uuid(mint(&mut rng));
             tracing::info!(instance = %minted, "this instance had no identity, so it was given one");
             minted
         });
-        let mut instance = Self {
+        Self {
             state,
             id,
             key,
-            domain: startup.domain.clone(),
-            serving: startup.serving,
-            build: startup.build.clone(),
-            runtime: startup.runtime.clone(),
+            source,
+            path,
+            domain,
+            serving: port,
+            address,
+            runtime,
             rng,
+            next,
             turns: BTreeMap::new(),
             warrants: BTreeMap::new(),
             interrupted: BTreeSet::new(),
@@ -211,6 +353,7 @@ impl Instance {
             tunnels: BTreeMap::new(),
             routing: BTreeMap::new(),
             deferred: VecDeque::new(),
+            timers: BTreeSet::new(),
             // Written once on waking, before anything can depend on this
             // instance: a first run has a file at all, a file that had no
             // identity has one from the moment it is opened, and a path that
@@ -218,82 +361,47 @@ impl Instance {
             // change — `docs/conventions.md` §3.
             dirty: true,
             staged: Vec::new(),
-        };
-        let (mut effects, swept) = instance.waking(startup);
-        instance.flush(&mut effects);
-        Ok(Woken {
-            instance,
-            effects,
-            swept,
-        })
+            announced: false,
+            swept: None,
+        }
     }
 
-    /// Which instance this is.
-    #[must_use]
-    pub const fn id(&self) -> InstanceId {
-        self.id
+    /// What waking asks for: the world told what booting found, the sweep,
+    /// and the first write.
+    pub(crate) fn waking_up(&mut self, containers: &[Container]) -> Vec<Effect> {
+        let mut effects = vec![Effect::App(AppEffect::Booted {
+            runtime: self.runtime.clone(),
+            domain: self.domain.to_string(),
+        })];
+        let (swept, tally) = self.waking(containers);
+        effects.extend(swept);
+        self.swept = Some(tally);
+        self.flush(&mut effects);
+        effects
     }
 
-    /// What this instance knows, for reading.
-    ///
-    /// The world reads this to say what it is serving; it decides nothing
-    /// from it, because deciding is what [`Instance::step`] is for.
-    #[must_use]
-    pub const fn state(&self) -> &State {
-        &self.state
+    /// An identifier for an effect this instance will be answered about.
+    const fn effect_id(&mut self) -> EffectId {
+        let id = EffectId(self.next);
+        // An identifier only has to be unique among the effects still
+        // waiting to be answered — the writes not yet landed and the timers
+        // not yet gone off — so coming round could only meet one long spent.
+        self.next = self.next.wrapping_add(1); // CLAMP-OK: the cycle is `EffectId`'s contract.
+        id
     }
 
-    /// What a presented credential entitles its bearer to, if this instance
-    /// minted it and the turn it was minted for is still running.
-    #[must_use]
-    pub fn warranted(&self, presented: &str) -> Option<&Warranted> {
-        self.warrants.get(presented)
-    }
-
-    /// One event in, effects out.
-    ///
-    /// The whole of the instance's interface after construction. Every
-    /// decision the daemon makes is made in here, on one thread, in the order
-    /// events arrive.
+    /// Handles one event and answers with what to do about it.
     pub fn step(&mut self, event: Event) -> Vec<Effect> {
         let mut effects = Vec::new();
-        let Event::App(event) = event;
         match event {
-            AppEvent::Persisted { outcome } => self.persisted(outcome, &mut effects),
-            AppEvent::TurnEnded { speaker, outcome } => self.ended(speaker, outcome, &mut effects),
-            AppEvent::Probed { job, answering } => {
-                if !answering {
-                    // Halted, so the port it was on reaches nothing.
-                    self.forget_tunnel(job);
-                }
-                probed(job, answering, &mut effects);
+            Event::Written { id, outcome } => self.written(id, outcome, &mut effects),
+            Event::Woke { id } => self.woke(id, &mut effects),
+            Event::Read { .. } | Event::Ran { .. } => {
+                tracing::warn!(
+                    "answered something this instance did not ask for while awake; ignored"
+                );
             }
-            AppEvent::Listed { running } => self.listed(&running, &mut effects),
-            AppEvent::Woke {
-                timer: Timer::Settle,
-            } => {
-                effects.emit(AppEffect::ListRunning);
-                effects.push(sweep::settle_later());
-            }
-            AppEvent::Heard { channel, message } => self.heard(channel, &message, &mut effects),
-            AppEvent::Inspected {
-                container,
-                present,
-                agent,
-            } => self.inspected(&container, present, agent, &mut effects),
-            AppEvent::ToolCalled {
-                id,
-                at,
-                nearby,
-                bearer,
-                body,
-            } => self.tool_called(id, at, nearby, bearer.as_deref(), &body, &mut effects),
-            AppEvent::ThreadOpened { job, outcome } => self.thread_opened(job, outcome),
-            AppEvent::Posted { request, outcome } => self.posted(request, outcome),
-            AppEvent::Request { id, request } => self.requested(id, request, &mut effects),
-            AppEvent::TunnelAsked { id, job } => self.tunnel_asked(id, job, &mut effects),
-            AppEvent::PortFound { job, port } => self.port_found(job, port, &mut effects),
-            AppEvent::TunnelFailed { job, why } => self.tunnel_failed(job, &why),
+            Event::App(event) => self.told(event, &mut effects),
         }
         self.flush(&mut effects);
         debug_assert!(
@@ -303,25 +411,117 @@ impl Instance {
         effects
     }
 
+    /// Handles one thing the application's own world said.
+    fn told(&mut self, event: AppEvent, effects: &mut Vec<Effect>) {
+        match event {
+            AppEvent::Serving { .. } => {
+                tracing::debug!("told again where the dashboard is served; ignored");
+            }
+            AppEvent::TurnEnded { speaker, outcome } => self.ended(speaker, outcome, effects),
+            AppEvent::Probed { job, answering } => {
+                if !answering {
+                    // Halted, so the port it was on reaches nothing.
+                    self.forget_tunnel(job);
+                }
+                probed(job, answering, effects);
+            }
+            AppEvent::Listed { running } => self.listed(&running, effects),
+            AppEvent::Heard { channel, message } => self.heard(channel, &message, effects),
+            AppEvent::Inspected {
+                container,
+                present,
+                agent,
+            } => self.inspected(&container, present, agent, effects),
+            AppEvent::ToolCalled {
+                id,
+                at,
+                nearby,
+                bearer,
+                body,
+            } => self.tool_called(id, at, nearby, bearer.as_deref(), &body, effects),
+            AppEvent::ThreadOpened { job, outcome } => self.thread_opened(job, outcome),
+            AppEvent::Posted { request, outcome } => self.posted(request, outcome),
+            AppEvent::Request { id, request } => self.requested(id, request, effects),
+            AppEvent::TunnelAsked { id, job } => self.tunnel_asked(id, job, effects),
+            AppEvent::PortFound { job, port } => self.port_found(job, port, effects),
+            AppEvent::TunnelFailed { job, why } => self.tunnel_failed(job, &why),
+        }
+    }
+
+    /// A timer went off.
+    fn woke(&mut self, id: EffectId, effects: &mut Vec<Effect>) {
+        if self.timers.remove(&id) {
+            effects.emit(AppEffect::ListRunning);
+            let settling = self.settle_later();
+            effects.push(settling);
+        } else {
+            tracing::warn!("woken for a timer this instance did not set; ignored");
+        }
+    }
+
     /// What the world said about a write.
     ///
-    /// Persists are answered in the order they were asked for, so the front
-    /// of the queue is the one being answered. A write that failed drops what
-    /// waited on it: the state in memory is still right, the next change asks
-    /// again, and nothing outward-facing happens on the strength of a record
-    /// that is not on the disk.
-    fn persisted(&mut self, outcome: Result<(), String>, effects: &mut Vec<Effect>) {
-        let Some(waiting) = self.deferred.pop_front() else {
+    /// Writes are answered in the order they were asked for, so the front of
+    /// the queue is the one being answered. A write that landed releases what
+    /// waited on it; the first to land is what the address is announced
+    /// after, because it is what says the file can be written at all. A write
+    /// that failed drops what waited on it: the state in memory is still
+    /// right, the next change asks again, and nothing outward-facing happens
+    /// on the strength of a record that is not on the disk — except at the
+    /// start, where a file that cannot be written is a start that refuses.
+    fn written(&mut self, id: EffectId, outcome: Result<(), String>, effects: &mut Vec<Effect>) {
+        let Some((asked, waiting)) = self.deferred.pop_front() else {
             tracing::warn!("the world answered a write nobody asked for; ignored");
             return;
         };
+        if asked != id {
+            tracing::error!("writes were answered out of order; carrying on in the order asked");
+        }
         match outcome {
-            Ok(()) => effects.extend(waiting),
+            Ok(()) => {
+                effects.extend(waiting);
+                if !self.announced {
+                    self.announced = true;
+                    effects.push(Generic::Print {
+                        text: self.announcement(),
+                    });
+                }
+            }
             Err(why) => {
                 tracing::error!(%why, "the instance could not be written");
-                self.dropped(waiting);
+                if self.announced {
+                    self.dropped(waiting);
+                } else {
+                    effects.push(Generic::Exit {
+                        message: format!(
+                            "the instance at {} could not be written\n  caused by: {why}",
+                            self.path.display()
+                        ),
+                    });
+                }
             }
         }
+    }
+
+    /// The startup block: every field on its own line, the address last.
+    ///
+    /// Outward from the program to this instance's data: what it is, what it
+    /// needs in order to work, what opens its file, where that file is, and
+    /// the domain — the one most likely to be wrong on a machine this was
+    /// deployed to, so it is said out loud. The address is last, and that
+    /// ordering is load-bearing: it is what anything supervising a start
+    /// waits for, so everything worth reading has to be above it.
+    fn announcement(&self) -> String {
+        format!(
+            "\nstageman is running.\n  version    {}\n  runtime    {}\n  key        {}\n  \
+             instance   {}\n  domain     {}\n\n  dashboard  http://{}\n\n",
+            release::described(),
+            self.runtime.display(),
+            self.source,
+            self.path.display(),
+            self.domain,
+            self.address,
+        )
     }
 
     /// What becomes of effects that waited on a write that never landed.
@@ -369,9 +569,13 @@ impl Instance {
         self.dirty = false;
         match file::sealed(&self.state, self.id, &self.key, &mut self.rng) {
             Ok(bytes) => {
-                self.deferred.push_back(staged);
-                effects.emit(AppEffect::Persist {
-                    bytes: stageman_vocabulary::Bytes::new(bytes),
+                let id = self.effect_id();
+                self.deferred.push_back((id, staged));
+                effects.push(Generic::Write {
+                    id,
+                    path: self.path.clone(),
+                    bytes: bytes.into(),
+                    private: false,
                 });
             }
             Err(why) => {
@@ -429,7 +633,6 @@ impl Instance {
     }
 }
 
-/// A fresh identifier from the instance's own randomness.
 fn mint(rng: &mut StdRng) -> Uuid {
     let mut bytes = [0_u8; 16];
     rng.fill_bytes(&mut bytes);

@@ -31,28 +31,23 @@ use stageman_instance::{AppEvent, Domain, Routed, decode};
 
 use crate::world::Located;
 
-/// What names the domain this instance answers on.
-const DOMAIN_VARIABLE: &str = "STAGEMAN_DOMAIN";
-
-/// The domain this instance answers on.
+/// The domain this instance answers on, once the instance has said.
 ///
-/// Read once per process, like the runtime and the job endpoint's port: a
-/// value that changed underneath a running daemon would leave jobs holding
-/// addresses that used to work. The instance is told it on waking, and this
-/// is where the world reads it from the environment.
-pub static DOMAIN: std::sync::LazyLock<Domain> =
-    std::sync::LazyLock::new(|| chosen_domain(std::env::var(DOMAIN_VARIABLE).ok().as_deref()));
+/// Decided by the instance from its environment and told to the world on
+/// booting; until then every request is the dashboard's, since no job can
+/// have been told an address yet. On its way out: once the listener is the
+/// instance's own to bind, the instance answers where each request goes.
+static DOMAIN: std::sync::OnceLock<Domain> = std::sync::OnceLock::new();
 
-/// Which domain to answer on, given what the environment said.
-///
-/// Anything unreadable falls back rather than failing, for the reason the job
-/// endpoint's port does the same: a mistyped value should not stop an instance
-/// starting, because a tunnel is not what an operator came for. It is reported
-/// at startup either way, so the fallback is visible rather than silent — and
-/// here that matters more than it does for a port, because the fallback is a
-/// working domain rather than an obviously wrong one.
-fn chosen_domain(named: Option<&str>) -> Domain {
-    named.and_then(Domain::parse).unwrap_or_else(Domain::local)
+/// Takes the domain the instance decided on.
+pub fn adopt(domain: &str) {
+    let Some(domain) = Domain::parse(domain) else {
+        tracing::error!(%domain, "the instance named a domain that is not one");
+        return;
+    };
+    if DOMAIN.set(domain).is_err() {
+        tracing::error!("the instance booted twice; the second domain is ignored");
+    }
 }
 
 /// Where a job's tunnel is, as somebody answers it.
@@ -125,7 +120,10 @@ async fn forwarded(
         .or_else(|| request.uri().host().map(str::to_owned))
         .unwrap_or_default();
 
-    match decode(&host, &DOMAIN) {
+    let Some(domain) = DOMAIN.get() else {
+        return next.run(request).await;
+    };
+    match decode(&host, domain) {
         Routed::Dashboard => next.run(request).await,
         Routed::Stranger => {
             tracing::warn!(
@@ -247,19 +245,6 @@ async fn relay(
 
 #[cfg(test)]
 mod tests {
-    use super::{Domain, chosen_domain};
-
-    /// A mistyped value falls back rather than stopping the instance.
-    #[test]
-    fn an_unreadable_domain_falls_back_to_the_default() {
-        assert_eq!(chosen_domain(None), Domain::local());
-        assert_eq!(chosen_domain(Some("not a domain")), Domain::local());
-        assert_eq!(
-            chosen_domain(Some("example.com")),
-            Domain::parse("example.com").expect("a domain"),
-        );
-    }
-
     /// Everything the instance decides is pure and tested there, and none of
     /// it proves a request arrives.
     ///
@@ -271,9 +256,10 @@ mod tests {
     /// contributes is a port, and a port is a port. Nor an instance: where a
     /// job is comes from a table this test writes.
     mod forwarding {
-        use super::super::{DOMAIN, Found, forwarded};
+        use super::super::{Found, adopt, forwarded};
         use dioxus::server::axum;
         use stageman_core::{JobId, Uuid};
+        use stageman_instance::Domain;
         use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
 
         /// What the dashboard answers, so that a misrouted request is obvious.
@@ -377,6 +363,7 @@ mod tests {
 
         /// This instance, with the layer under test in front of a dashboard.
         async fn an_instance_serving() -> u16 {
+            adopt(Domain::local().as_str());
             let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
                 .await
                 .expect("a port");
@@ -425,7 +412,7 @@ mod tests {
             TABLE.lock().insert(job, container);
             let instance = an_instance_serving().await;
 
-            let named = format!("{}.{}", job.as_uuid(), *DOMAIN);
+            let named = format!("{}.{}", job.as_uuid(), Domain::local());
             let answered = asked(instance, &named).await;
             assert!(answered.contains("FROM-THE-JOB"), "{answered}");
             assert!(
@@ -434,7 +421,7 @@ mod tests {
                  build its own links: {answered}"
             );
 
-            let dashboard = asked(instance, DOMAIN.as_str()).await;
+            let dashboard = asked(instance, Domain::local().as_str()).await;
             assert!(dashboard.contains(DASHBOARD), "{dashboard}");
         }
 
@@ -448,12 +435,16 @@ mod tests {
         async fn a_name_that_is_no_job_is_refused_rather_than_shown_the_dashboard() {
             let instance = an_instance_serving().await;
 
-            let answered = asked(instance, &format!("nobody.{}", *DOMAIN)).await;
+            let answered = asked(instance, &format!("nobody.{}", Domain::local())).await;
             assert!(answered.starts_with("HTTP/1.1 404"), "{answered}");
             assert!(!answered.contains(DASHBOARD), "{answered}");
 
             let unknown = JobId::from_uuid(Uuid::from_u128(99));
-            let answered = asked(instance, &format!("{}.{}", unknown.as_uuid(), *DOMAIN)).await;
+            let answered = asked(
+                instance,
+                &format!("{}.{}", unknown.as_uuid(), Domain::local()),
+            )
+            .await;
             assert!(answered.starts_with("HTTP/1.1 404"), "{answered}");
         }
 
@@ -480,7 +471,7 @@ mod tests {
                         "GET / HTTP/1.1\r\nHost: {}.{}\r\nConnection: Upgrade\r\n\
                          Upgrade: probe\r\n\r\n",
                         job.as_uuid(),
-                        *DOMAIN
+                        Domain::local()
                     )
                     .as_bytes(),
                 )

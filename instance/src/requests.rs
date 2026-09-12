@@ -19,7 +19,7 @@ use stageman_core::{
 };
 use stageman_wire::{ChannelDraft, Draft, Ending, KitDraft, Refusal, VariableDraft};
 
-use crate::Instance;
+use crate::Running;
 use crate::turns::listening_on;
 use crate::views;
 use crate::vocabulary::{AppEffect, RequestId, Speaker};
@@ -174,13 +174,13 @@ pub enum Response {
     Refused(Refusal),
 }
 
-impl Instance {
+impl Running {
     /// Answers a request, once whatever it changed is on the disk.
     pub fn requested(&mut self, id: RequestId, request: Request, effects: &mut Vec<Effect>) {
         let answered = match request {
             Request::Instance => Ok(Response::Instance(views::overview(
                 &self.state,
-                &self.runtime,
+                &self.runtime.display().to_string(),
             ))),
             Request::Agents => Ok(Response::Agents(views::listed(&self.state))),
             Request::Configure { agent, credential } => self.configure(&agent, &credential),

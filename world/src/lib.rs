@@ -10,10 +10,19 @@
 //! Small enough to be read rather than tested, which is the point of it
 //! being a crate of its own: what is here is a channel, a loop, and one
 //! performer per mechanism, and none of them holds a domain type.
+//!
+//! **A write is performed inline and everything else on a task.** A write is
+//! the one effect the deciding half waits on before anything outward-facing,
+//! so it is performed where the loop can await it and answered in the order
+//! it was asked for; everything that takes time runs on a task of its own,
+//! and the loop is free to answer the next event.
 
+use std::fs;
+use std::io::{self, Write as _};
+use std::path::Path;
 use std::sync::Arc;
 
-use stageman_vocabulary::{App, Deciding, Effect, Event, Named};
+use stageman_vocabulary::{App, Bytes, Deciding, Effect, Environment, Event, Finished, Named};
 
 /// The way in: events go to the loop, and nothing comes back this way.
 ///
@@ -52,14 +61,15 @@ pub trait Perform<A: App>: Send + Sync + 'static {
 
 /// Steps the deciding half for as long as this process runs.
 ///
-/// `pending` is what it asked for on waking, performed before the first event
-/// is read. Each effect is performed before the next is looked at, which is
-/// what keeps an answered effect answered in the order it was asked for; a
-/// performer that has nothing to wait on returns at once.
+/// `pending` is what it asked for on construction, performed before the
+/// first event is read. Each effect is performed before the next is looked
+/// at, which is what keeps an answered effect answered in the order it was
+/// asked for; a performer that has nothing to wait on returns at once.
 #[mutants::skip]
 pub fn run<D, P>(
     deciding: D,
     pending: Vec<Effect<D::App>>,
+    world: Arc<World<D::App>>,
     performer: Arc<P>,
     mut events: tokio::sync::mpsc::UnboundedReceiver<Event<D::App>>,
 ) where
@@ -69,12 +79,12 @@ pub fn run<D, P>(
     drop(tokio::spawn(async move {
         let mut deciding = deciding;
         for effect in pending {
-            perform(&performer, effect).await;
+            perform(&world, &performer, effect).await;
         }
         while let Some(event) = events.recv().await {
             tracing::trace!(kind = event.kind(), "stepping");
             for effect in deciding.step(event) {
-                perform(&performer, effect).await;
+                perform(&world, &performer, effect).await;
             }
         }
         tracing::error!("the world stopped sending events, so the instance stopped stepping");
@@ -84,9 +94,177 @@ pub fn run<D, P>(
 /// Performs one effect: a generic one as the mechanism it names, and one of
 /// the application's by handing it over.
 #[mutants::skip]
-async fn perform<A: App, P: Perform<A>>(performer: &Arc<P>, effect: Effect<A>) {
+async fn perform<A: App, P: Perform<A>>(
+    world: &Arc<World<A>>,
+    performer: &Arc<P>,
+    effect: Effect<A>,
+) {
     tracing::trace!(kind = effect.kind(), "performing");
     match effect {
+        Effect::Read { id, path } => {
+            let world = Arc::clone(world);
+            drop(tokio::spawn(async move {
+                let contents = tokio::task::spawn_blocking(move || read(&path))
+                    .await
+                    .unwrap_or_else(|why| Err(why.to_string()));
+                world.send(Event::Read { id, contents });
+            }));
+        }
+        Effect::Write {
+            id,
+            path,
+            bytes,
+            private,
+        } => {
+            let outcome =
+                tokio::task::spawn_blocking(move || write(&path, bytes.as_slice(), private))
+                    .await
+                    .unwrap_or_else(|why| Err(why.to_string()));
+            world.send(Event::Written { id, outcome });
+        }
+        Effect::Run {
+            id,
+            program,
+            arguments,
+            environment,
+            stdin,
+        } => {
+            let world = Arc::clone(world);
+            drop(tokio::spawn(async move {
+                let finished = run_once(&program, &arguments, &environment, stdin).await;
+                world.send(Event::Ran { id, finished });
+            }));
+        }
+        Effect::Wake { id, after } => {
+            let world = Arc::clone(world);
+            drop(tokio::spawn(async move {
+                tokio::time::sleep(after).await;
+                world.send(Event::Woke { id });
+            }));
+        }
+        Effect::Print { text } => {
+            // Whoever started this process is reading here, and a reader
+            // that has gone away is not a reason to stop: the write is
+            // attempted, and its failure is the one thing not worth a line.
+            let mut out = io::stdout().lock();
+            let _ = out.write_all(text.as_bytes());
+            let _ = out.flush();
+        }
+        #[expect(
+            clippy::exit,
+            reason = "an exit effect is how the instance ends the process, and this is its performer"
+        )]
+        Effect::Exit { message } => {
+            // The program's last word, to whoever ran it, and not through a
+            // log level anybody could filter.
+            eprintln!("stageman: {message}");
+            std::process::exit(1);
+        }
         Effect::App(effect) => performer.perform(effect).await,
+    }
+}
+
+/// Reads a file whole, telling absent from unreadable.
+fn read(path: &Path) -> Result<Option<Bytes>, String> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(Bytes::new(bytes))),
+        Err(why) if why.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(why) => Err(why.to_string()),
+    }
+}
+
+/// Writes a file whole, atomically, making its directory if need be.
+fn write(path: &Path, bytes: &[u8], private: bool) -> Result<(), String> {
+    if let Some(directory) = path.parent()
+        && !directory.as_os_str().is_empty()
+    {
+        fs::create_dir_all(directory).map_err(|why| why.to_string())?;
+    }
+    write_atomically(path, bytes, private).map_err(|why| why.to_string())
+}
+
+/// Replaces a file in one step, so a crash mid-write cannot truncate it.
+///
+/// Written beside the target rather than in a temporary directory, because
+/// renaming across filesystems is not atomic and would silently become a
+/// copy. A private file is created readable and writable by its owner alone,
+/// where the platform has an opinion; a mode is set at creation rather than
+/// afterwards, so there is no moment at which it is readable by anybody
+/// else.
+///
+/// # Errors
+///
+/// Fails if the file cannot be created, written, synced or renamed.
+pub fn write_atomically(path: &Path, bytes: &[u8], private: bool) -> io::Result<()> {
+    let temporary = path.with_extension("tmp");
+    let outcome = (|| {
+        let mut opening = fs::OpenOptions::new();
+        opening.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        if private {
+            std::os::unix::fs::OpenOptionsExt::mode(&mut opening, 0o600);
+        }
+        #[cfg(not(unix))]
+        let _ = private;
+        let mut file = opening.open(&temporary)?;
+        file.write_all(bytes)?;
+        // Rename is atomic, but only orders against data that has reached the
+        // disk. Without this a crash can leave an intact name over empty
+        // contents, which is the failure this function exists to prevent.
+        file.sync_all()?;
+        fs::rename(&temporary, path)
+    })();
+    if outcome.is_err() {
+        // Best effort: the write already failed, and failing to tidy up after
+        // it is not worth reporting over the failure itself.
+        drop(fs::remove_file(&temporary));
+    }
+    outcome
+}
+
+/// Runs a program once, with exactly the environment given, to its end.
+#[mutants::skip]
+async fn run_once(
+    program: &Path,
+    arguments: &[String],
+    environment: &Environment,
+    stdin: Option<Bytes>,
+) -> Finished {
+    let mut command = tokio::process::Command::new(program);
+    command
+        .args(arguments)
+        .env_clear()
+        .envs(environment)
+        .stdin(if stdin.is_some() {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        })
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(why) if why.kind() == io::ErrorKind::NotFound => return Finished::NotFound,
+        Err(why) => return Finished::Failed(why.to_string()),
+    };
+    if let Some(bytes) = stdin
+        && let Some(mut writing) = child.stdin.take()
+    {
+        use tokio::io::AsyncWriteExt as _;
+        if let Err(why) = writing.write_all(bytes.as_slice()).await {
+            return Finished::Failed(format!("its standard input could not be written: {why}"));
+        }
+        // End of file is what tells a program it has the whole of its input,
+        // and dropping the handle is what sends one.
+        drop(writing);
+    }
+    match child.wait_with_output().await {
+        Ok(output) => Finished::Exited {
+            status: output.status.code(),
+            stdout: Bytes::new(output.stdout),
+            stderr: Bytes::new(output.stderr),
+        },
+        Err(why) => Finished::Failed(why.to_string()),
     }
 }

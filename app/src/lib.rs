@@ -27,8 +27,6 @@ pub(crate) mod endpoint;
 #[cfg(feature = "server")]
 mod listening;
 #[cfg(feature = "server")]
-pub mod release;
-#[cfg(feature = "server")]
 mod serving;
 #[cfg(feature = "server")]
 pub(crate) mod tooling;
@@ -45,7 +43,9 @@ pub use dashboard::Dashboard;
 #[cfg(feature = "server")]
 pub use endpoint::{bind as bind_tools, serve as serve_tools};
 #[cfg(feature = "server")]
-pub use serving::{RUNTIME, serve};
+pub use serving::serve;
+#[cfg(feature = "server")]
+pub use stageman_instance::release;
 #[cfg(feature = "server")]
 pub use tooling::served_at as tools_endpoint;
 #[cfg(feature = "server")]

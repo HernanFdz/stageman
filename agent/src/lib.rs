@@ -1535,24 +1535,13 @@ const fn agent_label(agent: Agent) -> &'static str {
 }
 
 /// The agent a label names, if it names one this build knows.
-fn labelled(text: &str) -> Option<Agent> {
+/// The agent a label names, if this build knows it.
+#[must_use]
+pub fn labelled(text: &str) -> Option<Agent> {
     Agent::ALL
         .iter()
         .copied()
         .find(|agent| agent_label(*agent) == text)
-}
-
-/// The arguments that ask a runtime which agent a container was made for.
-///
-/// Pure, so the query can be asserted without a container. Both runtimes take
-/// the same template.
-fn made_for_arguments(name: &str) -> Vec<String> {
-    vec![
-        "inspect".to_owned(),
-        "--format".to_owned(),
-        format!("{{{{index .Config.Labels \"{AGENT_LABEL}\"}}}}"),
-        name.to_owned(),
-    ]
 }
 
 /// Which agent a container was made for, if it says.
@@ -1569,7 +1558,13 @@ fn made_for_arguments(name: &str) -> Vec<String> {
 #[mutants::skip]
 pub async fn made_for(runtime: &ContainerRuntime, name: &str) -> Result<Option<Agent>, AgentError> {
     let asked = tokio::process::Command::new(runtime.path())
-        .args(made_for_arguments(name))
+        .args(
+            Command::Label {
+                name: name.to_owned(),
+                label: Label::Agent,
+            }
+            .arguments(),
+        )
         .kill_on_drop(true)
         .output()
         .await
@@ -1585,19 +1580,6 @@ pub async fn made_for(runtime: &ContainerRuntime, name: &str) -> Result<Option<A
         });
     }
     Ok(labelled(String::from_utf8_lossy(&asked.stdout).trim()))
-}
-
-/// The arguments that ask a runtime which instance started a container.
-///
-/// Pure, so the query can be asserted without a container. The same template
-/// as [`made_for_arguments`], and both runtimes take it.
-fn started_by_arguments(name: &str) -> Vec<String> {
-    vec![
-        "inspect".to_owned(),
-        "--format".to_owned(),
-        format!("{{{{index .Config.Labels \"{INSTANCE_LABEL}\"}}}}"),
-        name.to_owned(),
-    ]
 }
 
 /// Which instance started a container, if it says.
@@ -1618,7 +1600,13 @@ pub async fn started_by(
     name: &str,
 ) -> Result<Option<InstanceId>, AgentError> {
     let asked = tokio::process::Command::new(runtime.path())
-        .args(started_by_arguments(name))
+        .args(
+            Command::Label {
+                name: name.to_owned(),
+                label: Label::Instance,
+            }
+            .arguments(),
+        )
         .kill_on_drop(true)
         .output()
         .await
@@ -1643,7 +1631,9 @@ pub async fn started_by(
 /// that is not an identifier is treated the same way: unreadable rather than
 /// somebody else's, because guessing the other way round would let a sweep
 /// remove a container it could not actually place.
-fn minted(text: &str) -> Option<InstanceId> {
+/// The instance a label names, if it names one this build can read.
+#[must_use]
+pub fn minted(text: &str) -> Option<InstanceId> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return None;
@@ -2067,10 +2057,125 @@ pub async fn halt(runtime: &ContainerRuntime, name: &str) -> Result<(), AgentErr
     })
 }
 
-/// Every container this project has left behind, by name.
+/// One question the runtime is asked, as a value.
 ///
-/// Found by label rather than by reading the instance, so that a container
-/// whose job the snapshot has lost is still findable.
+/// Rendered to the arguments the runtime is given and read back from them,
+/// and the two directions are tested against each other, so that whatever
+/// decides to ask — the instance, since
+/// `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`
+/// — and whatever answers in a simulation cannot drift apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Command {
+    /// Whether the runtime answers at all, which is also how a candidate for
+    /// one is found to be present.
+    Version,
+    /// The names of every container this project started, or only the
+    /// running ones.
+    Containers {
+        /// Only those up right now.
+        running_only: bool,
+    },
+    /// What one label on a container says.
+    Label {
+        /// The container.
+        name: String,
+        /// Which label.
+        label: Label,
+    },
+}
+
+/// The labels a container of this project's carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Label {
+    /// Which instance started it.
+    Instance,
+    /// Which agent it was made for.
+    Agent,
+}
+
+impl Label {
+    const fn key(self) -> &'static str {
+        match self {
+            Self::Instance => INSTANCE_LABEL,
+            Self::Agent => AGENT_LABEL,
+        }
+    }
+
+    fn of(key: &str) -> Option<Self> {
+        match key {
+            INSTANCE_LABEL => Some(Self::Instance),
+            AGENT_LABEL => Some(Self::Agent),
+            _ => None,
+        }
+    }
+}
+
+impl Command {
+    /// The arguments that ask it, which both runtimes take.
+    #[must_use]
+    pub fn arguments(&self) -> Vec<String> {
+        match self {
+            Self::Version => vec!["version".to_owned()],
+            Self::Containers { running_only } => {
+                let mut arguments = vec!["ps".to_owned()];
+                if !running_only {
+                    arguments.push("--all".to_owned());
+                }
+                arguments.extend([
+                    "--filter".to_owned(),
+                    format!("label={OWNER_LABEL}"),
+                    "--format".to_owned(),
+                    "{{.Names}}".to_owned(),
+                ]);
+                arguments
+            }
+            Self::Label { name, label } => vec![
+                "inspect".to_owned(),
+                "--format".to_owned(),
+                format!("{{{{index .Config.Labels \"{}\"}}}}", label.key()),
+                name.clone(),
+            ],
+        }
+    }
+
+    /// The question these arguments ask, if they ask one this build renders.
+    #[must_use]
+    pub fn parse(arguments: &[String]) -> Option<Self> {
+        let words: Vec<&str> = arguments.iter().map(String::as_str).collect();
+        match words.as_slice() {
+            ["version"] => Some(Self::Version),
+            ["ps", "--all", "--filter", filter, "--format", "{{.Names}}"]
+                if *filter == format!("label={OWNER_LABEL}") =>
+            {
+                Some(Self::Containers {
+                    running_only: false,
+                })
+            }
+            ["ps", "--filter", filter, "--format", "{{.Names}}"]
+                if *filter == format!("label={OWNER_LABEL}") =>
+            {
+                Some(Self::Containers { running_only: true })
+            }
+            ["inspect", "--format", template, name] => {
+                let key = template
+                    .strip_prefix("{{index .Config.Labels \"")?
+                    .strip_suffix("\"}}")?;
+                Some(Self::Label {
+                    name: (*name).to_owned(),
+                    label: Label::of(key)?,
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Every container this project has ever started that the runtime still
+/// holds, by name.
+///
+/// The names a container carries are the only thing a listing is asked for:
+/// the two runtimes format a listing's labels differently, and an inspection
+/// is the one shape both take, so labels are asked per container.
 ///
 /// # Errors
 ///
@@ -2079,26 +2184,27 @@ pub async fn halt(runtime: &ContainerRuntime, name: &str) -> Result<(), AgentErr
 pub async fn abandoned(runtime: &ContainerRuntime) -> Result<Vec<String>, AgentError> {
     listed(
         runtime,
-        &["ps", "--all", "--filter", &format!("label={OWNER_LABEL}")],
+        &Command::Containers {
+            running_only: false,
+        },
     )
     .await
 }
 
-/// The names a listing query reports.
+/// Every container this project started that is up right now, by name.
 ///
-/// Shared by the two that ask it, which differ by one flag. Written once
-/// because the format string is the part that has to match on both — a listing
-/// that printed anything else would be parsed as container names and produce a
-/// sweep acting on nothing.
+/// # Errors
 ///
-/// Skipped by mutation testing, like everything here that drives the runtime:
-/// what it does is spawn a process and hand the output to [`names`], which is
-/// where the deciding is and is tested directly.
+/// Fails if the runtime cannot be run, or refuses the query.
 #[mutants::skip]
-async fn listed(runtime: &ContainerRuntime, query: &[&str]) -> Result<Vec<String>, AgentError> {
+pub async fn running(runtime: &ContainerRuntime) -> Result<Vec<String>, AgentError> {
+    listed(runtime, &Command::Containers { running_only: true }).await
+}
+
+#[mutants::skip]
+async fn listed(runtime: &ContainerRuntime, query: &Command) -> Result<Vec<String>, AgentError> {
     let listed = tokio::process::Command::new(runtime.path())
-        .args(query)
-        .args(["--format", "{{.Names}}"])
+        .args(query.arguments())
         .kill_on_drop(true)
         .output()
         .await
@@ -2116,17 +2222,13 @@ async fn listed(runtime: &ContainerRuntime, query: &[&str]) -> Result<Vec<String
     Ok(names(&String::from_utf8_lossy(&listed.stdout)))
 }
 
-/// The container names in what a listing reported.
-///
-/// Pure, so what a sweep works from can be tested without a runtime. A blank
-/// line is dropped rather than carried: the runtime prints one when it found
-/// nothing, and a name that is the empty string reaches a subcommand that
-/// would then address something other than what was meant.
-fn names(reported: &str) -> Vec<String> {
+/// The names in a listing, one per line, however the runtime spaced them.
+#[must_use]
+pub fn names(reported: &str) -> Vec<String> {
     reported
         .lines()
         .map(str::trim)
-        .filter(|name| !name.is_empty())
+        .filter(|line| !line.is_empty())
         .map(str::to_owned)
         .collect()
 }
@@ -2196,26 +2298,6 @@ fn published(reported: &str) -> Option<u16> {
         .lines()
         .filter_map(|line| line.trim().rsplit(':').next())
         .find_map(|port| port.trim().parse().ok())
-}
-
-/// Every container this project has running right now, by name.
-///
-/// The same question [`abandoned`] asks, narrowed to what is up. Since
-/// `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`
-/// those are two different sets and the difference is the point: a container
-/// that is merely retained costs a writable layer, and one that is running
-/// costs whatever is running in it.
-///
-/// # Errors
-///
-/// Fails if the runtime cannot be run, or refuses the query.
-#[mutants::skip]
-pub async fn running(runtime: &ContainerRuntime) -> Result<Vec<String>, AgentError> {
-    listed(
-        runtime,
-        &["ps", "--filter", &format!("label={OWNER_LABEL}")],
-    )
-    .await
 }
 
 /// Removes a container and everything inside it.
@@ -2586,6 +2668,57 @@ mod tests {
 
     /// A container's label names its agent both ways, and an unknown label
     /// names nobody.
+    /// Every question renders to arguments and reads back as itself, and
+    /// arguments that ask nothing this build renders read as nothing.
+    #[test]
+    fn every_command_reads_back_from_its_own_arguments() {
+        let every = [
+            Command::Version,
+            Command::Containers {
+                running_only: false,
+            },
+            Command::Containers { running_only: true },
+            Command::Label {
+                name: "stageman-job-1".to_owned(),
+                label: Label::Instance,
+            },
+            Command::Label {
+                name: "stageman-foreman-2".to_owned(),
+                label: Label::Agent,
+            },
+        ];
+        for command in every {
+            assert_eq!(
+                Command::parse(&command.arguments()),
+                Some(command.clone()),
+                "{command:?}"
+            );
+        }
+        assert_eq!(Command::parse(&["rm".to_owned(), "-f".to_owned()]), None);
+        assert_eq!(
+            Command::parse(&[
+                "ps".to_owned(),
+                "--all".to_owned(),
+                "--filter".to_owned(),
+                "label=other".to_owned(),
+                "--format".to_owned(),
+                "{{.Names}}".to_owned()
+            ]),
+            None,
+            "another project's containers are not this one's question"
+        );
+        assert_eq!(
+            Command::parse(&[
+                "inspect".to_owned(),
+                "--format".to_owned(),
+                "{{index .Config.Labels \"other\"}}".to_owned(),
+                "x".to_owned()
+            ]),
+            None
+        );
+        assert_eq!(names(" a \n\nb\n"), vec!["a".to_owned(), "b".to_owned()]);
+    }
+
     #[test]
     fn an_agents_label_reads_back_as_that_agent() {
         for agent in Agent::ALL {
@@ -2598,7 +2731,11 @@ mod tests {
         assert_eq!(labelled(""), None, "no label is no agent");
         assert_eq!(labelled("gpt"), None, "a label this build does not know");
         assert_eq!(
-            made_for_arguments("stageman-foreman-x"),
+            Command::Label {
+                name: "stageman-foreman-x".to_owned(),
+                label: Label::Agent,
+            }
+            .arguments(),
             vec![
                 "inspect",
                 "--format",
@@ -3909,7 +4046,11 @@ mod tests {
     /// The question is asked of the named container, and of nothing else.
     #[test]
     fn asking_which_instance_started_a_container_names_that_container() {
-        let arguments = started_by_arguments("stageman-job-abc");
+        let arguments = Command::Label {
+            name: "stageman-job-abc".to_owned(),
+            label: Label::Instance,
+        }
+        .arguments();
         assert_eq!(arguments[0], "inspect");
         assert_eq!(
             arguments.last().map(String::as_str),

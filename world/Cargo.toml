@@ -18,7 +18,7 @@ repository.workspace = true
 [dependencies]
 mutants = "0.0.4"
 stageman-vocabulary = { workspace = true }
-tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.53.1", features = ["io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1.44"
 
 [lints]

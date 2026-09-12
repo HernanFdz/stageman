@@ -15,7 +15,7 @@ use stageman_core::{
 };
 use stageman_foreman::Starting;
 
-use crate::Instance;
+use crate::Running;
 use crate::turns::Turn;
 use crate::vocabulary::{AppEffect, Message, Run, Speaker};
 use crate::{Effect, Emit as _};
@@ -75,7 +75,7 @@ fn keeps(made_for: Option<Agent>, wanted: Agent) -> bool {
     made_for.is_none_or(|made| made == wanted)
 }
 
-impl Instance {
+impl Running {
     /// A message at the root of a project's channel, for its foreman.
     ///
     /// Taken or queued in this step, in the order messages arrive — which is

@@ -30,7 +30,7 @@ fn a_first_message_opens_a_session_and_is_acknowledged_first() {
     let shape = world.shape();
     let persisted = shape
         .iter()
-        .position(|line| line.starts_with("<- Persisted"))
+        .position(|line| line.starts_with("<- Written"))
         .expect("the inbox was written");
     let inspected = shape
         .iter()

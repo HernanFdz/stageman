@@ -95,6 +95,11 @@ first.
   and servers that turn what happens into events, the adapters that perform
   effects — the runtime through **agent**, the channels, the disk — and
   nothing that decides.
+  `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`
+  then took the generic half of that into **world** and startup into the
+  instance, so what is left here is the application's own half: an entry point
+  that draws a seed, binds the dashboard and steps, and adapters for the
+  effects only this application has.
 - **instance** — the deciding and the doing as one deterministic value: what
   the daemon knows, and what it does about each thing that happens, answered
   as effects. It is the seam
@@ -104,6 +109,14 @@ first.
   an effect, read a clock, or draw on entropy of its own. What it keeps goes
   to the disk, and it seals and opens that file itself; what it merely holds,
   a restart begins without.
+
+  It **boots itself**, from a seed and the environment and nothing else:
+  whether a runtime answers, where its key is, what its file holds and what
+  the last run left behind are all things it asks for and is answered about.
+  So a start that refuses — no runtime, an unreadable file, a key that is not
+  key material — is a sequence of effects rather than a path through somebody
+  else's `main`, and a scenario pins it. See
+  `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`.
 - **wire** — the plain serialisable types that cross to a browser: views,
   drafts, and the dashboard's error. Its own crate rather than a module of
   **app**, because the instance answers a request with one and the app is the

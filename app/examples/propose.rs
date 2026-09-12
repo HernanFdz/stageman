@@ -16,19 +16,19 @@
 //! the process table by any user on the machine, which is the same reason
 //! containers are given `--env NAME` rather than `--env NAME=value`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use stageman::world::{Asking, Performer};
-use stageman_agent::ContainerRuntime;
 use stageman_core::{
     Agent, AgentConfig, JobId, Key, Kit, KitConfig, KitName, NONCE_LEN, Platform, Project,
     ProjectId, Secret, State, Timestamp, Uuid,
 };
-use stageman_instance::{Domain, Instance, Request, Response, Seed, Startup};
+use stageman_instance::{Instance, Request, Response, Seed};
+use stageman_vocabulary::Environment;
 use stageman_wire::Standing;
 
 /// The work this job is asked to do.
@@ -77,11 +77,6 @@ async fn propose() -> Result<(), String> {
 
     let agent_token = read_secret("anthropic-token")?;
     let platform_token = read_secret("github-token")?;
-    let runtime = ContainerRuntime::new(located_runtime()?);
-    runtime
-        .verify()
-        .await
-        .map_err(|error| format!("the container runtime is not usable: {error}"))?;
 
     // An instance that exists only for this run. Nothing configures a project
     // yet — that is the next step in `docs/open-questions.md` — so this builds
@@ -118,9 +113,10 @@ async fn propose() -> Result<(), String> {
     std::fs::create_dir_all(&scratch).map_err(|error| format!("no scratch directory: {error}"))?;
     let path = scratch.join("state.json");
     let key = throwaway_key();
-    let file = sealed(&state, &key)?;
+    std::fs::write(&path, sealed(&state, &key)?)
+        .map_err(|error| format!("the instance could not be written: {error}"))?;
 
-    let world = stood_up(runtime, path, &file, key).await?;
+    let world = stood_up(&path, &key).await?;
 
     println!("Proposing against {repository}");
     println!("This runs a real agent and opens a real pull request. It takes a few minutes.");
@@ -163,42 +159,32 @@ async fn propose() -> Result<(), String> {
 }
 
 /// Stands the world up the way the daemon stands it up, less the dashboard:
-/// the instance opens the state, the loop steps it, and the tools endpoint
-/// answers the job's own calls.
-async fn stood_up(
-    runtime: ContainerRuntime,
-    path: PathBuf,
-    file: &[u8],
-    key: Key,
-) -> Result<Arc<Asking>, String> {
-    // The runtime lives as long as the process, which is what the world asks
-    // of it.
-    let runtime: &'static ContainerRuntime = Box::leak(Box::new(runtime));
+/// the instance boots from an environment naming its file and its key, the
+/// loop steps it, and the tools endpoint answers the job's own calls.
+async fn stood_up(path: &Path, key: &Key) -> Result<Arc<Asking>, String> {
     let listening = stageman::bind_tools()
         .await
         .map_err(|error| format!("the tools endpoint could not be bound: {error}"))?;
     drop(tokio::spawn(async move {
         drop(stageman::serve_tools(listening).await);
     }));
-    let startup = Startup {
-        containers: Vec::new(),
-        domain: Domain::local(),
-        serving: 0,
-        build: "propose".to_owned(),
-        runtime: runtime.path().display().to_string(),
-    };
-    let woken = Instance::open(Some(file), key, seed(), &startup)
-        .map_err(|error| format!("the instance could not be opened: {error}"))?;
-    let (world, events) = stageman_world::World::new();
-    let asking = Asking::new(world);
-    stageman::world::adopt(Arc::clone(&asking));
-    let performer = Performer::new(
-        runtime,
-        path,
-        stageman::tools_endpoint(),
-        Arc::clone(&asking),
+    let mut environment: Environment = std::env::vars().collect();
+    environment.insert(
+        stageman_instance::STATE_VARIABLE.to_owned(),
+        path.display().to_string(),
     );
-    stageman_world::run(woken.instance, woken.effects, Arc::new(performer), events);
+    environment.insert(stageman_instance::KEY_VARIABLE.to_owned(), key.to_base64());
+    let (instance, effects) = Instance::boot(seed(), environment);
+    let (world, events) = stageman_world::World::new();
+    let asking = Asking::new(Arc::clone(&world));
+    stageman::world::adopt(Arc::clone(&asking));
+    // No dashboard is served here, and the instance is told so.
+    asking.send(stageman_instance::AppEvent::Serving {
+        address: "127.0.0.1:0".to_owned(),
+        port: 0,
+    });
+    let performer = Performer::new(stageman::tools_endpoint(), Arc::clone(&asking));
+    stageman_world::run(instance, effects, world, Arc::new(performer), events);
     Ok(asking)
 }
 
@@ -256,28 +242,6 @@ fn read_secret(name: &str) -> Result<Secret, String> {
         return Err(format!("{} is empty", path.display()));
     }
     Ok(Secret::new(trimmed.to_owned()))
-}
-
-/// Where the container runtime is.
-///
-/// Looked up when nothing says, which is allowed here for the reason the rule
-/// itself gives: `docs/conventions.md` §3 is about a daemon that must work
-/// under a service manager, and this is a command a person runs by hand.
-fn located_runtime() -> Result<PathBuf, String> {
-    if let Ok(configured) = std::env::var("STAGEMAN_CONTAINER_RUNTIME")
-        && !configured.trim().is_empty()
-    {
-        return Ok(PathBuf::from(configured.trim()));
-    }
-    let located = std::process::Command::new("sh")
-        .args(["-c", "command -v docker"])
-        .output()
-        .map_err(|error| format!("looking for a container runtime: {error}"))?;
-    let path = String::from_utf8_lossy(&located.stdout).trim().to_owned();
-    if path.is_empty() {
-        return Err("no container runtime found; set STAGEMAN_CONTAINER_RUNTIME".to_owned());
-    }
-    Ok(PathBuf::from(path))
 }
 
 /// A key for an instance that is discarded when this ends.

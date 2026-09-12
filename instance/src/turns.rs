@@ -4,7 +4,7 @@
 use stageman_agent::{Answer, StopReason};
 use stageman_core::{JobId, Progress, Project, Secret, Speaking, State, Thread, Waiting};
 
-use crate::Instance;
+use crate::Running;
 use crate::vocabulary::{AppEffect, Speaker};
 use crate::{Effect, Emit as _};
 
@@ -13,6 +13,7 @@ use crate::{Effect, Emit as _};
 /// Both per turn rather than per job, which is why this is a fresh value each
 /// time: a stop asked of a turn that has ended would stop the next one, and a
 /// claim left over would be recorded against work the agent never described.
+#[derive(Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Turn {
     /// Whether a person asked this turn to stop.
     pub stopping: bool,
@@ -93,7 +94,7 @@ pub fn listening_on(project: &Project) -> Option<(Secret, Speaking)> {
     Some((bound.listen_credential.clone()?, bound.speaking()))
 }
 
-impl Instance {
+impl Running {
     /// What a turn ending means, and what follows from it.
     ///
     /// A completion for a speaker with no turn in flight is one from before a

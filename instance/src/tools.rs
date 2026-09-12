@@ -16,7 +16,7 @@
 
 use stageman_core::{ChannelConfig, Kit, ProjectId, State, Timestamp, Waiting};
 
-use crate::Instance;
+use crate::Running;
 use crate::foreman::kits_offered;
 use crate::vocabulary::{AppEffect, RequestId, Speaker, Warranted};
 use crate::{Effect, Emit as _};
@@ -382,7 +382,7 @@ const ACCEPTED: u16 = 202;
 const BAD_REQUEST: u16 = 400;
 const FORBIDDEN: u16 = 403;
 
-impl Instance {
+impl Running {
     /// Answers one request on the tools endpoint, if whoever asked is allowed
     /// to.
     ///
@@ -429,7 +429,7 @@ impl Instance {
                     serde_json::json!({
                         "protocolVersion": protocol,
                         "capabilities": {"tools": {}},
-                        "serverInfo": {"name": SERVER, "version": self.build},
+                        "serverInfo": {"name": SERVER, "version": crate::release::described()},
                     }),
                 )),
             ),

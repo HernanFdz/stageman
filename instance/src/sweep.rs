@@ -9,8 +9,8 @@
 use stageman_core::{InstanceId, JobId, Outcome, Progress, State};
 
 use crate::turns::{Turn, listening_on};
-use crate::vocabulary::{AppEffect, Container, Run, Speaker, Startup, Timer};
-use crate::{Effect, Emit as _, Instance, SETTLING_INTERVAL};
+use crate::vocabulary::{AppEffect, Container, Run, Speaker};
+use crate::{Effect, Emit as _, Running, SETTLING_INTERVAL};
 
 /// One container, placed as far as its name allows.
 ///
@@ -167,7 +167,7 @@ pub fn resting(up: &[JobId], state: &State) -> (Vec<JobId>, Vec<JobId>) {
 ///
 /// Counts of what was *asked* rather than of what came of it: a turn put
 /// back to work is answered later, and how it went is recorded on the job.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Swept {
     /// Jobs put back to work.
     pub resumed: usize,
@@ -220,17 +220,20 @@ fn tallied(
     }
 }
 
-/// The timer that asks, every so often, which containers still deserve to be
-/// up.
-pub fn settle_later() -> Effect {
-    AppEffect::Wake {
-        after: SETTLING_INTERVAL,
-        timer: Timer::Settle,
+impl Running {
+    /// The timer that asks, every so often, which containers still deserve
+    /// to be up. A generic wake, remembered by its identifier as this one.
+    pub fn settle_later(&mut self) -> Effect {
+        let id = self.effect_id();
+        self.timers.insert(id);
+        Effect::Wake {
+            id,
+            after: SETTLING_INTERVAL,
+        }
     }
-    .into()
 }
 
-impl Instance {
+impl Running {
     /// What the instance does on waking, given what the runtime holds.
     ///
     /// The last piece of
@@ -240,9 +243,9 @@ impl Instance {
     /// and reported otherwise; from jobs to containers, every job that is not
     /// over either has a container or is lost, and every working one is put
     /// back to work.
-    pub fn waking(&mut self, startup: &Startup) -> (Vec<Effect>, Swept) {
+    pub fn waking(&mut self, containers: &[Container]) -> (Vec<Effect>, Swept) {
         let mut effects = Vec::new();
-        let left: Vec<Left<'_>> = startup.containers.iter().map(Left::of).collect();
+        let left: Vec<Left<'_>> = containers.iter().map(Left::of).collect();
 
         // First, because everything below reasons about containers a job
         // still needs, and these belong to nothing this instance knows.
@@ -316,7 +319,8 @@ impl Instance {
                 });
             }
         }
-        effects.push(settle_later());
+        let settling = self.settle_later();
+        effects.push(settling);
 
         // A foreman found holding a message was interrupted mid-turn, and
         // nothing else would ever drive it again: only an arrival that finds
