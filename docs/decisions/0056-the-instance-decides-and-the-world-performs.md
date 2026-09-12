@@ -2,7 +2,13 @@
 
 ## Status
 
-Accepted. Supersedes the rejection of ports and adapters in
+Accepted. Amended by
+`docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`,
+which makes the vocabulary below application-agnostic, has the instance
+constructed from a seed and the environment rather than from its file and the
+runtime's facts, and turns the container tests into a recorder; the seam, the
+answered persist, and what is kept against what is held all stand. Supersedes
+the rejection of ports and adapters in
 `docs/decisions/0003-four-crates-around-a-core.md` for one seam — the boundary
 between what this project decides and what it asks of the outside — and leaves
 that record's crate rule standing. Narrows

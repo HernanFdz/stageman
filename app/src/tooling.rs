@@ -99,10 +99,10 @@ async fn called(
         tracing::warn!(%peer, "the tools were reached from beyond this machine");
     }
     let bearer = presented(&headers).map(str::to_owned);
-    let Some(world) = crate::world() else {
+    let Some(asking) = crate::asking() else {
         return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    match world
+    match asking
         .call(stageman_core::Timestamp::now(), nearby, bearer, body)
         .await
     {

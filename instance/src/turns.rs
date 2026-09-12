@@ -5,7 +5,8 @@ use stageman_agent::{Answer, StopReason};
 use stageman_core::{JobId, Progress, Project, Secret, Speaking, State, Thread, Waiting};
 
 use crate::Instance;
-use crate::vocabulary::{Effect, Speaker};
+use crate::vocabulary::{AppEffect, Speaker};
+use crate::{Effect, Emit as _};
 
 /// One turn in flight: what it can be told, and what it has said.
 ///
@@ -137,7 +138,7 @@ impl Instance {
         // The container is asked whether it is still showing something, at
         // one of the three moments 0043 names. Inward-facing, so it need not
         // wait for the record to land.
-        effects.push(Effect::Probe { job });
+        effects.emit(AppEffect::Probe { job });
 
         // Said whichever way it went: the agent has already reported for
         // itself if it could, and this says the one thing the agent cannot,
@@ -146,8 +147,8 @@ impl Instance {
         if turn.notify
             && let Some((speaking, thread)) = speaking_for(&self.state, job)
         {
-            self.defer(Effect::Say {
-                speaking,
+            self.defer(AppEffect::Say {
+                speaking: speaking.into(),
                 thread,
                 text: stageman_foreman::attention_notice().to_owned(),
             });

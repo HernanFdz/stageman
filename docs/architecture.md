@@ -111,14 +111,29 @@ first.
   nothing, which is what keeps
   `docs/decisions/0022-the-browser-never-sees-the-domain.md` true from the
   other side.
+- **vocabulary** — the events and effects the instance and the world exchange,
+  as an application-agnostic set of mechanisms — a file, a process, a request,
+  a socket, a port, a timer — generic over a hole the application fills with
+  its own. It names nothing but serialisation, and its types serialise in full
+  and format not at all. See
+  `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`.
+- **world** — what performs the vocabulary on the async runtime, and the only
+  crate that names that runtime. It knows no domain: it steps whatever it is
+  given, performs each generic effect as the mechanism it names, and hands the
+  application's own effects to whatever the entry point supplied. Small enough
+  to be read rather than tested, which is the point of the two crates being
+  separate.
 
 Dependencies point inward. **core** names nothing. **agent** may name **core**.
 **foreman** and **job** may name **core** and **agent** — both run agents,
 for different shapes of work — and may never name each other; everything they
 share is a type in **core**, which is what keeps the deciding and the doing from
-growing into one another. **instance** may name all four, for their types and
-their pure functions, and nothing that can perform an effect. **wire** names
-nothing. **app** may name all six; nothing may name **app**.
+growing into one another. **vocabulary** names nothing but serialisation.
+**instance** may name the four, **wire** and **vocabulary**, for their types
+and their pure functions, and nothing that can perform an effect. **wire**
+names nothing. **world** names **vocabulary** and the async runtime, and no
+crate of this project's above it. **app** may name all of them; nothing may
+name **app**.
 
 There is one more direction, and it is inside **app** rather than between
 crates: **nothing served to a browser may name any of the four, nor the

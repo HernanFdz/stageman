@@ -183,10 +183,10 @@ fn NavLink(to: Route, children: Element) -> Element {
 pub(crate) async fn ask(
     request: stageman_instance::Request,
 ) -> DashboardResult<stageman_instance::Response> {
-    let Some(world) = crate::world() else {
+    let Some(asking) = crate::asking() else {
         return Err(DashboardError::NoInstance);
     };
-    match world.ask(request).await {
+    match asking.ask(request).await {
         Some(stageman_instance::Response::Refused(refusal)) => Err(refusal.into()),
         Some(response) => Ok(response),
         None => {

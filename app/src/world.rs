@@ -1,24 +1,20 @@
-//! The world: everything the instance is not.
+//! This application's half of the world: what performs its own effects, and
+//! how whoever needs an answer waits for it.
 //!
-//! One loop owns the instance and steps it, one event at a time, on a task of
-//! its own. Everything that happens — a turn ending, a message heard, a
-//! person's request, a timer — is an event sent to that loop, and everything
-//! the instance asks for comes back as an effect this module performs: the
-//! runtime through the agent crate, the channels, the disk, and the answers
-//! to whoever is waiting on a request. Nothing here decides; see
-//! `docs/decisions/0056-the-instance-decides-and-the-world-performs.md`.
-//!
-//! **A request is a question with an identifier.** A server function, the
-//! tools endpoint and the tunnel layer each send an event carrying one and
-//! wait on a channel for the effect that carries it back, which is what lets
-//! the instance answer a person's request between two turns ending without
-//! either side holding a lock.
+//! The loop, the channel and the generic mechanisms are the world crate's.
+//! What is here is what only stageman knows how to perform — a turn, a
+//! probe, a container's fate, a channel's posting — and the one thing the
+//! generic world cannot do for it: match an answer to whoever asked. A server
+//! function, the tools endpoint and the tunnel layer each send an event
+//! carrying an identifier and wait for the effect that carries it back, and
+//! the map below is where they wait. See
+//! `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`.
 //!
 //! **The disk is written inline and everything else on a task.** A write is
 //! the one effect the instance waits on before anything outward-facing, so
-//! it is performed in the loop and answered in order; a turn takes minutes,
-//! and `docs/conventions.md` §3 keeps that off the loop that answers the
-//! dashboard.
+//! it is performed where the loop can await it and answered in order; a turn
+//! takes minutes, and `docs/conventions.md` §3 keeps that off the loop that
+//! answers the dashboard.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -28,32 +24,33 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use stageman_agent::ContainerRuntime;
-use stageman_core::{Channel, JobId, Timestamp};
+use stageman_core::{Channel, JobId, Secret, Speaking, Timestamp};
 use stageman_instance::{
-    Container, Effect, Event, Instance, Request, RequestId, Response, Run, Speaker,
+    AppEffect, AppEvent, Container, Event, Request, RequestId, Response, Run, Speaker, Stageman,
 };
+use stageman_world::{Perform, World};
 
-/// The world this process runs, once it has an instance.
+/// The application's way in, once an instance has been opened.
 ///
 /// A process-wide value, because the things that send to it — a server
 /// function, a request on the tools endpoint, the tunnel layer — are handed
 /// nothing by anybody: each is called by a framework with a request and
 /// nothing else. One process operates one instance, so this is even true.
-static WORLD: OnceLock<Arc<World>> = OnceLock::new();
+static ASKING: OnceLock<Arc<Asking>> = OnceLock::new();
 
-/// The world, if an instance has been opened in this process.
+/// The way in, if an instance has been opened in this process.
 #[must_use]
-pub fn world() -> Option<&'static Arc<World>> {
-    WORLD.get()
+pub fn asking() -> Option<&'static Arc<Asking>> {
+    ASKING.get()
 }
 
-/// Makes a world the one this process runs.
+/// Makes a way in the one this process uses.
 ///
 /// Once. A second is a fault in startup rather than a request to honour, and
 /// is said rather than silently replaced.
-pub fn adopt(world: Arc<World>) {
-    if WORLD.set(world).is_err() {
-        tracing::error!("this process already has a world; the second was not adopted");
+pub fn adopt(asking: Arc<Asking>) {
+    if ASKING.set(asking).is_err() {
+        tracing::error!("this process already has a way in; the second was not adopted");
     }
 }
 
@@ -83,35 +80,30 @@ enum Answered {
     Tunnel(Located),
 }
 
-/// The way in to the instance: events go one way, and answers come back to
-/// whoever asked.
-pub struct World {
-    /// What the loop reads.
-    events: tokio::sync::mpsc::UnboundedSender<Event>,
+/// Sends the instance events, and matches its answers to whoever asked.
+pub struct Asking {
+    /// The loop's way in.
+    world: Arc<World<Stageman>>,
     /// The next request identifier. Never reused while this process runs.
     next: AtomicU64,
     /// Everyone waiting on an answer, by the identifier it will carry.
     waiting: parking_lot::Mutex<BTreeMap<RequestId, Answering>>,
 }
 
-impl World {
-    /// A world nothing is stepping yet, and the events it will send.
+impl Asking {
+    /// A way in to this world.
     #[must_use]
-    pub fn new() -> (Arc<Self>, tokio::sync::mpsc::UnboundedReceiver<Event>) {
-        let (events, receiving) = tokio::sync::mpsc::unbounded_channel();
-        let world = Arc::new(Self {
-            events,
+    pub fn new(world: Arc<World<Stageman>>) -> Arc<Self> {
+        Arc::new(Self {
+            world,
             next: AtomicU64::new(1),
             waiting: parking_lot::Mutex::new(BTreeMap::new()),
-        });
-        (world, receiving)
+        })
     }
 
     /// Tells the instance something happened.
-    pub fn send(&self, event: Event) {
-        if self.events.send(event).is_err() {
-            tracing::error!("the instance is no longer stepping, so an event was lost");
-        }
+    pub fn send(&self, event: impl Into<Event>) {
+        self.world.send(event);
     }
 
     /// A request identifier nothing else in this process has.
@@ -127,7 +119,7 @@ impl World {
         let (answer, waiting) = tokio::sync::oneshot::channel();
         let id = self.minted();
         self.waiting.lock().insert(id, Answering::Person(answer));
-        self.send(Event::Request { id, request });
+        self.send(AppEvent::Request { id, request });
         waiting.await.ok()
     }
 
@@ -145,7 +137,7 @@ impl World {
         let (answer, waiting) = tokio::sync::oneshot::channel();
         let id = self.minted();
         self.waiting.lock().insert(id, Answering::Tool(answer));
-        self.send(Event::ToolCalled {
+        self.send(AppEvent::ToolCalled {
             id,
             at,
             nearby,
@@ -160,7 +152,7 @@ impl World {
         let (answer, waiting) = tokio::sync::oneshot::channel();
         let id = self.minted();
         self.waiting.lock().insert(id, Answering::Tunnel(answer));
-        self.send(Event::TunnelAsked { id, job });
+        self.send(AppEvent::TunnelAsked { id, job });
         waiting.await.ok()
     }
 
@@ -187,16 +179,22 @@ impl World {
     }
 }
 
-/// What performs the instance's effects.
-pub struct Performer {
+/// What performs this application's own effects.
+///
+/// Cheap to clone and handed whole to every task it spawns, which is why the
+/// state sits behind one shared inner value.
+#[derive(Clone)]
+pub struct Performer(Arc<Inner>);
+
+struct Inner {
     /// The runtime every container effect goes through.
     runtime: &'static ContainerRuntime,
     /// Where the instance is kept.
     path: PathBuf,
     /// Where a container reaches the tools this instance serves.
     endpoint: String,
-    /// Where events go back.
-    world: Arc<World>,
+    /// Where events go back, and where answers are matched to askers.
+    asking: Arc<Asking>,
     /// The turns running right now, by whose they are, each with the handle
     /// that stops it. In memory and never written down: a turn does not
     /// survive this process, so neither should anything about one.
@@ -204,23 +202,35 @@ pub struct Performer {
 }
 
 impl Performer {
-    /// A performer for this runtime, this file and this world.
+    /// A performer for this runtime, this file and this way in.
     #[must_use]
     pub fn new(
         runtime: &'static ContainerRuntime,
         path: PathBuf,
         endpoint: String,
-        world: Arc<World>,
-    ) -> Arc<Self> {
-        Arc::new(Self {
+        asking: Arc<Asking>,
+    ) -> Self {
+        Self(Arc::new(Inner {
             runtime,
             path,
             endpoint,
-            world,
+            asking,
             turns: parking_lot::Mutex::new(BTreeMap::new()),
-        })
+        }))
     }
 
+    /// Performs an effect on a task of its own.
+    fn spawn<F, Fut>(&self, effect: F)
+    where
+        F: FnOnce(Arc<Inner>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let inner = Arc::clone(&self.0);
+        drop(tokio::spawn(effect(inner)));
+    }
+}
+
+impl Perform<Stageman> for Performer {
     /// Performs one effect: on a task of its own, or inline where the
     /// instance waits on the answer before doing anything else.
     ///
@@ -228,96 +238,103 @@ impl Performer {
     /// runtime or the network: every arm performs an effect and decides
     /// nothing a test could check without one.
     #[mutants::skip]
-    async fn perform(self: &Arc<Self>, effect: Effect) {
+    async fn perform(&self, effect: AppEffect) {
         match effect {
-            Effect::Persist { bytes } => self.persist(bytes).await,
-            Effect::RunTurn { speaker, run } => self.turn(speaker, run),
-            Effect::StopTurn { speaker } => {
+            AppEffect::Persist { bytes } => self.persist(bytes.into_inner()).await,
+            AppEffect::RunTurn { speaker, run } => self.turn(speaker, run),
+            AppEffect::StopTurn { speaker } => {
                 // A permit rather than a wake-up, so that a stop arriving in
                 // the instant between the turn starting and it waiting is not
                 // dropped on the floor.
-                if let Some(stopping) = self.turns.lock().get(&speaker) {
+                if let Some(stopping) = self.0.turns.lock().get(&speaker) {
                     stopping.notify_one();
                 }
             }
-            Effect::Probe { job } => self.probe(job),
-            Effect::ListRunning => self.list_running(),
-            Effect::Inspect { container } => self.inspect(container),
-            Effect::Halt { container } => self.halt(container),
-            Effect::Discard { container } => self.discard(container),
-            Effect::Reclaim => self.reclaim(),
-            Effect::Wake { after, timer } => self.spawn(move |performer| async move {
+            AppEffect::Probe { job } => self.probe(job),
+            AppEffect::ListRunning => self.list_running(),
+            AppEffect::Inspect { container } => self.inspect(container),
+            AppEffect::Halt { container } => self.halt(container),
+            AppEffect::Discard { container } => self.discard(container),
+            AppEffect::Reclaim => self.reclaim(),
+            AppEffect::Wake { after, timer } => self.spawn(move |inner| async move {
                 tokio::time::sleep(after).await;
-                performer.world.send(Event::Woke { timer });
+                inner.asking.send(AppEvent::Woke { timer });
             }),
-            Effect::Say {
+            AppEffect::Say {
                 speaking,
                 thread,
                 text,
             } => self.spawn(move |_| async move {
+                let speaking: Speaking = speaking.into();
                 if let Err(why) = crate::channel::say_in(&speaking, &thread, &text).await {
                     tracing::warn!(%why, "the thread could not be spoken to");
                 }
             }),
-            Effect::OpenThread {
+            AppEffect::OpenThread {
                 job,
                 speaking,
                 announcement,
-            } => self.spawn(move |performer| async move {
+            } => self.spawn(move |inner| async move {
+                let speaking: Speaking = speaking.into();
                 let outcome = crate::channel::open_thread(&speaking, Channel::Slack, &announcement)
                     .await
                     .map_err(|why| why.to_string());
-                performer.world.send(Event::ThreadOpened { job, outcome });
+                inner.asking.send(AppEvent::ThreadOpened { job, outcome });
             }),
-            Effect::Post {
+            AppEffect::Post {
                 request,
                 speaking,
                 thread,
                 text,
-            } => self.spawn(move |performer| async move {
+            } => self.spawn(move |inner| async move {
+                let speaking: Speaking = speaking.into();
                 let outcome = crate::channel::say_in(&speaking, &thread, &text)
                     .await
                     .map_err(|why| why.to_string());
-                performer.world.send(Event::Posted { request, outcome });
+                inner.asking.send(AppEvent::Posted { request, outcome });
             }),
-            Effect::Listen {
+            AppEffect::Listen {
                 project,
                 opening,
                 speaking,
             } => crate::listening::listen_to(
-                Arc::clone(&self.world),
+                Arc::clone(&self.0.asking),
                 crate::listening::Listening {
                     project,
-                    opening,
-                    speaking,
+                    opening: Secret::new(opening),
+                    speaking: speaking.into(),
                 },
             ),
-            Effect::FindPort { job } => self.find_port(job),
-            Effect::Respond { id, response } => self.world.answered(id, Answered::Person(response)),
-            Effect::ToolAnswered { id, status, body } => {
-                self.world.answered(id, Answered::Tool(status, body));
+            AppEffect::FindPort { job } => self.find_port(job),
+            AppEffect::Respond { id, response } => {
+                self.0.asking.answered(id, Answered::Person(response));
             }
-            Effect::Route { id, port } => self.world.answered(
+            AppEffect::ToolAnswered { id, status, body } => {
+                self.0.asking.answered(id, Answered::Tool(status, body));
+            }
+            AppEffect::Route { id, port } => self.0.asking.answered(
                 id,
                 Answered::Tunnel(port.map_or(Located::Nowhere, Located::At)),
             ),
         }
     }
+}
 
+impl Performer {
     /// Asks whether a job's tunnel is answering.
     #[mutants::skip]
-    fn probe(self: &Arc<Self>, job: JobId) {
-        self.spawn(move |performer| async move {
-            let answering = stageman_job::answering(performer.runtime, job).await;
-            performer.world.send(Event::Probed { job, answering });
+    fn probe(&self, job: JobId) {
+        self.spawn(move |inner| async move {
+            let answering = stageman_job::answering(inner.runtime, job).await;
+            inner.asking.send(AppEvent::Probed { job, answering });
         });
     }
 
     /// Asks which containers are running, and whose each is.
     #[mutants::skip]
-    fn list_running(self: &Arc<Self>) {
-        self.spawn(|performer| async move {
-            let names = match stageman_agent::running(performer.runtime).await {
+    fn list_running(&self) {
+        self.spawn(|inner| async move {
+            let names = match stageman_agent::running(inner.runtime).await {
                 Ok(names) => names,
                 Err(why) => {
                     tracing::warn!(%why, "could not ask which containers are running");
@@ -326,9 +343,9 @@ impl Performer {
             };
             let mut running = Vec::with_capacity(names.len());
             for name in names {
-                running.push(described(performer.runtime, name, true).await);
+                running.push(described(inner.runtime, name, true).await);
             }
-            performer.world.send(Event::Listed { running });
+            inner.asking.send(AppEvent::Listed { running });
         });
     }
 
@@ -337,12 +354,12 @@ impl Performer {
     /// A container that is not there refuses, and so does a runtime that will
     /// not answer; either way nothing can be resumed in it.
     #[mutants::skip]
-    fn inspect(self: &Arc<Self>, container: String) {
-        self.spawn(move |performer| async move {
-            let (present, agent) = stageman_agent::made_for(performer.runtime, &container)
+    fn inspect(&self, container: String) {
+        self.spawn(move |inner| async move {
+            let (present, agent) = stageman_agent::made_for(inner.runtime, &container)
                 .await
                 .map_or((false, None), |agent| (true, agent));
-            performer.world.send(Event::Inspected {
+            inner.asking.send(AppEvent::Inspected {
                 container,
                 present,
                 agent,
@@ -352,9 +369,9 @@ impl Performer {
 
     /// Stops a container, keeping it.
     #[mutants::skip]
-    fn halt(self: &Arc<Self>, container: String) {
-        self.spawn(move |performer| async move {
-            if let Err(why) = stageman_agent::halt(performer.runtime, &container).await {
+    fn halt(&self, container: String) {
+        self.spawn(move |inner| async move {
+            if let Err(why) = stageman_agent::halt(inner.runtime, &container).await {
                 tracing::warn!(%container, %why, "a container could not be stopped");
             }
         });
@@ -365,9 +382,9 @@ impl Performer {
     /// Not fatal, and deliberately not retried here: what is left is a
     /// container nothing needs, which is exactly what waking looks for.
     #[mutants::skip]
-    fn discard(self: &Arc<Self>, container: String) {
-        self.spawn(move |performer| async move {
-            if let Err(why) = stageman_agent::discard(performer.runtime, &container).await {
+    fn discard(&self, container: String) {
+        self.spawn(move |inner| async move {
+            if let Err(why) = stageman_agent::discard(inner.runtime, &container).await {
                 tracing::warn!(%container, %why, "a container could not be removed; waking will try again");
             }
         });
@@ -378,9 +395,9 @@ impl Performer {
     /// Housekeeping rather than work, so a runtime that will not answer is
     /// warned about and nothing else changes.
     #[mutants::skip]
-    fn reclaim(self: &Arc<Self>) {
-        self.spawn(|performer| async move {
-            match stageman_agent::reclaim(performer.runtime).await {
+    fn reclaim(&self) {
+        self.spawn(|inner| async move {
+            match stageman_agent::reclaim(inner.runtime).await {
                 Ok(gone) if gone > 0 => {
                     tracing::info!(images = gone, "reclaimed images no container needed");
                 }
@@ -392,29 +409,16 @@ impl Performer {
 
     /// Asks the runtime where a job's tunnel is published.
     #[mutants::skip]
-    fn find_port(self: &Arc<Self>, job: JobId) {
-        self.spawn(move |performer| async move {
-            let port = stageman_agent::tunnel_port(
-                performer.runtime,
-                &stageman_job::container(job),
-            )
-            .await
-            .unwrap_or_else(|why| {
-                tracing::debug!(%job, %why, "the runtime could not say where a job's tunnel is");
-                None
-            });
-            performer.world.send(Event::PortFound { job, port });
+    fn find_port(&self, job: JobId) {
+        self.spawn(move |inner| async move {
+            let port = stageman_agent::tunnel_port(inner.runtime, &stageman_job::container(job))
+                .await
+                .unwrap_or_else(|why| {
+                    tracing::debug!(%job, %why, "the runtime could not say where a job's tunnel is");
+                    None
+                });
+            inner.asking.send(AppEvent::PortFound { job, port });
         });
-    }
-
-    /// Performs an effect on a task of its own.
-    fn spawn<F, Fut>(self: &Arc<Self>, effect: F)
-    where
-        F: FnOnce(Arc<Self>) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = ()> + Send + 'static,
-    {
-        let performer = Arc::clone(self);
-        drop(tokio::spawn(effect(performer)));
     }
 
     /// Writes the instance, and says whether it landed.
@@ -427,7 +431,7 @@ impl Performer {
     /// again.
     #[mutants::skip]
     async fn persist(&self, bytes: Vec<u8>) {
-        let path = self.path.clone();
+        let path = self.0.path.clone();
         let outcome =
             match tokio::task::spawn_blocking(move || write_atomically(&path, &bytes)).await {
                 Ok(written) => written.map_err(|why| why.to_string()),
@@ -436,7 +440,7 @@ impl Performer {
         if let Err(why) = &outcome {
             tracing::error!(%why, "the instance could not be written");
         }
-        self.world.send(Event::Persisted { outcome });
+        self.0.asking.send(AppEvent::Persisted { outcome });
     }
 
     /// Runs one turn on a task of its own, and reports how it ended.
@@ -447,23 +451,41 @@ impl Performer {
     /// agent is no longer what it runs — see
     /// `docs/decisions/0053-a-job-is-stopped-or-retired-by-a-person.md`.
     #[mutants::skip]
-    fn turn(self: &Arc<Self>, speaker: Speaker, run: Run) {
+    fn turn(&self, speaker: Speaker, run: Run) {
         let stopping = Arc::new(tokio::sync::Notify::new());
-        self.turns.lock().insert(speaker, Arc::clone(&stopping));
-        self.spawn(move |performer| async move {
-            let tools = |warrant| stageman_agent::Tools::new(performer.endpoint.clone(), warrant);
+        self.0.turns.lock().insert(speaker, Arc::clone(&stopping));
+        self.spawn(move |inner| async move {
+            let tools = |warrant: String| {
+                stageman_agent::Tools::new(inner.endpoint.clone(), Secret::new(warrant))
+            };
             let running = async {
                 match run {
                     Run::Begin {
                         container,
-                        handout,
                         instance,
+                        agent,
+                        role,
+                        environment,
+                        repository,
+                        platform,
+                        kit,
                         warrant,
                         kickoff,
                     } => {
+                        let launch = stageman_agent::Launch {
+                            agent,
+                            role,
+                            environment: environment
+                                .into_iter()
+                                .map(|(name, value)| (name, Secret::new(value)))
+                                .collect(),
+                            repository,
+                            platform,
+                            kit,
+                        };
                         stageman_agent::begin(
-                            performer.runtime,
-                            &handout,
+                            inner.runtime,
+                            &launch,
                             &container,
                             instance,
                             Some(&tools(warrant)),
@@ -478,7 +500,7 @@ impl Performer {
                         text,
                     } => {
                         stageman_agent::resume(
-                            performer.runtime,
+                            inner.runtime,
                             &container,
                             &kit,
                             Some(&tools(warrant)),
@@ -492,36 +514,10 @@ impl Performer {
                 answered = running => answered.map_err(|why| because(&why)),
                 () = stopping.notified() => Err("stopped".to_owned()),
             };
-            performer.turns.lock().remove(&speaker);
-            performer.world.send(Event::TurnEnded { speaker, outcome });
+            inner.turns.lock().remove(&speaker);
+            inner.asking.send(AppEvent::TurnEnded { speaker, outcome });
         });
     }
-}
-
-/// Steps the instance for as long as this process runs.
-///
-/// `pending` is what the instance asked for on waking, performed before the
-/// first event is read. The loop ends when every sender is gone, which is
-/// never while the world is adopted.
-#[mutants::skip]
-pub fn run(
-    instance: Instance,
-    pending: Vec<Effect>,
-    performer: Arc<Performer>,
-    mut events: tokio::sync::mpsc::UnboundedReceiver<Event>,
-) {
-    drop(tokio::spawn(async move {
-        let mut instance = instance;
-        for effect in pending {
-            performer.perform(effect).await;
-        }
-        while let Some(event) = events.recv().await {
-            for effect in instance.step(event) {
-                performer.perform(effect).await;
-            }
-        }
-        tracing::error!("the world stopped sending events, so the instance stopped stepping");
-    }));
 }
 
 /// One container, as the instance is told about it: its name, and what its
@@ -622,8 +618,9 @@ fn because(failure: &dyn std::error::Error) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Answered, Located, Performer, World, because, write_atomically};
-    use stageman_instance::{Effect, Event, Request, Response};
+    use super::{Answered, Asking, Located, Performer, because, write_atomically};
+    use stageman_instance::{AppEffect, AppEvent, Event, Request, Response};
+    use stageman_world::{Perform as _, World};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -640,29 +637,30 @@ mod tests {
     #[tokio::test]
     async fn a_request_is_answered_by_the_effect_carrying_its_identifier() {
         let (world, mut events) = World::new();
+        let asking = Asking::new(world);
         let job = stageman_core::JobId::from_uuid(stageman_core::Uuid::from_u128(7));
 
-        let asking = {
-            let world = Arc::clone(&world);
-            tokio::spawn(async move { world.ask(Request::Instance).await })
+        let asked = {
+            let asking = Arc::clone(&asking);
+            tokio::spawn(async move { asking.ask(Request::Instance).await })
         };
-        let Some(Event::Request {
+        let Some(Event::App(AppEvent::Request {
             id,
             request: Request::Instance,
-        }) = soon(events.recv()).await
+        })) = soon(events.recv()).await
         else {
             panic!("the request, as an event");
         };
-        world.answered(id, Answered::Person(Response::Agents(Vec::new())));
+        asking.answered(id, Answered::Person(Response::Agents(Vec::new())));
         assert_eq!(
-            soon(asking).await.expect("the task"),
+            soon(asked).await.expect("the task"),
             Some(Response::Agents(Vec::new()))
         );
 
         let calling = {
-            let world = Arc::clone(&world);
+            let asking = Arc::clone(&asking);
             tokio::spawn(async move {
-                world
+                asking
                     .call(
                         stageman_core::Timestamp::UNIX_EPOCH,
                         true,
@@ -672,26 +670,27 @@ mod tests {
                     .await
             })
         };
-        let Some(Event::ToolCalled {
+        let Some(Event::App(AppEvent::ToolCalled {
             id, nearby, bearer, ..
-        }) = soon(events.recv()).await
+        })) = soon(events.recv()).await
         else {
             panic!("the call, as an event");
         };
         assert!(nearby);
         assert_eq!(bearer.as_deref(), Some("not-a-real-credential"));
-        world.answered(id, Answered::Tool(202, None));
+        asking.answered(id, Answered::Tool(202, None));
         assert_eq!(soon(calling).await.expect("the task"), Some((202, None)));
 
         let locating = {
-            let world = Arc::clone(&world);
-            tokio::spawn(async move { world.tunnel(job).await })
+            let asking = Arc::clone(&asking);
+            tokio::spawn(async move { asking.tunnel(job).await })
         };
-        let Some(Event::TunnelAsked { id, job: asked }) = soon(events.recv()).await else {
+        let Some(Event::App(AppEvent::TunnelAsked { id, job: asked })) = soon(events.recv()).await
+        else {
             panic!("the question, as an event");
         };
         assert_eq!(asked, job);
-        world.answered(id, Answered::Tunnel(Located::At(4242)));
+        asking.answered(id, Answered::Tunnel(Located::At(4242)));
         assert_eq!(
             soon(locating).await.expect("the task"),
             Some(Located::At(4242))
@@ -703,15 +702,16 @@ mod tests {
     #[tokio::test]
     async fn an_answer_of_the_wrong_kind_answers_nobody() {
         let (world, mut events) = World::new();
-        let asking = {
-            let world = Arc::clone(&world);
-            tokio::spawn(async move { world.ask(Request::Agents).await })
+        let asking = Asking::new(world);
+        let asked = {
+            let asking = Arc::clone(&asking);
+            tokio::spawn(async move { asking.ask(Request::Agents).await })
         };
-        let Some(Event::Request { id, .. }) = soon(events.recv()).await else {
+        let Some(Event::App(AppEvent::Request { id, .. })) = soon(events.recv()).await else {
             panic!("the request, as an event");
         };
-        world.answered(id, Answered::Tunnel(Located::Nowhere));
-        assert_eq!(soon(asking).await.expect("the task"), None);
+        asking.answered(id, Answered::Tunnel(Located::Nowhere));
+        assert_eq!(soon(asked).await.expect("the task"), None);
     }
 
     /// An effect is performed on a task of its own and comes back as an
@@ -719,6 +719,7 @@ mod tests {
     #[tokio::test]
     async fn an_effect_is_performed_and_answered_as_an_event() {
         let (world, mut events) = World::new();
+        let asking = Asking::new(world);
         let directory = tempfile::tempdir().expect("a temporary directory");
         let path = directory.path().join("instance.json");
         let runtime: &'static stageman_agent::ContainerRuntime = Box::leak(Box::new(
@@ -728,30 +729,30 @@ mod tests {
             runtime,
             path.clone(),
             "http://host.docker.internal:1/mcp".to_owned(),
-            Arc::clone(&world),
+            Arc::clone(&asking),
         );
 
         performer
-            .perform(Effect::Wake {
+            .perform(AppEffect::Wake {
                 after: Duration::from_millis(1),
                 timer: stageman_instance::Timer::Settle,
             })
             .await;
         assert!(matches!(
             soon(events.recv()).await,
-            Some(Event::Woke {
+            Some(Event::App(AppEvent::Woke {
                 timer: stageman_instance::Timer::Settle
-            })
+            }))
         ));
 
         performer
-            .perform(Effect::Persist {
-                bytes: b"landed".to_vec(),
+            .perform(AppEffect::Persist {
+                bytes: stageman_vocabulary::Bytes::new(b"landed".to_vec()),
             })
             .await;
         assert!(matches!(
             soon(events.recv()).await,
-            Some(Event::Persisted { outcome: Ok(()) })
+            Some(Event::App(AppEvent::Persisted { outcome: Ok(()) }))
         ));
         assert_eq!(std::fs::read(&path).expect("it landed"), b"landed");
 
@@ -759,16 +760,16 @@ mod tests {
             runtime,
             directory.path().join("nowhere").join("instance.json"),
             String::new(),
-            Arc::clone(&world),
+            Arc::clone(&asking),
         );
         elsewhere
-            .perform(Effect::Persist {
-                bytes: b"lost".to_vec(),
+            .perform(AppEffect::Persist {
+                bytes: stageman_vocabulary::Bytes::new(b"lost".to_vec()),
             })
             .await;
         assert!(matches!(
             soon(events.recv()).await,
-            Some(Event::Persisted { outcome: Err(_) })
+            Some(Event::App(AppEvent::Persisted { outcome: Err(_) }))
         ));
     }
 

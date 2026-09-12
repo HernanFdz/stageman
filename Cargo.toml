@@ -4,7 +4,7 @@
 # cannot name a crate it does not depend on.
 
 [workspace]
-members = ["core", "agent", "foreman", "job", "wire", "instance", "app", "xtask"]
+members = ["core", "agent", "foreman", "job", "wire", "vocabulary", "instance", "world", "app", "xtask"]
 # Must be explicit in a virtual manifest — there is no root package whose
 # edition could imply it, and the default without this line is resolver 1.
 resolver = "3"
@@ -39,6 +39,8 @@ stageman-agent = { path = "agent" }
 stageman-foreman = { path = "foreman" }
 stageman-job = { path = "job" }
 stageman-wire = { path = "wire" }
+stageman-vocabulary = { path = "vocabulary" }
+stageman-world = { path = "world" }
 stageman-instance = { path = "instance" }
 
 [profile.release]

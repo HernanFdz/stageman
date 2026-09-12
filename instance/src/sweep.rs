@@ -9,8 +9,8 @@
 use stageman_core::{InstanceId, JobId, Outcome, Progress, State};
 
 use crate::turns::{Turn, listening_on};
-use crate::vocabulary::{Container, Effect, Run, Speaker, Startup, Timer};
-use crate::{Instance, SETTLING_INTERVAL};
+use crate::vocabulary::{AppEffect, Container, Run, Speaker, Startup, Timer};
+use crate::{Effect, Emit as _, Instance, SETTLING_INTERVAL};
 
 /// One container, placed as far as its name allows.
 ///
@@ -222,11 +222,12 @@ fn tallied(
 
 /// The timer that asks, every so often, which containers still deserve to be
 /// up.
-pub const fn settle_later() -> Effect {
-    Effect::Wake {
+pub fn settle_later() -> Effect {
+    AppEffect::Wake {
         after: SETTLING_INTERVAL,
         timer: Timer::Settle,
     }
+    .into()
 }
 
 impl Instance {
@@ -252,7 +253,7 @@ impl Instance {
         let cleared = over(&left, &self.state);
         for job in &cleared {
             tracing::info!(%job, "removing the container of a job that is over");
-            effects.push(Effect::Discard {
+            effects.emit(AppEffect::Discard {
                 container: stageman_job::container(*job),
             });
         }
@@ -281,7 +282,7 @@ impl Instance {
             let speaker = Speaker::Job(*job);
             let warrant = self.warrant(speaker, thread);
             self.turns.insert(speaker, Turn::quiet());
-            effects.push(Effect::RunTurn {
+            effects.emit(AppEffect::RunTurn {
                 speaker,
                 run: Run::Resume {
                     container: stageman_job::container(*job),
@@ -302,16 +303,16 @@ impl Instance {
             .collect();
         let (placed, _) = resting(&up, &self.state);
         for job in placed {
-            effects.push(Effect::Probe { job });
+            effects.emit(AppEffect::Probe { job });
         }
 
-        effects.push(Effect::Reclaim);
+        effects.emit(AppEffect::Reclaim);
         for (project, watched) in &self.state.projects {
             if let Some((opening, speaking)) = listening_on(watched) {
-                effects.push(Effect::Listen {
+                effects.emit(AppEffect::Listen {
                     project: *project,
-                    opening,
-                    speaking,
+                    opening: opening.expose().to_owned(),
+                    speaking: speaking.into(),
                 });
             }
         }
@@ -376,7 +377,7 @@ impl Instance {
                 ),
             }
             if whose == Whose::Ours {
-                effects.push(Effect::Discard {
+                effects.emit(AppEffect::Discard {
                     container: container.named().to_owned(),
                 });
             }
@@ -402,7 +403,7 @@ impl Instance {
             .collect();
         let (placed, unplaced) = resting(&up, &self.state);
         for job in placed {
-            effects.push(Effect::Probe { job });
+            effects.emit(AppEffect::Probe { job });
         }
         for job in unplaced {
             let started = running
@@ -410,7 +411,7 @@ impl Instance {
                 .find(|container| stageman_job::job_of(&container.name) == Some(job))
                 .and_then(|container| container.instance);
             if belonging(started, self.id) == Whose::Ours {
-                effects.push(Effect::Probe { job });
+                effects.emit(AppEffect::Probe { job });
             } else {
                 tracing::debug!(
                     %job,

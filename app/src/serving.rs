@@ -27,10 +27,11 @@ use rand::rngs::{StdRng, SysRng};
 use rand::{Rng as _, SeedableRng as _};
 use stageman_agent::{AgentError, ContainerRuntime};
 use stageman_core::{Key, KeyError};
-use stageman_instance::{Effect, Event, Instance, Seed, Startup};
+use stageman_instance::{AppEffect, AppEvent, Effect, Instance, Seed, Startup};
+use stageman_world::World;
 
 use crate::Dashboard;
-use crate::world::{Performer, World};
+use crate::world::{Asking, Performer};
 
 /// The variable the snapshot's encryption key arrives in, as base64.
 ///
@@ -534,7 +535,8 @@ async fn awaken(
     }
 
     let (world, events) = World::new();
-    crate::world::adopt(Arc::clone(&world));
+    let asking = Asking::new(world);
+    crate::world::adopt(Arc::clone(&asking));
 
     // The instance writes itself once on waking, and that first write is
     // performed here rather than in the loop so that a path which cannot be
@@ -544,25 +546,25 @@ async fn awaken(
     let mut pending = Vec::new();
     for effect in woken.effects {
         match effect {
-            Effect::Persist { bytes } => {
-                crate::world::write_atomically(path, &bytes).map_err(|source| {
+            Effect::App(AppEffect::Persist { bytes }) => {
+                crate::world::write_atomically(path, bytes.as_slice()).map_err(|source| {
                     StartupError::Write {
                         path: path.to_owned(),
                         source,
                     }
                 })?;
-                world.send(Event::Persisted { outcome: Ok(()) });
+                asking.send(AppEvent::Persisted { outcome: Ok(()) });
             }
-            other => pending.push(other),
+            other @ Effect::App(_) => pending.push(other),
         }
     }
     let performer = Performer::new(
         runtime,
         path.to_owned(),
         crate::tooling::endpoint(*crate::endpoint::PORT),
-        Arc::clone(&world),
+        asking,
     );
-    crate::world::run(woken.instance, pending, performer, events);
+    stageman_world::run(woken.instance, pending, Arc::new(performer), events);
     Ok(())
 }
 

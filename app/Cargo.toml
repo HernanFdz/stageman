@@ -56,6 +56,7 @@ server = [
     "dep:stageman-job",
     "dep:stageman-foreman",
     "dep:stageman-instance",
+    "dep:stageman-world",
     "dep:tokio",
     "dep:tracing",
     "dep:tracing-subscriber",
@@ -164,6 +165,10 @@ stageman-core = { workspace = true, optional = true }
 stageman-job = { workspace = true, optional = true }
 stageman-foreman = { workspace = true, optional = true }
 stageman-instance = { workspace = true, optional = true }
+# Both halves, like the wire crate and for the same reason: it names nothing
+# but serialisation.
+stageman-vocabulary = { workspace = true }
+stageman-world = { workspace = true, optional = true }
 tokio = { version = "1.53.1", features = [
     "io-util",
     "macros",

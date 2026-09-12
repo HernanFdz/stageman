@@ -17,7 +17,8 @@ use stageman_foreman::Starting;
 
 use crate::Instance;
 use crate::turns::Turn;
-use crate::vocabulary::{Effect, Message, Run, Speaker};
+use crate::vocabulary::{AppEffect, Message, Run, Speaker};
+use crate::{Effect, Emit as _};
 
 /// Every project whose foreman was working when this process last stopped.
 ///
@@ -128,7 +129,7 @@ impl Instance {
     /// Held back behind whatever this step changed, so that a turn never
     /// starts on the strength of an inbox that is not on the disk.
     fn look_before_turning(&mut self, project: ProjectId) {
-        self.defer(Effect::Inspect {
+        self.defer(AppEffect::Inspect {
             container: stageman_foreman::container(project),
         });
     }
@@ -206,22 +207,38 @@ impl Instance {
             if present {
                 // Made for another agent, which is another image: it goes,
                 // and a fresh session is begun, with the memory as the price.
-                effects.push(Effect::Discard {
+                effects.emit(AppEffect::Discard {
                     container: container.to_owned(),
                 });
             }
+            let environment = match crate::rendered(&handout) {
+                Ok(environment) => environment,
+                Err(why) => {
+                    tracing::warn!(%project, %why, "the foreman's environment could not be decided");
+                    self.notice_in(project, &errand.thread, stageman_foreman::stuck_notice());
+                    self.move_on(project);
+                    return;
+                }
+            };
             // The opening and the first message together, because a session
             // that was told who it is and then asked nothing would have spent
             // a turn saying hello.
             Run::Begin {
                 container: container.to_owned(),
-                kickoff: format!("{}\n\n{asked}", stageman_foreman::opening(&repository)),
-                handout,
                 instance: self.id,
+                agent: handout.agent(),
+                role: handout.role(),
+                environment,
+                repository: handout.repository().map(str::to_owned),
+                platform: handout
+                    .platform(stageman_core::Platform::GitHub)
+                    .map(|_| stageman_core::Platform::GitHub),
+                kit: handout.kit().clone(),
                 warrant,
+                kickoff: format!("{}\n\n{asked}", stageman_foreman::opening(&repository)),
             }
         };
-        effects.push(Effect::RunTurn { speaker, run });
+        effects.emit(AppEffect::RunTurn { speaker, run });
     }
 
     /// A foreman's turn ended: put the message down, pick up the next.
@@ -286,8 +303,8 @@ impl Instance {
         else {
             return;
         };
-        self.defer(Effect::Say {
-            speaking,
+        self.defer(AppEffect::Say {
+            speaking: speaking.into(),
             thread: thread.clone(),
             text: text.to_owned(),
         });

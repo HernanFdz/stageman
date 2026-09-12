@@ -36,17 +36,79 @@ use std::time::Duration;
 
 use rand::rngs::StdRng;
 use rand::{Rng as _, SeedableRng as _};
-use stageman_core::{
-    InstanceId, JobId, Key, Kit, Progress, ProjectId, Secret, State, Thread, Uuid,
-};
+use stageman_core::{InstanceId, JobId, Key, Kit, Progress, ProjectId, State, Thread, Uuid};
 
 pub use file::LoadError;
 pub use requests::{Request, Response};
+pub use stageman_vocabulary::Seed;
 pub use sweep::Swept;
 pub use tunnel::{DEFAULT_DOMAIN, Domain, Routed, address, decode};
 pub use vocabulary::{
-    Container, Effect, Event, Message, RequestId, Run, Seed, Speaker, Startup, Timer, Warranted,
+    AppEffect, AppEvent, Container, Message, Posting, RequestId, Run, Speaker, Startup, Timer,
+    Warranted,
 };
+
+/// This application, as the vocabulary sees it: what fills its hole.
+pub struct Stageman;
+
+impl stageman_vocabulary::App for Stageman {
+    type Event = AppEvent;
+    type Effect = AppEffect;
+}
+
+/// One thing the world tells this instance.
+pub type Event = stageman_vocabulary::Event<Stageman>;
+
+/// One thing this instance asks of the world.
+pub type Effect = stageman_vocabulary::Effect<Stageman>;
+
+impl From<AppEvent> for Event {
+    fn from(event: AppEvent) -> Self {
+        Self::App(event)
+    }
+}
+
+impl From<AppEffect> for Effect {
+    fn from(effect: AppEffect) -> Self {
+        Self::App(effect)
+    }
+}
+
+/// Pushing an effect of this application's onto a step's effects, without
+/// wrapping it at every site.
+trait Emit {
+    /// Adds an effect.
+    fn emit(&mut self, effect: impl Into<Effect>);
+}
+
+impl Emit for Vec<Effect> {
+    fn emit(&mut self, effect: impl Into<Effect>) {
+        self.push(effect.into());
+    }
+}
+
+impl stageman_vocabulary::Deciding for Instance {
+    type App = Stageman;
+
+    fn step(&mut self, event: Event) -> Vec<Effect> {
+        Self::step(self, event)
+    }
+}
+
+/// Exactly the environment a container is given, rendered from what its
+/// handout decides, credentials in the clear for the wire.
+///
+/// # Errors
+///
+/// Fails if a project's variable claims a name this project delivers itself.
+fn rendered(
+    handout: &stageman_core::Handout,
+) -> Result<BTreeMap<String, String>, stageman_agent::AgentError> {
+    Ok(stageman_agent::environment(handout)?
+        .into_iter()
+        .map(|(name, value)| (name, value.expose().to_owned()))
+        .collect())
+}
 
 use turns::Turn;
 
@@ -195,42 +257,43 @@ impl Instance {
     /// events arrive.
     pub fn step(&mut self, event: Event) -> Vec<Effect> {
         let mut effects = Vec::new();
+        let Event::App(event) = event;
         match event {
-            Event::Persisted { outcome } => self.persisted(outcome, &mut effects),
-            Event::TurnEnded { speaker, outcome } => self.ended(speaker, outcome, &mut effects),
-            Event::Probed { job, answering } => {
+            AppEvent::Persisted { outcome } => self.persisted(outcome, &mut effects),
+            AppEvent::TurnEnded { speaker, outcome } => self.ended(speaker, outcome, &mut effects),
+            AppEvent::Probed { job, answering } => {
                 if !answering {
                     // Halted, so the port it was on reaches nothing.
                     self.forget_tunnel(job);
                 }
                 probed(job, answering, &mut effects);
             }
-            Event::Listed { running } => self.listed(&running, &mut effects),
-            Event::Woke {
+            AppEvent::Listed { running } => self.listed(&running, &mut effects),
+            AppEvent::Woke {
                 timer: Timer::Settle,
             } => {
-                effects.push(Effect::ListRunning);
+                effects.emit(AppEffect::ListRunning);
                 effects.push(sweep::settle_later());
             }
-            Event::Heard { channel, message } => self.heard(channel, &message, &mut effects),
-            Event::Inspected {
+            AppEvent::Heard { channel, message } => self.heard(channel, &message, &mut effects),
+            AppEvent::Inspected {
                 container,
                 present,
                 agent,
             } => self.inspected(&container, present, agent, &mut effects),
-            Event::ToolCalled {
+            AppEvent::ToolCalled {
                 id,
                 at,
                 nearby,
                 bearer,
                 body,
             } => self.tool_called(id, at, nearby, bearer.as_deref(), &body, &mut effects),
-            Event::ThreadOpened { job, outcome } => self.thread_opened(job, outcome),
-            Event::Posted { request, outcome } => self.posted(request, outcome),
-            Event::Request { id, request } => self.requested(id, request, &mut effects),
-            Event::TunnelAsked { id, job } => self.tunnel_asked(id, job, &mut effects),
-            Event::PortFound { job, port } => self.port_found(job, port, &mut effects),
-            Event::TunnelFailed { job, why } => self.tunnel_failed(job, &why),
+            AppEvent::ThreadOpened { job, outcome } => self.thread_opened(job, outcome),
+            AppEvent::Posted { request, outcome } => self.posted(request, outcome),
+            AppEvent::Request { id, request } => self.requested(id, request, &mut effects),
+            AppEvent::TunnelAsked { id, job } => self.tunnel_asked(id, job, &mut effects),
+            AppEvent::PortFound { job, port } => self.port_found(job, port, &mut effects),
+            AppEvent::TunnelFailed { job, why } => self.tunnel_failed(job, &why),
         }
         self.flush(&mut effects);
         debug_assert!(
@@ -275,10 +338,10 @@ impl Instance {
             "what waited on the write is dropped"
         );
         for effect in effects {
-            if let Effect::RunTurn {
+            if let Effect::App(AppEffect::RunTurn {
                 speaker: speaker @ Speaker::Job(job),
                 ..
-            } = effect
+            }) = effect
             {
                 self.turns.remove(&speaker);
                 self.warrants.retain(|_, known| known.speaker != speaker);
@@ -307,7 +370,9 @@ impl Instance {
         match file::sealed(&self.state, self.id, &self.key, &mut self.rng) {
             Ok(bytes) => {
                 self.deferred.push_back(staged);
-                effects.push(Effect::Persist { bytes });
+                effects.emit(AppEffect::Persist {
+                    bytes: stageman_vocabulary::Bytes::new(bytes),
+                });
             }
             Err(why) => {
                 tracing::error!(%why, "the instance could not be sealed, so nothing is written");
@@ -317,8 +382,8 @@ impl Instance {
     }
 
     /// Holds an effect back until the state this step changed is on the disk.
-    fn defer(&mut self, effect: Effect) {
-        self.staged.push(effect);
+    fn defer(&mut self, effect: impl Into<Effect>) {
+        self.staged.push(effect.into());
     }
 
     /// Writes what became of a job.
@@ -351,7 +416,7 @@ impl Instance {
     /// Unguessable from the instance's own generator, so there is one answer
     /// to where an unguessable value comes from. Bounded by construction: one
     /// entry per turn in flight rather than one per turn ever taken.
-    fn warrant(&mut self, speaker: Speaker, thread: Option<Thread>) -> Secret {
+    fn warrant(&mut self, speaker: Speaker, thread: Option<Thread>) -> String {
         let credential = format!(
             "{}{}",
             mint(&mut self.rng).simple(),
@@ -360,7 +425,7 @@ impl Instance {
         self.warrants.retain(|_, known| known.speaker != speaker);
         self.warrants
             .insert(credential.clone(), Warranted { speaker, thread });
-        Secret::new(credential)
+        credential
     }
 }
 
@@ -383,7 +448,7 @@ fn probed(job: JobId, answering: bool, effects: &mut Vec<Effect>) {
             "its container is left running, because something is still answering on its tunnel"
         );
     } else {
-        effects.push(Effect::Halt {
+        effects.emit(AppEffect::Halt {
             container: stageman_job::container(job),
         });
     }
@@ -391,7 +456,7 @@ fn probed(job: JobId, answering: bool, effects: &mut Vec<Effect>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Effect, probed};
+    use super::{AppEffect, Effect, probed};
     use stageman_core::{JobId, Uuid};
 
     /// The whole of what deciding a container's life looks like from here:
@@ -402,12 +467,12 @@ mod tests {
 
         let mut effects = Vec::new();
         probed(job, true, &mut effects);
-        assert!(effects.is_empty(), "{effects:?}");
+        assert!(effects.is_empty(), "answering keeps the container");
 
         probed(job, false, &mut effects);
         assert!(
-            matches!(effects.as_slice(), [Effect::Halt { container }] if *container == stageman_job::container(job)),
-            "{effects:?}"
+            matches!(effects.as_slice(), [Effect::App(AppEffect::Halt { container })] if *container == stageman_job::container(job)),
+            "silence stops it, and nothing else happens"
         );
     }
 }

@@ -1,28 +1,31 @@
-//! The two enumerations the instance and the world meet through, and what the
-//! instance is born knowing.
+//! What this instance says to the world and hears from it, in the
+//! application hole of the vocabulary.
 //!
-//! Everything here is a value. An [`Event`] is what the world tells the
-//! instance and an [`Effect`] is what the instance asks of the world, and
-//! neither can carry a call, a channel or a callback: a scenario's effects
-//! are a trace that can be compared, and the instance can learn nothing from
-//! making one. See
-//! `docs/decisions/0056-the-instance-decides-and-the-world-performs.md`.
+//! Everything here is plain data. An [`AppEvent`] is what the world tells the
+//! instance and an [`AppEffect`] is what the instance asks of the world, and
+//! neither carries a call, a channel, a callback or a domain secret: a
+//! credential crosses as the string it is, so that a scenario's trace
+//! serialises in full and the instance can learn nothing from making an
+//! effect. Neither enumeration formats, for the reason
+//! `docs/conventions.md` §4 gives. See
+//! `docs/decisions/0056-the-instance-decides-and-the-world-performs.md` and
+//! `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`.
+//!
+//! Every family here is a meaning rather than a mechanism — run a turn, probe
+//! a tunnel, say something — and each moves out of this hole into the generic
+//! vocabulary as the instance starts speaking the mechanism instead.
 
-use std::fmt;
+use std::collections::BTreeMap;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use stageman_agent::Answer;
 use stageman_core::{
-    Agent, Channel, Handout, InstanceId, JobId, Kit, ProjectId, Secret, Speaking, Thread, Timestamp,
+    Agent, Channel, InstanceId, JobId, Kit, Platform, ProjectId, Role, Speaking, Thread, Timestamp,
 };
+use stageman_vocabulary::{Bytes, Named};
 
 use crate::tunnel::Domain;
-
-/// What the world seeds the instance's randomness with, once.
-///
-/// From the operating system in production and from the scenario in a test,
-/// which is the whole difference between the two.
-pub type Seed = [u8; 32];
 
 /// What the world knows before the instance exists.
 ///
@@ -49,11 +52,11 @@ pub struct Startup {
 ///
 /// Minted by the world, carried in and echoed back, and opaque here: the
 /// instance decides nothing from its value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct RequestId(pub u64);
 
 /// One container the runtime holds, as the world reports it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Container {
     /// Its name, which is what addresses it.
     pub name: String,
@@ -71,7 +74,7 @@ pub struct Container {
 /// runs for each at a time, which is why a turn needs no identifier of its
 /// own: the speaker is the key, and a completion for a speaker with no turn
 /// in flight is one from before a crash.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Speaker {
     /// The one agent a project's foreman thinks with.
     Foreman(ProjectId),
@@ -80,7 +83,7 @@ pub enum Speaker {
 }
 
 /// What a timer the instance asked for was for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Timer {
     /// Time to ask which containers are still showing something.
     Settle,
@@ -105,7 +108,7 @@ pub struct Warranted {
 /// it, the thread it was in if any, the words, and the two facts about the
 /// speaker the rule in
 /// `docs/decisions/0031-a-mention-is-what-makes-it-ours.md` turns on.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Message {
     /// Where it was said.
     pub address: String,
@@ -122,13 +125,45 @@ pub struct Message {
     pub from_us: bool,
 }
 
+/// What posts on a channel, as plain data: where, and with what.
+///
+/// The domain's own type for this holds the credential as a secret, which
+/// deliberately does not serialise; this is that type as it crosses to the
+/// world, credential in the clear, for the reason the module says.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Posting {
+    /// Where on the channel.
+    pub address: String,
+    /// What reaches it.
+    pub credential: String,
+}
+
+impl From<Speaking> for Posting {
+    fn from(speaking: Speaking) -> Self {
+        Self {
+            address: speaking.address,
+            credential: speaking.credential.expose().to_owned(),
+        }
+    }
+}
+
+impl From<Posting> for Speaking {
+    fn from(posting: Posting) -> Self {
+        Self {
+            address: posting.address,
+            credential: stageman_core::Secret::new(posting.credential),
+        }
+    }
+}
+
 /// One thing the world tells the instance.
 ///
 /// Time appears only where a handler keeps it, which in this set is nowhere:
 /// nothing here is recorded with a timestamp.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Event {
-    /// Answers [`Effect::Persist`]: the bytes reached the disk, or did not.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AppEvent {
+    /// Answers [`AppEffect::Persist`]: the bytes reached the disk, or did
+    /// not.
     ///
     /// Answered in the order the persists were asked for, which is the one
     /// ordering obligation the world has beyond answering only when done.
@@ -136,26 +171,27 @@ pub enum Event {
         /// Why the write failed, if it did.
         outcome: Result<(), String>,
     },
-    /// Answers [`Effect::RunTurn`]: the agent stopped, or could not be run.
+    /// Answers [`AppEffect::RunTurn`]: the agent stopped, or could not be run.
     TurnEnded {
         /// Whose turn it was.
         speaker: Speaker,
         /// What the agent said and why it stopped, or why it could not.
         outcome: Result<Answer, String>,
     },
-    /// Answers [`Effect::Probe`]: whether something is behind a job's tunnel.
+    /// Answers [`AppEffect::Probe`]: whether something is behind a job's
+    /// tunnel.
     Probed {
         /// Which job's tunnel was probed.
         job: JobId,
         /// Whether anything answered behind it.
         answering: bool,
     },
-    /// Answers [`Effect::ListRunning`]: the containers up right now.
+    /// Answers [`AppEffect::ListRunning`]: the containers up right now.
     Listed {
         /// Every running container this project started, with its labels.
         running: Vec<Container>,
     },
-    /// Answers [`Effect::Wake`].
+    /// Answers [`AppEffect::Wake`].
     Woke {
         /// Which timer.
         timer: Timer,
@@ -167,7 +203,7 @@ pub enum Event {
         /// What was heard.
         message: Message,
     },
-    /// Answers [`Effect::Inspect`]: whether a container exists, and for
+    /// Answers [`AppEffect::Inspect`]: whether a container exists, and for
     /// which agent it was made.
     Inspected {
         /// Its name.
@@ -178,7 +214,7 @@ pub enum Event {
         agent: Option<Agent>,
     },
     /// An agent called the tools endpoint. Answered by
-    /// [`Effect::ToolAnswered`], in this step or a later one.
+    /// [`AppEffect::ToolAnswered`], in this step or a later one.
     ///
     /// The whole request, because everything the endpoint decides is
     /// instance state: whether the credential names anyone, what its bearer
@@ -196,15 +232,15 @@ pub enum Event {
         /// The request body, as JSON.
         body: serde_json::Value,
     },
-    /// Answers [`Effect::OpenThread`]: where a job's conversation happens,
-    /// or why it could not be opened.
+    /// Answers [`AppEffect::OpenThread`]: where a job's conversation
+    /// happens, or why it could not be opened.
     ThreadOpened {
         /// Whose thread.
         job: JobId,
         /// The thread, or why not.
         outcome: Result<Thread, String>,
     },
-    /// Answers [`Effect::Post`]: whether the platform took the message.
+    /// Answers [`AppEffect::Post`]: whether the platform took the message.
     Posted {
         /// Which request it was said for.
         request: RequestId,
@@ -212,7 +248,7 @@ pub enum Event {
         outcome: Result<(), String>,
     },
     /// A person asked something of the dashboard. Answered by
-    /// [`Effect::Respond`], in this step or a later one.
+    /// [`AppEffect::Respond`], in this step or a later one.
     Request {
         /// What the world is waiting to answer.
         id: RequestId,
@@ -220,18 +256,18 @@ pub enum Event {
         request: crate::requests::Request,
     },
     /// A request arrived for a name one label below the domain, and that
-    /// label is a job's identifier. Answered by [`Effect::Route`], in this
-    /// step or once the runtime has said where the tunnel is. The world
-    /// decodes the hostname, which is shape; whether the job is one of this
-    /// instance's is state, and so is asked here.
+    /// label is a job's identifier. Answered by [`AppEffect::Route`], in
+    /// this step or once the runtime has said where the tunnel is. The
+    /// world decodes the hostname, which is shape; whether the job is one of
+    /// this instance's is state, and so is asked here.
     TunnelAsked {
         /// What the world is waiting to answer.
         id: RequestId,
         /// The job the name identifies.
         job: JobId,
     },
-    /// Answers [`Effect::FindPort`]: where the job's tunnel is published, if
-    /// its container is running with one.
+    /// Answers [`AppEffect::FindPort`]: where the job's tunnel is published,
+    /// if its container is running with one.
     PortFound {
         /// Which job.
         job: JobId,
@@ -249,19 +285,40 @@ pub enum Event {
     },
 }
 
+impl Named for AppEvent {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Persisted { .. } => "Persisted",
+            Self::TurnEnded { .. } => "TurnEnded",
+            Self::Probed { .. } => "Probed",
+            Self::Listed { .. } => "Listed",
+            Self::Woke { .. } => "Woke",
+            Self::Heard { .. } => "Heard",
+            Self::Inspected { .. } => "Inspected",
+            Self::ToolCalled { .. } => "ToolCalled",
+            Self::ThreadOpened { .. } => "ThreadOpened",
+            Self::Posted { .. } => "Posted",
+            Self::Request { .. } => "Request",
+            Self::TunnelAsked { .. } => "TunnelAsked",
+            Self::PortFound { .. } => "PortFound",
+            Self::TunnelFailed { .. } => "TunnelFailed",
+        }
+    }
+}
+
 /// One thing the instance asks of the world.
 ///
 /// The doc comment on each says whether it is answered, and by what. An
 /// unanswered effect's failure is the world's to log.
-#[derive(Clone)]
-pub enum Effect {
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AppEffect {
     /// Write these bytes over the instance's file, atomically. Answered by
-    /// [`Event::Persisted`], in order.
+    /// [`AppEvent::Persisted`], in order.
     Persist {
         /// The sealed snapshot, whole.
-        bytes: Vec<u8>,
+        bytes: Bytes,
     },
-    /// Run one turn of an agent. Answered by [`Event::TurnEnded`].
+    /// Run one turn of an agent. Answered by [`AppEvent::TurnEnded`].
     RunTurn {
         /// Whose turn.
         speaker: Speaker,
@@ -269,15 +326,15 @@ pub enum Effect {
         run: Run,
     },
     /// Ask whether anything is behind a job's tunnel. Answered by
-    /// [`Event::Probed`].
+    /// [`AppEvent::Probed`].
     Probe {
         /// Which job.
         job: JobId,
     },
-    /// Ask which containers are up. Answered by [`Event::Listed`].
+    /// Ask which containers are up. Answered by [`AppEvent::Listed`].
     ListRunning,
     /// Ask whether a container exists and for which agent it was made.
-    /// Answered by [`Event::Inspected`].
+    /// Answered by [`AppEvent::Inspected`].
     ///
     /// Asked before every foreman's turn rather than remembered, because a
     /// container is the truth about whether a session exists: a foreman that
@@ -299,7 +356,7 @@ pub enum Effect {
     },
     /// Reclaim the images nothing needs any more. Unanswered.
     Reclaim,
-    /// Wake the instance later. Answered by [`Event::Woke`].
+    /// Wake the instance later. Answered by [`AppEvent::Woke`].
     Wake {
         /// How long from now.
         after: Duration,
@@ -311,14 +368,14 @@ pub enum Effect {
     /// not change because the notice of it did not arrive.
     Say {
         /// The channel and the credential that posts on it.
-        speaking: Speaking,
+        speaking: Posting,
         /// Where in it.
         thread: Thread,
         /// What.
         text: String,
     },
     /// Answer a tunnel request: where to forward it, or that nothing
-    /// answers on that name. Unanswered, except by [`Event::TunnelFailed`]
+    /// answers on that name. Unanswered, except by [`AppEvent::TunnelFailed`]
     /// when the forwarding does not go through.
     Route {
         /// Which request.
@@ -327,7 +384,7 @@ pub enum Effect {
         port: Option<u16>,
     },
     /// Ask the runtime where a job's tunnel is published. Answered by
-    /// [`Event::PortFound`].
+    /// [`AppEvent::PortFound`].
     FindPort {
         /// Which job.
         job: JobId,
@@ -340,8 +397,8 @@ pub enum Effect {
         response: crate::requests::Response,
     },
     /// Stop the turn running for a speaker: the agent process is ended and
-    /// the container carries on. Answered by [`Event::TurnEnded`], like the
-    /// turn it stops.
+    /// the container carries on. Answered by [`AppEvent::TurnEnded`], like
+    /// the turn it stops.
     StopTurn {
         /// Whose turn.
         speaker: Speaker,
@@ -357,22 +414,22 @@ pub enum Effect {
     },
     /// Open the thread a job's conversation happens in, by posting its
     /// announcement at the root of the channel. Answered by
-    /// [`Event::ThreadOpened`].
+    /// [`AppEvent::ThreadOpened`].
     OpenThread {
         /// Whose thread.
         job: JobId,
         /// The channel and the credential that posts on it.
-        speaking: Speaking,
+        speaking: Posting,
         /// What the thread hangs from.
         announcement: String,
     },
-    /// Post on a channel on an agent's behalf. Answered by [`Event::Posted`],
-    /// because the agent is told whether it was heard.
+    /// Post on a channel on an agent's behalf. Answered by
+    /// [`AppEvent::Posted`], because the agent is told whether it was heard.
     Post {
         /// Which request is waiting on it.
         request: RequestId,
         /// The channel and the credential that posts on it.
-        speaking: Speaking,
+        speaking: Posting,
         /// Where in it.
         thread: Thread,
         /// What.
@@ -384,25 +441,68 @@ pub enum Effect {
         /// Whose channel.
         project: ProjectId,
         /// What opens the event stream. Never enters a container.
-        opening: Secret,
+        opening: String,
         /// What posts, and what asks the platform who this instance is.
-        speaking: Speaking,
+        speaking: Posting,
     },
 }
 
+impl Named for AppEffect {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Persist { .. } => "Persist",
+            Self::RunTurn { .. } => "RunTurn",
+            Self::Probe { .. } => "Probe",
+            Self::ListRunning => "ListRunning",
+            Self::Inspect { .. } => "Inspect",
+            Self::Halt { .. } => "Halt",
+            Self::Discard { .. } => "Discard",
+            Self::Reclaim => "Reclaim",
+            Self::Wake { .. } => "Wake",
+            Self::Say { .. } => "Say",
+            Self::Route { .. } => "Route",
+            Self::FindPort { .. } => "FindPort",
+            Self::Respond { .. } => "Respond",
+            Self::StopTurn { .. } => "StopTurn",
+            Self::ToolAnswered { .. } => "ToolAnswered",
+            Self::OpenThread { .. } => "OpenThread",
+            Self::Post { .. } => "Post",
+            Self::Listen { .. } => "Listen",
+        }
+    }
+}
+
 /// Whether a turn starts a session or continues the one its container holds.
-#[derive(Clone)]
+///
+/// Everything an agent process is about to be handed, decided here and
+/// carried as plain data: the environment it is given is rendered from the
+/// handout by the instance, so that what a container sees is decided in the
+/// one place that decides, and the world only sets it.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Run {
     /// Make the container and the session, and put the first question.
     Begin {
         /// The container to make, named before it exists.
         container: String,
-        /// Exactly what the agent may see.
-        handout: Handout,
         /// Which instance made it, for the label.
         instance: InstanceId,
+        /// Which agent runs in it.
+        agent: Agent,
+        /// What it runs as, which decides the image.
+        role: Role,
+        /// Exactly the environment the container is given, and nothing
+        /// inherited. Credentials in the clear, for the reason the module
+        /// says.
+        environment: BTreeMap<String, String>,
+        /// The repository checked out before the agent speaks, for a job.
+        repository: Option<String>,
+        /// The platform whose tool makes the checkout, if a credential for
+        /// one is held.
+        platform: Option<Platform>,
+        /// What the agent runs on.
+        kit: Kit,
         /// What the agent presents to the tools endpoint.
-        warrant: Secret,
+        warrant: String,
         /// The instruction it begins from.
         kickoff: String,
     },
@@ -414,140 +514,44 @@ pub enum Run {
         /// forgets it.
         kit: Kit,
         /// What the agent presents to the tools endpoint, minted afresh.
-        warrant: Secret,
+        warrant: String,
         /// What the resumed agent is told.
         text: String,
     },
 }
 
-impl fmt::Debug for Effect {
-    /// The trace's rendering. Written out rather than derived for one variant:
-    /// the sealed bytes are ciphertext, and a trace line holding a whole file
-    /// would say nothing a reader could use.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Persist { bytes } => f
-                .debug_struct("Persist")
-                .field("bytes", &bytes.len())
-                .finish(),
-            Self::RunTurn { speaker, run } => f
-                .debug_struct("RunTurn")
-                .field("speaker", speaker)
-                .field("run", run)
-                .finish(),
-            Self::Probe { job } => f.debug_struct("Probe").field("job", job).finish(),
-            Self::ListRunning => f.write_str("ListRunning"),
-            Self::Inspect { container } => f
-                .debug_struct("Inspect")
-                .field("container", container)
-                .finish(),
-            Self::Halt { container } => f
-                .debug_struct("Halt")
-                .field("container", container)
-                .finish(),
-            Self::Discard { container } => f
-                .debug_struct("Discard")
-                .field("container", container)
-                .finish(),
-            Self::Reclaim => f.write_str("Reclaim"),
-            Self::Wake { after, timer } => f
-                .debug_struct("Wake")
-                .field("after", after)
-                .field("timer", timer)
-                .finish(),
-            Self::Say {
-                speaking,
-                thread,
-                text,
-            } => f
-                .debug_struct("Say")
-                .field("address", &speaking.address)
-                .field("thread", thread)
-                .field("text", text)
-                .finish(),
-            Self::Listen {
-                project, speaking, ..
-            } => f
-                .debug_struct("Listen")
-                .field("project", project)
-                .field("address", &speaking.address)
-                .finish(),
-            Self::Route { id, port } => f
-                .debug_struct("Route")
-                .field("id", id)
-                .field("port", port)
-                .finish(),
-            Self::FindPort { job } => f.debug_struct("FindPort").field("job", job).finish(),
-            Self::Respond { id, response } => f
-                .debug_struct("Respond")
-                .field("id", id)
-                .field("response", response)
-                .finish(),
-            Self::StopTurn { speaker } => f
-                .debug_struct("StopTurn")
-                .field("speaker", speaker)
-                .finish(),
-            Self::ToolAnswered { id, status, body } => f
-                .debug_struct("ToolAnswered")
-                .field("id", id)
-                .field("status", status)
-                .field("body", body)
-                .finish(),
-            Self::OpenThread {
-                job,
-                speaking,
-                announcement,
-            } => f
-                .debug_struct("OpenThread")
-                .field("job", job)
-                .field("address", &speaking.address)
-                .field("announcement", announcement)
-                .finish(),
-            Self::Post {
-                request,
-                speaking,
-                thread,
-                text,
-            } => f
-                .debug_struct("Post")
-                .field("request", request)
-                .field("address", &speaking.address)
-                .field("thread", thread)
-                .field("text", text)
-                .finish(),
-        }
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::{AppEffect, AppEvent, Run};
 
-impl fmt::Debug for Run {
-    /// Names what a turn is given and never a credential: the handout
-    /// redacts itself, and the warrant is one.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Begin {
-                container,
-                handout,
-                instance,
-                kickoff,
-                ..
-            } => f
-                .debug_struct("Begin")
-                .field("container", container)
-                .field("handout", handout)
-                .field("instance", instance)
-                .field("kickoff", kickoff)
-                .finish(),
-            Self::Resume {
-                container,
-                kit,
-                text,
-                ..
-            } => f
-                .debug_struct("Resume")
-                .field("container", container)
-                .field("kit", kit)
-                .field("text", text)
-                .finish(),
+    /// This application's own events and effects format no more than the
+    /// vocabulary does, because a credential crosses them in the clear: the
+    /// probe answers through an inherent method only where `Debug` exists.
+    #[test]
+    fn the_applications_own_vocabulary_formats_not_at_all() {
+        struct Probe<T>(std::marker::PhantomData<T>);
+        impl<T: std::fmt::Debug> Probe<T> {
+            #[expect(
+                clippy::unused_self,
+                reason = "a method, so that resolution prefers it to the trait's where it exists"
+            )]
+            const fn formats(&self) -> bool {
+                true
+            }
         }
+        trait Otherwise {
+            fn formats(&self) -> bool {
+                false
+            }
+        }
+        impl<T> Otherwise for Probe<T> {}
+
+        assert!(!Probe::<AppEvent>(std::marker::PhantomData).formats());
+        assert!(!Probe::<AppEffect>(std::marker::PhantomData).formats());
+        assert!(!Probe::<Run>(std::marker::PhantomData).formats());
+        assert!(
+            Probe::<String>(std::marker::PhantomData).formats(),
+            "the probe tells"
+        );
     }
 }

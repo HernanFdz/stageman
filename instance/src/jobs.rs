@@ -8,7 +8,7 @@ use stageman_foreman::Voice;
 
 use crate::Instance;
 use crate::turns::{Turn, speaking_for};
-use crate::vocabulary::{Effect, Run, Speaker};
+use crate::vocabulary::{AppEffect, Run, Speaker};
 
 /// A job could not be recorded.
 #[derive(Debug, thiserror::Error)]
@@ -93,9 +93,9 @@ impl Instance {
         // quietly false. It is also the cheapest moment to fail — no
         // container exists yet.
         match handout.channels().next() {
-            Some((_, speaking)) => self.defer(Effect::OpenThread {
+            Some((_, speaking)) => self.defer(AppEffect::OpenThread {
                 job,
-                speaking: speaking.clone(),
+                speaking: speaking.clone().into(),
                 announcement,
             }),
             None => self.start(job),
@@ -158,15 +158,35 @@ impl Instance {
         let Some(kickoff) = self.state.job(job).map(|recorded| recorded.kickoff.clone()) else {
             return;
         };
+        let environment = match crate::rendered(&handout) {
+            Ok(environment) => environment,
+            Err(why) => {
+                tracing::warn!(%job, %why, "the job's environment could not be decided");
+                self.record(
+                    job,
+                    Progress::Idle(Waiting::Failed(format!(
+                        "what its agent may see could not be decided: {why}"
+                    ))),
+                );
+                return;
+            }
+        };
         let speaker = Speaker::Job(job);
         let warrant = self.warrant(speaker, thread);
         self.turns.insert(speaker, Turn::noticed());
-        self.defer(Effect::RunTurn {
+        self.defer(AppEffect::RunTurn {
             speaker,
             run: Run::Begin {
                 container: stageman_job::container(job),
-                handout,
                 instance: self.id,
+                agent: handout.agent(),
+                role: handout.role(),
+                environment,
+                repository: handout.repository().map(str::to_owned),
+                platform: handout
+                    .platform(stageman_core::Platform::GitHub)
+                    .map(|_| stageman_core::Platform::GitHub),
+                kit: handout.kit().clone(),
                 warrant,
                 kickoff,
             },

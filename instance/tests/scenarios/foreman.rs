@@ -11,7 +11,7 @@ fn runs(world: &Simulation) -> Vec<String> {
     world
         .shape()
         .into_iter()
-        .filter(|line| line.starts_with("-> RunTurn { speaker: Foreman("))
+        .filter(|line| line.starts_with("-> RunTurn") && line.contains("\"Foreman\""))
         .collect()
 }
 
@@ -110,14 +110,14 @@ fn messages_arriving_while_it_works_are_queued_and_worked_in_order() {
     let shape = world.shape();
     let mut open = 0_u8;
     for line in &shape {
-        if line.starts_with("-> RunTurn { speaker: Foreman(") {
+        if line.starts_with("-> RunTurn") && line.contains("\"Foreman\"") {
             open += 1;
             assert_eq!(
                 open, 1,
                 "a second turn started before the first ended: {shape:?}"
             );
         }
-        if line.starts_with("<- TurnEnded { speaker: Foreman(") {
+        if line.starts_with("<- TurnEnded") && line.contains("\"Foreman\"") {
             open -= 1;
         }
     }
@@ -183,7 +183,7 @@ fn a_crash_mid_turn_picks_the_message_up_again() {
     assert_eq!(first, scenario(4));
     let runs: Vec<&String> = first
         .iter()
-        .filter(|line| line.starts_with("-> RunTurn { speaker: Foreman("))
+        .filter(|line| line.starts_with("-> RunTurn") && line.contains("\"Foreman\""))
         .collect();
     assert_eq!(runs.len(), 2, "{first:?}");
     assert!(runs[0].contains("Begin"), "{}", runs[0]);
@@ -230,7 +230,7 @@ fn a_foremans_warrant_names_the_thread_of_the_message_it_answers() {
     world.run_until(&mut instance, 150);
     let warrant = world.warrants().last().expect("a warrant").clone();
     let warranted = instance
-        .warranted(warrant.expose())
+        .warranted(warrant.as_str())
         .expect("known while the turn runs");
     assert_eq!(
         warranted.speaker,
@@ -239,5 +239,5 @@ fn a_foremans_warrant_names_the_thread_of_the_message_it_answers() {
     assert_eq!(warranted.thread, Some(thread(1)));
 
     world.run_until(&mut instance, 5_000);
-    assert!(instance.warranted(warrant.expose()).is_none());
+    assert!(instance.warranted(warrant.as_str()).is_none());
 }

@@ -3710,7 +3710,9 @@ dependencies = [
  "stageman-foreman",
  "stageman-instance",
  "stageman-job",
+ "stageman-vocabulary",
  "stageman-wire",
+ "stageman-world",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -3729,6 +3731,7 @@ dependencies = [
  "futures",
  "mutants",
  "parking_lot",
+ "serde",
  "serde_json",
  "sha2",
  "stageman-core",
@@ -3773,6 +3776,7 @@ dependencies = [
  "stageman-core",
  "stageman-foreman",
  "stageman-job",
+ "stageman-vocabulary",
  "stageman-wire",
  "thiserror 2.0.20",
  "tracing",
@@ -3791,11 +3795,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "stageman-vocabulary"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "stageman-wire"
 version = "0.0.0"
 dependencies = [
  "serde",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "stageman-world"
+version = "0.0.0"
+dependencies = [
+ "mutants",
+ "stageman-vocabulary",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

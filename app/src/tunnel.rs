@@ -27,7 +27,7 @@ use std::pin::Pin;
 use dioxus::server::axum;
 use dioxus::server::axum::response::IntoResponse as _;
 use stageman_core::JobId;
-use stageman_instance::{Domain, Event, Routed, decode};
+use stageman_instance::{AppEvent, Domain, Routed, decode};
 
 use crate::world::Located;
 
@@ -75,10 +75,10 @@ type Locator = fn(JobId) -> Pin<Box<dyn Future<Output = Found> + Send>>;
 /// Where a job's tunnel is, asked of the instance.
 fn asking_the_instance(job: JobId) -> Pin<Box<dyn Future<Output = Found> + Send>> {
     Box::pin(async move {
-        let Some(world) = crate::world() else {
+        let Some(asking) = crate::asking() else {
             return Found::Unanswerable;
         };
-        match world.tunnel(job).await {
+        match asking.tunnel(job).await {
             Some(Located::At(port)) => Found::At(port),
             Some(Located::Nowhere) => Found::Nowhere,
             None => Found::Unanswerable,
@@ -177,8 +177,8 @@ async fn forward(
         Ok(response) => response,
         Err(why) => {
             tracing::debug!(%job, %port, %why, "a job's tunnel did not answer");
-            if let Some(world) = crate::world() {
-                world.send(Event::TunnelFailed {
+            if let Some(asking) = crate::asking() {
+                asking.send(AppEvent::TunnelFailed {
                     job,
                     why: why.to_string(),
                 });

@@ -38,8 +38,12 @@ fn shape_of(world: &Simulation) -> Vec<String> {
         .shape()
         .into_iter()
         .map(|line| {
-            line.split_once(" { bytes")
-                .map_or_else(|| line.clone(), |(head, _)| head.to_owned())
+            let traced = line.starts_with("-> ") || line.starts_with("<- ");
+            if traced && let Some((head, _)) = line.split_once(" {") {
+                head.to_owned()
+            } else {
+                line
+            }
         })
         .collect()
 }
@@ -56,13 +60,13 @@ fn a_first_run_writes_its_file_and_settles_later() {
         [
             "woke, swept Swept { resumed: 0, lost: 0, cleared: 0, unidentified: 0, forgotten: 0, unclaimed: 0, elsewhere: 0 }",
             "-> Reclaim",
-            "-> Wake { after: 60s, timer: Settle }",
+            "-> Wake",
             "-> Persist",
-            "<- Persisted { outcome: Ok(()) }",
-            "<- Woke { timer: Settle }",
+            "<- Persisted",
+            "<- Woke",
             "-> ListRunning",
-            "-> Wake { after: 60s, timer: Settle }",
-            "<- Listed { running: [] }",
+            "-> Wake",
+            "<- Listed",
         ]
     );
     assert!(world.disk().is_some(), "a first run has a file");
@@ -141,9 +145,9 @@ fn a_working_job_with_a_container_is_resumed_and_its_ending_recorded() {
 
     let shape = world.shape();
     assert!(
-        shape
-            .iter()
-            .any(|line| line.starts_with("-> RunTurn { speaker: Job(") && line.contains("Resume")),
+        shape.iter().any(|line| line.starts_with("-> RunTurn")
+            && line.contains("\"Job\"")
+            && line.contains("Resume")),
         "{shape:?}"
     );
     assert_eq!(
@@ -474,10 +478,12 @@ fn the_same_seed_gives_the_same_trace_across_a_crash() {
     );
 }
 
-/// Nothing a turn is given prints a credential, and the warrant it presents
-/// is known while the turn runs and forgotten when it ends.
+/// A turn crosses to the world with what the world has to hand over, its
+/// warrant included and in the clear — a trace serialises in full, and what
+/// keeps a credential out of a log is that nothing here formats — and the
+/// warrant is known for exactly as long as the turn runs.
 #[test]
-fn a_turn_prints_no_credential_and_its_warrant_lives_as_long_as_it_does() {
+fn a_turn_carries_what_the_world_is_handed_and_its_warrant_lives_as_long_as_it_does() {
     let mut world = Simulation::new();
     let working = job(1);
     world.holding(&watching(&[(working, Progress::Working)]));
@@ -495,22 +501,24 @@ fn a_turn_prints_no_credential_and_its_warrant_lives_as_long_as_it_does() {
         .first()
         .expect("a warrant was handed over")
         .clone();
-    assert!(!run.contains("agent-token"), "{run}");
-    assert!(!run.contains(warrant.expose()), "{run}");
     assert!(
-        warrant.expose().len() >= 64,
-        "unguessable: {}",
-        warrant.expose().len()
+        run.contains(warrant.as_str()),
+        "the warrant crosses in full, for the world to hand over: {run}"
     );
     assert!(
-        instance.warranted(warrant.expose()).is_some(),
+        warrant.as_str().len() >= 64,
+        "unguessable: {}",
+        warrant.as_str().len()
+    );
+    assert!(
+        instance.warranted(warrant.as_str()).is_some(),
         "known while the turn runs"
     );
     assert!(instance.warranted("not-a-warrant").is_none());
 
     world.run_until(&mut instance, 2_000);
     assert!(
-        instance.warranted(warrant.expose()).is_none(),
+        instance.warranted(warrant.as_str()).is_none(),
         "forgotten when the turn ends"
     );
 }

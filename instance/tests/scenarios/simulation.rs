@@ -16,9 +16,10 @@ use stageman_core::{
     Thread, Timestamp, Uuid,
 };
 use stageman_instance::{
-    Container, Domain, Effect, Event, Instance, Message, Request, RequestId, Response, Run, Seed,
-    Startup,
+    AppEffect, AppEvent, Container, Domain, Effect, Event, Instance, Message, Request, RequestId,
+    Response, Run, Seed, Startup,
 };
+use stageman_vocabulary::Named as _;
 
 /// Virtual milliseconds.
 pub type Now = u64;
@@ -72,7 +73,7 @@ pub struct Simulation {
     posts: Vec<(Thread, String)>,
     listening: Vec<stageman_core::ProjectId>,
     reclaims: usize,
-    warrants: Vec<Secret>,
+    warrants: Vec<String>,
     key: Key,
 }
 
@@ -192,7 +193,7 @@ pub fn watching_a_channel(jobs: &[(JobId, Progress, u32)]) -> State {
 
 /// Somebody mentioning this instance in a thread on the project's channel.
 pub fn said_in(thread: u32, text: &str) -> Event {
-    Event::Heard {
+    Event::App(AppEvent::Heard {
         channel: Channel::Slack,
         message: Message {
             address: CHANNEL.to_owned(),
@@ -202,13 +203,13 @@ pub fn said_in(thread: u32, text: &str) -> Event {
             mentions: true,
             from_us: false,
         },
-    }
+    })
 }
 
 /// Somebody mentioning this instance at the root of the project's channel.
 /// Each is its own message, so each opens its own thread.
 pub fn said_at_root(n: u32, text: &str) -> Event {
-    Event::Heard {
+    Event::App(AppEvent::Heard {
         channel: Channel::Slack,
         message: Message {
             address: CHANNEL.to_owned(),
@@ -218,7 +219,7 @@ pub fn said_at_root(n: u32, text: &str) -> Event {
             mentions: true,
             from_us: false,
         },
-    }
+    })
 }
 
 /// Puts a message in the project's foreman's hands, as a daemon that died
@@ -237,29 +238,29 @@ pub fn holding_a_message(state: &mut State, n: u32, text: &str) {
 
 /// A request arriving for a job's name under the domain.
 pub const fn tunnel_asked(id: u64, job: JobId) -> Event {
-    Event::TunnelAsked {
+    Event::App(AppEvent::TunnelAsked {
         id: RequestId(id),
         job,
-    }
+    })
 }
 
 /// A person asking something of the dashboard.
 pub const fn request(id: u64, request: Request) -> Event {
-    Event::Request {
+    Event::App(AppEvent::Request {
         id: RequestId(id),
         request,
-    }
+    })
 }
 
 /// A call on the tools endpoint from this machine, presenting a credential.
-pub fn tool_call(id: u64, bearer: &Secret, body: serde_json::Value) -> Event {
-    Event::ToolCalled {
+pub fn tool_call(id: u64, bearer: &str, body: serde_json::Value) -> Event {
+    Event::App(AppEvent::ToolCalled {
         id: RequestId(id),
         at: Timestamp::UNIX_EPOCH,
         nearby: true,
-        bearer: Some(bearer.expose().to_owned()),
+        bearer: Some(bearer.to_owned()),
         body,
-    }
+    })
 }
 
 pub const fn key() -> Key {
@@ -423,18 +424,20 @@ impl Simulation {
         self.queue.retain(|_, event| {
             !matches!(
                 event,
-                Event::Persisted { .. }
-                    | Event::TurnEnded { .. }
-                    | Event::Probed { .. }
-                    | Event::Listed { .. }
-                    | Event::Inspected { .. }
-                    | Event::ThreadOpened { .. }
-                    | Event::Posted { .. }
-                    | Event::Woke { .. }
-                    | Event::Request { .. }
-                    | Event::TunnelAsked { .. }
-                    | Event::PortFound { .. }
-                    | Event::TunnelFailed { .. }
+                Event::App(
+                    AppEvent::Persisted { .. }
+                        | AppEvent::TurnEnded { .. }
+                        | AppEvent::Probed { .. }
+                        | AppEvent::Listed { .. }
+                        | AppEvent::Inspected { .. }
+                        | AppEvent::ThreadOpened { .. }
+                        | AppEvent::Posted { .. }
+                        | AppEvent::Woke { .. }
+                        | AppEvent::Request { .. }
+                        | AppEvent::TunnelAsked { .. }
+                        | AppEvent::PortFound { .. }
+                        | AppEvent::TunnelFailed { .. }
+                )
             )
         });
         self.landing.clear();
@@ -443,9 +446,9 @@ impl Simulation {
         self.wake(seed)
     }
 
-    pub fn schedule(&mut self, at: Now, event: Event) {
+    pub fn schedule(&mut self, at: Now, event: impl Into<Event>) {
         self.seq += 1;
-        self.queue.insert((at, self.seq), event);
+        self.queue.insert((at, self.seq), event.into());
     }
 
     /// The next event, if there is one. A write lands as its completion is
@@ -453,12 +456,13 @@ impl Simulation {
     pub fn next(&mut self) -> Option<Event> {
         let ((at, _), event) = self.queue.pop_first()?;
         self.now = at;
-        if matches!(event, Event::Persisted { .. })
+        if matches!(event, Event::App(AppEvent::Persisted { .. }))
             && let Some(Some(bytes)) = self.landing.pop_front()
         {
             self.disk = Some(bytes);
         }
-        self.trace.push(format!("{at}: <- {event:?}"));
+        self.trace
+            .push(format!("{at}: <- {}{}", event.kind(), serialised(&event)));
         Some(event)
     }
 
@@ -538,7 +542,7 @@ impl Simulation {
             None => Err(format!("no such container: {container}")),
         };
         let at = self.now + self.turn_takes;
-        self.schedule(at, Event::TurnEnded { speaker, outcome });
+        self.schedule(at, AppEvent::TurnEnded { speaker, outcome });
     }
 
     /// Answers whether a container exists, and whose it is.
@@ -549,7 +553,7 @@ impl Simulation {
             .map_or((false, None), |held| (true, held.agent));
         self.schedule(
             self.now,
-            Event::Inspected {
+            AppEvent::Inspected {
                 container,
                 present,
                 agent,
@@ -570,18 +574,18 @@ impl Simulation {
                 running: true,
             })
             .collect();
-        self.schedule(self.now, Event::Listed { running });
+        self.schedule(self.now, AppEvent::Listed { running });
     }
 
     /// Ends the agent process, so the turn it was running ends with that
     /// rather than with whatever the agent would have said.
     fn stop_turn(&mut self, speaker: stageman_instance::Speaker) {
         self.queue.retain(|_, event| {
-            !matches!(event, Event::TurnEnded { speaker: whose, .. } if *whose == speaker)
+            !matches!(event, Event::App(AppEvent::TurnEnded { speaker: whose, .. }) if *whose == speaker)
         });
         self.schedule(
             self.now,
-            Event::TurnEnded {
+            AppEvent::TurnEnded {
                 speaker,
                 outcome: Err("stopped".to_owned()),
             },
@@ -598,52 +602,58 @@ impl Simulation {
             self.landing.push_back(Some(bytes));
             Ok(())
         };
-        self.schedule(self.now + 1, Event::Persisted { outcome });
+        self.schedule(self.now + 1, AppEvent::Persisted { outcome });
     }
 
     pub fn perform(&mut self, effect: Effect) {
-        self.trace.push(format!("{}: -> {effect:?}", self.now));
+        self.trace.push(format!(
+            "{}: -> {}{}",
+            self.now,
+            effect.kind(),
+            serialised(&effect)
+        ));
+        let Effect::App(effect) = effect;
         match effect {
-            Effect::Persist { bytes } => self.write(bytes),
-            Effect::RunTurn { speaker, run } => self.run_turn(speaker, &run),
-            Effect::Probe { job } => {
+            AppEffect::Persist { bytes } => self.write(bytes.into_inner()),
+            AppEffect::RunTurn { speaker, run } => self.run_turn(speaker, &run),
+            AppEffect::Probe { job } => {
                 let answering = self
                     .containers
                     .get(&stageman_job::container(job))
                     .is_some_and(|held| held.running && held.serving);
-                self.schedule(self.now, Event::Probed { job, answering });
+                self.schedule(self.now, AppEvent::Probed { job, answering });
             }
-            Effect::Inspect { container } => self.inspect(container),
-            Effect::ListRunning => self.list_running(),
-            Effect::Halt { container } => {
+            AppEffect::Inspect { container } => self.inspect(container),
+            AppEffect::ListRunning => self.list_running(),
+            AppEffect::Halt { container } => {
                 if let Some(held) = self.containers.get_mut(&container) {
                     held.running = false;
                 }
             }
-            Effect::Discard { container } => {
+            AppEffect::Discard { container } => {
                 self.containers.remove(&container);
             }
-            Effect::Reclaim => self.reclaims += 1,
-            Effect::Wake { after, timer } => {
+            AppEffect::Reclaim => self.reclaims += 1,
+            AppEffect::Wake { after, timer } => {
                 let at = self.now + u64::try_from(after.as_millis()).expect("a short wait");
-                self.schedule(at, Event::Woke { timer });
+                self.schedule(at, AppEvent::Woke { timer });
             }
-            Effect::Say { thread, text, .. } => self.posts.push((thread, text)),
-            Effect::ToolAnswered { id, status, body } => {
+            AppEffect::Say { thread, text, .. } => self.posts.push((thread, text)),
+            AppEffect::ToolAnswered { id, status, body } => {
                 self.tool_answers.insert(id, (status, body));
             }
-            Effect::Respond { id, response } => {
+            AppEffect::Respond { id, response } => {
                 self.responses.insert(id, response);
             }
-            Effect::Route { id, port } => {
+            AppEffect::Route { id, port } => {
                 self.routes.insert(id, port.map_or(Sent::Nowhere, Sent::To));
             }
-            Effect::FindPort { job } => {
+            AppEffect::FindPort { job } => {
                 let port = self.port_of(&stageman_job::container(job));
-                self.schedule(self.now, Event::PortFound { job, port });
+                self.schedule(self.now, AppEvent::PortFound { job, port });
             }
-            Effect::StopTurn { speaker } => self.stop_turn(speaker),
-            Effect::OpenThread {
+            AppEffect::StopTurn { speaker } => self.stop_turn(speaker),
+            AppEffect::OpenThread {
                 job, announcement, ..
             } => {
                 self.threads_opened += 1;
@@ -651,13 +661,13 @@ impl Simulation {
                 self.posts.push((opened.clone(), announcement));
                 self.schedule(
                     self.now,
-                    Event::ThreadOpened {
+                    AppEvent::ThreadOpened {
                         job,
                         outcome: Ok(opened),
                     },
                 );
             }
-            Effect::Post {
+            AppEffect::Post {
                 request,
                 thread,
                 text,
@@ -669,9 +679,9 @@ impl Simulation {
                     self.posts.push((thread, text));
                     Ok(())
                 };
-                self.schedule(self.now, Event::Posted { request, outcome });
+                self.schedule(self.now, AppEvent::Posted { request, outcome });
             }
-            Effect::Listen { project, .. } => {
+            AppEffect::Listen { project, .. } => {
                 self.listening.push(project);
                 self.trace.push(format!(
                     "{}: listening on {} project(s)",
@@ -721,9 +731,32 @@ impl Simulation {
     }
 
     /// The credentials handed to turns so far, oldest first.
-    pub fn warrants(&self) -> &[Secret] {
+    pub fn warrants(&self) -> &[String] {
         &self.warrants
     }
+}
+
+/// A value's fields as one line of JSON after a space, which is what a trace
+/// holds beside the kind: the application's variant is unwrapped, and a
+/// variant with no fields is nothing at all.
+fn serialised(value: &impl serde::Serialize) -> String {
+    let mut value = serde_json::to_value(value).expect("everything in the vocabulary serialises");
+    // Down through the hole and the variant, to the fields.
+    for _ in 0..2 {
+        value = match value {
+            serde_json::Value::Object(mut wrapped) if wrapped.len() == 1 => wrapped
+                .values_mut()
+                .next()
+                .map(serde_json::Value::take)
+                .expect("one value"),
+            serde_json::Value::String(_) => return String::new(),
+            other => other,
+        };
+    }
+    format!(
+        " {}",
+        serde_json::to_string(&value).expect("a value serialises")
+    )
 }
 
 impl Default for Simulation {

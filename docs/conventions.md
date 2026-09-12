@@ -348,11 +348,22 @@ Record the near-miss too: the term you rejected, and what it would have implied.
 
 - **scenario** — a scripted world: the file an instance starts from and the
   sequence of events it is fed, run against the simulated world, whose trace
-  of effects and state after each step are snapshots. A **seed** is a random
-  world under the same simulation, and a seed found failing is committed as a
-  scenario, so that the bug costs one run to rule out for ever. Not *test
-  case*, which does not say that the world is simulated; not *replay*, which
-  is one way to make a scenario and not what one is.
+  of effects and state after each step are snapshots. Two kinds, and telling
+  them apart matters. A **replay** is a file of events in and effects out,
+  compared exactly, in which nothing behaves; an **exploration** is a
+  **seed**, a random world under the same simulation, answering effects with
+  faults and crashes while an invariant is checked after every step. Replay
+  pins and exploration finds, and a seed found failing is committed as a
+  replay, so that the bug costs one run to rule out for ever — see
+  `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`.
+  Not *test case*, which does not say that the world is simulated.
+
+- **recorder** — what runs the real container runtime and the real agent, and
+  writes down what they print and how they answer, as the fixtures the
+  in-memory tests replay. Not a *test*: what it checks is what the outside
+  does, not what this project does, and it runs by hand and when a pin
+  changes rather than in the gate. Not an *example* either, which says how to
+  use something rather than what something else is like.
 
 ## 3. House rules
 
@@ -543,15 +554,18 @@ justify is usually obsolete.
   answer differently on another run. See
   `docs/decisions/0056-the-instance-decides-and-the-world-performs.md`.
 
-- **The world routes by shape, never decides on state, and answers an effect
-  only when it has completed.** Routing by shape is the host, the path and the
-  port of a request; deciding on state is anything that reads what the
-  instance knows, and it belongs in the instance as an event and a response.
-  An `if` on domain data in the world is a smell to move. The completion rule
-  is the whole of what the durability guarantee rests on: the instance holds
-  back a client's answer and a turn's start until the world says the write
-  landed, so a world that answered a persist when the write was merely started
-  would make every one of those promises false.
+- **The world knows no domain, and answers an effect only when it has
+  completed.** It performs mechanisms — a file, a process, a request, a
+  socket, a port, a timer — and hands the application's own effects to
+  whatever the entry point supplied. Which host a request is for, which
+  command a runtime is given and what its output means are all the
+  instance's; an `if` on domain data in the world is a smell to move, and so
+  is a string the world composes for anything but a log line. The completion
+  rule is the whole of what the durability guarantee rests on: the instance
+  holds back a client's answer and a turn's start until the world says the
+  write landed, so a world that answered a persist when the write was merely
+  started would make every one of those promises false. See
+  `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`.
 
 ## 4. Quality bar beyond the gate
 
@@ -716,13 +730,14 @@ it lands.
   ending, a sweep, a reply arriving while a turn runs, the daemon dying
   part-way — is a scenario against the simulated world, and its trace of
   effects and state after each step are snapshots whose diff somebody reads
-  before it merges. A seed found failing is committed as a scenario. A few
-  seeds run in `just check`, because the gate's cost is bounded by the code,
-  and more in `just verify`. Every event and effect is a value: it clones,
-  it compares, and it prints with every credential redacted, and a test holds
-  one that carries a credential to that. A channel or a callback added to a
-  variant would end the comparison that makes any of this work, and a
-  credential in a trace would end something worse.
+  before it merges. A seed found failing is committed as a replay. One fixed
+  seed runs in `just verify`, so the harness cannot rot; exploration proper
+  runs outside the gate, on its own trigger. Every event and effect is a
+  value: it clones, it compares, and it serialises in full, and it formats
+  not at all — the generic vocabulary implements neither `Debug` nor
+  `Display`, so a credential inside one can reach a file a test wrote, where
+  every credential is fake, and never a log. A channel or a callback added
+  to a variant would end the comparison that makes any of this work.
 
 ## 5. What this project needs installed
 

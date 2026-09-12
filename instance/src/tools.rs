@@ -18,7 +18,8 @@ use stageman_core::{ChannelConfig, Kit, ProjectId, State, Timestamp, Waiting};
 
 use crate::Instance;
 use crate::foreman::kits_offered;
-use crate::vocabulary::{Effect, RequestId, Speaker, Warranted};
+use crate::vocabulary::{AppEffect, RequestId, Speaker, Warranted};
+use crate::{Effect, Emit as _};
 
 /// The protocol version answered when a caller names none.
 const PROTOCOL: &str = "2025-06-18";
@@ -510,7 +511,7 @@ impl Instance {
 
     /// Answers a request, once whatever this step changed is on the disk.
     fn answer(&mut self, id: RequestId, status: u16, body: Option<serde_json::Value>) {
-        self.defer(Effect::ToolAnswered { id, status, body });
+        self.defer(AppEffect::ToolAnswered { id, status, body });
     }
 
     /// Which project a bearer belongs to.
@@ -599,9 +600,9 @@ impl Instance {
                 "no channel is bound to this project, so there is nobody to say this to".to_owned(),
             );
         };
-        effects.push(Effect::Post {
+        effects.emit(AppEffect::Post {
             request,
-            speaking,
+            speaking: speaking.into(),
             thread,
             text: message.to_owned(),
         });

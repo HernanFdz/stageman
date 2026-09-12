@@ -44,11 +44,7 @@ fn is_error(answer: &(u16, Option<serde_json::Value>)) -> bool {
 }
 
 /// A world in which the foreman is mid-turn, with the warrant it holds.
-fn with_a_foreman_working() -> (
-    Simulation,
-    stageman_instance::Instance,
-    stageman_core::Secret,
-) {
+fn with_a_foreman_working() -> (Simulation, stageman_instance::Instance, String) {
     let mut world = Simulation::new();
     world.holding(&watching_a_channel(&[]));
     let mut instance = world.wake(seed(1));
@@ -69,17 +65,16 @@ fn only_a_nearby_caller_with_a_minted_credential_is_served() {
     let (mut world, mut instance, warrant) = with_a_foreman_working();
 
     let mut faraway = tool_call(1, &warrant, body("tools/list", serde_json::json!({})));
-    if let stageman_instance::Event::ToolCalled { nearby, .. } = &mut faraway {
+    if let stageman_instance::Event::App(stageman_instance::AppEvent::ToolCalled {
+        nearby, ..
+    }) = &mut faraway
+    {
         *nearby = false;
     }
     world.schedule(160, faraway);
     world.schedule(
         161,
-        tool_call(
-            2,
-            &stageman_core::Secret::new("not-minted".to_owned()),
-            body("tools/list", serde_json::json!({})),
-        ),
+        tool_call(2, "not-minted", body("tools/list", serde_json::json!({}))),
     );
     world.schedule(
         162,
@@ -216,7 +211,7 @@ fn minting_a_warrant_forgets_only_that_speakers_previous_one() {
     world.schedule(2_100, said_at_root(2, "and look at the tests"));
     world.run_until(&mut instance, 2_200);
     let second = world.warrants().last().cloned().expect("the new warrant");
-    assert_ne!(second.expose(), first.expose());
+    assert_ne!(second, first);
     world.schedule(
         2_300,
         tool_call(3, &first, body("tools/list", serde_json::json!({}))),
@@ -275,7 +270,7 @@ fn a_foreman_starts_a_job_whose_thread_is_opened_before_its_agent_speaks() {
         .expect("opened");
     let begun = shape
         .iter()
-        .position(|line| line.starts_with("-> RunTurn { speaker: Job("))
+        .position(|line| line.starts_with("-> RunTurn") && line.contains("\"Job\""))
         .expect("begun");
     assert!(
         persisted < opened && opened < begun,

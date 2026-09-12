@@ -1,0 +1,25 @@
+# What performs the vocabulary on the async runtime, and the only crate of
+# this project's that names that runtime. It knows no domain: it steps
+# whatever it is given, performs each generic effect as the mechanism it
+# names, and hands the application's own effects to whatever the entry point
+# supplied. See
+# `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`.
+
+[package]
+name = "stageman-world"
+description = "What performs stageman's vocabulary on the async runtime. Internal to the workspace."
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+mutants = "0.0.4"
+stageman-vocabulary = { workspace = true }
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tracing = "0.1.44"
+
+[lints]
+workspace = true

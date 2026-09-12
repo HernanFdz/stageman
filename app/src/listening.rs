@@ -15,9 +15,9 @@
 use std::sync::Arc;
 
 use stageman_core::{Channel, ProjectId, Secret, Speaking};
-use stageman_instance::{Event, Message};
+use stageman_instance::{AppEvent, Message};
 
-use crate::world::World;
+use crate::world::Asking;
 
 /// Who this instance is on a channel, so it can recognise itself.
 ///
@@ -324,7 +324,7 @@ async fn connect(listening: &Listening) -> Result<Connected, crate::channel::Cha
 /// Fails if the socket breaks in a way that is not an ordinary ending.
 #[mutants::skip]
 async fn read(
-    world: &Arc<World>,
+    world: &Arc<Asking>,
     connected: Connected,
 ) -> Result<Ended, crate::channel::ChannelError> {
     use futures_util::{SinkExt as _, StreamExt as _};
@@ -393,7 +393,7 @@ async fn read(
                             "heard somebody speak"
                         );
                     }
-                    world.send(Event::Heard {
+                    world.send(AppEvent::Heard {
                         channel: Channel::Slack,
                         message,
                     });
@@ -412,7 +412,7 @@ async fn read(
 /// arrives in between. It is read on a task of its own so that opening the
 /// replacement does not wait for it, and it ends when the platform closes it.
 #[mutants::skip]
-fn drain(world: &Arc<World>, project: ProjectId, replaced: Box<Connected>) {
+fn drain(world: &Arc<Asking>, project: ProjectId, replaced: Box<Connected>) {
     let world = Arc::clone(world);
     drop(tokio::spawn(async move {
         if let Err(why) = read(&world, *replaced).await {
@@ -489,7 +489,7 @@ const BEFORE_TRYING_AGAIN: std::time::Duration = std::time::Duration::from_secs(
 /// reported, because a message said into it reaches nobody and the platform
 /// does not send it again.
 #[mutants::skip]
-pub fn listen_to(world: Arc<World>, one: Listening) {
+pub fn listen_to(world: Arc<Asking>, one: Listening) {
     drop(tokio::spawn(async move {
         let project = one.project;
         // When this project stopped having a connection, and `None` while it

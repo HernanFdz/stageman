@@ -7,7 +7,8 @@
 
 use stageman_core::{JobId, Progress};
 
-use crate::vocabulary::{Effect, RequestId};
+use crate::vocabulary::{AppEffect, RequestId};
+use crate::{Effect, Emit as _};
 
 /// The domain assumed when nothing names one.
 ///
@@ -211,11 +212,11 @@ impl crate::Instance {
             .job(job)
             .is_some_and(|recorded| !matches!(recorded.progress, Progress::Retired(_)));
         if !showing {
-            effects.push(Effect::Route { id, port: None });
+            effects.emit(AppEffect::Route { id, port: None });
             return;
         }
         if let Some(port) = self.tunnels.get(&job) {
-            effects.push(Effect::Route {
+            effects.emit(AppEffect::Route {
                 id,
                 port: Some(*port),
             });
@@ -224,7 +225,7 @@ impl crate::Instance {
         let waiting = self.routing.entry(job).or_default();
         waiting.push(id);
         if waiting.len() == 1 {
-            effects.push(Effect::FindPort { job });
+            effects.emit(AppEffect::FindPort { job });
         }
     }
 
@@ -234,7 +235,7 @@ impl crate::Instance {
             self.tunnels.insert(job, port);
         }
         for id in self.routing.remove(&job).unwrap_or_default() {
-            effects.push(Effect::Route { id, port });
+            effects.emit(AppEffect::Route { id, port });
         }
     }
 

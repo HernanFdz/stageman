@@ -1025,7 +1025,19 @@ const WORKSPACE: &str = "/workspace";
 /// pure question about configuration and lives in the domain crate; what they
 /// are called here is knowledge about one agent and lives in its adapter. See
 /// `docs/conventions.md` §3.
-fn delivered(handout: &Handout) -> Result<Vec<(String, Secret)>, AgentError> {
+/// Exactly the environment a container running this handout is given, in the
+/// order it is set: the agent's own credential under the variable its
+/// adapter reads, the platform credentials under the variables their tools
+/// read, and the project's variables last, refused on collision.
+///
+/// Pure, so that whoever decides what a process is handed can decide this
+/// too, and the world only sets it.
+///
+/// # Errors
+///
+/// Fails if a project's variable claims a name this project delivers itself,
+/// which would change who pays — `docs/decisions/0008-one-credential-per-agent.md`.
+pub fn environment(handout: &Handout) -> Result<Vec<(String, Secret)>, AgentError> {
     let mut set: Vec<(String, Secret)> = vec![match handout.agent() {
         Agent::Claude => (
             claude_credential_variable(handout.agent_credential()).to_owned(),
@@ -1338,7 +1350,7 @@ fn carrying(image: &Image, delivering: &[(String, Secret)]) -> Vec<String> {
 }
 
 /// What an agent said in reply to one question.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Answer {
     /// Everything the agent said, in order.
     ///
@@ -1389,7 +1401,7 @@ pub async fn ask(
     tools: Option<&Tools>,
     question: &str,
 ) -> Result<Answer, AgentError> {
-    let delivering = delivered(handout)?;
+    let delivering = environment(handout)?;
     let image = build(runtime, handout.agent(), handout.role()).await?;
     let container = spawn(
         runtime,
@@ -1721,6 +1733,47 @@ fn retained_arguments(
     arguments
 }
 
+/// Everything a container is started with, decided elsewhere and handed
+/// over as plain data.
+///
+/// What a handout decides, rendered: the environment is already the list of
+/// variables the container is given, and the role is what decides the
+/// image — see `docs/decisions/0036-a-foremans-image-is-not-a-jobs.md`.
+#[derive(Debug, Clone)]
+pub struct Launch {
+    /// Which agent runs in it.
+    pub agent: Agent,
+    /// What it runs as.
+    pub role: Role,
+    /// Exactly the environment it is given, in order, and nothing inherited.
+    pub environment: Vec<(String, Secret)>,
+    /// The repository checked out before the agent speaks, for a job.
+    pub repository: Option<String>,
+    /// The platform whose tool makes the checkout, if a credential for one
+    /// is held.
+    pub platform: Option<Platform>,
+    /// What the agent runs on.
+    pub kit: Kit,
+}
+
+impl Launch {
+    /// What a handout decides, rendered.
+    ///
+    /// # Errors
+    ///
+    /// Fails as [`environment`] does.
+    pub fn of(handout: &Handout) -> Result<Self, AgentError> {
+        Ok(Self {
+            agent: handout.agent(),
+            role: handout.role(),
+            environment: environment(handout)?,
+            repository: handout.repository().map(str::to_owned),
+            platform: handout.platform(Platform::GitHub).map(|_| Platform::GitHub),
+            kit: handout.kit().clone(),
+        })
+    }
+}
+
 /// Starts a retained container for an agent and puts the first question to it.
 ///
 /// The container survives this process, under `name`. Nothing removes it —
@@ -1737,18 +1790,14 @@ fn retained_arguments(
 #[mutants::skip]
 pub async fn begin(
     runtime: &ContainerRuntime,
-    handout: &Handout,
+    launch: &Launch,
     name: &str,
     instance: InstanceId,
     tools: Option<&Tools>,
     question: &str,
 ) -> Result<Answer, AgentError> {
-    let delivering = delivered(handout)?;
-    // Which image is decided by the handout rather than passed in beside it.
-    // That is what stops a container holding a foreman's credentials from
-    // being started on a job's image — see
-    // `docs/decisions/0036-a-foremans-image-is-not-a-jobs.md`.
-    let image = build(runtime, handout.agent(), handout.role()).await?;
+    let delivering = &launch.environment;
+    let image = build(runtime, launch.agent, launch.role).await?;
     // Created rather than run, so there is a moment between existing and
     // starting in which the thread can be put in place. `run` would have
     // started it immediately and left nowhere to do that.
@@ -1756,9 +1805,9 @@ pub async fn begin(
         .args(retained_arguments(
             name,
             &image,
-            handout.agent(),
+            launch.agent,
             instance,
-            &delivering,
+            delivering,
         ))
         .envs(
             delivering
@@ -1788,12 +1837,11 @@ pub async fn begin(
     // A foreman's handout carries no repository, and its image has no tool to
     // clone with, so the step is a job's alone. With one platform, holding
     // its credential is what decides which tool makes the clone.
-    if let Some(repository) = handout.repository() {
-        let platform = handout.platform(Platform::GitHub).map(|_| Platform::GitHub);
-        check_out(runtime, name, repository, platform).await?;
+    if let Some(repository) = &launch.repository {
+        check_out(runtime, name, repository, launch.platform).await?;
     }
     let container = spawn(runtime, &agent_arguments(name), &[])?;
-    converse(container, Opening::Fresh, tools, handout.kit(), question).await
+    converse(container, Opening::Fresh, tools, &launch.kit, question).await
 }
 
 /// What makes sure a container is up, without attaching to it.
@@ -3445,7 +3493,7 @@ mod tests {
     /// the delivery helper is fallible now — unwrapping it in six places would
     /// say less than naming the expectation once.
     fn names_of(handout: &Handout) -> Vec<String> {
-        delivered(handout)
+        environment(handout)
             .expect("a handout with no reserved name")
             .into_iter()
             .map(|(name, _)| name)
@@ -3462,7 +3510,7 @@ mod tests {
                 id: "1728312345.678901".to_owned(),
             });
 
-        let delivering = delivered(&handout).expect("a handout with no reserved name");
+        let delivering = environment(&handout).expect("a handout with no reserved name");
         let named = names_of(&handout);
 
         assert!(
@@ -3558,7 +3606,7 @@ mod tests {
         let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
         let handout = Handout::for_foreman(&state, project).expect("a watched project");
 
-        let delivered = delivered(&handout).expect("a handout with no reserved name");
+        let delivered = environment(&handout).expect("a handout with no reserved name");
 
         assert_eq!(delivered.len(), 1, "{delivered:?}");
         assert_eq!(delivered[0].0, "CLAUDE_CODE_OAUTH_TOKEN");
@@ -3598,7 +3646,7 @@ mod tests {
         let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project)
             .expect("a watched project");
 
-        let delivering = delivered(&handout).expect("no reserved name here");
+        let delivering = environment(&handout).expect("no reserved name here");
         let found = delivering
             .iter()
             .find(|(name, _)| name == "STRIPE_API_KEY")
@@ -3653,7 +3701,7 @@ mod tests {
             let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project)
                 .expect("a watched project");
 
-            let refused = delivered(&handout).expect_err("that name is ours");
+            let refused = environment(&handout).expect_err("that name is ours");
 
             assert!(
                 matches!(refused, AgentError::ReservedVariable { ref name } if name == claimed),
@@ -3700,7 +3748,7 @@ mod tests {
 
         let arguments = session_arguments(
             &built(),
-            &delivered(&handout).expect("a handout with no reserved name"),
+            &environment(&handout).expect("a handout with no reserved name"),
         );
         let line = arguments.join(" ");
 
@@ -3724,7 +3772,7 @@ mod tests {
 
         let arguments = session_arguments(
             &built(),
-            &delivered(&handout).expect("a handout with no reserved name"),
+            &environment(&handout).expect("a handout with no reserved name"),
         );
 
         assert!(!arguments.iter().any(|a| a == "none"), "{arguments:?}");
@@ -3755,7 +3803,7 @@ mod tests {
             &built(),
             Agent::Claude,
             an_instance(),
-            &delivered(&handout).expect("a handout with no reserved name"),
+            &environment(&handout).expect("a handout with no reserved name"),
         );
         let line = arguments.join(" ");
 
@@ -3799,7 +3847,7 @@ mod tests {
             &built(),
             Agent::Claude,
             an_instance(),
-            &delivered(&handout).expect("a handout with no reserved name"),
+            &environment(&handout).expect("a handout with no reserved name"),
         );
         let line = arguments.join(" ");
 
@@ -3825,7 +3873,7 @@ mod tests {
             &built(),
             Agent::Claude,
             an_instance(),
-            &delivered(&handout).expect("a handout with no reserved name"),
+            &environment(&handout).expect("a handout with no reserved name"),
         );
 
         let line = arguments.join(" ");
@@ -3970,7 +4018,7 @@ mod tests {
             &built(),
             Agent::Claude,
             an_instance(),
-            &delivered(&handout).expect("a handout with no reserved name"),
+            &environment(&handout).expect("a handout with no reserved name"),
         );
 
         assert!(arguments.iter().any(|a| a == "--init"), "{arguments:?}");
@@ -4128,7 +4176,7 @@ mod tests {
 
         let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
         let handout = Handout::for_foreman(&state, project).expect("a watched project");
-        let delivering = delivered(&handout).expect("a handout with no reserved name");
+        let delivering = environment(&handout).expect("a handout with no reserved name");
         let image = build(&runtime, Agent::Claude, Role::Foreman)
             .await
             .expect("the image builds");
@@ -4473,7 +4521,7 @@ mod tests {
 
             let first = begin(
                 &runtime,
-                &handout,
+                &Launch::of(&handout).expect("a handout with no reserved name"),
                 name,
                 an_instance(),
                 None,
@@ -4525,7 +4573,7 @@ mod tests {
                 std::time::Duration::from_secs(6),
                 begin(
                     &runtime,
-                    &handout,
+                    &Launch::of(&handout).expect("a handout with no reserved name"),
                     name,
                     an_instance(),
                     None,

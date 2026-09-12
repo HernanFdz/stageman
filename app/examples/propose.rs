@@ -22,7 +22,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
-use stageman::world::{Performer, World};
+use stageman::world::{Asking, Performer};
 use stageman_agent::ContainerRuntime;
 use stageman_core::{
     Agent, AgentConfig, JobId, Key, Kit, KitConfig, KitName, NONCE_LEN, Platform, Project,
@@ -170,7 +170,7 @@ async fn stood_up(
     path: PathBuf,
     file: &[u8],
     key: Key,
-) -> Result<Arc<World>, String> {
+) -> Result<Arc<Asking>, String> {
     // The runtime lives as long as the process, which is what the world asks
     // of it.
     let runtime: &'static ContainerRuntime = Box::leak(Box::new(runtime));
@@ -189,21 +189,22 @@ async fn stood_up(
     };
     let woken = Instance::open(Some(file), key, seed(), &startup)
         .map_err(|error| format!("the instance could not be opened: {error}"))?;
-    let (world, events) = World::new();
-    stageman::world::adopt(Arc::clone(&world));
+    let (world, events) = stageman_world::World::new();
+    let asking = Asking::new(world);
+    stageman::world::adopt(Arc::clone(&asking));
     let performer = Performer::new(
         runtime,
         path,
         stageman::tools_endpoint(),
-        Arc::clone(&world),
+        Arc::clone(&asking),
     );
-    stageman::world::run(woken.instance, woken.effects, performer, events);
-    Ok(world)
+    stageman_world::run(woken.instance, woken.effects, Arc::new(performer), events);
+    Ok(asking)
 }
 
 /// Waits for the job to stop working, by asking: nothing else in this process
 /// is watching it, and the instance answers between one turn and the next.
-async fn finished(world: &World, project: ProjectId, job: &str) -> Result<Standing, String> {
+async fn finished(world: &Asking, project: ProjectId, job: &str) -> Result<Standing, String> {
     loop {
         tokio::time::sleep(Duration::from_secs(5)).await;
         let Some(Response::Jobs(working)) = world

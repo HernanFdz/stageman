@@ -9,7 +9,8 @@ use stageman_core::{Arriving, Channel, ChannelConfig, JobId, Progress, Recipient
 
 use crate::Instance;
 use crate::turns::{Turn, speaking_for};
-use crate::vocabulary::{Effect, Message, Run, Speaker};
+use crate::vocabulary::{AppEffect, Message, Run, Speaker};
+use crate::{Effect, Emit as _};
 
 /// What the gate decided when a reply arrived.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,8 +89,8 @@ impl Instance {
                 else {
                     return;
                 };
-                effects.push(Effect::Say {
-                    speaking,
+                effects.emit(AppEffect::Say {
+                    speaking: speaking.into(),
                     thread: Thread {
                         channel,
                         id: id.to_owned(),
@@ -125,7 +126,7 @@ impl Instance {
                 // Resuming starts the container, which publishes its tunnel
                 // on a fresh port.
                 self.forget_tunnel(job);
-                self.defer(Effect::RunTurn {
+                self.defer(AppEffect::RunTurn {
                     speaker,
                     run: Run::Resume {
                         container: stageman_job::container(job),
@@ -147,8 +148,8 @@ impl Instance {
     /// anything: a notice about a refusal changes no state.
     fn notice(&mut self, job: JobId, text: &str) {
         if let Some((speaking, thread)) = speaking_for(&self.state, job) {
-            self.staged.push(Effect::Say {
-                speaking,
+            self.defer(AppEffect::Say {
+                speaking: speaking.into(),
                 thread,
                 text: text.to_owned(),
             });

@@ -3,7 +3,7 @@
 //! moved.
 
 use stageman_core::{Outcome, Progress, Waiting};
-use stageman_instance::{Effect, Event, Instance};
+use stageman_instance::{AppEffect, AppEvent, Effect, Instance};
 
 use crate::simulation::{
     Sent, Simulation, job, said_in, seed, tunnel_asked, watching, watching_a_channel,
@@ -45,7 +45,7 @@ fn a_jobs_tunnel_is_looked_up_once_and_remembered() {
     assert_eq!(
         effects
             .iter()
-            .filter(|effect| matches!(effect, Effect::FindPort { .. }))
+            .filter(|effect| matches!(effect, Effect::App(AppEffect::FindPort { .. })))
             .count(),
         1,
         "asked once for both"
@@ -137,10 +137,13 @@ fn a_port_that_can_have_moved_is_looked_up_again() {
     assert_eq!(count(&sim, "-> FindPort"), 3, "resuming forgot the port");
 
     // A connection that did not go through forgets it too.
-    for effect in instance.step(Event::TunnelFailed {
-        job: job(1),
-        why: "connection refused".to_owned(),
-    }) {
+    for effect in instance.step(
+        AppEvent::TunnelFailed {
+            job: job(1),
+            why: "connection refused".to_owned(),
+        }
+        .into(),
+    ) {
         sim.perform(effect);
     }
     visit(&mut sim, &mut instance, 4, 1);

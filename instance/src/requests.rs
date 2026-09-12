@@ -22,7 +22,8 @@ use stageman_wire::{ChannelDraft, Draft, Ending, KitDraft, Refusal, VariableDraf
 use crate::Instance;
 use crate::turns::listening_on;
 use crate::views;
-use crate::vocabulary::{Effect, RequestId, Speaker};
+use crate::vocabulary::{AppEffect, RequestId, Speaker};
+use crate::{Effect, Emit as _};
 
 /// Why a job started, when a person started it.
 ///
@@ -32,7 +33,7 @@ use crate::vocabulary::{Effect, RequestId, Speaker};
 const BY_HAND: &str = "started by hand from the dashboard";
 
 /// What a person can ask.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Request {
     /// The instance screen.
     Instance,
@@ -159,7 +160,7 @@ impl fmt::Debug for Request {
 }
 
 /// What a person is answered.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Response {
     /// The instance screen.
     Instance(stageman_wire::Instance),
@@ -203,7 +204,7 @@ impl Instance {
             } => self.retire(&project, &job, ending),
         };
         let response = answered.unwrap_or_else(Response::Refused);
-        self.defer(Effect::Respond { id, response });
+        self.defer(AppEffect::Respond { id, response });
     }
 
     /// Gives an agent a credential, or replaces the one it has.
@@ -289,10 +290,10 @@ impl Instance {
         // so.
         if let Some((opening, speaking)) = self.state.projects.get(&created).and_then(listening_on)
         {
-            self.defer(Effect::Listen {
+            self.defer(AppEffect::Listen {
                 project: created,
-                opening,
-                speaking,
+                opening: opening.expose().to_owned(),
+                speaking: speaking.into(),
             });
         }
         Ok(Response::Projects(views::watching_now(&self.state)))
@@ -357,14 +358,14 @@ impl Instance {
         let jobs: Vec<JobId> = watched.jobs.keys().copied().collect();
         for job in &jobs {
             self.forget_tunnel(*job);
-            self.defer(Effect::Discard {
+            self.defer(AppEffect::Discard {
                 container: stageman_job::container(*job),
             });
         }
-        self.defer(Effect::Discard {
+        self.defer(AppEffect::Discard {
             container: stageman_foreman::container(identifier),
         });
-        self.defer(Effect::Reclaim);
+        self.defer(AppEffect::Reclaim);
         self.state.projects.remove(&identifier);
         self.dirty = true;
         Ok(Response::Projects(views::watching_now(&self.state)))
@@ -439,7 +440,7 @@ impl Instance {
         let speaker = Speaker::Job(named);
         if let Some(turn) = self.turns.get_mut(&speaker) {
             turn.stopping = true;
-            effects.push(Effect::StopTurn { speaker });
+            effects.emit(AppEffect::StopTurn { speaker });
             tracing::info!(job = %named, "asked to stop a job");
         } else {
             tracing::debug!(job = %named, "asked to stop a job with no turn in it");
@@ -470,10 +471,10 @@ impl Instance {
             }
         }
         self.forget_tunnel(named);
-        self.defer(Effect::Discard {
+        self.defer(AppEffect::Discard {
             container: stageman_job::container(named),
         });
-        self.defer(Effect::Reclaim);
+        self.defer(AppEffect::Reclaim);
         self.jobs(project)
     }
 }

@@ -49,4 +49,4 @@ pub use serving::{RUNTIME, serve};
 #[cfg(feature = "server")]
 pub use tooling::served_at as tools_endpoint;
 #[cfg(feature = "server")]
-pub use world::world;
+pub use world::asking;

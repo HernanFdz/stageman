@@ -76,7 +76,7 @@ fn a_dropped_turn_forgets_only_its_own_warrant() {
         .last()
         .cloned()
         .expect("the resumed job's warrant");
-    assert!(instance.warranted(kept.expose()).is_some());
+    assert!(instance.warranted(kept.as_str()).is_some());
 
     // The reply is taken, and the write that would let it resume fails.
     world.next_write_fails("the disk is full");
@@ -91,7 +91,7 @@ fn a_dropped_turn_forgets_only_its_own_warrant() {
         "the turn that was not started is recorded as such"
     );
     assert!(
-        instance.warranted(kept.expose()).is_some(),
+        instance.warranted(kept.as_str()).is_some(),
         "the other speaker's warrant still answers"
     );
     assert_eq!(progress_of(instance.state(), running), Progress::Working);
@@ -226,11 +226,15 @@ fn a_message_without_a_mention_or_from_this_instance_reaches_nobody() {
     let mut instance = world.wake(seed(1));
 
     let mut plain = said_in(1, "people talking to each other");
-    if let stageman_instance::Event::Heard { message, .. } = &mut plain {
+    if let stageman_instance::Event::App(stageman_instance::AppEvent::Heard { message, .. }) =
+        &mut plain
+    {
         message.mentions = false;
     }
     let mut ours = said_in(1, "something this instance posted");
-    if let stageman_instance::Event::Heard { message, .. } = &mut ours {
+    if let stageman_instance::Event::App(stageman_instance::AppEvent::Heard { message, .. }) =
+        &mut ours
+    {
         message.from_us = true;
     }
     world.schedule(100, plain);
