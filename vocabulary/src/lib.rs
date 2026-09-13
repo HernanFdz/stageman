@@ -342,12 +342,27 @@ pub trait Deciding: Sized {
     /// The application whose events and effects this speaks.
     type App: App;
 
-    /// Constructs the deciding half from the two facts that exist before
+    /// Which platform this build was made for.
+    ///
+    /// The third fact that exists before anything happens, and the only one
+    /// that is a property of the binary rather than of the run. It is handed
+    /// over rather than read so that nothing inside branches on the machine
+    /// it was compiled for: a recording made on one platform is replayed on
+    /// another by handing the replay the target the file names. Which
+    /// platforms there are is the application's to say, which is why this is
+    /// a hole rather than a set named here.
+    type Target: Serialize + DeserializeOwned + Clone;
+
+    /// Constructs the deciding half from the facts that exist before
     /// anything happens, and answers with what it asks for first.
     ///
     /// Everything else — a key, a file, what is installed — it asks for
     /// through effects and learns from their answers.
-    fn boot(seed: Seed, environment: Environment) -> (Self, Vec<Effect<Self::App>>);
+    fn boot(
+        seed: Seed,
+        environment: Environment,
+        target: Self::Target,
+    ) -> (Self, Vec<Effect<Self::App>>);
 
     /// Handles one event and answers with what to do about it.
     fn step(&mut self, event: Event<Self::App>) -> Vec<Effect<Self::App>>;
@@ -506,8 +521,13 @@ pub(crate) mod doorbell {
 
     impl Deciding for Bell {
         type App = Doorbell;
+        type Target = ();
 
-        fn boot(_seed: Seed, environment: Environment) -> (Self, Vec<Effect<Doorbell>>) {
+        fn boot(
+            _seed: Seed,
+            environment: Environment,
+            (): Self::Target,
+        ) -> (Self, Vec<Effect<Doorbell>>) {
             let path = environment
                 .get("BELL")
                 .map_or_else(|| "bell".to_owned(), Clone::clone);

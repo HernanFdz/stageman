@@ -23,7 +23,7 @@ use dioxus::prelude::{DioxusRouterExt as _, ServeConfig};
 use dioxus::server::axum;
 use rand::rngs::{StdRng, SysRng};
 use rand::{Rng as _, SeedableRng as _};
-use stageman_instance::{AppEvent, Instance, Seed};
+use stageman_instance::{AppEvent, Instance, Seed, Target};
 use stageman_vocabulary::Environment;
 use stageman_world::World;
 
@@ -194,7 +194,10 @@ async fn start() -> Result<(), StartupError> {
     // answers, its key, its file, what was left behind. Every way a start
     // can refuse is an exit effect with its reason, performed by the world.
     let environment: Environment = std::env::vars().collect();
-    let (instance, effects) = Instance::boot(seed()?, environment);
+    // The one place a compile-time condition says anything about a platform.
+    // Everything downstream decides on the value, so a start can be recorded
+    // here and replayed on a machine this is not.
+    let (instance, effects) = Instance::boot(seed()?, environment, Target::compiled());
     let (world, events) = World::new();
     let asking = Asking::new(Arc::clone(&world));
     crate::world::adopt(Arc::clone(&asking));

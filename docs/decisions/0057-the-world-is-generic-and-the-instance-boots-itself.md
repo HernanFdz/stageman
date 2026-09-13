@@ -91,9 +91,10 @@ process reaches the outside, each answered where an answer exists:
   body and hand that back, or respond now. The body arrives as an event only
   when asked for, and bounded.
 
-**The instance boots itself.** It is constructed from two things that exist
+**The instance boots itself.** It is constructed from three things that exist
 before anything happens: a seed, drawn once by the world from the operating
-system, and the environment as a map. Everything else it asks for: the key,
+system; the environment as a map; and which platform this build was made for.
+Everything else it asks for: the key,
 its own file, each runtime candidate in order, what containers were left
 behind, the listeners it wants. The presentation server's port — see below —
 arrives as the application's own event, first of all, because it is an
@@ -101,6 +102,27 @@ application fact and the map is what the process was actually given.
 Everything a start used to refuse with an exit code is an exit effect with
 its reason, and everything a start used to order by care — the address line
 last, after the first write has landed — is a sequence a replay pins.
+
+**The platform is handed over rather than read**, and it is the third
+construction fact for a reason the other rejected ones are not: it is a
+property of the binary rather than an answer somebody had to go and find.
+Where a container runtime might be and where a program's own files go are
+both decided per platform, and reading either from a compile-time condition
+would make a start a function of the machine it was compiled for — so a flow
+recorded on one would fail to replay on another, which is where the gate
+runs. Every list and every rule stays inside, for every platform at once, and
+the value says which applies. One compile-time condition remains, in the
+entry point, choosing the value to hand over. Two things follow that are
+worth having on their own: what a start does on a platform is testable from
+any other, which is exactly the branch that shipped wrong once; and
+discovering a runtime by looking for the file is gone, because a candidate is
+tried by being run.
+
+The build's own identity is the one compile-time read left inside, on the
+line naming this binary. It is absent in every build that is not a release,
+which is every build that runs a scenario, so it cannot vary underneath one;
+what did vary, the target triple, is off that line and stays on `--version`,
+which the entry point prints without the instance.
 
 **The seed is never derived from anything guessable.** Every unguessable
 value the instance mints comes from it, and warrants are among them: a warrant
@@ -204,9 +226,22 @@ person was given is the whole of what says where it goes.
 Rejected: **the presentation port as an entry in the environment map**, which
 would make the map something other than what the process was given, and
 require every scenario author to know to include it. Rejected likewise:
-**construction facts beyond the seed and the environment**, which were how
-0056 handed over the runtime's containers and the bound port; both are
-answers now.
+**construction facts that are answers**, which were how 0056 handed over the
+runtime's containers and the bound port; both are asked for now. The platform
+is not one of those: nothing goes and finds it.
+
+Rejected, for the platform in particular: **an environment variable naming
+where a runtime might be**, which adds configuration
+`docs/decisions/0023-the-container-runtime-is-discovered-once.md`
+deliberately does without, and would let a start be pointed anywhere.
+Rejected: **one merged list of every platform's paths**, which needs no
+configuration but spends every start on paths belonging to other platforms
+and quietly changes which runtime some machines pick. Rejected: **handing the
+instance the list and the rules themselves** rather than a value naming the
+platform, which would put that knowledge outside and let a caller substitute
+it, where the point of 0023 is that nobody can. Rejected: **recording a file
+per platform**, which cannot be done here at all, since nothing in this
+project can produce a recording for a machine it is not.
 
 Rejected: **the container tests as examples.** An example says how to use
 something; these say what the outside does. Naming them as tests kept them in

@@ -19,6 +19,7 @@
 
 use std::path::PathBuf;
 
+use stageman_agent::Target;
 use stageman_vocabulary::Environment;
 
 use crate::tunnel::Domain;
@@ -79,8 +80,12 @@ pub fn told(environment: &Environment, named: &str) -> Option<String> {
 }
 
 /// The user's home, as the platform names it.
-fn home(environment: &Environment) -> Result<PathBuf, NoHome> {
-    let named = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+fn home(environment: &Environment, target: Target) -> Result<PathBuf, NoHome> {
+    let named = if target == Target::Windows {
+        "USERPROFILE"
+    } else {
+        "HOME"
+    };
     environment
         .get(named)
         .filter(|home| !home.is_empty())
@@ -101,9 +106,9 @@ fn absolute(environment: &Environment, named: &str) -> Option<PathBuf> {
 ///
 /// Two cases and not three: see the note at the top of this module for why
 /// macOS is not one of them.
-fn configuration(environment: &Environment) -> Result<PathBuf, NoHome> {
-    let home = home(environment)?;
-    if cfg!(windows) {
+fn configuration(environment: &Environment, target: Target) -> Result<PathBuf, NoHome> {
+    let home = home(environment, target)?;
+    if target == Target::Windows {
         Ok(
             absolute(environment, "APPDATA")
                 .unwrap_or_else(|| home.join("AppData").join("Roaming")),
@@ -119,9 +124,9 @@ fn configuration(environment: &Environment) -> Result<PathBuf, NoHome> {
 /// this returns it, which 0037 records as a documented consequence rather
 /// than something to work around. Everywhere else the two differ, which is
 /// what keeps a generated key from sitting beside the file it protects.
-fn data(environment: &Environment) -> Result<PathBuf, NoHome> {
-    let home = home(environment)?;
-    if cfg!(windows) {
+fn data(environment: &Environment, target: Target) -> Result<PathBuf, NoHome> {
+    let home = home(environment, target)?;
+    if target == Target::Windows {
         Ok(
             absolute(environment, "APPDATA")
                 .unwrap_or_else(|| home.join("AppData").join("Roaming")),
@@ -137,8 +142,8 @@ fn data(environment: &Environment) -> Result<PathBuf, NoHome> {
 /// # Errors
 ///
 /// Fails if there is no home directory to derive it from.
-pub fn key_file(environment: &Environment) -> Result<PathBuf, NoHome> {
-    Ok(configuration(environment)?
+pub fn key_file(environment: &Environment, target: Target) -> Result<PathBuf, NoHome> {
+    Ok(configuration(environment, target)?
         .join(INSTANCE_DIRECTORY)
         .join(KEY_FILE))
 }
@@ -149,11 +154,11 @@ pub fn key_file(environment: &Environment) -> Result<PathBuf, NoHome> {
 ///
 /// Fails if nothing names it and there is no home directory to derive it
 /// from.
-pub fn instance_file(environment: &Environment) -> Result<PathBuf, NoHome> {
+pub fn instance_file(environment: &Environment, target: Target) -> Result<PathBuf, NoHome> {
     if let Some(named) = said(environment, STATE_VARIABLE) {
         return Ok(PathBuf::from(named));
     }
-    Ok(data(environment)?
+    Ok(data(environment, target)?
         .join(INSTANCE_DIRECTORY)
         .join(INSTANCE_FILE))
 }
@@ -175,7 +180,7 @@ pub fn domain(environment: &Environment) -> Domain {
 
 #[cfg(test)]
 mod tests {
-    use super::{Domain, NoHome, domain, instance_file, key_file};
+    use super::{Domain, NoHome, Target, domain, instance_file, key_file};
     use stageman_vocabulary::Environment;
     use std::path::PathBuf;
 
@@ -195,14 +200,14 @@ mod tests {
             ("STAGEMAN_STATE", "/elsewhere/i.json"),
         ]);
         assert_eq!(
-            instance_file(&told),
+            instance_file(&told, Target::Linux),
             Ok(PathBuf::from("/elsewhere/i.json")),
             "an override is honoured whole"
         );
 
         let home = environment(&[("HOME", "/home/somebody")]);
-        let file = instance_file(&home).expect("a home is enough");
-        let key = key_file(&home).expect("a home is enough");
+        let file = instance_file(&home, Target::Linux).expect("a home is enough");
+        let key = key_file(&home, Target::Linux).expect("a home is enough");
         assert!(file.starts_with("/home/somebody"), "{}", file.display());
         assert!(
             file.ends_with("stageman/instance.json"),
@@ -217,8 +222,72 @@ mod tests {
         );
 
         let nowhere = environment(&[("STAGEMAN_STATE", "")]);
-        assert_eq!(instance_file(&nowhere), Err(NoHome));
-        assert_eq!(key_file(&nowhere), Err(NoHome));
+        assert_eq!(instance_file(&nowhere, Target::Linux), Err(NoHome));
+        assert_eq!(key_file(&nowhere, Target::Linux), Err(NoHome));
+    }
+
+    /// Every platform's answer, from whichever machine this runs on.
+    ///
+    /// The whole point of the target being a value rather than a compiled
+    /// condition: what a mac does is checkable from a Linux box. The branch
+    /// nobody here could execute is the one that shipped wrong — a port that
+    /// reached for Apple's own directories, which would have moved an
+    /// instance that already existed and looked exactly like a first run.
+    #[test]
+    fn each_platform_keeps_them_where_that_platform_says() {
+        let home = environment(&[("HOME", "/home/x"), ("USERPROFILE", r"C:\Users\x")]);
+
+        // A mac keeps them where a Linux does. Apple's own directories are
+        // one call away and are not what a program run from a terminal uses.
+        assert_eq!(
+            instance_file(&home, Target::MacOs),
+            Ok(PathBuf::from("/home/x/.local/share/stageman/instance.json"))
+        );
+        assert_eq!(
+            key_file(&home, Target::MacOs),
+            Ok(PathBuf::from("/home/x/.config/stageman/key"))
+        );
+        for same in [Target::Linux, Target::Unknown] {
+            assert_eq!(
+                instance_file(&home, same),
+                instance_file(&home, Target::MacOs),
+                "{same:?} keeps its instance where a mac does"
+            );
+            assert_eq!(
+                key_file(&home, same),
+                key_file(&home, Target::MacOs),
+                "{same:?} keeps its key where a mac does"
+            );
+        }
+
+        // Windows reads a different variable for the home, and defines the
+        // two directories as one place — which
+        // `docs/decisions/0037-the-instance-key-is-generated-on-first-run.md`
+        // records as a consequence rather than something to work around.
+        let file = instance_file(&home, Target::Windows).expect("a home");
+        let key = key_file(&home, Target::Windows).expect("a home");
+        assert!(file.starts_with(r"C:\Users\x"), "{}", file.display());
+        assert_eq!(file.parent(), key.parent(), "one directory, not two");
+        assert_eq!(
+            instance_file(&environment(&[("HOME", "/home/x")]), Target::Windows),
+            Err(NoHome),
+            "and it reads that variable rather than the one beside it"
+        );
+    }
+
+    /// The platform's own overrides are honoured only when absolute.
+    #[test]
+    fn a_relative_xdg_override_is_ignored_as_the_specification_says() {
+        let absolute = environment(&[("HOME", "/home/x"), ("XDG_DATA_HOME", "/data")]);
+        assert_eq!(
+            instance_file(&absolute, Target::Linux),
+            Ok(PathBuf::from("/data/stageman/instance.json"))
+        );
+        let relative = environment(&[("HOME", "/home/x"), ("XDG_DATA_HOME", "data")]);
+        assert_eq!(
+            instance_file(&relative, Target::Linux),
+            Ok(PathBuf::from("/home/x/.local/share/stageman/instance.json"))
+        );
     }
 
     /// A variable cleared by a wrapper script is not a value, and one with a
@@ -226,53 +295,18 @@ mod tests {
     #[test]
     fn a_cleared_variable_is_unset_and_a_padded_one_is_trimmed() {
         let cleared = environment(&[("HOME", "/home/x"), ("STAGEMAN_STATE", "   ")]);
-        let derived = instance_file(&environment(&[("HOME", "/home/x")]));
+        let derived = instance_file(&environment(&[("HOME", "/home/x")]), Target::Linux);
         assert_eq!(
-            instance_file(&cleared),
+            instance_file(&cleared, Target::Linux),
             derived,
             "an emptied variable falls back to the platform's own place"
         );
         assert_eq!(
-            instance_file(&environment(&[("STAGEMAN_STATE", " /elsewhere/i.json\n")])),
+            instance_file(
+                &environment(&[("STAGEMAN_STATE", " /elsewhere/i.json\n")]),
+                Target::Linux
+            ),
             Ok(PathBuf::from("/elsewhere/i.json"))
-        );
-    }
-
-    /// The platform's own overrides are honoured only when absolute.
-    #[cfg(not(windows))]
-    #[test]
-    fn a_relative_xdg_override_is_ignored_as_the_specification_says() {
-        let absolute = environment(&[("HOME", "/home/x"), ("XDG_DATA_HOME", "/data")]);
-        assert_eq!(
-            instance_file(&absolute),
-            Ok(PathBuf::from("/data/stageman/instance.json"))
-        );
-        let relative = environment(&[("HOME", "/home/x"), ("XDG_DATA_HOME", "data")]);
-        assert_eq!(
-            instance_file(&relative),
-            Ok(PathBuf::from("/home/x/.local/share/stageman/instance.json"))
-        );
-    }
-
-    /// A mac keeps them where a Linux does, and this is the test that says
-    /// so on purpose.
-    ///
-    /// The guess everybody makes is Apple's own directories, and taking them
-    /// would move an instance that exists — a running stageman would find
-    /// nothing where it looked, mint a key, and write an empty instance over
-    /// nobody's objection. Asserted on every platform but Windows, so the
-    /// machine this runs on is not what decides whether it is checked.
-    #[cfg(not(windows))]
-    #[test]
-    fn a_mac_keeps_them_where_a_linux_does_rather_than_under_its_own_library() {
-        let home = environment(&[("HOME", "/home/x")]);
-        assert_eq!(
-            instance_file(&home),
-            Ok(PathBuf::from("/home/x/.local/share/stageman/instance.json"))
-        );
-        assert_eq!(
-            key_file(&home),
-            Ok(PathBuf::from("/home/x/.config/stageman/key"))
         );
     }
 

@@ -24,7 +24,7 @@ use std::path::PathBuf;
 
 use rand::rngs::StdRng;
 use rand::{Rng as _, SeedableRng as _};
-use stageman_agent::{Command, Label};
+use stageman_agent::{Command, Label, Target};
 use stageman_core::{Agent, InstanceId, Key, State};
 use stageman_vocabulary::{Bytes, Effect as Generic, EffectId, Environment, Finished, Seed};
 
@@ -133,11 +133,15 @@ impl Boot {
     /// A machine with no home directory and nothing naming where the file
     /// is cannot keep an instance, and says so at once. A home is not needed
     /// for the key until the key is, since the environment may name it.
-    pub fn new(seed: Seed, environment: Environment) -> (Self, Vec<Effect>) {
+    ///
+    /// The target is handed over rather than read, so that where this looks
+    /// for a runtime and where it keeps its files are decided by what it was
+    /// given: a start recorded on one platform replays on another.
+    pub fn new(seed: Seed, environment: Environment, target: Target) -> (Self, Vec<Effect>) {
         let rng = StdRng::from_seed(seed);
         let domain = paths::domain(&environment);
-        let key_file = paths::key_file(&environment).ok();
-        let instance_file = match paths::instance_file(&environment) {
+        let key_file = paths::key_file(&environment, target).ok();
+        let instance_file = match paths::instance_file(&environment, target) {
             Ok(instance_file) => instance_file,
             Err(why) => {
                 let boot = Self {
@@ -171,7 +175,7 @@ impl Boot {
             domain,
             key_file,
             instance_file,
-            candidates: stageman_agent::candidates()
+            candidates: stageman_agent::candidates(target)
                 .iter()
                 .map(PathBuf::from)
                 .collect(),

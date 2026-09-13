@@ -77,22 +77,58 @@ pub use agent_client_protocol::schema::v1::StopReason;
 /// [`printed`], which reads past this and discards the rest.
 const STDERR_LIMIT: usize = 8 * 1024;
 
-/// Where a container runtime is looked for, in order.
+/// Which platform this binary was made for, as far as anything here needs to
+/// care.
 ///
-/// Absolute paths and never a search of `PATH`, which is the whole of what
-/// `docs/conventions.md` §3 forbids: an inherited variable differs between the
-/// shell you tested in and what a service manager supplies, and a list
-/// compiled in does not. Deterministic in the same way on every machine is the
-/// property being bought.
-///
-/// Ordered, and the order is a decision rather than an accident. Docker first
-/// because it is what most machines that have anything have; the package
-/// manager locations before the system ones on each platform, because a
-/// hand-installed runtime is the one somebody chose. A machine with both gets
-/// the first, and that is the cost of not asking — see
-/// `docs/decisions/0023-the-container-runtime-is-discovered-once.md`.
-#[cfg(target_os = "macos")]
-const CANDIDATES: &[&str] = &[
+/// Handed to the instance at construction rather than read inside it, so that
+/// what a start does is a function of what it was given: a flow recorded on
+/// one platform replays on another by handing the replay the target the file
+/// names, and a test on any machine can ask what a start would do on a
+/// platform this is not. See
+/// `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Target {
+    /// A mac.
+    MacOs,
+    /// A Linux machine.
+    Linux,
+    /// A Windows machine.
+    Windows,
+    /// Anything else, which knows nowhere to look for a runtime and says so
+    /// rather than failing to build.
+    Unknown,
+}
+
+impl Target {
+    /// What this binary was made for.
+    ///
+    /// The one place a compile-time condition decides anything about a
+    /// platform. Everything downstream branches on the value instead, which
+    /// is what lets the same build answer for a platform it is not running
+    /// on.
+    #[must_use]
+    pub const fn compiled() -> Self {
+        #[cfg(target_os = "macos")]
+        {
+            Self::MacOs
+        }
+        #[cfg(target_os = "linux")]
+        {
+            Self::Linux
+        }
+        #[cfg(target_os = "windows")]
+        {
+            Self::Windows
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        {
+            Self::Unknown
+        }
+    }
+}
+
+/// Where a container runtime is looked for on a mac, in order.
+const MACOS_CANDIDATES: &[&str] = &[
     "/usr/local/bin/docker",
     "/opt/homebrew/bin/docker",
     "/Applications/Docker.app/Contents/Resources/bin/docker",
@@ -100,11 +136,8 @@ const CANDIDATES: &[&str] = &[
     "/usr/local/bin/podman",
 ];
 
-/// Where a container runtime is looked for, in order.
-///
-/// See the macOS list above for why this is a list of absolute paths.
-#[cfg(target_os = "linux")]
-const CANDIDATES: &[&str] = &[
+/// Where a container runtime is looked for on a Linux machine, in order.
+const LINUX_CANDIDATES: &[&str] = &[
     "/usr/bin/docker",
     "/usr/local/bin/docker",
     "/snap/bin/docker",
@@ -112,52 +145,39 @@ const CANDIDATES: &[&str] = &[
     "/usr/local/bin/podman",
 ];
 
-/// Where a container runtime is looked for, in order.
-///
-/// See the macOS list above for why this is a list of absolute paths.
-#[cfg(target_os = "windows")]
-const CANDIDATES: &[&str] = &[
+/// Where a container runtime is looked for on a Windows machine, in order.
+const WINDOWS_CANDIDATES: &[&str] = &[
     r"C:\Program Files\Docker\Docker\resources\bin\docker.exe",
     r"C:\Program Files\RedHat\Podman\podman.exe",
 ];
 
-/// Nothing is known about where a runtime lives on this platform.
+/// Every place a runtime is looked for on that platform, in order, for a
+/// start that has to try them and for a refusal that has to say where it
+/// looked.
 ///
-/// An empty list rather than a compile error, so that a platform nobody has
-/// tried still builds and fails honestly at startup with "none found" — which
-/// is a message somebody can act on, unlike a build that will not finish.
-#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-const CANDIDATES: &[&str] = &[];
-
-/// The first of [`candidates`] that is a file, as a runtime.
+/// Absolute paths and never a search of `PATH`, which is the whole of what
+/// `docs/conventions.md` §3 forbids: an inherited variable differs between
+/// the shell you tested in and what a service manager supplies, and a list
+/// compiled in does not.
 ///
-/// The whole of discovery, and deliberately a pure function of the list rather
-/// than a lazy static reading a fixed one. The static lives in the binary,
-/// because *what to do when there is none* is a decision about a program that
-/// cannot run rather than knowledge about container runtimes — and because a
-/// function taking its list can be tested for the absence, which a static
-/// reading the real list on a machine that has Docker never can.
+/// Ordered, and the order is a decision rather than an accident. Docker
+/// first because it is what most machines that have anything have; the
+/// package manager locations before the system ones on each platform,
+/// because a hand-installed runtime is the one somebody chose. A machine
+/// with both gets the first, and that is the cost of not asking — see
+/// `docs/decisions/0023-the-container-runtime-is-discovered-once.md`.
 ///
-/// # Examples
-///
-/// ```
-/// use stageman_agent::first_present;
-///
-/// assert!(first_present(&["/nowhere/at/all/docker"]).is_none());
-/// ```
+/// A platform nothing here knows gets an empty list, so it still builds and
+/// refuses honestly at startup with "none found", which is a message
+/// somebody can act on unlike a build that will not finish.
 #[must_use]
-pub fn first_present(candidates: &[&str]) -> Option<ContainerRuntime> {
-    candidates
-        .iter()
-        .map(PathBuf::from)
-        .find(|candidate| candidate.is_file())
-        .map(ContainerRuntime::new)
-}
-
-/// Every place a runtime was looked for, for a message that has to say.
-#[must_use]
-pub const fn candidates() -> &'static [&'static str] {
-    CANDIDATES
+pub const fn candidates(target: Target) -> &'static [&'static str] {
+    match target {
+        Target::MacOs => MACOS_CANDIDATES,
+        Target::Linux => LINUX_CANDIDATES,
+        Target::Windows => WINDOWS_CANDIDATES,
+        Target::Unknown => &[],
+    }
 }
 
 /// Where the container runtime lives.
@@ -3330,44 +3350,31 @@ mod tests {
         );
     }
 
-    #[test]
-    fn nothing_installed_is_an_absence_rather_than_a_failure() {
-        assert_eq!(first_present(&[]), None);
-        assert_eq!(first_present(&["/nowhere/at/all/docker"]), None);
-    }
-
-    #[test]
-    fn the_first_path_that_is_there_is_the_one_used() {
-        let real = ["/usr/bin/false", "/bin/false"]
-            .into_iter()
-            .find(|candidate| Path::new(candidate).is_file())
-            .expect("a standard utility");
-
-        let found = first_present(&["/nowhere/at/all/docker", real]);
-
-        assert_eq!(found, Some(ContainerRuntime::new(PathBuf::from(real))));
-    }
-
-    /// A directory is not a runtime, which `exists` would not have caught.
-    #[test]
-    fn a_directory_where_a_runtime_would_be_is_not_one() {
-        assert_eq!(first_present(&["/usr/bin"]), None);
-    }
-
     /// Every candidate is absolute, which is the property that makes this not
     /// a `PATH` search.
     #[test]
     fn nothing_is_looked_for_relative_to_wherever_this_started() {
-        assert!(
-            !candidates().is_empty(),
-            "this platform knows nowhere to look"
-        );
-        for candidate in candidates() {
-            assert!(
-                Path::new(candidate).is_absolute(),
-                "{candidate} is not an absolute path"
-            );
+        // Every platform's list, on whichever machine this runs, which is
+        // the point of the lists being values rather than one compiled
+        // arm: what a mac would look for is checkable from a Linux box.
+        for target in [Target::MacOs, Target::Linux, Target::Windows] {
+            let looked = candidates(target);
+            assert!(!looked.is_empty(), "{target:?} knows nowhere to look");
+            for candidate in looked {
+                let absolute = if target == Target::Windows {
+                    // A drive letter, which is what absolute means there and
+                    // what `Path` cannot tell from a Unix machine.
+                    candidate.starts_with(r"C:\")
+                } else {
+                    Path::new(candidate).is_absolute()
+                };
+                assert!(absolute, "{candidate} is not an absolute path");
+            }
         }
+        assert!(
+            candidates(Target::Unknown).is_empty(),
+            "a platform nothing knows looks nowhere"
+        );
     }
 
     #[tokio::test]

@@ -29,18 +29,21 @@ pub struct Meta {
     pub description: String,
 }
 
-/// Construction: the two facts that exist before anything happens, what the
+/// Construction: the facts that exist before anything happens, what the
 /// deciding half asked for first, and everything it held once constructed.
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct Init<A: App> {
+pub struct Init<D: Deciding> {
     /// The seed, as hex.
     #[serde(with = "hex_seed")]
     pub seed: Seed,
     /// The environment the process was given.
     pub environment: Environment,
+    /// Which platform the build that recorded this was made for, so that a
+    /// replay answers as that build did rather than as this machine would.
+    pub target: D::Target,
     /// What it asked for on construction, in order.
-    pub effects: Vec<Effect<A>>,
+    pub effects: Vec<Effect<D::App>>,
     /// Everything it held once constructed.
     pub state: serde_json::Value,
 }
@@ -60,32 +63,37 @@ pub struct Turn<A: App> {
 }
 
 /// One scenario, whole.
+///
+/// Named for the deciding half it records rather than for the application,
+/// because what it pins is one implementation's answers and it carries what
+/// that implementation was constructed with.
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct Scenario<A: App> {
+pub struct Scenario<D: Deciding> {
     /// What it is.
     pub meta: Meta,
     /// How it starts.
-    pub init: Init<A>,
+    pub init: Init<D>,
     /// What happens, one event at a time.
-    pub turns: Vec<Turn<A>>,
+    pub turns: Vec<Turn<D::App>>,
 }
 
 /// Records a scenario as a deciding half is run against a world.
-pub struct Recorder<A: App> {
-    scenario: Scenario<A>,
+pub struct Recorder<D: Deciding> {
+    scenario: Scenario<D>,
     /// The state as of the last turn, for the next patch.
     state: serde_json::Value,
 }
 
-impl<A: App> Recorder<A> {
+impl<D: Deciding> Recorder<D> {
     /// Begins a recording at construction.
     #[must_use]
     pub fn started(
         meta: Meta,
         seed: Seed,
         environment: Environment,
-        effects: Vec<Effect<A>>,
+        target: D::Target,
+        effects: Vec<Effect<D::App>>,
         state: serde_json::Value,
     ) -> Self {
         Self {
@@ -94,6 +102,7 @@ impl<A: App> Recorder<A> {
                 init: Init {
                     seed,
                     environment,
+                    target,
                     effects,
                     state: state.clone(),
                 },
@@ -107,8 +116,8 @@ impl<A: App> Recorder<A> {
     pub fn turned(
         &mut self,
         at: u64,
-        event: Event<A>,
-        effects: Vec<Effect<A>>,
+        event: Event<D::App>,
+        effects: Vec<Effect<D::App>>,
         state: serde_json::Value,
     ) {
         let changed = json_patch::diff(&self.state, &state);
@@ -123,7 +132,7 @@ impl<A: App> Recorder<A> {
 
     /// The scenario recorded so far.
     #[must_use]
-    pub fn finished(self) -> Scenario<A> {
+    pub fn finished(self) -> Scenario<D> {
         self.scenario
     }
 }
@@ -234,8 +243,12 @@ impl std::error::Error for Mismatch {}
 /// # Errors
 ///
 /// Fails at the first turn whose effects or state differ from the file's.
-pub fn replay<D: Deciding>(scenario: &Scenario<D::App>) -> Result<(), Mismatch> {
-    let (mut deciding, effects) = D::boot(scenario.init.seed, scenario.init.environment.clone());
+pub fn replay<D: Deciding>(scenario: &Scenario<D>) -> Result<(), Mismatch> {
+    let (mut deciding, effects) = D::boot(
+        scenario.init.seed,
+        scenario.init.environment.clone(),
+        scenario.init.target.clone(),
+    );
     let (expected, actual) = (value(&scenario.init.effects)?, value(&effects)?);
     if actual != expected {
         return Err(Mismatch::Init {
@@ -327,14 +340,14 @@ pub const fn no_environment() -> Environment {
 #[cfg(test)]
 mod tests {
     use super::{Meta, Recorder, Scenario, replay};
-    use crate::doorbell::{Bell, Doorbell, Told};
+    use crate::doorbell::{Bell, Told};
     use crate::{Deciding, Effect, EffectId, Environment, Event};
 
     /// Records the bell being rung twice, as a world that answers would.
-    fn recorded() -> Scenario<Doorbell> {
+    fn recorded() -> Scenario<Bell> {
         let seed = [7; 32];
         let environment: Environment = [("BELL".to_owned(), "/tmp/bell".to_owned())].into();
-        let (mut bell, effects) = Bell::boot(seed, environment.clone());
+        let (mut bell, effects) = Bell::boot(seed, environment.clone(), ());
         let mut recorder = Recorder::started(
             Meta {
                 title: "a bell counts its rings".to_owned(),
@@ -342,6 +355,7 @@ mod tests {
             },
             seed,
             environment,
+            (),
             effects,
             bell.snapshot(),
         );
@@ -377,7 +391,7 @@ mod tests {
             file.contains(r#""op": "replace""#),
             "the patch says what changed: {file}"
         );
-        let read: Scenario<Doorbell> = serde_json::from_str(&file).expect("and back");
+        let read: Scenario<Bell> = serde_json::from_str(&file).expect("and back");
         assert_eq!(read.turns.len(), 3);
         replay::<Bell>(&read).expect("the bell behaves as recorded");
     }

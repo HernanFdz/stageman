@@ -35,8 +35,6 @@ pub struct Release {
     /// The distinction is the point: a rebuild of one tag must not produce a
     /// binary claiming a different date, or the version names two things.
     pub date: &'static str,
-    /// The triple it was built for.
-    pub target: &'static str,
 }
 
 /// The triple this was built for, which is known whether or not it is a
@@ -78,20 +76,17 @@ const fn assembled(
             version,
             commit,
             date,
-            target: TARGET,
         }),
         _ => None,
     }
 }
 
 /// How a release describes itself in one line.
+///
+/// Without the target, for the reason [`described`] gives.
 impl fmt::Display for Release {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} ({} {}) {}",
-            self.version, self.commit, self.date, self.target
-        )
+        write!(f, "{} ({} {})", self.version, self.commit, self.date)
     }
 }
 
@@ -99,10 +94,17 @@ impl fmt::Display for Release {
 ///
 /// Used on the startup block, where it is one fact among a dozen, and by the
 /// tool server describing itself.
+///
+/// It does not name the target, and that absence is load-bearing: both of
+/// those are effects the instance asks for, and a scenario recorded on one
+/// machine is replayed on another, so a line naming the machine would make
+/// every recorded start fail everywhere else. Whoever wants the triple asks
+/// for it with `--version`, which is [`detailed`] and never crosses the
+/// instance.
 #[must_use]
 pub fn described() -> String {
     RELEASE.map_or_else(
-        || format!("none — not a release build, for {TARGET}"),
+        || "none — not a release build".to_owned(),
         |release| release.to_string(),
     )
 }
@@ -175,10 +177,6 @@ mod tests {
         assert_eq!(whole.version, "0.2.0");
         assert_eq!(whole.commit, "abc123");
         assert_eq!(whole.date, "2026-09-01");
-        assert_eq!(
-            whole.target, TARGET,
-            "the target is never supplied, only derived"
-        );
 
         assert!(
             assembled(None, None, None).is_none(),
@@ -255,9 +253,12 @@ mod tests {
     #[test]
     fn what_it_says_follows_what_it_carries() {
         let said = described();
+        // Nothing about the machine, which is what lets a startup block
+        // recorded on one be replayed on another. `--version` is where the
+        // triple lives, and it never crosses the instance.
         assert!(
-            said.contains(TARGET),
-            "it should always name its target: {said}"
+            !said.contains(TARGET),
+            "the one-line form names the build, not the machine: {said}"
         );
         match RELEASE {
             Some(release) => {
@@ -277,12 +278,11 @@ mod tests {
     /// Built here rather than read from the compiled-in one, which is empty in
     /// the gate — an assertion against that would assert nothing.
     #[test]
-    fn a_release_names_all_four_things() {
+    fn a_release_names_all_three_things() {
         let release = Release {
             version: "0.2.0",
             commit: "abc123def456",
             date: "2026-09-01",
-            target: "x86_64-unknown-linux-gnu",
         };
 
         let said = release.to_string();
@@ -290,7 +290,6 @@ mod tests {
         assert!(said.contains("0.2.0"), "{said}");
         assert!(said.contains("abc123def456"), "{said}");
         assert!(said.contains("2026-09-01"), "{said}");
-        assert!(said.contains("x86_64-unknown-linux-gnu"), "{said}");
         assert!(!said.contains('\n'), "a version is one line: {said}");
     }
 }

@@ -110,9 +110,11 @@ first.
   to the disk, and it seals and opens that file itself; what it merely holds,
   a restart begins without.
 
-  It **boots itself**, from a seed and the environment and nothing else:
-  whether a runtime answers, where its key is, what its file holds and what
-  the last run left behind are all things it asks for and is answered about.
+  It **boots itself**, from a seed, the environment, and which platform this
+  build was made for: whether a runtime answers, where its key is, what its
+  file holds and what the last run left behind are all things it asks for and
+  is answered about. The platform is handed over rather than read, so that
+  nothing inside branches on the machine it was compiled for.
   So a start that refuses — no runtime, an unreadable file, a key that is not
   key material — is a sequence of effects rather than a path through somebody
   else's `main`, and a scenario pins it. See

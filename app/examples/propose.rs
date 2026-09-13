@@ -27,7 +27,7 @@ use stageman_core::{
     Agent, AgentConfig, JobId, Key, Kit, KitConfig, KitName, NONCE_LEN, Platform, Project,
     ProjectId, Secret, State, Timestamp, Uuid,
 };
-use stageman_instance::{Instance, Request, Response, Seed};
+use stageman_instance::{Instance, Request, Response, Seed, Target};
 use stageman_vocabulary::Environment;
 use stageman_wire::Standing;
 
@@ -174,7 +174,7 @@ async fn stood_up(path: &Path, key: &Key) -> Result<Arc<Asking>, String> {
         path.display().to_string(),
     );
     environment.insert(stageman_instance::KEY_VARIABLE.to_owned(), key.to_base64());
-    let (instance, effects) = Instance::boot(seed(), environment);
+    let (instance, effects) = Instance::boot(seed(), environment, Target::compiled());
     let (world, events) = stageman_world::World::new();
     let asking = Asking::new(Arc::clone(&world));
     stageman::world::adopt(Arc::clone(&asking));

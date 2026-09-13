@@ -20,7 +20,7 @@ use stageman_core::{
 };
 use stageman_instance::{
     AppEffect, AppEvent, Container, Effect, Event, Instance, Message, Request, RequestId, Response,
-    Run, Seed,
+    Run, Seed, Target,
 };
 use stageman_vocabulary::{Bytes, EffectId, Environment, Finished, Named as _};
 
@@ -29,6 +29,14 @@ pub type Now = u64;
 
 /// Where every simulated instance keeps its file.
 const INSTANCE_FILE: &str = "/sim/instance.json";
+
+/// Which platform every scenario is played on.
+///
+/// One platform for all of them, and a value rather than this machine's, so
+/// that a flow answers the same wherever it is run and a recording of one
+/// replays anywhere. What each platform does about a path is a unit test of
+/// the paths themselves, where all of them are reachable.
+pub const TARGET: Target = Target::Linux;
 
 /// One container as the simulated runtime holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -442,20 +450,19 @@ impl Simulation {
     /// Boots with an environment of the caller's own, for the starts that
     /// turn on what a variable says.
     pub fn wake_given(&mut self, seed: Seed, environment: Environment) -> Instance {
-        let (mut instance, effects) = Instance::boot(seed, environment);
+        let (mut instance, effects) = Instance::boot(seed, environment, TARGET);
         self.trace.push(format!("{}: booted", self.now));
         for effect in effects {
             self.perform(effect);
         }
-        for effect in instance.step(
+        self.stepped(
+            &mut instance,
             AppEvent::Serving {
                 address: "127.0.0.1:8080".to_owned(),
                 port: 8080,
             }
             .into(),
-        ) {
-            self.perform(effect);
-        }
+        );
         let now = self.now;
         self.run_until(&mut instance, now);
         instance
@@ -519,10 +526,17 @@ impl Simulation {
                 break;
             }
             let Some(event) = self.next() else { break };
-            for effect in instance.step(event) {
-                self.perform(effect);
-            }
+            self.stepped(instance, event);
             self.oracle(instance);
+        }
+    }
+
+    /// Steps the instance once: what it asks for is performed, and the turn
+    /// is written down where a recording is being made.
+    fn stepped(&mut self, instance: &mut Instance, event: Event) {
+        let effects = instance.step(event);
+        for effect in effects {
+            self.perform(effect);
         }
     }
 

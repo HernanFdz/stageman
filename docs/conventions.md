@@ -554,6 +554,18 @@ justify is usually obsolete.
   answer differently on another run. See
   `docs/decisions/0056-the-instance-decides-and-the-world-performs.md`.
 
+  **On another machine, too, and that is the part most easily missed.** A
+  compile-time condition inside the instance is as much a hidden input as a
+  clock: it makes a start a function of the machine the binary was made for,
+  and a flow recorded on one then fails to replay on another. So which
+  platform this build is for arrives at construction beside the seed and the
+  environment, every platform's lists and rules are held for all of them at
+  once, and the branch is on the value. The one compile-time condition left
+  is in the entry point, choosing which value to hand over. A `cfg` or a
+  `cfg!` anywhere in the instance crate is the smell this rule exists to
+  catch; see
+  `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`.
+
 - **The world knows no domain, and answers an effect only when it has
   completed.** It performs mechanisms — a file, a process, a request, a
   socket, a port, a timer — and hands the application's own effects to

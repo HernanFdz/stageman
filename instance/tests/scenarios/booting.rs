@@ -4,9 +4,9 @@
 use stageman_core::Progress;
 
 use stageman_instance::{Effect, Event, Instance};
-use stageman_vocabulary::{Bytes, EffectId, Finished};
+use stageman_vocabulary::{Bytes, EffectId, Environment, Finished};
 
-use crate::simulation::{Simulation, job, seed, watching};
+use crate::simulation::{Simulation, TARGET, job, seed, watching};
 
 /// A program that ran and said nothing, which is what a runtime answering
 /// its version check looks like to everything downstream of the parsing.
@@ -166,7 +166,7 @@ fn an_answer_to_another_question_moves_nothing() {
     // the two phases that would otherwise be skipped.
     let mut environment = Simulation::environment();
     environment.remove("STAGEMAN_KEY");
-    let (mut instance, effects) = Instance::boot(seed(1), environment);
+    let (mut instance, effects) = Instance::boot(seed(1), environment, TARGET);
 
     let [Effect::Run { id: version, .. }] = effects.as_slice() else {
         panic!("one runtime question, and this is not it");
@@ -297,7 +297,7 @@ fn an_instance_that_cannot_be_opened_says_what_went_wrong_underneath() {
 /// environment and has no business with the key that opens an instance.
 #[test]
 fn a_runtime_command_is_given_this_environment_less_this_projects_own() {
-    let (_, effects) = Instance::boot(seed(1), Simulation::environment());
+    let (_, effects) = Instance::boot(seed(1), Simulation::environment(), TARGET);
 
     let [
         Effect::Run {
@@ -323,8 +323,11 @@ fn a_runtime_command_is_given_this_environment_less_this_projects_own() {
 fn the_deciding_half_a_replay_drives_is_this_instance() {
     use stageman_vocabulary::Deciding;
 
-    let (mut instance, effects) =
-        <Instance as stageman_vocabulary::Deciding>::boot(seed(1), Simulation::environment());
+    let (mut instance, effects) = <Instance as stageman_vocabulary::Deciding>::boot(
+        seed(1),
+        Simulation::environment(),
+        TARGET,
+    );
     let [Effect::Run { id, .. }] = effects.as_slice() else {
         panic!("one runtime question, and this is not it");
     };
@@ -395,7 +398,7 @@ fn what_an_awake_instance_holds_reads_in_full() {
 #[test]
 fn one_listing_is_not_both() {
     let stray = EffectId(9999);
-    let (mut instance, effects) = Instance::boot(seed(1), Simulation::environment());
+    let (mut instance, effects) = Instance::boot(seed(1), Simulation::environment(), TARGET);
 
     let [Effect::Run { id: version, .. }] = effects.as_slice() else {
         panic!("one runtime question, and this is not it");
@@ -446,4 +449,27 @@ fn one_listing_is_not_both() {
         serde_json::json!({ "booting": "ready" }),
         "and both is everything booting was waiting on"
     );
+}
+
+/// A machine with nowhere to keep an instance says so and stops.
+///
+/// Before a runtime is asked anything, because a start that cannot keep what
+/// it learns has no reason to learn it — and the message names the variable
+/// that would fix it, since a machine with no home is usually a service
+/// manager's idea of one rather than a mistake.
+#[test]
+fn nowhere_to_keep_an_instance_is_refused_before_anything_is_asked() {
+    let mut world = Simulation::new();
+    let mut instance = world.wake_given(seed(1), Environment::new());
+    world.run_until(&mut instance, 1);
+
+    let refused = world.exited().expect("refused");
+    assert!(refused.contains("no home directory"), "{refused}");
+    assert!(refused.contains("STAGEMAN_STATE"), "{refused}");
+    assert!(
+        !world.shape().iter().any(|line| line.starts_with("-> Run")),
+        "nothing is asked of a runtime: {:?}",
+        world.shape()
+    );
+    assert!(world.printed().is_empty());
 }

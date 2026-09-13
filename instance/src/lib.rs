@@ -52,6 +52,12 @@ pub use boot::KeySource;
 pub use file::LoadError;
 pub use paths::{DOMAIN_VARIABLE, KEY_VARIABLE, STATE_VARIABLE};
 pub use requests::{Request, Response};
+/// Which platform this build was made for, handed to [`Instance::boot`].
+///
+/// The agent crate's, because that is where what a platform means is known:
+/// where a container runtime might be on one. Re-exported because the entry
+/// point names it and has no other reason to know that crate exists.
+pub use stageman_agent::Target;
 pub use stageman_vocabulary::Seed;
 pub use sweep::Swept;
 pub use tunnel::{DEFAULT_DOMAIN, Domain, Routed, address, decode};
@@ -153,8 +159,8 @@ impl Instance {
     /// Constructs an instance from the two facts that exist before anything
     /// happens, and answers with what it asks for first.
     #[must_use]
-    pub fn boot(seed: Seed, environment: Environment) -> (Self, Vec<Effect>) {
-        let (booting, effects) = boot::Boot::new(seed, environment);
+    pub fn boot(seed: Seed, environment: Environment, target: Target) -> (Self, Vec<Effect>) {
+        let (booting, effects) = boot::Boot::new(seed, environment, target);
         (
             Self {
                 stage: Stage::Booting(Box::new(booting)),
@@ -232,9 +238,10 @@ impl Instance {
 
 impl stageman_vocabulary::Deciding for Instance {
     type App = Stageman;
+    type Target = Target;
 
-    fn boot(seed: Seed, environment: Environment) -> (Self, Vec<Effect>) {
-        Self::boot(seed, environment)
+    fn boot(seed: Seed, environment: Environment, target: Target) -> (Self, Vec<Effect>) {
+        Self::boot(seed, environment, target)
     }
 
     fn step(&mut self, event: Event) -> Vec<Effect> {

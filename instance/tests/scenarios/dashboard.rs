@@ -71,7 +71,8 @@ fn the_instance_screen_counts_what_it_may_and_never_a_credential() {
     let Response::Instance(shown) = ask(&mut sim, &mut instance, 1, Request::Instance) else {
         panic!("the instance screen");
     };
-    assert_eq!(shown.container_runtime, "/usr/local/bin/docker");
+    // The first candidate on the platform every scenario is played on.
+    assert_eq!(shown.container_runtime, "/usr/bin/docker");
     assert_eq!(shown.agents, 1);
     assert_eq!(shown.projects.len(), 1);
     let served = serde_json::to_string(&shown).expect("it serialises");
