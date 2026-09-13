@@ -4,6 +4,7 @@
 
 #![expect(
     clippy::expect_used,
+    clippy::panic,
     clippy::arithmetic_side_effects,
     reason = "test support in an integration-test crate is not seen as test code by the \
               lints' allowances, and a world that cannot open its own file has nothing to \

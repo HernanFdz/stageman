@@ -1,0 +1,35 @@
+{
+  "meta": {
+    "title": "A machine with no home and nothing naming a file refuses at once, asking nothing"
+  },
+  "init": {
+    "seed": "0101010101010101010101010101010101010101010101010101010101010101",
+    "environment": {},
+    "target": "Linux",
+    "effects": [
+      {
+        "Exit": {
+          "message": "no home directory, so there is nowhere to keep an instance — set STAGEMAN_STATE"
+        }
+      }
+    ],
+    "state": {
+      "booting": "refused"
+    }
+  },
+  "turns": [
+    {
+      "at": 0,
+      "event": {
+        "App": {
+          "Serving": {
+            "address": "127.0.0.1:8080",
+            "port": 8080
+          }
+        }
+      },
+      "effects": [],
+      "changed": []
+    }
+  ]
+}

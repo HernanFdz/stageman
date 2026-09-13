@@ -42,5 +42,11 @@ uuid = { version = "1.26.0", features = ["serde"] }
 [lints]
 workspace = true
 
+# The recorded flows are files rather than functions, so this target makes a
+# test of each at run time instead of at compile time. See `tests/replays.rs`.
+[[test]]
+name = "replays"
+harness = false
+
 [dev-dependencies]
 libtest-mimic = "0.8.2"

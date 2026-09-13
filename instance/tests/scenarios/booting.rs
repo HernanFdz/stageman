@@ -82,6 +82,10 @@ fn no_runtime_is_refused_before_anything_else_is_asked() {
 #[test]
 fn a_first_run_writes_its_file_before_it_is_announced() {
     let mut world = Simulation::new();
+    world.recording(
+        "a-first-run",
+        "A first run finds no file, writes one, and is announced on the strength of that write",
+    );
     let mut instance = world.wake(seed(1));
     assert!(world.disk().is_none(), "not yet: the write has not landed");
 
@@ -89,6 +93,7 @@ fn a_first_run_writes_its_file_before_it_is_announced() {
     assert!(world.disk().is_some(), "an instance with nothing in it");
     assert_eq!(world.printed().len(), 1);
     assert!(instance.id().is_some(), "and it has an identity");
+    world.recorded();
 }
 
 /// A key that is not key material is refused, and the refusal does not
@@ -457,9 +462,15 @@ fn one_listing_is_not_both() {
 /// it learns has no reason to learn it — and the message names the variable
 /// that would fix it, since a machine with no home is usually a service
 /// manager's idea of one rather than a mistake.
+///
+/// Recorded as a replay: the whole shape of a refusal, in four lines.
 #[test]
 fn nowhere_to_keep_an_instance_is_refused_before_anything_is_asked() {
     let mut world = Simulation::new();
+    world.recording(
+        "nowhere-to-keep-an-instance",
+        "A machine with no home and nothing naming a file refuses at once, asking nothing",
+    );
     let mut instance = world.wake_given(seed(1), Environment::new());
     world.run_until(&mut instance, 1);
 
@@ -472,4 +483,5 @@ fn nowhere_to_keep_an_instance_is_refused_before_anything_is_asked() {
         world.shape()
     );
     assert!(world.printed().is_empty());
+    world.recorded();
 }

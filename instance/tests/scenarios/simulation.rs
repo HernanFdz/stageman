@@ -22,6 +22,7 @@ use stageman_instance::{
     AppEffect, AppEvent, Container, Effect, Event, Instance, Message, Request, RequestId, Response,
     Run, Seed, Target,
 };
+use stageman_vocabulary::scenario::{Meta, Recorder};
 use stageman_vocabulary::{Bytes, EffectId, Environment, Finished, Named as _};
 
 /// Virtual milliseconds.
@@ -37,6 +38,14 @@ const INSTANCE_FILE: &str = "/sim/instance.json";
 /// replays anywhere. What each platform does about a path is a unit test of
 /// the paths themselves, where all of them are reachable.
 pub const TARGET: Target = Target::Linux;
+
+/// What says this run is meant to rewrite the replay files it records.
+///
+/// Off by default, and that is the whole of the arrangement: a committed
+/// file is what the replay runner checks a fresh instance against, so
+/// rewriting one is a deliberate act whose diff somebody reads. See
+/// `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`.
+const RECORD_VARIABLE: &str = "STAGEMAN_RECORD";
 
 /// One container as the simulated runtime holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,6 +114,12 @@ pub struct Simulation {
     reclaims: usize,
     warrants: Vec<String>,
     key: Key,
+    /// What this flow is recorded as, where it is recorded at all: the file
+    /// it is written to, and what that file says it pins.
+    recording: Option<(String, Meta)>,
+    /// The recording itself, once an instance has been constructed for it
+    /// to begin from.
+    recorder: Option<Recorder<Instance>>,
 }
 
 /// The identity every simulated instance has.
@@ -320,6 +335,8 @@ impl Simulation {
             reclaims: 0,
             warrants: Vec::new(),
             key: key(),
+            recording: None,
+            recorder: None,
         }
     }
 
@@ -450,8 +467,22 @@ impl Simulation {
     /// Boots with an environment of the caller's own, for the starts that
     /// turn on what a variable says.
     pub fn wake_given(&mut self, seed: Seed, environment: Environment) -> Instance {
-        let (mut instance, effects) = Instance::boot(seed, environment, TARGET);
+        let (mut instance, effects) = Instance::boot(seed, environment.clone(), TARGET);
         self.trace.push(format!("{}: booted", self.now));
+        if let Some((_, meta)) = &self.recording {
+            assert!(
+                self.recorder.is_none(),
+                "a replay is one instance's life, so a flow that wakes twice needs a file each"
+            );
+            self.recorder = Some(Recorder::started(
+                meta.clone(),
+                seed,
+                environment,
+                TARGET,
+                effects.clone(),
+                instance.snapshot(),
+            ));
+        }
         for effect in effects {
             self.perform(effect);
         }
@@ -534,10 +565,50 @@ impl Simulation {
     /// Steps the instance once: what it asks for is performed, and the turn
     /// is written down where a recording is being made.
     fn stepped(&mut self, instance: &mut Instance, event: Event) {
-        let effects = instance.step(event);
+        let effects = instance.step(event.clone());
+        if let Some(recorder) = &mut self.recorder {
+            recorder.turned(self.now, event, effects.clone(), instance.snapshot());
+        }
         for effect in effects {
             self.perform(effect);
         }
+    }
+
+    /// Records this flow as a replay file under the name given.
+    ///
+    /// Asked for per flow rather than always, because a recording costs a
+    /// snapshot of everything the instance holds on every step, and because
+    /// which flows are pinned as files is a decision worth reading in the
+    /// test that makes it.
+    pub fn recording(&mut self, name: &str, title: &str) {
+        self.recording = Some((
+            name.to_owned(),
+            Meta {
+                title: title.to_owned(),
+                description: String::new(),
+            },
+        ));
+    }
+
+    /// Writes what was recorded, when this run was asked to rewrite files.
+    ///
+    /// Otherwise nothing at all: what checks the committed file is the
+    /// replay runner, which drives it against a fresh instance, and a test
+    /// that quietly rewrote its own expectation would check nothing.
+    pub fn recorded(&mut self) {
+        let (Some((name, _)), Some(recorder)) = (self.recording.take(), self.recorder.take())
+        else {
+            panic!("nothing was recorded: `recording` is asked for before an instance wakes");
+        };
+        if std::env::var_os(RECORD_VARIABLE).is_none() {
+            return;
+        }
+        let directory = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/replays"));
+        std::fs::create_dir_all(directory).expect("the replays directory");
+        let mut written =
+            serde_json::to_string_pretty(&recorder.finished()).expect("a scenario serialises");
+        written.push('\n');
+        std::fs::write(directory.join(format!("{name}.json")), written).expect("the replay lands");
     }
 
     /// What must hold between the instance and the world after every step.
