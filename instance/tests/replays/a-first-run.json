@@ -224,6 +224,9 @@
             "serving": 8080,
             "address": "127.0.0.1:8080",
             "runtime": "/usr/bin/docker",
+            "runtime_environment": {
+              "HOME": "/sim/home"
+            },
             "next": 7,
             "turns": [],
             "warrants": {},
@@ -240,6 +243,8 @@
             "timers": [
               5
             ],
+            "asked": [],
+            "listing": [],
             "dirty": false,
             "staged": [],
             "announced": false,

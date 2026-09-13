@@ -18,6 +18,7 @@ use stageman_foreman::Starting;
 use crate::Running;
 use crate::turns::Turn;
 use crate::vocabulary::{AppEffect, Message, Run, Speaker};
+use crate::{Asked, Command};
 use crate::{Effect, Emit as _};
 
 /// Every project whose foreman was working when this process last stopped.
@@ -129,9 +130,15 @@ impl Running {
     /// Held back behind whatever this step changed, so that a turn never
     /// starts on the strength of an inbox that is not on the disk.
     fn look_before_turning(&mut self, project: ProjectId) {
-        self.defer(AppEffect::Inspect {
-            container: stageman_foreman::container(project),
-        });
+        let container = stageman_foreman::container(project);
+        let looking = self.ask(
+            &Command::Label {
+                name: container.clone(),
+                label: stageman_agent::Label::Agent,
+            },
+            Asked::Inspected { container },
+        );
+        self.defer(looking);
     }
 
     /// What the runtime said about a foreman's container, and the turn that
@@ -207,9 +214,15 @@ impl Running {
             if present {
                 // Made for another agent, which is another image: it goes,
                 // and a fresh session is begun, with the memory as the price.
-                effects.emit(AppEffect::Discard {
-                    container: container.to_owned(),
-                });
+                let discard = self.ask(
+                    &Command::Discard {
+                        name: container.to_owned(),
+                    },
+                    Asked::Discarded {
+                        container: container.to_owned(),
+                    },
+                );
+                effects.push(discard);
             }
             let environment = match crate::rendered(&handout) {
                 Ok(environment) => environment,

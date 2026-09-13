@@ -21,7 +21,7 @@ use std::sync::{Arc, OnceLock};
 use stageman_agent::ContainerRuntime;
 use stageman_core::{Channel, JobId, Secret, Speaking, Timestamp};
 use stageman_instance::{
-    AppEffect, AppEvent, Container, Event, Request, RequestId, Response, Run, Speaker, Stageman,
+    AppEffect, AppEvent, Event, Request, RequestId, Response, Run, Speaker, Stageman,
 };
 use stageman_world::{Perform, World};
 
@@ -254,10 +254,6 @@ impl Perform<Stageman> for Performer {
     /// runtime or the network: every arm performs an effect and decides
     /// nothing a test could check without one.
     #[mutants::skip]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one arm per effect the application adds, each a few lines; it shortens as families leave the hole"
-    )]
     async fn perform(&self, effect: AppEffect) {
         match effect {
             AppEffect::Booted { runtime, domain } => {
@@ -279,46 +275,6 @@ impl Perform<Stageman> for Performer {
                 let answering = stageman_job::answering(runtime, job).await;
                 inner.asking.send(AppEvent::Probed { job, answering });
             }),
-            AppEffect::ListRunning => self.spawn(|inner, runtime| async move {
-                let names = match stageman_agent::running(runtime).await {
-                    Ok(names) => names,
-                    Err(why) => {
-                        tracing::warn!(%why, "could not ask which containers are running");
-                        return;
-                    }
-                };
-                let mut running = Vec::with_capacity(names.len());
-                for name in names {
-                    running.push(described(runtime, name, true).await);
-                }
-                inner.asking.send(AppEvent::Listed { running });
-            }),
-            AppEffect::Inspect { container } => self.spawn(move |inner, runtime| async move {
-                // A container that is not there refuses, and so does a
-                // runtime that will not answer; either way nothing can be
-                // resumed in it.
-                let (present, agent) = stageman_agent::made_for(runtime, &container)
-                    .await
-                    .map_or((false, None), |agent| (true, agent));
-                inner.asking.send(AppEvent::Inspected {
-                    container,
-                    present,
-                    agent,
-                });
-            }),
-            AppEffect::Halt { container } => self.spawn(move |_, runtime| async move {
-                if let Err(why) = stageman_agent::halt(runtime, &container).await {
-                    tracing::warn!(%container, %why, "a container could not be stopped");
-                }
-            }),
-            AppEffect::Discard { container } => self.spawn(move |_, runtime| async move {
-                // Not fatal, and deliberately not retried here: what is left
-                // is a container nothing needs, which is exactly what waking
-                // looks for.
-                if let Err(why) = stageman_agent::discard(runtime, &container).await {
-                    tracing::warn!(%container, %why, "a container could not be removed; waking will try again");
-                }
-            }),
             AppEffect::Reclaim => self.spawn(|_, runtime| async move {
                 // Housekeeping rather than work, so a runtime that will not
                 // answer is warned about and nothing else changes.
@@ -327,7 +283,9 @@ impl Perform<Stageman> for Performer {
                         tracing::info!(images = gone, "reclaimed images no container needed");
                     }
                     Ok(_) => {}
-                    Err(why) => tracing::warn!(%why, "could not reclaim the images nothing is using"),
+                    Err(why) => {
+                        tracing::warn!(%why, "could not reclaim the images nothing is using");
+                    }
                 }
             }),
             AppEffect::Say {
@@ -375,25 +333,16 @@ impl Perform<Stageman> for Performer {
                     speaking: speaking.into(),
                 },
             ),
-            AppEffect::FindPort { job } => self.spawn(move |inner, runtime| async move {
-                let port = stageman_agent::tunnel_port(runtime, &stageman_job::container(job))
-                    .await
-                    .unwrap_or_else(|why| {
-                        tracing::debug!(%job, %why, "the runtime could not say where a job's tunnel is");
-                        None
-                    });
-                inner.asking.send(AppEvent::PortFound { job, port });
-            }),
             AppEffect::Respond { id, response } => {
                 self.0.asking.answered(id, Answered::Person(response));
             }
             AppEffect::ToolAnswered { id, status, body } => {
                 self.0.asking.answered(id, Answered::Tool(status, body));
             }
-            AppEffect::Route { id, port } => self
-                .0
-                .asking
-                .answered(id, Answered::Tunnel(port.map_or(Located::Nowhere, Located::At))),
+            AppEffect::Route { id, port } => self.0.asking.answered(
+                id,
+                Answered::Tunnel(port.map_or(Located::Nowhere, Located::At)),
+            ),
         }
     }
 }
@@ -473,35 +422,6 @@ impl Performer {
             inner.turns.lock().remove(&speaker);
             inner.asking.send(AppEvent::TurnEnded { speaker, outcome });
         });
-    }
-}
-
-/// One container, as the instance is told about it: its name, and what its
-/// labels say about whose it is and what it was made for.
-///
-/// Two questions of the runtime per container, because the two runtimes
-/// format a listing's labels differently and an inspection is the one shape
-/// both take. A label that cannot be read is reported as absent, which is the
-/// safe direction: an unlabelled container is left alone.
-#[mutants::skip]
-pub async fn described(runtime: &ContainerRuntime, name: String, running: bool) -> Container {
-    let instance = stageman_agent::started_by(runtime, &name)
-        .await
-        .unwrap_or_else(|why| {
-            tracing::warn!(container = %name, %why, "could not ask which instance started a container");
-            None
-        });
-    let agent = stageman_agent::made_for(runtime, &name)
-        .await
-        .unwrap_or_else(|why| {
-            tracing::warn!(container = %name, %why, "could not ask which agent a container was made for");
-            None
-        });
-    Container {
-        name,
-        instance,
-        agent,
-        running,
     }
 }
 

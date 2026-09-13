@@ -2102,10 +2102,29 @@ pub enum Command {
         /// Which label.
         label: Label,
     },
+    /// Stop a container, leaving it where it is.
+    Halt {
+        /// The container.
+        name: String,
+    },
+    /// Remove a container and everything inside it.
+    ///
+    /// Forced, because a container that is still running is one this has
+    /// decided is finished with, and stopping it first would be two commands
+    /// with a window between them.
+    Discard {
+        /// The container.
+        name: String,
+    },
+    /// Where a container's tunnel is published on the host, if anywhere.
+    Port {
+        /// The container.
+        name: String,
+    },
 }
 
 /// The labels a container of this project's carries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Label {
     /// Which instance started it.
     Instance,
@@ -2155,6 +2174,11 @@ impl Command {
                 format!("{{{{index .Config.Labels \"{}\"}}}}", label.key()),
                 name.clone(),
             ],
+            Self::Halt { name } => vec!["stop".to_owned(), name.clone()],
+            Self::Discard { name } => {
+                vec!["rm".to_owned(), "--force".to_owned(), name.clone()]
+            }
+            Self::Port { name } => vec!["port".to_owned(), name.clone(), TUNNEL_PORT.to_string()],
         }
     }
 
@@ -2183,6 +2207,17 @@ impl Command {
                 Some(Self::Label {
                     name: (*name).to_owned(),
                     label: Label::of(key)?,
+                })
+            }
+            ["stop", name] => Some(Self::Halt {
+                name: (*name).to_owned(),
+            }),
+            ["rm", "--force", name] => Some(Self::Discard {
+                name: (*name).to_owned(),
+            }),
+            ["port", name, published] if *published == TUNNEL_PORT.to_string() => {
+                Some(Self::Port {
+                    name: (*name).to_owned(),
                 })
             }
             _ => None,
@@ -2304,6 +2339,11 @@ pub async fn tunnel_port(
 
 /// The host port in what the runtime reported, if it reported one.
 ///
+/// Public because the instance reads it: since
+/// `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`
+/// the command is rendered there and its output parsed there, and this is
+/// the parser.
+///
 /// Pure, so every shape either runtime prints can be tested without a
 /// container. It takes the port from the *last* colon onwards rather than
 /// splitting on colons, because a mapping published on IPv6 is printed as
@@ -2313,7 +2353,8 @@ pub async fn tunnel_port(
 /// The first line that yields a port wins. Nothing here prefers one family
 /// over the other: both reach the same container, and this connects over
 /// loopback where both work.
-fn published(reported: &str) -> Option<u16> {
+#[must_use]
+pub fn published(reported: &str) -> Option<u16> {
     reported
         .lines()
         .filter_map(|line| line.trim().rsplit(':').next())
@@ -2706,6 +2747,15 @@ mod tests {
                 name: "stageman-foreman-2".to_owned(),
                 label: Label::Agent,
             },
+            Command::Halt {
+                name: "stageman-job-1".to_owned(),
+            },
+            Command::Discard {
+                name: "stageman-job-1".to_owned(),
+            },
+            Command::Port {
+                name: "stageman-job-1".to_owned(),
+            },
         ];
         for command in every {
             assert_eq!(
@@ -2746,6 +2796,15 @@ mod tests {
                 "x".to_owned()
             ]),
             None
+        );
+        assert_eq!(
+            Command::parse(&[
+                "port".to_owned(),
+                "stageman-job-1".to_owned(),
+                "80".to_owned()
+            ]),
+            None,
+            "another port is another question"
         );
         assert_eq!(names(" a \n\nb\n"), vec!["a".to_owned(), "b".to_owned()]);
     }

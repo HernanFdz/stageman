@@ -19,8 +19,8 @@ use stageman_core::{
     Thread, Timestamp, Uuid,
 };
 use stageman_instance::{
-    AppEffect, AppEvent, Container, Effect, Event, Instance, Message, Request, RequestId, Response,
-    Run, Seed, Target,
+    AppEffect, AppEvent, Effect, Event, Instance, Message, Request, RequestId, Response, Run, Seed,
+    Target,
 };
 use stageman_vocabulary::scenario::{Meta, Recorder};
 use stageman_vocabulary::{Bytes, EffectId, Environment, Finished, Named as _};
@@ -113,6 +113,10 @@ pub struct Simulation {
     listening: Vec<ProjectId>,
     reclaims: usize,
     warrants: Vec<String>,
+    /// Every runtime command asked for, as the agent crate reads it back and
+    /// where in the trace it was asked — so a test names a question rather
+    /// than a string, and can still say what came before it.
+    commands: Vec<(usize, Command)>,
     key: Key,
     /// What this flow is recorded as, where it is recorded at all: the file
     /// it is written to, and what that file says it pins.
@@ -334,6 +338,7 @@ impl Simulation {
             listening: Vec::new(),
             reclaims: 0,
             warrants: Vec::new(),
+            commands: Vec::new(),
             key: key(),
             recording: None,
             recorder: None,
@@ -444,6 +449,34 @@ impl Simulation {
     }
 
     /// Everything printed to standard output so far.
+    /// Every runtime command asked for, in order.
+    pub fn commands(&self) -> Vec<Command> {
+        self.commands
+            .iter()
+            .map(|(_, command)| command.clone())
+            .collect()
+    }
+
+    /// Every runtime command asked after a point in the trace.
+    ///
+    /// Booting asks several of the same questions an awake instance does, so
+    /// a test about what waking leads to says where waking was.
+    pub fn commands_after(&self, at: usize) -> Vec<Command> {
+        self.commands
+            .iter()
+            .filter(|(asked, _)| *asked > at)
+            .map(|(_, command)| command.clone())
+            .collect()
+    }
+
+    /// Where in the trace the runtime was first asked something of a kind.
+    pub fn first_asking(&self, wanted: impl Fn(&Command) -> bool) -> Option<usize> {
+        self.commands
+            .iter()
+            .find(|(_, command)| wanted(command))
+            .map(|(at, _)| *at)
+    }
+
     pub fn printed(&self) -> &[String] {
         &self.printed
     }
@@ -512,13 +545,10 @@ impl Simulation {
                         AppEvent::Serving { .. }
                             | AppEvent::TurnEnded { .. }
                             | AppEvent::Probed { .. }
-                            | AppEvent::Listed { .. }
-                            | AppEvent::Inspected { .. }
                             | AppEvent::ThreadOpened { .. }
                             | AppEvent::Posted { .. }
                             | AppEvent::Request { .. }
                             | AppEvent::TunnelAsked { .. }
-                            | AppEvent::PortFound { .. }
                             | AppEvent::TunnelFailed { .. }
                     )
             )
@@ -729,44 +759,28 @@ impl Simulation {
                         })
                     },
                 ),
+                Some(Command::Halt { name }) => {
+                    if let Some(held) = self.containers.get_mut(&name) {
+                        held.running = false;
+                    }
+                    exited(String::new())
+                }
+                Some(Command::Discard { name }) => {
+                    self.containers.remove(&name);
+                    exited(String::new())
+                }
+                // As the runtime prints it: the host side of the mapping,
+                // one line, and nothing at all when there is no mapping.
+                Some(Command::Port { name }) => self.port_of(&name).map_or_else(
+                    || exited(String::new()),
+                    |port| exited(format!("127.0.0.1:{port}\n")),
+                ),
                 None => Finished::Failed("the simulation does not know this command".to_owned()),
             }
         } else {
             Finished::NotFound
         };
         self.schedule(self.now, Event::Ran { id, finished });
-    }
-
-    /// Answers whether a container exists, and whose it is.
-    fn inspect(&mut self, container: String) {
-        let (present, agent) = self
-            .containers
-            .get(&container)
-            .map_or((false, None), |held| (true, held.agent));
-        self.schedule(
-            self.now,
-            AppEvent::Inspected {
-                container,
-                present,
-                agent,
-            },
-        );
-    }
-
-    /// Answers with every container that is running.
-    fn list_running(&mut self) {
-        let running = self
-            .containers
-            .iter()
-            .filter(|(_, held)| held.running)
-            .map(|(name, held)| Container {
-                name: name.clone(),
-                instance: held.instance,
-                agent: held.agent,
-                running: true,
-            })
-            .collect();
-        self.schedule(self.now, AppEvent::Listed { running });
     }
 
     /// Ends the agent process, so the turn it was running ends with that
@@ -785,6 +799,12 @@ impl Simulation {
     }
 
     pub fn perform(&mut self, effect: Effect) {
+        // Before the line is pushed, so the position recorded is its own.
+        if let Effect::Run { arguments, .. } = &effect
+            && let Some(command) = Command::parse(arguments)
+        {
+            self.commands.push((self.trace.len(), command));
+        }
         self.trace.push(format!(
             "{}: -> {}{}",
             self.now,
@@ -804,16 +824,6 @@ impl Simulation {
                     .is_some_and(|held| held.running && held.serving);
                 self.schedule(self.now, AppEvent::Probed { job, answering });
             }
-            AppEffect::Inspect { container } => self.inspect(container),
-            AppEffect::ListRunning => self.list_running(),
-            AppEffect::Halt { container } => {
-                if let Some(held) = self.containers.get_mut(&container) {
-                    held.running = false;
-                }
-            }
-            AppEffect::Discard { container } => {
-                self.containers.remove(&container);
-            }
             AppEffect::Reclaim => self.reclaims += 1,
             AppEffect::Say { thread, text, .. } => self.posts.push((thread, text)),
             AppEffect::ToolAnswered { id, status, body } => {
@@ -824,10 +834,6 @@ impl Simulation {
             }
             AppEffect::Route { id, port } => {
                 self.routes.insert(id, port.map_or(Sent::Nowhere, Sent::To));
-            }
-            AppEffect::FindPort { job } => {
-                let port = self.port_of(&stageman_job::container(job));
-                self.schedule(self.now, AppEvent::PortFound { job, port });
             }
             AppEffect::StopTurn { speaker } => self.stop_turn(speaker),
             AppEffect::OpenThread {

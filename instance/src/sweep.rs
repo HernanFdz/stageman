@@ -256,9 +256,8 @@ impl Running {
         let cleared = over(&left, &self.state);
         for job in &cleared {
             tracing::info!(%job, "removing the container of a job that is over");
-            effects.emit(AppEffect::Discard {
-                container: stageman_job::container(*job),
-            });
+            let discard = self.discard(stageman_job::container(*job));
+            effects.push(discard);
         }
 
         // Anything with nothing to run in is over: the session lived in that
@@ -351,7 +350,7 @@ impl Running {
     /// found and what it decided about each, in the same order, so the tally
     /// can pair them.
     fn disowned<'a>(
-        &self,
+        &mut self,
         left: &[Left<'a>],
         effects: &mut Vec<Effect>,
     ) -> (Vec<Unplaceable<'a>>, Vec<Whose>) {
@@ -381,9 +380,8 @@ impl Running {
                 ),
             }
             if whose == Whose::Ours {
-                effects.emit(AppEffect::Discard {
-                    container: container.named().to_owned(),
-                });
+                let discard = self.discard(container.named().to_owned());
+                effects.push(discard);
             }
             disowned.push(whose);
         }

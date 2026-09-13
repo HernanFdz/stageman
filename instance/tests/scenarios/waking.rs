@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use crate::simulation::{
     Held, Simulation, another_instance, job, project, seed, this_instance, watching,
 };
+use stageman_agent::Command;
 use stageman_agent::{Answer, StopReason};
 use stageman_core::{Agent, JobId, Outcome, Progress, ProjectId, State, Uuid, Waiting};
 
@@ -79,9 +80,12 @@ fn a_first_run_writes_its_file_and_settles_later() {
             "<- Written",
             "-> Print",
             "<- Woke",
-            "-> ListRunning",
+            // Settling asks the runtime which containers are up. Nothing is
+            // running, so nothing is asked about labels and the answer is
+            // the end of it.
+            "-> Run",
             "-> Wake",
-            "<- Listed",
+            "<- Ran",
         ]
     );
     assert!(world.disk().is_some(), "a first run has a file");
@@ -395,12 +399,24 @@ fn settling_stops_what_shows_nothing_and_keeps_what_shows_something() {
         progress_of(instance.state(), working),
         Progress::Idle(Waiting::Silent)
     );
-    let listed = world
+    // After waking, because booting asks the same question of the runtime
+    // before there is an instance to settle.
+    let woke = world
         .shape()
         .iter()
-        .filter(|line| line.starts_with("<- Listed"))
+        .position(|line| line.starts_with("-> Booted"))
+        .expect("it woke");
+    let listed = world
+        .commands_after(woke)
+        .iter()
+        .filter(|command| matches!(command, Command::Containers { running_only: true }))
         .count();
-    assert_eq!(listed, 1, "settling came round once: {:?}", world.shape());
+    assert_eq!(
+        listed,
+        1,
+        "settling came round once: {:?}",
+        world.commands_after(woke)
+    );
 }
 
 /// Settling asks only about what is ours: a stranger's running container is

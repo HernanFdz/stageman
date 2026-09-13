@@ -5,6 +5,7 @@
 use crate::simulation::{
     Simulation, holding_a_message, project, said_at_root, seed, thread, watching_a_channel,
 };
+use stageman_agent::Command;
 use stageman_foreman::Starting;
 
 fn runs(world: &Simulation) -> Vec<String> {
@@ -32,10 +33,11 @@ fn a_first_message_opens_a_session_and_is_acknowledged_first() {
         .iter()
         .position(|line| line.starts_with("<- Written"))
         .expect("the inbox was written");
-    let inspected = shape
-        .iter()
-        .position(|line| line.starts_with("-> Inspect"))
-        .expect("the runtime was asked");
+    // Read back through the agent crate's inverse: looking at a foreman's
+    // container is a label asked of the runtime like any other command.
+    let inspected = world
+        .first_asking(|command| matches!(command, Command::Label { .. }))
+        .expect("the runtime was asked about the container");
     assert!(
         persisted < inspected,
         "nothing turns before the inbox lands: {shape:?}"

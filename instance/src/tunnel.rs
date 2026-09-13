@@ -8,6 +8,7 @@
 use stageman_core::{JobId, Progress};
 
 use crate::vocabulary::{AppEffect, RequestId};
+use crate::{Asked, Command};
 use crate::{Effect, Emit as _};
 
 /// The domain assumed when nothing names one.
@@ -225,7 +226,13 @@ impl crate::Running {
         let waiting = self.routing.entry(job).or_default();
         waiting.push(id);
         if waiting.len() == 1 {
-            effects.emit(AppEffect::FindPort { job });
+            let looking = self.ask(
+                &Command::Port {
+                    name: stageman_job::container(job),
+                },
+                Asked::Port { job },
+            );
+            effects.push(looking);
         }
     }
 

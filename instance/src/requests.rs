@@ -358,13 +358,11 @@ impl Running {
         let jobs: Vec<JobId> = watched.jobs.keys().copied().collect();
         for job in &jobs {
             self.forget_tunnel(*job);
-            self.defer(AppEffect::Discard {
-                container: stageman_job::container(*job),
-            });
+            let discard = self.discard(stageman_job::container(*job));
+            self.defer(discard);
         }
-        self.defer(AppEffect::Discard {
-            container: stageman_foreman::container(identifier),
-        });
+        let discard = self.discard(stageman_foreman::container(identifier));
+        self.defer(discard);
         self.defer(AppEffect::Reclaim);
         self.state.projects.remove(&identifier);
         self.dirty = true;
@@ -471,9 +469,8 @@ impl Running {
             }
         }
         self.forget_tunnel(named);
-        self.defer(AppEffect::Discard {
-            container: stageman_job::container(named),
-        });
+        let discard = self.discard(stageman_job::container(named));
+        self.defer(discard);
         self.defer(AppEffect::Reclaim);
         self.jobs(project)
     }

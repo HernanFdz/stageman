@@ -2,8 +2,9 @@
 //! to forward, asks the runtime once per look, and forgets a port that has
 //! moved.
 
+use stageman_agent::Command;
 use stageman_core::{Outcome, Progress, Waiting};
-use stageman_instance::{AppEffect, AppEvent, Effect, Instance};
+use stageman_instance::{AppEvent, Effect, Instance};
 
 use crate::simulation::{
     Sent, Simulation, job, said_in, seed, tunnel_asked, watching, watching_a_channel,
@@ -18,10 +19,15 @@ fn visit(sim: &mut Simulation, instance: &mut Instance, id: u64, which: u128) {
     sim.run_until(instance, until);
 }
 
-fn count(sim: &Simulation, what: &str) -> usize {
-    sim.trace()
+/// How many times the runtime was asked where a tunnel is.
+///
+/// Read back through the agent crate's own inverse rather than matched as a
+/// string: every runtime command is one generic effect now, so what tells
+/// them apart is the argument list, and that is rendered in one place.
+fn looked(sim: &Simulation) -> usize {
+    sim.commands()
         .iter()
-        .filter(|line| line.contains(what))
+        .filter(|command| matches!(command, Command::Port { .. }))
         .count()
 }
 
@@ -45,7 +51,10 @@ fn a_jobs_tunnel_is_looked_up_once_and_remembered() {
     assert_eq!(
         effects
             .iter()
-            .filter(|effect| matches!(effect, Effect::App(AppEffect::FindPort { .. })))
+            .filter(|effect| {
+                matches!(effect, Effect::Run { arguments, .. }
+                    if matches!(Command::parse(arguments), Some(Command::Port { .. })))
+            })
             .count(),
         1,
         "asked once for both"
@@ -60,7 +69,7 @@ fn a_jobs_tunnel_is_looked_up_once_and_remembered() {
 
     visit(&mut sim, &mut instance, 3, 1);
     assert_eq!(sim.route(3), Some(Sent::To(port)));
-    assert_eq!(count(&sim, "-> FindPort"), 1, "the third look asks nobody");
+    assert_eq!(looked(&sim), 1, "the third look asks nobody");
 }
 
 /// A name that identifies no job of this instance's, or a job that is over,
@@ -84,13 +93,13 @@ fn a_stranger_and_a_retired_job_are_answered_without_asking() {
         Some(Sent::Nowhere),
         "over, so nothing to show"
     );
-    assert_eq!(count(&sim, "-> FindPort"), 0);
+    assert_eq!(looked(&sim), 0);
 
     // An idle job whose container is stopped is asked about, and found to
     // be reachable nowhere.
     visit(&mut sim, &mut instance, 3, 2);
     assert_eq!(sim.route(3), Some(Sent::Nowhere));
-    assert_eq!(count(&sim, "-> FindPort"), 1);
+    assert_eq!(looked(&sim), 1);
 }
 
 /// The port is forgotten at every moment it can have moved — a halt, a
@@ -108,7 +117,7 @@ fn a_port_that_can_have_moved_is_looked_up_again() {
 
     visit(&mut sim, &mut instance, 1, 1);
     assert_eq!(sim.route(1), Some(Sent::To(first)));
-    assert_eq!(count(&sim, "-> FindPort"), 1);
+    assert_eq!(looked(&sim), 1);
 
     // The turn ends and nothing answers on the tunnel, so the container is
     // halted; the port it was on reaches nothing now.
@@ -120,7 +129,7 @@ fn a_port_that_can_have_moved_is_looked_up_again() {
         Some(Sent::Nowhere),
         "stopped, so nothing to reach"
     );
-    assert_eq!(count(&sim, "-> FindPort"), 2, "halting forgot the port");
+    assert_eq!(looked(&sim), 2, "halting forgot the port");
 
     // A reply resumes the job, which restarts the container on a fresh port.
     for effect in instance.step(said_in(1, "go on")) {
@@ -134,7 +143,7 @@ fn a_port_that_can_have_moved_is_looked_up_again() {
     assert_ne!(first, second, "the runtime publishes afresh on every start");
     visit(&mut sim, &mut instance, 3, 1);
     assert_eq!(sim.route(3), Some(Sent::To(second)));
-    assert_eq!(count(&sim, "-> FindPort"), 3, "resuming forgot the port");
+    assert_eq!(looked(&sim), 3, "resuming forgot the port");
 
     // A connection that did not go through forgets it too.
     for effect in instance.step(
@@ -148,5 +157,5 @@ fn a_port_that_can_have_moved_is_looked_up_again() {
     }
     visit(&mut sim, &mut instance, 4, 1);
     assert_eq!(sim.route(4), Some(Sent::To(second)));
-    assert_eq!(count(&sim, "-> FindPort"), 4, "a failure forgot the port");
+    assert_eq!(looked(&sim), 4, "a failure forgot the port");
 }

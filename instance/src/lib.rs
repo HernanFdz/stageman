@@ -45,8 +45,9 @@ use std::time::Duration;
 
 use rand::Rng as _;
 use rand::rngs::StdRng;
-use stageman_core::{InstanceId, JobId, Key, Kit, Progress, ProjectId, State, Thread, Uuid};
-use stageman_vocabulary::{Effect as Generic, EffectId, Environment};
+use stageman_agent::Command;
+use stageman_core::{Agent, InstanceId, JobId, Key, Kit, Progress, ProjectId, State, Thread, Uuid};
+use stageman_vocabulary::{Effect as Generic, EffectId, Environment, Finished};
 
 pub use boot::KeySource;
 pub use file::LoadError;
@@ -253,6 +254,44 @@ impl stageman_vocabulary::Deciding for Instance {
     }
 }
 
+/// What the runtime was asked, and therefore what its answer means.
+///
+/// The awake half of what booting's phases do: a command is a value with an
+/// identifier, and the identifier comes back on the answer, so this is what
+/// says which question was being answered.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum Asked {
+    /// A container told to stop, which is a job's tunnel gone quiet.
+    Halted {
+        /// The container.
+        container: String,
+    },
+    /// A container told to go, with everything in it.
+    Discarded {
+        /// The container.
+        container: String,
+    },
+    /// Where a job's tunnel is published on the host.
+    Port {
+        /// Whose.
+        job: JobId,
+    },
+    /// Whether a container is there, and which agent it was made for.
+    Inspected {
+        /// The container.
+        container: String,
+    },
+    /// Which containers are up, for the settling sweep.
+    Listing,
+    /// What one label on one container of a listing says.
+    Labelled {
+        /// The container.
+        name: String,
+        /// Which label.
+        label: stageman_agent::Label,
+    },
+}
+
 /// What booting hands an awake instance.
 pub struct Facts {
     /// What the file held, or nothing on a first run.
@@ -273,6 +312,8 @@ pub struct Facts {
     pub path: PathBuf,
     /// The runtime that answered.
     pub runtime: PathBuf,
+    /// What every command that runtime is given gets for an environment.
+    pub runtime_environment: Environment,
     /// Where the dashboard is served, as a person would type it.
     pub address: String,
     /// The port it is served on.
@@ -299,6 +340,20 @@ pub struct Running {
     address: String,
     /// The runtime that answered.
     runtime: PathBuf,
+    /// What every command it is given gets for an environment: this
+    /// process's own, less this project's, decided once while booting.
+    runtime_environment: Environment,
+    /// What a listing being assembled has learned so far, by container.
+    ///
+    /// A listing is one question and then two more per container it names,
+    /// so this is what the answers accumulate into until the last arrives.
+    listing: BTreeMap<String, (Option<InstanceId>, Option<Agent>)>,
+    /// What the runtime was asked, by the identifier its answer will carry.
+    ///
+    /// Held and never kept: an answer arriving after this process dies is
+    /// answered to nobody, and the next start asks again whatever still
+    /// matters.
+    asked: BTreeMap<EffectId, Asked>,
     /// The one generator.
     rng: StdRng,
     /// The next effect identifier.
@@ -346,6 +401,7 @@ impl Running {
             domain,
             path,
             runtime,
+            runtime_environment,
             address,
             port,
         } = facts;
@@ -364,6 +420,9 @@ impl Running {
             serving: port,
             address,
             runtime,
+            runtime_environment,
+            asked: BTreeMap::new(),
+            listing: BTreeMap::new(),
             rng,
             next,
             turns: BTreeMap::new(),
@@ -400,6 +459,164 @@ impl Running {
         effects
     }
 
+    /// Asks the runtime something, and remembers what for.
+    ///
+    /// Every command is rendered here rather than by whoever performs it, so
+    /// what a scenario shows is the argument list that actually runs — and
+    /// the answer is routed by the identifier it carries back.
+    fn ask(&mut self, command: &Command, asked: Asked) -> Effect {
+        let id = self.effect_id();
+        self.asked.insert(id, asked);
+        Generic::Run {
+            id,
+            program: self.runtime.clone(),
+            arguments: command.arguments(),
+            environment: self.runtime_environment.clone(),
+            stdin: None,
+        }
+    }
+
+    /// Asks for a container to go, with everything in it.
+    ///
+    /// Named because four places want it and the pairing of the command with
+    /// what its answer means should be written once.
+    fn discard(&mut self, container: String) -> Effect {
+        self.ask(
+            &Command::Discard {
+                name: container.clone(),
+            },
+            Asked::Discarded { container },
+        )
+    }
+
+    /// What the runtime said about something this instance asked it.
+    fn ran(&mut self, id: EffectId, finished: &Finished, effects: &mut Vec<Effect>) {
+        let Some(asked) = self.asked.remove(&id) else {
+            tracing::warn!("a program finished that this instance did not ask about; ignored");
+            return;
+        };
+        match asked {
+            // Housekeeping, so a failure is said and nothing else changes:
+            // what is left is a container nothing needs, which is exactly
+            // what the next sweep looks for.
+            Asked::Halted { container } => {
+                if let Some(why) = complaint(finished) {
+                    tracing::warn!(%container, %why, "a container could not be stopped");
+                }
+            }
+            Asked::Discarded { container } => {
+                if let Some(why) = complaint(finished) {
+                    tracing::warn!(
+                        %container,
+                        %why,
+                        "a container could not be removed; waking will try again"
+                    );
+                }
+            }
+            // A container that is not there refuses, and so does a runtime
+            // that will not answer; either way nothing can be resumed in it,
+            // which is the one thing the answer decides.
+            Asked::Inspected { container } => {
+                // Nothing to complain about is the whole of what "it is
+                // there" means: a container that is not there makes the
+                // runtime say so, and so does a runtime that will not
+                // answer at all.
+                let present = complaint(finished).is_none();
+                let agent = stageman_agent::labelled(said(finished).trim());
+                self.inspected(&container, present, agent, effects);
+            }
+            Asked::Listing => self.listing(finished, effects),
+            Asked::Labelled { name, label } => self.labelled(&name, label, finished, effects),
+            Asked::Port { job } => {
+                if let Some(why) = complaint(finished) {
+                    tracing::debug!(%job, %why, "the runtime could not say where a job's tunnel is");
+                }
+                // Nothing published reads as no line at all, which is what a
+                // container with no tunnel prints, so an empty answer and a
+                // failed one mean the same thing here: nowhere to send them.
+                let port = stageman_agent::published(said(finished));
+                self.port_found(job, port, effects);
+            }
+        }
+    }
+
+    /// The runtime said which containers are up.
+    ///
+    /// A listing is assembled here rather than by whoever runs the commands:
+    /// the names come back first, and each is then asked what its labels
+    /// say, which is the shape booting uses before it is awake.
+    fn listing(&mut self, finished: &Finished, effects: &mut Vec<Effect>) {
+        if let Some(why) = complaint(finished) {
+            tracing::warn!(%why, "could not ask which containers are running");
+        }
+        self.listing.clear();
+        let mut asking = Vec::new();
+        for name in stageman_agent::names(said(finished)) {
+            self.listing.insert(name.clone(), (None, None));
+            for label in [
+                stageman_agent::Label::Instance,
+                stageman_agent::Label::Agent,
+            ] {
+                asking.push(self.ask(
+                    &Command::Label {
+                        name: name.clone(),
+                        label,
+                    },
+                    Asked::Labelled {
+                        name: name.clone(),
+                        label,
+                    },
+                ));
+            }
+        }
+        if asking.is_empty() {
+            self.listed(&[], effects);
+        } else {
+            effects.extend(asking);
+        }
+    }
+
+    /// The runtime said what one label on one listed container says.
+    ///
+    /// The listing is finished when nothing is left to answer, which is what
+    /// says every container in it has been placed.
+    fn labelled(
+        &mut self,
+        name: &str,
+        label: stageman_agent::Label,
+        finished: &Finished,
+        effects: &mut Vec<Effect>,
+    ) {
+        if complaint(finished).is_some() {
+            tracing::warn!(container = %name, "could not read a container's label");
+        }
+        let text = said(finished);
+        if let Some(entry) = self.listing.get_mut(name) {
+            match label {
+                stageman_agent::Label::Instance => entry.0 = stageman_agent::minted(text),
+                stageman_agent::Label::Agent => entry.1 = stageman_agent::labelled(text.trim()),
+            }
+        }
+        if self
+            .asked
+            .values()
+            .any(|asked| matches!(asked, Asked::Labelled { .. }))
+        {
+            return;
+        }
+        let running: Vec<Container> = std::mem::take(&mut self.listing)
+            .into_iter()
+            .map(|(name, (instance, agent))| Container {
+                name,
+                instance,
+                agent,
+                // Only the running ones were asked for.
+                running: true,
+            })
+            .collect();
+        self.listed(&running, effects);
+    }
+
     /// An identifier for an effect this instance will be answered about.
     const fn effect_id(&mut self) -> EffectId {
         let id = EffectId(self.next);
@@ -416,9 +633,10 @@ impl Running {
         match event {
             Event::Written { id, outcome } => self.written(id, outcome, &mut effects),
             Event::Woke { id } => self.woke(id, &mut effects),
-            Event::Read { .. } | Event::Ran { .. } => {
+            Event::Ran { id, finished } => self.ran(id, &finished, &mut effects),
+            Event::Read { .. } => {
                 tracing::warn!(
-                    "answered something this instance did not ask for while awake; ignored"
+                    "a file was read that this instance did not ask for while awake; ignored"
                 );
             }
             Event::App(event) => self.told(event, &mut effects),
@@ -443,15 +661,17 @@ impl Running {
                     // Halted, so the port it was on reaches nothing.
                     self.forget_tunnel(job);
                 }
-                probed(job, answering, effects);
+                if let Some(container) = probed(job, answering) {
+                    let halt = self.ask(
+                        &Command::Halt {
+                            name: container.clone(),
+                        },
+                        Asked::Halted { container },
+                    );
+                    effects.push(halt);
+                }
             }
-            AppEvent::Listed { running } => self.listed(&running, effects),
             AppEvent::Heard { channel, message } => self.heard(channel, &message, effects),
-            AppEvent::Inspected {
-                container,
-                present,
-                agent,
-            } => self.inspected(&container, present, agent, effects),
             AppEvent::ToolCalled {
                 id,
                 at,
@@ -463,7 +683,6 @@ impl Running {
             AppEvent::Posted { request, outcome } => self.posted(request, outcome),
             AppEvent::Request { id, request } => self.requested(id, request, effects),
             AppEvent::TunnelAsked { id, job } => self.tunnel_asked(id, job, effects),
-            AppEvent::PortFound { job, port } => self.port_found(job, port, effects),
             AppEvent::TunnelFailed { job, why } => self.tunnel_failed(job, &why),
         }
     }
@@ -471,7 +690,8 @@ impl Running {
     /// A timer went off.
     fn woke(&mut self, id: EffectId, effects: &mut Vec<Effect>) {
         if self.timers.remove(&id) {
-            effects.emit(AppEffect::ListRunning);
+            let listing = self.ask(&Command::Containers { running_only: true }, Asked::Listing);
+            effects.push(listing);
             let settling = self.settle_later();
             effects.push(settling);
         } else {
@@ -657,27 +877,61 @@ fn mint(rng: &mut StdRng) -> Uuid {
     uuid::Builder::from_random_bytes(bytes).into_uuid()
 }
 
+/// What a runtime command printed, when it ran and was happy.
+///
+/// Anything else printed nothing worth reading: a command that failed has
+/// its reason on the other stream, which is [`complaint`].
+fn said(finished: &Finished) -> &str {
+    match finished {
+        Finished::Exited {
+            status: Some(0),
+            stdout,
+            ..
+        } => stdout.as_text().unwrap_or(""),
+        _ => "",
+    }
+}
+
+/// Why a runtime command failed, if it did.
+///
+/// A command that was run and exited cleanly says nothing; anything else is
+/// worth a line, and the line is the runtime's own complaint where there is
+/// one.
+fn complaint(finished: &Finished) -> Option<String> {
+    match finished {
+        Finished::Exited {
+            status: Some(0), ..
+        } => None,
+        Finished::Exited { stderr, .. } => Some(stderr.as_text().unwrap_or("").trim().to_owned()),
+        Finished::NotFound => Some("the runtime could not be run".to_owned()),
+        Finished::Failed(why) => Some(why.clone()),
+    }
+}
+
 /// What to do about a job's tunnel, now the world has looked.
 ///
 /// Answering means the container is left running for whoever is looking;
 /// nothing behind it means the container is stopped, keeping it and the
 /// session in it for the next reply.
-fn probed(job: JobId, answering: bool, effects: &mut Vec<Effect>) {
+///
+/// It answers with the container to stop rather than stopping one, so the
+/// deciding is a function anything can call and the asking stays with the
+/// instance, which is what mints an identifier for the answer.
+fn probed(job: JobId, answering: bool) -> Option<String> {
     if answering {
         tracing::info!(
             %job,
             "its container is left running, because something is still answering on its tunnel"
         );
+        None
     } else {
-        effects.emit(AppEffect::Halt {
-            container: stageman_job::container(job),
-        });
+        Some(stageman_job::container(job))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AppEffect, Effect, probed};
+    use super::probed;
     use stageman_core::{JobId, Uuid};
 
     /// The whole of what deciding a container's life looks like from here:
@@ -686,14 +940,11 @@ mod tests {
     fn a_tunnel_that_answers_keeps_its_container_and_silence_stops_it() {
         let job = JobId::from_uuid(Uuid::from_u128(5));
 
-        let mut effects = Vec::new();
-        probed(job, true, &mut effects);
-        assert!(effects.is_empty(), "answering keeps the container");
-
-        probed(job, false, &mut effects);
-        assert!(
-            matches!(effects.as_slice(), [Effect::App(AppEffect::Halt { container })] if *container == stageman_job::container(job)),
-            "silence stops it, and nothing else happens"
+        assert_eq!(probed(job, true), None, "answering keeps the container");
+        assert_eq!(
+            probed(job, false),
+            Some(stageman_job::container(job)),
+            "silence stops it, and that container and no other"
         );
     }
 }

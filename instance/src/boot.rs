@@ -688,6 +688,7 @@ impl Boot {
             domain: self.domain.clone(),
             path: self.instance_file.clone(),
             runtime,
+            runtime_environment: self.runtime_environment(),
             address,
             port,
         });

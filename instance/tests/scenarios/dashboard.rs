@@ -1,6 +1,7 @@
 //! A person at the dashboard: every request is answered once whatever it
 //! changed is on the disk, and refused with a reason the screen can show.
 
+use stageman_agent::Command;
 use stageman_core::{Agent, JobId, Outcome, Progress, ProjectId, Timestamp, Uuid, Waiting};
 use stageman_instance::{Instance, Request, Response};
 use stageman_wire::{ChannelDraft, Draft, Ending, Fitted, KitDraft, Refusal, Standing};
@@ -44,6 +45,29 @@ fn a_draft(name: &str) -> Draft {
 }
 
 /// Where in the trace a line first mentions something.
+/// Where in the trace a container was first told to go.
+///
+/// Every runtime command is one generic effect now, so what tells them
+/// apart is the argument list, read back through the agent crate's own
+/// inverse rather than matched as a string.
+fn first_removal(sim: &Simulation) -> usize {
+    let found = sim.first_asking(|command| matches!(command, Command::Discard { .. }));
+    assert!(
+        found.is_some(),
+        "nothing was removed: {:#?}",
+        sim.commands()
+    );
+    found.expect("asserted above")
+}
+
+/// How many containers were told to go.
+fn removals(sim: &Simulation) -> usize {
+    sim.commands()
+        .iter()
+        .filter(|command| matches!(command, Command::Discard { .. }))
+        .count()
+}
+
 fn first(sim: &Simulation, what: &str) -> usize {
     let found = sim.trace().iter().position(|line| line.contains(what));
     assert!(
@@ -386,7 +410,7 @@ fn forgetting_a_project_removes_its_containers_and_refuses_while_busy() {
     assert!(!sim.exists(&stageman_job::container(job(1))));
     assert!(!sim.exists(&stageman_job::container(job(2))));
     assert!(!sim.exists(&stageman_foreman::container(project())));
-    assert!(first(&sim, "-> Write") < first(&sim, "-> Discard"));
+    assert!(first(&sim, "-> Write") < first_removal(&sim));
     assert!(sim.reclaims() >= 1);
     assert!(sim.disk().expect("landed").projects.is_empty());
 }
@@ -618,7 +642,7 @@ fn retiring_a_job_records_the_verdict_before_its_container_goes() {
         .find(|listed| listed.id == job(1).to_string())
         .expect("still listed");
     assert_eq!(retired.standing, Standing::Done);
-    assert!(first(&sim, "-> Write") < first(&sim, "-> Discard"));
+    assert!(first(&sim, "-> Write") < first_removal(&sim));
     assert!(!sim.exists(&stageman_job::container(job(1))));
     assert_eq!(sim.reclaims(), reclaimed + 1);
     assert_eq!(
@@ -658,7 +682,7 @@ fn retiring_a_job_records_the_verdict_before_its_container_goes() {
         Some(Progress::Retired(Outcome::Done)),
         "a verdict is never overwritten"
     );
-    assert_eq!(count(&sim, "-> Discard"), 2, "safe to press twice");
+    assert_eq!(removals(&sim), 2, "safe to press twice");
 }
 
 /// The same requests against the same seed leave the same trace.

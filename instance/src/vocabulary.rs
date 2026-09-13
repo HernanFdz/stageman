@@ -159,27 +159,12 @@ pub enum AppEvent {
         /// Whether anything answered behind it.
         answering: bool,
     },
-    /// Answers [`AppEffect::ListRunning`]: the containers up right now.
-    Listed {
-        /// Every running container this project started, with its labels.
-        running: Vec<Container>,
-    },
     /// Somebody said something on a channel this instance listens to.
     Heard {
         /// Which channel.
         channel: Channel,
         /// What was heard.
         message: Message,
-    },
-    /// Answers [`AppEffect::Inspect`]: whether a container exists, and for
-    /// which agent it was made.
-    Inspected {
-        /// Its name.
-        container: String,
-        /// Whether the runtime holds it.
-        present: bool,
-        /// Which agent it was made for, if it is there and its label says.
-        agent: Option<Agent>,
     },
     /// An agent called the tools endpoint. Answered by
     /// [`AppEffect::ToolAnswered`], in this step or a later one.
@@ -234,14 +219,6 @@ pub enum AppEvent {
         /// The job the name identifies.
         job: JobId,
     },
-    /// Answers [`AppEffect::FindPort`]: where the job's tunnel is published,
-    /// if its container is running with one.
-    PortFound {
-        /// Which job.
-        job: JobId,
-        /// The host port, or none if nothing can be reached.
-        port: Option<u16>,
-    },
     /// A connection to where a job's tunnel was last found did not go
     /// through. Only failures are reported: a relay that worked needs no
     /// decision, and one per request would be noise.
@@ -259,15 +236,12 @@ impl Named for AppEvent {
             Self::Serving { .. } => "Serving",
             Self::TurnEnded { .. } => "TurnEnded",
             Self::Probed { .. } => "Probed",
-            Self::Listed { .. } => "Listed",
             Self::Heard { .. } => "Heard",
-            Self::Inspected { .. } => "Inspected",
             Self::ToolCalled { .. } => "ToolCalled",
             Self::ThreadOpened { .. } => "ThreadOpened",
             Self::Posted { .. } => "Posted",
             Self::Request { .. } => "Request",
             Self::TunnelAsked { .. } => "TunnelAsked",
-            Self::PortFound { .. } => "PortFound",
             Self::TunnelFailed { .. } => "TunnelFailed",
         }
     }
@@ -303,29 +277,6 @@ pub enum AppEffect {
         /// Which job.
         job: JobId,
     },
-    /// Ask which containers are up. Answered by [`AppEvent::Listed`].
-    ListRunning,
-    /// Ask whether a container exists and for which agent it was made.
-    /// Answered by [`AppEvent::Inspected`].
-    ///
-    /// Asked before every foreman's turn rather than remembered, because a
-    /// container is the truth about whether a session exists: a foreman that
-    /// believed it had one and did not would fail every turn until somebody
-    /// looked.
-    Inspect {
-        /// Its name.
-        container: String,
-    },
-    /// Stop a container, keeping it and everything in it. Unanswered.
-    Halt {
-        /// Its name.
-        container: String,
-    },
-    /// Remove a container and everything in it. Unanswered.
-    Discard {
-        /// Its name.
-        container: String,
-    },
     /// Reclaim the images nothing needs any more. Unanswered.
     Reclaim,
     /// Post on a channel, in a thread, on the instance's own behalf.
@@ -347,12 +298,6 @@ pub enum AppEffect {
         id: RequestId,
         /// The host port to forward to, or none for a name nothing answers on.
         port: Option<u16>,
-    },
-    /// Ask the runtime where a job's tunnel is published. Answered by
-    /// [`AppEvent::PortFound`].
-    FindPort {
-        /// Which job.
-        job: JobId,
     },
     /// Answer a person's request. Unanswered.
     Respond {
@@ -418,14 +363,9 @@ impl Named for AppEffect {
             Self::Booted { .. } => "Booted",
             Self::RunTurn { .. } => "RunTurn",
             Self::Probe { .. } => "Probe",
-            Self::ListRunning => "ListRunning",
-            Self::Inspect { .. } => "Inspect",
-            Self::Halt { .. } => "Halt",
-            Self::Discard { .. } => "Discard",
             Self::Reclaim => "Reclaim",
             Self::Say { .. } => "Say",
             Self::Route { .. } => "Route",
-            Self::FindPort { .. } => "FindPort",
             Self::Respond { .. } => "Respond",
             Self::StopTurn { .. } => "StopTurn",
             Self::ToolAnswered { .. } => "ToolAnswered",
