@@ -181,11 +181,25 @@
           }
         },
         {
-          "App": "Reclaim"
+          "Run": {
+            "id": 5,
+            "program": "/usr/bin/docker",
+            "arguments": [
+              "images",
+              "--filter",
+              "reference=stageman",
+              "--format",
+              "{{.Repository}}:{{.Tag}}"
+            ],
+            "environment": {
+              "HOME": "/sim/home"
+            },
+            "stdin": null
+          }
         },
         {
           "Wake": {
-            "id": 5,
+            "id": 6,
             "after": {
               "secs": 60,
               "nanos": 0
@@ -194,7 +208,7 @@
         },
         {
           "Write": {
-            "id": 6,
+            "id": 7,
             "path": "/sim/instance.json",
             "bytes": {
               "text": "{\n  \"instance\": \"3301e8d7-e754-4b2c-b57b-0a4ca73f253c\",\n  \"agents\": {},\n  \"projects\": {}\n}"
@@ -227,7 +241,7 @@
             "runtime_environment": {
               "HOME": "/sim/home"
             },
-            "next": 7,
+            "next": 8,
             "turns": [],
             "warrants": {},
             "interrupted": [],
@@ -236,14 +250,19 @@
             "routing": [],
             "deferred": [
               [
-                6,
+                7,
                 []
               ]
             ],
             "timers": [
-              5
+              6
             ],
-            "asked": [],
+            "asked": [
+              [
+                5,
+                "Images"
+              ]
+            ],
             "listing": [],
             "dirty": false,
             "staged": [],
@@ -266,10 +285,92 @@
       ]
     },
     {
+      "at": 0,
+      "event": {
+        "Ran": {
+          "id": 5,
+          "finished": {
+            "Exited": {
+              "status": 0,
+              "stdout": {
+                "text": "stageman:unneeded\n"
+              },
+              "stderr": {
+                "text": ""
+              }
+            }
+          }
+        }
+      },
+      "effects": [
+        {
+          "Run": {
+            "id": 8,
+            "program": "/usr/bin/docker",
+            "arguments": [
+              "rmi",
+              "stageman:unneeded"
+            ],
+            "environment": {
+              "HOME": "/sim/home"
+            },
+            "stdin": null
+          }
+        }
+      ],
+      "changed": [
+        {
+          "op": "replace",
+          "path": "/held/next",
+          "value": 9
+        },
+        {
+          "op": "replace",
+          "path": "/held/asked/0/0",
+          "value": 8
+        },
+        {
+          "op": "replace",
+          "path": "/held/asked/0/1",
+          "value": {
+            "Reclaimed": {
+              "image": "stageman:unneeded"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "at": 0,
+      "event": {
+        "Ran": {
+          "id": 8,
+          "finished": {
+            "Exited": {
+              "status": 0,
+              "stdout": {
+                "text": ""
+              },
+              "stderr": {
+                "text": ""
+              }
+            }
+          }
+        }
+      },
+      "effects": [],
+      "changed": [
+        {
+          "op": "remove",
+          "path": "/held/asked/0"
+        }
+      ]
+    },
+    {
       "at": 1,
       "event": {
         "Written": {
-          "id": 6,
+          "id": 7,
           "outcome": {
             "Ok": null
           }

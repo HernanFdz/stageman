@@ -277,8 +277,6 @@ pub enum AppEffect {
         /// Which job.
         job: JobId,
     },
-    /// Reclaim the images nothing needs any more. Unanswered.
-    Reclaim,
     /// Post on a channel, in a thread, on the instance's own behalf.
     /// Unanswered: this is a notice about an outcome, and the outcome does
     /// not change because the notice of it did not arrive.
@@ -363,7 +361,6 @@ impl Named for AppEffect {
             Self::Booted { .. } => "Booted",
             Self::RunTurn { .. } => "RunTurn",
             Self::Probe { .. } => "Probe",
-            Self::Reclaim => "Reclaim",
             Self::Say { .. } => "Say",
             Self::Route { .. } => "Route",
             Self::Respond { .. } => "Respond",

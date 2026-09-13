@@ -70,13 +70,18 @@ fn a_first_run_writes_its_file_and_settles_later() {
             "-> Run",
             "<- Ran",
             "<- Ran",
-            // Awake: the world is told what was found, the sweep asks for
-            // its housekeeping, the file is written, and the address is
-            // announced only once that write has landed.
+            // Awake: the world is told which runtime answered, the sweep
+            // asks the runtime which images are ours, the file is written,
+            // and the address is announced only once that write has landed.
+            // The one image nothing needs is removed as soon as the listing
+            // says so, which is housekeeping and waits for nobody.
             "-> Booted",
-            "-> Reclaim",
+            "-> Run",
             "-> Wake",
             "-> Write",
+            "<- Ran",
+            "-> Run",
+            "<- Ran",
             "<- Written",
             "-> Print",
             "<- Woke",

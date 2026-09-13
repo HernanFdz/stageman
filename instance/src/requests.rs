@@ -23,6 +23,7 @@ use crate::Running;
 use crate::turns::listening_on;
 use crate::views;
 use crate::vocabulary::{AppEffect, RequestId, Speaker};
+use crate::{Asked, Command};
 use crate::{Effect, Emit as _};
 
 /// Why a job started, when a person started it.
@@ -363,7 +364,8 @@ impl Running {
         }
         let discard = self.discard(stageman_foreman::container(identifier));
         self.defer(discard);
-        self.defer(AppEffect::Reclaim);
+        let reclaiming = self.ask(&Command::Images, Asked::Images);
+        self.defer(reclaiming);
         self.state.projects.remove(&identifier);
         self.dirty = true;
         Ok(Response::Projects(views::watching_now(&self.state)))
@@ -471,7 +473,8 @@ impl Running {
         self.forget_tunnel(named);
         let discard = self.discard(stageman_job::container(named));
         self.defer(discard);
-        self.defer(AppEffect::Reclaim);
+        let reclaiming = self.ask(&Command::Images, Asked::Images);
+        self.defer(reclaiming);
         self.jobs(project)
     }
 }

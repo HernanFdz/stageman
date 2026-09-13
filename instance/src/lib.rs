@@ -290,6 +290,13 @@ enum Asked {
         /// Which label.
         label: stageman_agent::Label,
     },
+    /// Which images this project has built and still holds.
+    Images,
+    /// One image told to go, in the housekeeping that follows a removal.
+    Reclaimed {
+        /// Its name and tag.
+        image: String,
+    },
 }
 
 /// What booting hands an awake instance.
@@ -524,6 +531,35 @@ impl Running {
                 let present = complaint(finished).is_none();
                 let agent = stageman_agent::labelled(said(finished).trim());
                 self.inspected(&container, present, agent, effects);
+            }
+            // What a listing of images leads to is a decision about which
+            // this build would only rebuild, which is knowledge about
+            // images and lives with them; what is left here is the asking.
+            Asked::Images => {
+                if let Some(why) = complaint(finished) {
+                    tracing::warn!(%why, "could not ask which images are ours");
+                    return;
+                }
+                let keeping = stageman_agent::keeping();
+                for image in stageman_agent::tagged(said(finished)) {
+                    if stageman_agent::kept(&keeping, &image) {
+                        continue;
+                    }
+                    let removal = self.ask(
+                        &Command::RemoveImage {
+                            image: image.clone(),
+                        },
+                        Asked::Reclaimed { image },
+                    );
+                    effects.push(removal);
+                }
+            }
+            Asked::Reclaimed { image } => {
+                if let Some(why) = complaint(finished) {
+                    tracing::warn!(%image, %why, "an image nothing needs could not be removed");
+                } else {
+                    tracing::info!(%image, "reclaimed an image no container needed");
+                }
             }
             Asked::Listing => self.listing(finished, effects),
             Asked::Labelled { name, label } => self.labelled(&name, label, finished, effects),

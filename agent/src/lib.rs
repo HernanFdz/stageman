@@ -552,32 +552,6 @@ fn ours_arguments() -> Vec<String> {
     ]
 }
 
-/// Every image this project has built and still has, by name.
-///
-/// # Errors
-///
-/// Fails if the runtime cannot be run, or refuses the query.
-#[mutants::skip]
-async fn ours(runtime: &ContainerRuntime) -> Result<Vec<String>, AgentError> {
-    let listed = tokio::process::Command::new(runtime.path())
-        .args(ours_arguments())
-        .kill_on_drop(true)
-        .output()
-        .await
-        .map_err(|source| AgentError::Runtime {
-            path: runtime.path().to_owned(),
-            source,
-        })?;
-
-    if !listed.status.success() {
-        return Err(AgentError::Unusable {
-            path: runtime.path().to_owned(),
-            message: String::from_utf8_lossy(&listed.stderr).trim().to_owned(),
-        });
-    }
-    Ok(tagged(&String::from_utf8_lossy(&listed.stdout)))
-}
-
 /// The image names in what a listing reported.
 ///
 /// Pure, so what a sweep works from can be tested without a runtime. Two
@@ -585,7 +559,11 @@ async fn ours(runtime: &ContainerRuntime) -> Result<Vec<String>, AgentError> {
 /// runtime prints when it found nothing, and anything still carrying the
 /// runtime's word for *no name*, which is an image that lost its name between
 /// the listing and now and is not one this project can address.
-fn tagged(reported: &str) -> Vec<String> {
+///
+/// Public because the instance reads it: the listing is asked for there, and
+/// this is what its lines mean.
+#[must_use]
+pub fn tagged(reported: &str) -> Vec<String> {
     reported
         .lines()
         .map(str::trim)
@@ -601,7 +579,14 @@ fn tagged(reported: &str) -> Vec<String> {
 /// wants exactly this. And a sweep that removed them would race the path that
 /// has just built one and not yet created its container, which is a job
 /// failing on an image that was there a moment ago.
-fn keeping() -> Vec<Image> {
+///
+/// Public, with [`kept`], because the instance decides what a sweep removes:
+/// since
+/// `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`
+/// the listing is asked for there and read there, and what is left is this —
+/// knowledge about images rather than about one run.
+#[must_use]
+pub fn keeping() -> Vec<Image> {
     Agent::ALL
         .iter()
         .copied()
@@ -616,78 +601,13 @@ fn keeping() -> Vec<Image> {
 
 /// Whether a name is one of the images this build would use.
 ///
-/// Pulled out of [`reclaim`] and named, for the reason `keeping` is: the loop
-/// around it drives a runtime and cannot be tested cheaply, and this is the
-/// decision that says whether anything is removed at all. Inverted, a sweep
-/// reclaims exactly the images the next container wants and keeps the ones
-/// nothing will ask for again.
-fn kept(keeping: &[Image], image: &str) -> bool {
+/// Named and public, for the reason [`keeping`] is: the sweep around it is
+/// the instance's now, and this is the decision that says whether anything
+/// is removed at all. Inverted, a sweep reclaims exactly the images the next
+/// container wants and keeps the ones nothing will ask for again.
+#[must_use]
+pub fn kept(keeping: &[Image], image: &str) -> bool {
     keeping.iter().any(|keep| keep.as_argument() == image)
-}
-
-/// Removes one image unless something is using it.
-///
-/// **Unforced, and that is the whole of it.** The refusal is the runtime's
-/// own, decided atomically against every container it has — including
-/// containers this instance did not create and cannot see the point of. So
-/// there is no window in which a container is created from an image this has
-/// just decided was unused, and no need to ask what is using it first.
-///
-/// Total, like [`present`]: a refusal means something needs it, which is not a
-/// failure, and a runtime broken badly enough to matter fails loudly
-/// everywhere else in the same breath.
-#[mutants::skip]
-async fn discarded(runtime: &ContainerRuntime, image: &str) -> bool {
-    tokio::process::Command::new(runtime.path())
-        .args(["rmi", image])
-        .kill_on_drop(true)
-        .output()
-        .await
-        .is_ok_and(|removed| removed.status.success())
-}
-
-/// Removes every image of this project's that nothing needs, and says how many
-/// went.
-///
-/// What stops images accumulating once they have names:
-/// `docs/decisions/0051-an-image-is-named-by-the-recipe-it-is-built-from.md`
-/// makes every container from one recipe share one image, and this is what
-/// reclaims the image of a recipe that has been *edited* — the one case a
-/// shared name does not cover, because the old name goes on naming an image
-/// nothing will ask for again.
-///
-/// Deliberately blind to what a container is for. An image held by another
-/// instance's container is kept because that container is using it, not
-/// because this recognised it, which is what makes this safe to run while
-/// something else is running.
-///
-/// # Errors
-///
-/// Fails only if the runtime will not say what images it has. An image that
-/// will not go is kept and not counted, which is the ordinary outcome for
-/// every image a container needs.
-///
-/// Skipped by mutation testing, like everything here that drives the runtime:
-/// what it decides is the private `kept` beside it, which has its own test, and
-/// what it does is spawn a process per image.
-#[mutants::skip]
-pub async fn reclaim(runtime: &ContainerRuntime) -> Result<usize, AgentError> {
-    let ours = ours(runtime).await?;
-    let keeping = keeping();
-
-    // Collected rather than counted up, for the reason the sweep in **app**
-    // gives: the gate denies arithmetic that can overflow, and the escapes
-    // that quiet it are the ones that produce silent wrong values.
-    let mut gone: Vec<String> = Vec::new();
-    for image in ours {
-        if kept(&keeping, &image) {
-            continue;
-        }
-        if discarded(runtime, &image).await {
-            gone.push(image);
-        }
-    }
-    Ok(gone.len())
 }
 
 /// The arguments that start a container just long enough to be greeted.
@@ -2121,6 +2041,13 @@ pub enum Command {
         /// The container.
         name: String,
     },
+    /// Every image this project has built and still holds.
+    Images,
+    /// Remove one image.
+    RemoveImage {
+        /// Its name and tag.
+        image: String,
+    },
 }
 
 /// The labels a container of this project's carries.
@@ -2179,6 +2106,8 @@ impl Command {
                 vec!["rm".to_owned(), "--force".to_owned(), name.clone()]
             }
             Self::Port { name } => vec!["port".to_owned(), name.clone(), TUNNEL_PORT.to_string()],
+            Self::Images => ours_arguments(),
+            Self::RemoveImage { image } => vec!["rmi".to_owned(), image.clone()],
         }
     }
 
@@ -2220,6 +2149,16 @@ impl Command {
                     name: (*name).to_owned(),
                 })
             }
+            [
+                "images",
+                "--filter",
+                filter,
+                "--format",
+                "{{.Repository}}:{{.Tag}}",
+            ] if *filter == format!("reference={REPOSITORY}") => Some(Self::Images),
+            ["rmi", image] => Some(Self::RemoveImage {
+                image: (*image).to_owned(),
+            }),
             _ => None,
         }
     }
@@ -2756,6 +2695,10 @@ mod tests {
             Command::Port {
                 name: "stageman-job-1".to_owned(),
             },
+            Command::Images,
+            Command::RemoveImage {
+                image: "stageman:0123".to_owned(),
+            },
         ];
         for command in every {
             assert_eq!(
@@ -2805,6 +2748,17 @@ mod tests {
             ]),
             None,
             "another port is another question"
+        );
+        assert_eq!(
+            Command::parse(&[
+                "images".to_owned(),
+                "--filter".to_owned(),
+                "reference=other".to_owned(),
+                "--format".to_owned(),
+                "{{.Repository}}:{{.Tag}}".to_owned()
+            ]),
+            None,
+            "another project's images are not this one's question"
         );
         assert_eq!(names(" a \n\nb\n"), vec!["a".to_owned(), "b".to_owned()]);
     }
@@ -4242,6 +4196,29 @@ mod tests {
         assert!(arguments.iter().any(|a| a == "--init"), "{arguments:?}");
     }
 
+    /// Runs one of the commands the instance renders, against a real
+    /// runtime.
+    ///
+    /// What the instance asks the world for is an argument list, so a test
+    /// that drives the same list is evidence about the thing it will meet.
+    fn asking(runtime: &ContainerRuntime, command: &Command) -> std::process::Output {
+        std::process::Command::new(runtime.path())
+            .args(command.arguments())
+            .output()
+            .expect("the runtime runs")
+    }
+
+    /// Every image of ours the runtime holds right now.
+    fn ours_now(runtime: &ContainerRuntime) -> Vec<String> {
+        let listed = asking(runtime, &Command::Images);
+        assert!(
+            listed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&listed.stderr)
+        );
+        tagged(&String::from_utf8_lossy(&listed.stdout))
+    }
+
     /// A sweep removes an image nothing needs, keeps the ones a container is
     /// using, and keeps the ones the next container will want.
     ///
@@ -4297,14 +4274,24 @@ mod tests {
             String::from_utf8_lossy(&created.stderr)
         );
 
-        reclaim(&runtime).await.expect("the runtime answers");
+        // The sweep as the instance performs it: ask which images are ours,
+        // keep the ones this build would only rebuild, remove the rest. The
+        // deciding is pure and tested in memory; what needs a live runtime
+        // is what the two commands actually do.
+        let keeping = keeping();
+        for image in ours_now(&runtime) {
+            if kept(&keeping, &image) {
+                continue;
+            }
+            drop(asking(&runtime, &Command::RemoveImage { image }));
+        }
 
         // Asserted on what is left rather than on how many went, because
         // another test may be sweeping the same daemon at the same moment and
         // the count is the one thing that is genuinely theirs to change. What
         // is left is not: an image nothing needs is gone whoever removed it,
         // and one a container needs survives either way.
-        let left = ours(&runtime).await.expect("the runtime answers");
+        let left = ours_now(&runtime);
         assert!(
             !left.contains(&stale),
             "a name nothing needs is still here: {left:?}",

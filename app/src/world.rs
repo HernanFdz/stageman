@@ -275,19 +275,6 @@ impl Perform<Stageman> for Performer {
                 let answering = stageman_job::answering(runtime, job).await;
                 inner.asking.send(AppEvent::Probed { job, answering });
             }),
-            AppEffect::Reclaim => self.spawn(|_, runtime| async move {
-                // Housekeeping rather than work, so a runtime that will not
-                // answer is warned about and nothing else changes.
-                match stageman_agent::reclaim(runtime).await {
-                    Ok(gone) if gone > 0 => {
-                        tracing::info!(images = gone, "reclaimed images no container needed");
-                    }
-                    Ok(_) => {}
-                    Err(why) => {
-                        tracing::warn!(%why, "could not reclaim the images nothing is using");
-                    }
-                }
-            }),
             AppEffect::Say {
                 speaking,
                 thread,

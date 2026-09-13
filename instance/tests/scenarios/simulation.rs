@@ -111,7 +111,11 @@ pub struct Simulation {
     trace: Vec<String>,
     posts: Vec<(Thread, String)>,
     listening: Vec<ProjectId>,
-    reclaims: usize,
+    /// Every image this project has built, as the runtime holds them.
+    ///
+    /// One that nothing needs is what a sweep reclaims, and what it leaves
+    /// is what the next container would have rebuilt anyway.
+    images: Vec<String>,
     warrants: Vec<String>,
     /// Every runtime command asked for, as the agent crate reads it back and
     /// where in the trace it was asked — so a test names a question rather
@@ -312,7 +316,7 @@ pub const fn seed(n: u8) -> Seed {
 }
 
 impl Simulation {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             now: 0,
             seq: 0,
@@ -336,7 +340,7 @@ impl Simulation {
             trace: Vec::new(),
             posts: Vec::new(),
             listening: Vec::new(),
-            reclaims: 0,
+            images: vec!["stageman:unneeded".to_owned()],
             warrants: Vec::new(),
             commands: Vec::new(),
             key: key(),
@@ -771,6 +775,17 @@ impl Simulation {
                 }
                 // As the runtime prints it: the host side of the mapping,
                 // one line, and nothing at all when there is no mapping.
+                Some(Command::Images) => {
+                    exited(self.images.iter().fold(String::new(), |mut listed, image| {
+                        listed.push_str(image);
+                        listed.push('\n');
+                        listed
+                    }))
+                }
+                Some(Command::RemoveImage { image }) => {
+                    self.images.retain(|held| *held != image);
+                    exited(String::new())
+                }
                 Some(Command::Port { name }) => self.port_of(&name).map_or_else(
                     || exited(String::new()),
                     |port| exited(format!("127.0.0.1:{port}\n")),
@@ -824,7 +839,6 @@ impl Simulation {
                     .is_some_and(|held| held.running && held.serving);
                 self.schedule(self.now, AppEvent::Probed { job, answering });
             }
-            AppEffect::Reclaim => self.reclaims += 1,
             AppEffect::Say { thread, text, .. } => self.posts.push((thread, text)),
             AppEffect::ToolAnswered { id, status, body } => {
                 self.tool_answers.insert(id, (status, body));
@@ -929,8 +943,11 @@ impl Simulation {
         &self.posts
     }
 
-    pub const fn reclaims(&self) -> usize {
-        self.reclaims
+    pub fn reclaims(&self) -> usize {
+        self.commands
+            .iter()
+            .filter(|(_, command)| matches!(command, Command::Images))
+            .count()
     }
 
     /// What is on the disk, opened.

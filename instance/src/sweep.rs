@@ -10,6 +10,7 @@ use stageman_core::{InstanceId, JobId, Outcome, Progress, State};
 
 use crate::turns::{Turn, listening_on};
 use crate::vocabulary::{AppEffect, Container, Run, Speaker};
+use crate::{Asked, Command};
 use crate::{Effect, Emit as _, Running, SETTLING_INTERVAL};
 
 /// One container, placed as far as its name allows.
@@ -308,7 +309,8 @@ impl Running {
             effects.emit(AppEffect::Probe { job });
         }
 
-        effects.emit(AppEffect::Reclaim);
+        let reclaiming = self.ask(&Command::Images, Asked::Images);
+        effects.push(reclaiming);
         for (project, watched) in &self.state.projects {
             if let Some((opening, speaking)) = listening_on(watched) {
                 effects.emit(AppEffect::Listen {
