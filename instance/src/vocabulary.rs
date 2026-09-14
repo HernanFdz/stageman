@@ -281,7 +281,111 @@ impl Named for AppEffect {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppEffect, AppEvent};
+    use super::{AppEffect, AppEvent, Posting, RequestId};
+    use stageman_core::{Channel, JobId, Thread, Uuid};
+    use stageman_vocabulary::Named;
+
+    /// Every event and effect of this application's names its kind, which
+    /// is the one thing the world may say about one in a log line.
+    #[test]
+    fn every_kind_is_named() {
+        let job = JobId::from_uuid(Uuid::from_u128(1));
+        let thread = Thread {
+            channel: Channel::Slack,
+            id: "1788000000.000001".to_owned(),
+        };
+        let posting = Posting {
+            address: "C0123456789".to_owned(),
+            credential: "xoxb-not-a-real-token".to_owned(),
+        };
+        let events = [
+            AppEvent::Presenting { port: 9000 },
+            AppEvent::Probed {
+                job,
+                answering: true,
+            },
+            AppEvent::Heard {
+                channel: Channel::Slack,
+                message: super::Message {
+                    address: "C0123456789".to_owned(),
+                    id: "1788000000.000002".to_owned(),
+                    thread: None,
+                    text: "hello".to_owned(),
+                    mentions: true,
+                    from_us: false,
+                },
+            },
+            AppEvent::ThreadOpened {
+                job,
+                outcome: Ok(thread.clone()),
+            },
+            AppEvent::Posted {
+                request: stageman_vocabulary::RequestId(1),
+                outcome: Ok(()),
+            },
+            AppEvent::Request {
+                id: RequestId(1),
+                request: crate::requests::Request::Instance,
+            },
+        ];
+        let kinds: Vec<&str> = events.iter().map(Named::kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                "Presenting",
+                "Probed",
+                "Heard",
+                "ThreadOpened",
+                "Posted",
+                "Request"
+            ]
+        );
+
+        let effects = [
+            AppEffect::Booted {
+                runtime: "/usr/bin/docker".into(),
+            },
+            AppEffect::Probe { job },
+            AppEffect::Say {
+                speaking: posting.clone(),
+                thread: thread.clone(),
+                text: "said".to_owned(),
+            },
+            AppEffect::Respond {
+                id: RequestId(1),
+                response: crate::requests::Response::Agents(Vec::new()),
+            },
+            AppEffect::OpenThread {
+                job,
+                speaking: posting.clone(),
+                announcement: "a job".to_owned(),
+            },
+            AppEffect::Post {
+                request: stageman_vocabulary::RequestId(1),
+                speaking: posting.clone(),
+                thread,
+                text: "said".to_owned(),
+            },
+            AppEffect::Listen {
+                project: stageman_core::ProjectId::from_uuid(Uuid::from_u128(2)),
+                opening: "xapp-not-a-real-token".to_owned(),
+                speaking: posting,
+            },
+        ];
+        let kinds: Vec<&str> = effects.iter().map(Named::kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                "Booted",
+                "Probe",
+                "Say",
+                "Respond",
+                "OpenThread",
+                "Post",
+                "Listen"
+            ]
+        );
+    }
 
     /// This application's own events and effects format no more than the
     /// vocabulary does, because a credential crosses them in the clear: the

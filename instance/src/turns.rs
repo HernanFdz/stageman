@@ -661,12 +661,17 @@ impl Running {
     }
 
     /// A turn's agent process ended, on its own or because it was closed.
+    ///
+    /// The process is forgotten by the turn ending, which is the one place a
+    /// turn's process is forgotten; a process whose turn is already gone is
+    /// forgotten here, so that nothing is held for nobody.
     pub fn process_ended(&mut self, process: EffectId, ended: &Ended, effects: &mut Vec<Effect>) {
-        let Some(speaker) = self.talking.remove(&process) else {
+        let Some(speaker) = self.talking.get(&process).copied() else {
             tracing::warn!("a process this instance did not open ended; ignored");
             return;
         };
         let Some(turn) = self.turns.get(&speaker) else {
+            self.talking.remove(&process);
             return;
         };
         let outcome = match &turn.stage {

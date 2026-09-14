@@ -235,4 +235,11 @@ fn a_turn_is_the_commands_it_runs_in_order() {
     assert_eq!(sim.talks().len(), 2);
     assert!(sim.talks_in(&name)[0].resumed());
     assert!(sim.talks_in(&stageman_job::container(begun))[0].began());
+
+    // Both turns have ended, and nothing of either is held: not the turn,
+    // not the process it talked over, not the credential it presented.
+    let held = &instance.snapshot()["held"];
+    assert_eq!(held["turns"], serde_json::json!([]));
+    assert_eq!(held["talking"], serde_json::json!([]));
+    assert_eq!(held["warrants"], serde_json::json!({}));
 }

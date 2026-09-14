@@ -90,14 +90,12 @@ impl<A: App> World<A> {
     /// end is on its way as an event, and whoever sent the line will hear
     /// it.
     fn tell(&self, id: EffectId, line: String) {
-        let sent = self
+        let delivered = self
             .open
             .lock()
             .get(&id)
             .is_some_and(|opened| opened.lines.send(line).is_ok());
-        if !sent {
-            tracing::debug!("a line was sent to a process that is not open; dropped");
-        }
+        undelivered(delivered);
     }
 
     /// Ends a process kept open: its input is closed and it is killed.
@@ -401,6 +399,19 @@ async fn run_once(
             stderr: Bytes::new(output.stderr),
         },
         Err(why) => Finished::Failed(why.to_string()),
+    }
+}
+
+/// Says so when a line went to a process that is not open.
+///
+/// Skipped by mutation testing because it is equivalent under one: what the
+/// test decides is whether a line is logged, and a log line is not something
+/// a test can see. That a line to a process that has ended goes nowhere is
+/// tested, by nothing arriving.
+#[mutants::skip]
+fn undelivered(delivered: bool) {
+    if !delivered {
+        tracing::debug!("a line was sent to a process that is not open; dropped");
     }
 }
 
@@ -829,10 +840,7 @@ mod tests {
     use serde::{Deserialize, Serialize};
     use stageman_vocabulary::{App, EffectId, Ended, Environment, Named};
 
-    use super::{
-        Answer, Bytes, COMPLAINT_LIMIT, Effect, Event, Perform, World, read, write,
-        write_atomically,
-    };
+    use super::{Answer, Bytes, Effect, Event, Perform, World, read, write, write_atomically};
 
     /// An application that adds nothing, so what is tested here is the
     /// mechanisms and nothing of anybody's domain.
@@ -1585,7 +1593,11 @@ mod tests {
                 ..
             } => {
                 assert_eq!(status, Some(0));
-                assert_eq!(stderr.len(), COMPLAINT_LIMIT, "the beginning, and no more");
+                assert_eq!(
+                    stderr.len(),
+                    64 * 1024,
+                    "the beginning, sixty-four kibibytes of it, and no more"
+                );
                 assert!(
                     stderr
                         .as_text()

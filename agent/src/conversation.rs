@@ -506,7 +506,6 @@ impl Conversation {
                 value,
                 message: refused(&error),
             })),
-            Stage::Over => Exchange::Continue(Vec::new()),
             _ => self.over(Err(AgentError::Protocol(error))),
         }
     }
@@ -659,10 +658,14 @@ fn prompted(blocks: &[ContentBlock]) -> String {
 }
 
 /// How a value of an option is spelled on the wire, read back.
+///
+/// A named value and nothing else: a kit spells its values, and the one
+/// toggle the adapter was measured to offer is not exposed, per
+/// `docs/decisions/0048-a-job-runs-on-a-kit.md` — so a boolean is not
+/// something this side says, and reads as nothing it said.
 fn spelled(value: &SessionConfigOptionValue) -> Option<String> {
     match value {
         SessionConfigOptionValue::ValueId { value } => Some(value.0.to_string()),
-        SessionConfigOptionValue::Boolean { value } => Some(value.to_string()),
         _ => None,
     }
 }
@@ -1083,6 +1086,7 @@ mod tests {
         );
         assert!(said(&first) == [Said::Initialize { id: 1 }]);
         assert_eq!(conversation.waiting_for(), "the handshake");
+        assert!(!conversation.is_over());
 
         assert!(
             continuing(&mut conversation, &Heard::initialized(1))
@@ -1534,7 +1538,11 @@ mod tests {
         let flood = "x".repeat(20_000);
         match conversation.stopped(Some(2), &flood) {
             AgentError::Container { message, .. } => {
-                assert_eq!(message.len(), " — ".len() + crate::STDERR_LIMIT, "bounded");
+                assert_eq!(
+                    message.len(),
+                    " — ".len() + 8 * 1024,
+                    "eight kibibytes of it, which is the bound"
+                );
             }
             other => panic!("{other}"),
         }

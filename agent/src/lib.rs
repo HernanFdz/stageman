@@ -1984,10 +1984,17 @@ pub fn published(reported: &str) -> Option<u16> {
 
 /// Removes a container and everything inside it.
 ///
+/// Skipped by mutation testing, like everything else here that drives the
+/// runtime: what it decides is reached only by the container tests, and an
+/// ignored test kills no mutant. The instance renders its own removal since
+/// `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`;
+/// this is what the tests tidy up with.
+///
 /// # Errors
 ///
 /// Fails if the runtime cannot be run, or refuses. A container that is not
 /// there is not a failure: what was asked for is that it be gone.
+#[mutants::skip]
 pub async fn discard(runtime: &ContainerRuntime, name: &str) -> Result<(), AgentError> {
     let removed = tokio::process::Command::new(runtime.path())
         .args(["rm", "--force", name])
@@ -2304,6 +2311,42 @@ mod tests {
             Command::parse(&odd_variables),
             None,
             "a variable not introduced by --env is not a variable"
+        );
+
+        // The two halves of the guard, each wrong on its own: a tunnel
+        // published somewhere other than loopback, and an owner label naming
+        // another container than the one being made.
+        let creating = || {
+            Command::Create {
+                name: "stageman-job-1".to_owned(),
+                image: "stageman:0123".to_owned(),
+                agent: Agent::Claude,
+                instance: an_instance(),
+                variables: Vec::new(),
+            }
+            .arguments()
+        };
+        let mut elsewhere = creating();
+        let published = elsewhere
+            .iter()
+            .position(|argument| argument.starts_with("127.0.0.1::"))
+            .expect("the tunnel's mapping");
+        elsewhere[published] = format!("0.0.0.0::{TUNNEL_PORT}");
+        assert_eq!(
+            Command::parse(&elsewhere),
+            None,
+            "a tunnel published beyond loopback is not this build's question"
+        );
+        let mut disowned = creating();
+        let owner = disowned
+            .iter()
+            .position(|argument| argument == "stageman.job=stageman-job-1")
+            .expect("the owner label");
+        disowned[owner] = "stageman.job=stageman-job-2".to_owned();
+        assert_eq!(
+            Command::parse(&disowned),
+            None,
+            "an owner label naming another container is not this build's question"
         );
     }
 
