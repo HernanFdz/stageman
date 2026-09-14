@@ -28,6 +28,7 @@ mod channel;
 mod file;
 mod foreman;
 mod jobs;
+mod listening;
 mod paths;
 pub mod release;
 mod replies;
@@ -65,9 +66,7 @@ pub use stageman_agent::Target;
 pub use stageman_vocabulary::Seed;
 pub use sweep::Swept;
 pub use tunnel::{ANSWERING_WITHIN, DEFAULT_DOMAIN, Domain, Routed, address, answering, decode};
-pub use vocabulary::{
-    AppEffect, AppEvent, Container, Message, Posting, RequestId, Speaker, Warranted,
-};
+pub use vocabulary::{AppEffect, AppEvent, Container, RequestId, Speaker, Warranted};
 
 /// This application, as the vocabulary sees it: what fills its hole.
 pub struct Stageman;
@@ -92,19 +91,6 @@ impl From<AppEvent> for Event {
 impl From<AppEffect> for Effect {
     fn from(effect: AppEffect) -> Self {
         Self::App(effect)
-    }
-}
-
-/// Pushing an effect of this application's onto a step's effects, without
-/// wrapping it at every site.
-trait Emit {
-    /// Adds an effect.
-    fn emit(&mut self, effect: impl Into<Effect>);
-}
-
-impl Emit for Vec<Effect> {
-    fn emit(&mut self, effect: impl Into<Effect>) {
-        self.push(effect.into());
     }
 }
 
@@ -136,6 +122,18 @@ fn out_of_order(asked: EffectId, id: EffectId) {
     if asked != id {
         tracing::error!("writes were answered out of order; carrying on in the order asked");
     }
+}
+
+/// What a wake was asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum Timer {
+    /// The settling sweep: which containers still deserve to be up.
+    Settling,
+    /// A project's channel, tried again after something went wrong.
+    Reconnecting {
+        /// Whose.
+        project: ProjectId,
+    },
 }
 
 /// How often the instance asks which containers still deserve to be up.
@@ -465,9 +463,17 @@ pub struct Running {
     sent: BTreeMap<EffectId, channel::Sent>,
     /// Effects waiting on a write, by the write they wait on, in order.
     deferred: VecDeque<(EffectId, Vec<Effect>)>,
-    /// The wakes asked for that have not gone off, each one the settling
-    /// timer; a second kind of timer is what would make this a map again.
-    timers: BTreeSet<EffectId>,
+    /// The wakes asked for that have not gone off, and what each was for.
+    timers: BTreeMap<EffectId, Timer>,
+    /// Every project whose channel is being listened to, and where its
+    /// connection has got to.
+    listeners: BTreeMap<ProjectId, listening::Listener>,
+    /// Every socket open, by the identifier the world knows it under: whose
+    /// channel each is, for as long as it is open.
+    sockets: BTreeMap<EffectId, ProjectId>,
+    /// Sockets the platform said it would close, read until they do while
+    /// their replacements are opened.
+    draining: BTreeSet<EffectId>,
     /// Whether this step changed what is kept.
     dirty: bool,
     /// Effects of this step held back until the write lands.
@@ -538,7 +544,10 @@ impl Running {
             probes: BTreeMap::new(),
             sent: BTreeMap::new(),
             deferred: VecDeque::new(),
-            timers: BTreeSet::new(),
+            timers: BTreeMap::new(),
+            listeners: BTreeMap::new(),
+            sockets: BTreeMap::new(),
+            draining: BTreeSet::new(),
             // Written once on waking, before anything can depend on this
             // instance: a first run has a file at all, a file that had no
             // identity has one from the moment it is opened, and a path that
@@ -830,11 +839,16 @@ impl Running {
             Event::Line { id, line } => self.line(id, &line, &mut effects),
             Event::Ended { id, ended } => self.process_ended(id, &ended, &mut effects),
             Event::Probed { id, probed } => self.probed(id, probed, &mut effects),
-            Event::Responded { id, responded } => self.responded(id, &responded),
-            Event::Read { .. }
-            | Event::Bound { .. }
-            | Event::Frame { .. }
-            | Event::Disconnected { .. } => {
+            Event::Responded { id, responded, at } => {
+                self.responded(id, &responded, at, &mut effects);
+            }
+            Event::Frame { id, text, at } => self.frame(id, &text, at, &mut effects),
+            Event::Disconnected {
+                id,
+                disconnected,
+                at,
+            } => self.disconnected(id, &disconnected, at, &mut effects),
+            Event::Read { .. } | Event::Bound { .. } => {
                 tracing::warn!(
                     "answered something this instance did not ask for while awake; ignored"
                 );
@@ -855,20 +869,21 @@ impl Running {
             AppEvent::Presenting { .. } => {
                 tracing::debug!("told again where the presentation server is; ignored");
             }
-            AppEvent::Heard { channel, message } => self.heard(channel, &message, effects),
-            AppEvent::Request { id, request } => self.requested(id, request, effects),
+            AppEvent::Request { id, request } => self.requested(id, *request, effects),
         }
     }
 
     /// A timer went off.
     fn woke(&mut self, id: EffectId, effects: &mut Vec<Effect>) {
-        if self.timers.remove(&id) {
-            let listing = self.ask(&Command::Containers { running_only: true }, Asked::Listing);
-            effects.push(listing);
-            let settling = self.settle_later();
-            effects.push(settling);
-        } else {
-            tracing::warn!("woken for a timer this instance did not set; ignored");
+        match self.timers.remove(&id) {
+            Some(Timer::Settling) => {
+                let listing = self.ask(&Command::Containers { running_only: true }, Asked::Listing);
+                effects.push(listing);
+                let settling = self.settle_later();
+                effects.push(settling);
+            }
+            Some(Timer::Reconnecting { project }) => self.try_again(project, effects),
+            None => tracing::warn!("woken for a timer this instance did not set; ignored"),
         }
     }
 
@@ -901,7 +916,7 @@ impl Running {
             Err(why) => {
                 tracing::error!(%why, "the instance could not be written");
                 if self.announced {
-                    self.dropped(waiting);
+                    self.dropped(waiting, effects);
                 } else {
                     effects.push(Generic::Exit {
                         message: format!(
@@ -947,12 +962,12 @@ impl Running {
     /// is not made, and whatever waited on its answer hears that instead:
     /// a notice is simply not said, and a job whose thread was never opened
     /// is failed the same way a turn never started is.
-    fn dropped(&mut self, effects: Vec<Effect>) {
+    fn dropped(&mut self, dropped: Vec<Effect>, effects: &mut Vec<Effect>) {
         tracing::warn!(
-            dropped = effects.len(),
+            dropped = dropped.len(),
             "what waited on the write is dropped"
         );
-        for effect in effects {
+        for effect in dropped {
             match effect {
                 Effect::Run { id, .. } => {
                     if let Some(Asked::Present { speaker } | Asked::Started { speaker }) =
@@ -961,7 +976,7 @@ impl Running {
                         self.abandoned(speaker);
                     }
                 }
-                Effect::Request { id, .. } => self.unsent(id),
+                Effect::Request { id, .. } => self.unsent(id, effects),
                 _ => {}
             }
         }
@@ -992,7 +1007,7 @@ impl Running {
             }
             Err(why) => {
                 tracing::error!(%why, "the instance could not be sealed, so nothing is written");
-                self.dropped(staged);
+                self.dropped(staged, effects);
             }
         }
     }

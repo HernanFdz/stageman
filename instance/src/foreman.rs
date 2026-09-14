@@ -18,7 +18,9 @@ use stageman_foreman::Starting;
 use crate::Effect;
 use crate::Running;
 use crate::turns::{Run, Turn};
-use crate::vocabulary::{Message, Speaker};
+use stageman_channel::Message;
+
+use crate::vocabulary::Speaker;
 use crate::{Asked, Command};
 
 /// Every project whose foreman was working when this process last stopped.

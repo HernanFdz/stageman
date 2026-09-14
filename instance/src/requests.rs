@@ -21,7 +21,7 @@ use stageman_wire::{ChannelDraft, Draft, Ending, KitDraft, Refusal, VariableDraf
 
 use crate::Effect;
 use crate::Running;
-use crate::turns::listening_on;
+
 use crate::views;
 use crate::vocabulary::{AppEffect, RequestId, Speaker};
 use crate::{Asked, Command};
@@ -289,13 +289,8 @@ impl Running {
         // Listened to from now, not from the next restart: binding a channel
         // used to do nothing until the daemon was restarted, and nothing said
         // so.
-        if let Some((opening, speaking)) = self.state.projects.get(&created).and_then(listening_on)
-        {
-            self.defer(AppEffect::Listen {
-                project: created,
-                opening: opening.expose().to_owned(),
-                speaking: speaking.into(),
-            });
+        if let Some(question) = self.listen(created) {
+            self.defer(question);
         }
         Ok(Response::Projects(views::watching_now(&self.state)))
     }
@@ -366,6 +361,11 @@ impl Running {
         self.defer(discard);
         let reclaiming = self.ask(&Command::Images, Asked::Images);
         self.defer(reclaiming);
+        // Its channel is no longer listened to, and what is said there from
+        // now reaches nobody here.
+        for disconnect in self.stop_listening(identifier) {
+            self.defer(disconnect);
+        }
         self.state.projects.remove(&identifier);
         self.dirty = true;
         Ok(Response::Projects(views::watching_now(&self.state)))

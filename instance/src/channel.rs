@@ -11,7 +11,7 @@
 
 use std::time::Duration;
 
-use stageman_core::{Channel, JobId, Speaking, Thread};
+use stageman_core::{Channel, JobId, ProjectId, Speaking, Thread};
 use stageman_vocabulary::{Bytes, Effect as Generic, EffectId, RequestId, Responded};
 
 use crate::{Effect, Running};
@@ -43,6 +43,15 @@ pub struct Sent {
 /// Why a request to a channel was made.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Purpose {
+    /// A message posted.
+    Post(Post),
+    /// A question a listener asks before it can read anything.
+    Question(Question),
+}
+
+/// Why a message was posted.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Post {
     /// A notice on the instance's own behalf. Its failure is said and
     /// changes nothing: it is a notice about an outcome, and the outcome
     /// does not change because the notice of it did not arrive.
@@ -61,6 +70,34 @@ pub enum Purpose {
     },
 }
 
+/// What a listener asked, on its way to a connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Question {
+    /// Who this instance is on the channel.
+    Introducing {
+        /// Whose channel.
+        project: ProjectId,
+    },
+    /// Where to connect for the event stream.
+    Locating {
+        /// Whose channel.
+        project: ProjectId,
+    },
+}
+
+/// One request to a channel, as the world makes it, with the budget every
+/// one of them is given.
+pub fn request(id: EffectId, rendered: stageman_channel::Request) -> Effect {
+    Generic::Request {
+        id,
+        method: rendered.method,
+        url: rendered.url,
+        headers: rendered.headers,
+        body: rendered.body.map(Bytes::new),
+        within: ANSWERS_WITHIN,
+    }
+}
+
 impl Running {
     /// Asks the world to post one message, remembering what for.
     fn spoken(
@@ -69,19 +106,18 @@ impl Running {
         speaking: &Speaking,
         text: &str,
         thread: Option<&str>,
-        purpose: Purpose,
+        post: Post,
     ) -> Effect {
         let rendered = stageman_channel::post(channel, speaking, text, thread);
         let id = self.effect_id();
-        self.sent.insert(id, Sent { channel, purpose });
-        Generic::Request {
+        self.sent.insert(
             id,
-            method: rendered.method,
-            url: rendered.url,
-            headers: rendered.headers,
-            body: rendered.body.map(Bytes::new),
-            within: ANSWERS_WITHIN,
-        }
+            Sent {
+                channel,
+                purpose: Purpose::Post(post),
+            },
+        );
+        request(id, rendered)
     }
 
     /// Says something in a thread on the instance's own behalf, once
@@ -92,7 +128,7 @@ impl Running {
             speaking,
             text,
             Some(&thread.id),
-            Purpose::Notice,
+            Post::Notice,
         );
         self.defer(request);
     }
@@ -111,7 +147,7 @@ impl Running {
             speaking,
             text,
             Some(&thread.id),
-            Purpose::Notice,
+            Post::Notice,
         );
         effects.push(request);
     }
@@ -126,13 +162,7 @@ impl Running {
         speaking: &Speaking,
         announcement: &str,
     ) {
-        let request = self.spoken(
-            channel,
-            speaking,
-            announcement,
-            None,
-            Purpose::Opening { job },
-        );
+        let request = self.spoken(channel, speaking, announcement, None, Post::Opening { job });
         self.defer(request);
     }
 
@@ -151,7 +181,7 @@ impl Running {
             speaking,
             text,
             Some(&thread.id),
-            Purpose::Saying { request },
+            Post::Saying { request },
         );
         effects.push(posting);
     }
@@ -162,37 +192,49 @@ impl Running {
     /// never became an answer is a channel that could not be reached. Both
     /// are one string by the time they reach a record or an agent, since
     /// what either can do with the reason is show it to a person.
-    pub fn responded(&mut self, id: EffectId, responded: &Responded) {
+    pub fn responded(
+        &mut self,
+        id: EffectId,
+        responded: &Responded,
+        at: u64,
+        effects: &mut Vec<Effect>,
+    ) {
         let Some(sent) = self.sent.remove(&id) else {
             tracing::warn!("a request was answered that this instance did not make; ignored");
             return;
         };
-        let outcome = match responded {
-            Responded::Answered { status, body, .. } => {
-                stageman_channel::posted(sent.channel, *status, body.as_slice())
-                    .map_err(|why| why.to_string())
+        match sent.purpose {
+            Purpose::Post(post) => {
+                let outcome = match responded {
+                    Responded::Answered { status, body, .. } => {
+                        stageman_channel::posted(sent.channel, *status, body.as_slice())
+                            .map_err(|why| why.to_string())
+                    }
+                    Responded::Failed(why) => {
+                        Err(format!("the channel could not be reached: {why}"))
+                    }
+                };
+                self.answered(sent.channel, &post, outcome);
             }
-            Responded::Failed(why) => Err(format!("the channel could not be reached: {why}")),
-        };
-        self.answered(&sent, outcome);
+            Purpose::Question(question) => {
+                self.questioned(sent.channel, question, responded, at, effects);
+            }
+        }
     }
 
-    /// What follows from a channel's answer, given what was asked.
-    fn answered(&mut self, sent: &Sent, outcome: Result<String, String>) {
-        match sent.purpose {
-            Purpose::Notice => {
+    /// What follows from a channel's answer to a post, given why it was
+    /// posted.
+    fn answered(&mut self, channel: Channel, post: &Post, outcome: Result<String, String>) {
+        match post {
+            Post::Notice => {
                 if let Err(why) = outcome {
                     tracing::warn!(%why, "the thread could not be spoken to");
                 }
             }
-            Purpose::Opening { job } => self.thread_opened(
-                job,
-                outcome.map(|id| Thread {
-                    channel: sent.channel,
-                    id,
-                }),
-            ),
-            Purpose::Saying { request } => self.posted(request, outcome.map(|_| ())),
+            Post::Opening { job } => {
+                self.thread_opened(*job, outcome.map(|id| Thread { channel, id }));
+            }
+            Post::Saying { request } => self.posted(*request, outcome.map(|_| ())),
         }
     }
 
@@ -202,15 +244,22 @@ impl Running {
     /// Whatever waited on its answer is answered as if the channel could not
     /// be reached, which from where it stands is the truth: a notice is
     /// simply not said, a job whose thread was never opened is recorded as
-    /// failed rather than left working with nowhere to speak, and a call
-    /// held open is answered rather than held for ever.
-    pub fn unsent(&mut self, id: EffectId) {
+    /// failed rather than left working with nowhere to speak, a call held
+    /// open is answered rather than held for ever, and a listener's question
+    /// is asked again later.
+    pub fn unsent(&mut self, id: EffectId, effects: &mut Vec<Effect>) {
         let Some(sent) = self.sent.remove(&id) else {
             return;
         };
-        self.answered(
-            &sent,
-            Err("the record it waited on could not be written".to_owned()),
-        );
+        match sent.purpose {
+            Purpose::Post(post) => self.answered(
+                sent.channel,
+                &post,
+                Err("the record it waited on could not be written".to_owned()),
+            ),
+            Purpose::Question(
+                Question::Introducing { project } | Question::Locating { project },
+            ) => self.unasked(project, effects),
+        }
     }
 }

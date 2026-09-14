@@ -16,14 +16,14 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use stageman_agent::{Answer, Command, Heard, Label, Said, StopReason};
+use stageman_channel::Call;
 use stageman_core::{
     Agent, AgentConfig, Channel, ChannelConfig, Errand, InstanceId, Job, JobId, Key, Kit,
     KitConfig, KitName, NONCE_LEN, Nonce, Progress, Project, ProjectId, Secret, Snapshot, State,
     Thread, Timestamp, Uuid,
 };
 use stageman_instance::{
-    AppEffect, AppEvent, Effect, Event, Instance, Message, Request, RequestId, Response, Seed,
-    Target,
+    AppEffect, AppEvent, Effect, Event, Instance, Request, RequestId, Response, Seed, Target,
 };
 use stageman_vocabulary::scenario::{Meta, Recorder};
 use stageman_vocabulary::{
@@ -206,7 +206,20 @@ pub struct Simulation {
     turn_takes: Now,
     trace: Vec<String>,
     posts: Vec<(Thread, String)>,
-    listening: Vec<ProjectId>,
+    /// The sockets the platform holds, by the identifier each was connected
+    /// under, and whether each is still open.
+    sockets: BTreeMap<EffectId, bool>,
+    /// How many event streams have been opened, so each is addressed apart.
+    streams_opened: u32,
+    /// How many envelopes have been delivered, so each is named apart.
+    envelopes: u32,
+    /// Every envelope acknowledged, in order.
+    acked: Vec<String>,
+    /// Why the platform refuses the next questions a listener asks, front
+    /// first.
+    listen_failures: VecDeque<String>,
+    /// Why the next sockets cannot be opened, front first.
+    socket_failures: VecDeque<String>,
     /// Every image this project has built, as the runtime holds them.
     ///
     /// One that nothing needs is what a sweep reclaims, and what it leaves
@@ -223,6 +236,10 @@ pub struct Simulation {
     /// where in the trace it was asked — so a test names a question rather
     /// than a string, and can still say what came before it.
     commands: Vec<(usize, Command)>,
+    /// Every request to a platform asked for, as the channel crate reads it
+    /// back and where in the trace it was asked — so a test names a call
+    /// rather than a string.
+    calls: Vec<(usize, Call)>,
     key: Key,
     /// What this flow is recorded as, where it is recorded at all: the file
     /// it is written to, and what that file says it pins.
@@ -337,37 +354,6 @@ pub fn watching_a_channel(jobs: &[(JobId, Progress, u32)]) -> State {
     ))
 }
 
-/// Somebody mentioning this instance in a thread on the project's channel.
-pub fn said_in(thread: u32, text: &str) -> Event {
-    Event::App(AppEvent::Heard {
-        channel: Channel::Slack,
-        message: Message {
-            address: CHANNEL.to_owned(),
-            id: "1788000099.000001".to_owned(),
-            thread: Some(self::thread(thread).id),
-            text: text.to_owned(),
-            mentions: true,
-            from_us: false,
-        },
-    })
-}
-
-/// Somebody mentioning this instance at the root of the project's channel.
-/// Each is its own message, so each opens its own thread.
-pub fn said_at_root(n: u32, text: &str) -> Event {
-    Event::App(AppEvent::Heard {
-        channel: Channel::Slack,
-        message: Message {
-            address: CHANNEL.to_owned(),
-            id: thread(n).id,
-            thread: None,
-            text: text.to_owned(),
-            mentions: true,
-            from_us: false,
-        },
-    })
-}
-
 /// Puts a message in the project's foreman's hands, as a daemon that died
 /// mid-turn would have left it.
 pub fn holding_a_message(state: &mut State, n: u32, text: &str) {
@@ -388,10 +374,10 @@ pub fn tunnel_host(job: JobId) -> String {
 }
 
 /// A person asking something of the dashboard.
-pub const fn request(id: u64, request: Request) -> Event {
+pub fn request(id: u64, request: Request) -> Event {
     Event::App(AppEvent::Request {
         id: RequestId(id),
-        request,
+        request: Box::new(request),
     })
 }
 
@@ -441,12 +427,18 @@ impl Simulation {
             turn_takes: 1_000,
             trace: Vec::new(),
             posts: Vec::new(),
-            listening: Vec::new(),
+            sockets: BTreeMap::new(),
+            streams_opened: 0,
+            envelopes: 0,
+            acked: Vec::new(),
+            listen_failures: VecDeque::new(),
+            socket_failures: VecDeque::new(),
             images: vec!["stageman:unneeded".to_owned()],
             listeners: BTreeMap::new(),
             bodies: BTreeMap::new(),
             asking_next: 1,
             commands: Vec::new(),
+            calls: Vec::new(),
             key: key(),
             recording: None,
             recorder: None,
@@ -636,9 +628,9 @@ impl Simulation {
         self.now
     }
 
-    /// The projects listened on so far, in the order listening began.
-    pub fn listening(&self) -> &[ProjectId] {
-        &self.listening
+    /// How many connections the platform holds open for this instance.
+    pub fn listening(&self) -> usize {
+        self.sockets_open().len()
     }
 
     /// Everything printed to standard output so far.
@@ -789,6 +781,14 @@ impl Simulation {
             .map(|(at, _)| *at)
     }
 
+    /// Where in the trace a platform was first asked something of a kind.
+    pub fn first_call(&self, wanted: impl Fn(&Call) -> bool) -> Option<usize> {
+        self.calls
+            .iter()
+            .find(|(_, call)| wanted(call))
+            .map(|(at, _)| *at)
+    }
+
     pub fn printed(&self) -> &[String] {
         &self.printed
     }
@@ -859,8 +859,10 @@ impl Simulation {
         self.landing.clear();
         self.begun.clear();
         // The agent processes die with the daemon that held their pipes;
-        // what they wrote into their containers stays.
+        // what they wrote into their containers stays. So do the sockets:
+        // the platform sees them close, and delivers nothing to them again.
         self.adapters.clear();
+        self.sockets.clear();
         self.trace.push(format!("{}: CRASH", self.now));
         self.wake(seed)
     }
@@ -1476,6 +1478,22 @@ impl Simulation {
         {
             self.commands.push((self.trace.len(), command));
         }
+        if let Effect::Request {
+            method,
+            url,
+            headers,
+            body,
+            ..
+        } = &effect
+            && let Some(call) = Call::parse(&stageman_channel::Request {
+                method: method.clone(),
+                url: url.clone(),
+                headers: headers.clone(),
+                body: body.as_ref().map(|bytes| bytes.as_slice().to_vec()),
+            })
+        {
+            self.calls.push((self.trace.len(), call));
+        }
         self.trace.push(format!(
             "{}: -> {}{}",
             self.now,
@@ -1488,14 +1506,6 @@ impl Simulation {
         match effect {
             AppEffect::Respond { id, response } => {
                 self.responses.insert(id, response);
-            }
-            AppEffect::Listen { project, .. } => {
-                self.listening.push(project);
-                self.trace.push(format!(
-                    "{}: listening on {} project(s)",
-                    self.now,
-                    self.listening.len()
-                ));
             }
         }
     }
@@ -1522,8 +1532,8 @@ impl Simulation {
             headers,
             body: body.map(Bytes::into_inner),
         };
-        let responded = match stageman_channel::Call::parse(&request) {
-            Some(stageman_channel::Call::Post {
+        let responded = match Call::parse(&request) {
+            Some(Call::Post {
                 channel,
                 text,
                 thread: in_thread,
@@ -1555,9 +1565,275 @@ impl Simulation {
                     body: body.into(),
                 }
             }
+            Some(question @ (Call::WhoAmI { .. } | Call::OpenSocket { .. })) => {
+                let body = if let Some(error) = self.listen_failures.pop_front() {
+                    format!(r#"{{"ok":false,"error":"{error}"}}"#)
+                } else if matches!(question, Call::WhoAmI { .. }) {
+                    r#"{"ok":true,"user_id":"U0BOT"}"#.to_owned()
+                } else {
+                    self.streams_opened += 1;
+                    format!(
+                        r#"{{"ok":true,"url":"wss://sim.slack/link/{}"}}"#,
+                        self.streams_opened
+                    )
+                };
+                Responded::Answered {
+                    status: 200,
+                    headers: [("content-type".to_owned(), "application/json".to_owned())].into(),
+                    body: body.into(),
+                }
+            }
             None => Responded::Failed("the simulation does not know this request".to_owned()),
         };
-        self.schedule(self.now, Event::Responded { id, responded });
+        self.schedule(
+            self.now,
+            Event::Responded {
+                id,
+                responded,
+                at: self.now,
+            },
+        );
+    }
+
+    /// Opens a socket the instance asked for: the platform greets on it at
+    /// once, which is what says it is up — unless the next one was scripted
+    /// not to open.
+    fn connected(&mut self, id: EffectId) {
+        if let Some(why) = self.socket_failures.pop_front() {
+            self.schedule(
+                self.now,
+                Event::Disconnected {
+                    id,
+                    disconnected: Disconnected::Failed(why),
+                    at: self.now,
+                },
+            );
+            return;
+        }
+        self.sockets.insert(id, true);
+        self.schedule(
+            self.now,
+            Event::Frame {
+                id,
+                text: r#"{"type":"hello","num_connections":1}"#.to_owned(),
+                at: self.now,
+            },
+        );
+    }
+
+    /// A frame sent on a socket: an acknowledgement, written down so a test
+    /// can say what was acknowledged. One sent on a socket that has ended
+    /// goes nowhere, as it would.
+    fn transmitted(&mut self, id: EffectId, text: &str) {
+        if !self.sockets.get(&id).copied().unwrap_or(false) {
+            return;
+        }
+        let acknowledged: serde_json::Value =
+            serde_json::from_str(text).expect("a frame this instance sends is JSON");
+        if let Some(envelope) = acknowledged
+            .get("envelope_id")
+            .and_then(serde_json::Value::as_str)
+        {
+            self.acked.push(envelope.to_owned());
+        }
+    }
+
+    /// A socket ends, closed, at an instant: as the platform closes one, or
+    /// as the instance's disconnect is answered.
+    fn closes(&mut self, id: EffectId, at: Now) {
+        let Some(open) = self.sockets.get_mut(&id) else {
+            return;
+        };
+        if !*open {
+            return;
+        }
+        *open = false;
+        self.schedule(
+            at,
+            Event::Disconnected {
+                id,
+                disconnected: Disconnected::Closed,
+                at,
+            },
+        );
+    }
+
+    /// The socket the platform delivers on now: the newest still open.
+    fn live_socket(&self) -> EffectId {
+        self.sockets
+            .iter()
+            .rev()
+            .find(|(_, open)| **open)
+            .map(|(id, _)| *id)
+            .expect("nothing is listening, so nothing can be said")
+    }
+
+    /// One message as the platform delivers it: a frame on a socket, in an
+    /// envelope of its own.
+    fn frame_on(
+        &mut self,
+        socket: EffectId,
+        at: Now,
+        id: &str,
+        in_thread: Option<&str>,
+        text: &str,
+        from_us: bool,
+    ) -> Event {
+        self.envelopes += 1;
+        let envelope = format!("e-{}", self.envelopes);
+        let thread_ts =
+            in_thread.map_or_else(String::new, |thread| format!(r#","thread_ts":"{thread}""#));
+        let speaker = if from_us {
+            r#""bot_id":"B0SELF","subtype":"bot_message""#
+        } else {
+            r#""user":"U0HUMAN""#
+        };
+        let text = serde_json::Value::String(text.to_owned()).to_string();
+        Event::Frame {
+            id: socket,
+            text: format!(
+                r#"{{"envelope_id":"{envelope}","type":"events_api","payload":{{"event":{{"type":"message","channel":"{CHANNEL}",{speaker},"text":{text},"ts":"{id}"{thread_ts}}}}}}}"#
+            ),
+            at,
+        }
+    }
+
+    /// Somebody mentioning this instance in a thread on the project's
+    /// channel, as the platform would deliver it now.
+    pub fn said_in(&mut self, thread: u32, text: &str) -> Event {
+        let socket = self.live_socket();
+        let now = self.now;
+        self.frame_on(
+            socket,
+            now,
+            "1788000099.000001",
+            Some(&self::thread(thread).id),
+            &format!("<@U0BOT> {text}"),
+            false,
+        )
+    }
+
+    /// Somebody mentioning this instance in a thread, said at an instant.
+    pub fn says_in(&mut self, at: Now, thread: u32, text: &str) {
+        let socket = self.live_socket();
+        let event = self.frame_on(
+            socket,
+            at,
+            "1788000099.000001",
+            Some(&self::thread(thread).id),
+            &format!("<@U0BOT> {text}"),
+            false,
+        );
+        self.schedule(at, event);
+    }
+
+    /// Somebody talking in a thread without mentioning this instance.
+    pub fn said_in_plainly(&mut self, thread: u32, text: &str) -> Event {
+        let socket = self.live_socket();
+        let now = self.now;
+        self.frame_on(
+            socket,
+            now,
+            "1788000099.000002",
+            Some(&self::thread(thread).id),
+            text,
+            false,
+        )
+    }
+
+    /// Something this instance itself posted in a thread, heard back.
+    pub fn said_in_by_us(&mut self, thread: u32, text: &str) -> Event {
+        let socket = self.live_socket();
+        let now = self.now;
+        self.frame_on(
+            socket,
+            now,
+            "1788000099.000003",
+            Some(&self::thread(thread).id),
+            &format!("<@U0BOT> {text}"),
+            true,
+        )
+    }
+
+    /// Somebody mentioning this instance at the root of the project's
+    /// channel, said at an instant. Each is its own message, so each opens
+    /// its own thread.
+    pub fn says_at_root(&mut self, at: Now, n: u32, text: &str) {
+        let socket = self.live_socket();
+        let event = self.frame_on(
+            socket,
+            at,
+            &self::thread(n).id,
+            None,
+            &format!("<@U0BOT> {text}"),
+            false,
+        );
+        self.schedule(at, event);
+    }
+
+    /// Somebody mentioning this instance at the root, on the socket named
+    /// rather than the newest: what a message on a connection being
+    /// replaced looks like.
+    pub fn says_at_root_on(&mut self, socket: EffectId, at: Now, n: u32, text: &str) {
+        let event = self.frame_on(
+            socket,
+            at,
+            &self::thread(n).id,
+            None,
+            &format!("<@U0BOT> {text}"),
+            false,
+        );
+        self.schedule(at, event);
+    }
+
+    /// The platform warns, at an instant, that it is about to close the
+    /// connection it delivers on now.
+    pub fn platform_warns(&mut self, at: Now) {
+        let socket = self.live_socket();
+        self.schedule(
+            at,
+            Event::Frame {
+                id: socket,
+                text: r#"{"type":"disconnect","reason":"warning"}"#.to_owned(),
+                at,
+            },
+        );
+    }
+
+    /// The platform closes, at an instant, the connection it delivers on
+    /// now, with no warning.
+    pub fn platform_closes(&mut self, at: Now) {
+        let socket = self.live_socket();
+        self.closes(socket, at);
+    }
+
+    /// The platform closes the connection named, at an instant.
+    pub fn platform_closes_socket(&mut self, socket: EffectId, at: Now) {
+        self.closes(socket, at);
+    }
+
+    /// Scripts the platform to refuse the next question a listener asks.
+    pub fn next_listen_fails(&mut self, why: &str) {
+        self.listen_failures.push_back(why.to_owned());
+    }
+
+    /// Scripts the next socket not to open.
+    pub fn next_socket_fails(&mut self, why: &str) {
+        self.socket_failures.push_back(why.to_owned());
+    }
+
+    /// The sockets still open, oldest first.
+    pub fn sockets_open(&self) -> Vec<EffectId> {
+        self.sockets
+            .iter()
+            .filter(|(_, open)| **open)
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// Every envelope acknowledged so far, in order.
+    pub fn acked(&self) -> &[String] {
+        &self.acked
     }
 
     /// What a probe of a port finds, as the runtime's proxy was measured to
@@ -1639,18 +1915,12 @@ impl Simulation {
                 body,
                 ..
             } => self.requested(id, method, url, headers, body),
-            // Nothing listens yet: the socket is the next family.
-            Effect::Connect { id, .. } => self.schedule(
-                self.now,
-                Event::Disconnected {
-                    id,
-                    disconnected: Disconnected::Failed(
-                        "the simulation opens no sockets yet".to_owned(),
-                    ),
-                    at: self.now,
-                },
-            ),
-            Effect::Transmit { .. } | Effect::Disconnect { .. } => {}
+            Effect::Connect { id, .. } => self.connected(id),
+            Effect::Transmit { id, text } => self.transmitted(id, &text),
+            Effect::Disconnect { id } => {
+                let now = self.now;
+                self.closes(id, now);
+            }
             Effect::Print { text } => self.printed.push(text),
             Effect::Exit { message } => self.exited = Some(message),
             Effect::Open { id, arguments, .. } => self.opened(id, &arguments),

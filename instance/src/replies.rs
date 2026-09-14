@@ -10,7 +10,9 @@ use stageman_core::{Arriving, Channel, ChannelConfig, JobId, Progress, Recipient
 use crate::Effect;
 use crate::Running;
 use crate::turns::{Run, Turn, speaking_for};
-use crate::vocabulary::{Message, Speaker};
+use stageman_channel::Message;
+
+use crate::vocabulary::Speaker;
 
 /// What the gate decided when a reply arrived.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

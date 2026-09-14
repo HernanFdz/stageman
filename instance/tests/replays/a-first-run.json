@@ -281,6 +281,9 @@
             "routing": [],
             "probes": [],
             "sent": [],
+            "listeners": {},
+            "sockets": [],
+            "draining": [],
             "deferred": [
               [
                 9,
@@ -288,7 +291,10 @@
               ]
             ],
             "timers": [
-              8
+              [
+                8,
+                "Settling"
+              ]
             ],
             "asked": [
               [

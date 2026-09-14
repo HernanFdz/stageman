@@ -2,6 +2,7 @@
 //! changed is on the disk, and refused with a reason the screen can show.
 
 use stageman_agent::Command;
+use stageman_channel::Call;
 use stageman_core::{Agent, JobId, Outcome, Progress, ProjectId, Timestamp, Uuid, Waiting};
 use stageman_instance::{Instance, Request, Response};
 use stageman_wire::{ChannelDraft, Draft, Ending, Fitted, KitDraft, Refusal, Standing};
@@ -28,7 +29,8 @@ fn as_it_comes() -> Fitted {
     }
 }
 
-fn a_draft(name: &str) -> Draft {
+/// A project as a person drafts one: no channel unless the test binds one.
+pub fn a_draft(name: &str) -> Draft {
     Draft {
         name: name.to_owned(),
         repository: format!("https://example.invalid/{name}"),
@@ -209,7 +211,7 @@ fn creating_a_project_listens_on_its_channel_once_the_record_has_landed() {
     let mut sim = Simulation::new();
     sim.holding(&watching(&[]));
     let mut instance = sim.wake(seed(1));
-    assert!(sim.listening().is_empty(), "the one project has no channel");
+    assert_eq!(sim.listening(), 0, "the one project has no channel");
 
     let mut draft = a_draft("burrow");
     draft.channel = ChannelDraft {
@@ -236,9 +238,18 @@ fn creating_a_project_listens_on_its_channel_once_the_record_has_landed() {
     assert_eq!(burrow.channels, vec!["Slack".to_owned()]);
     assert_eq!(burrow.platforms, vec!["github".to_owned()]);
     let created = ProjectId::from_uuid(Uuid::parse_str(&burrow.id).expect("an identifier"));
-    assert_eq!(sim.listening(), [created]);
-    assert!(first(&sim, "-> Write") < first(&sim, "-> Listen"));
-    assert!(first(&sim, "-> Listen") < first(&sim, "-> Respond"));
+    assert_eq!(
+        sim.listening(),
+        1,
+        "listened to from the moment the record landed"
+    );
+    // Listening begins by asking the platform who this instance is, and
+    // only once the record has landed.
+    let asked = sim
+        .first_call(|call| matches!(call, Call::WhoAmI { .. }))
+        .expect("the platform was asked");
+    assert!(first(&sim, "-> Write") < asked);
+    assert!(asked < first(&sim, "-> Respond"));
     assert!(sim.disk().expect("landed").projects.contains_key(&created));
 
     draft.name = "another".to_owned();
@@ -509,7 +520,10 @@ fn a_job_started_by_hand_on_a_bound_project_opens_its_thread_first() {
         panic!("the project's screen");
     };
     assert_eq!(shown.jobs.len(), 1);
-    assert!(first(&sim, "-> Request") < sim.first_turn().expect("a turn"));
+    let opened = sim
+        .first_call(|call| matches!(call, Call::Post { thread: None, .. }))
+        .expect("the thread was opened");
+    assert!(opened < sim.first_turn().expect("a turn"));
     assert_eq!(sim.posts().len(), 1);
     let started = JobId::from_uuid(Uuid::parse_str(&shown.jobs[0].id).expect("an identifier"));
     assert!(

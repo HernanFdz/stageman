@@ -146,9 +146,11 @@ behave perfectly under test, and reintroduce exactly this. `docs/architecture.md
 §2 carries it as an invariant so that it is defended by a reviewer who has been
 told what to look for.
 
-**Reversing** is small and well isolated — awaiting in `app/src/listening.rs`
-rather than handing the instance an event — and there is no data to migrate,
-because none of this is recorded anywhere.
+**Reversing** is small and well isolated — awaiting in the task that reads
+the socket rather than handing the instance an event — and there is no data
+to migrate, because none of this is recorded anywhere. Since 0057 that task
+is the world's and holds nothing to await on, so reversing would first mean
+giving it something.
 
 **Revisit if** a channel arrives whose transport redelivers what it could not
 deliver, which would make the gap warning noise rather than news; or if the

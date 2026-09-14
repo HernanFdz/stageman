@@ -3,7 +3,7 @@
 //! world.
 
 use crate::simulation::{
-    Simulation, Talk, holding_a_message, project, said_at_root, seed, thread, watching_a_channel,
+    Simulation, Talk, holding_a_message, project, seed, thread, watching_a_channel,
 };
 use stageman_agent::Command;
 use stageman_foreman::Starting;
@@ -26,7 +26,7 @@ fn a_first_message_opens_a_session_and_is_acknowledged_first() {
     world.holding(&watching_a_channel(&[]));
     let mut instance = world.wake(seed(1));
 
-    world.schedule(100, said_at_root(1, "look at the parser"));
+    world.says_at_root(100, 1, "look at the parser");
     world.run_until(&mut instance, 5_000);
 
     let shape = world.shape();
@@ -71,7 +71,7 @@ fn what_a_containers_agent_may_see_is_decided_here() {
     world.holding(&watching_a_channel(&[]));
     let mut instance = world.wake(seed(1));
 
-    world.schedule(100, said_at_root(1, "look at the parser"));
+    world.says_at_root(100, 1, "look at the parser");
     world.run_until(&mut instance, 5_000);
 
     let container = stageman_foreman::container(project());
@@ -96,7 +96,7 @@ fn a_foreman_with_a_container_continues_its_session() {
     world.container(&name, held);
     let mut instance = world.wake(seed(1));
 
-    world.schedule(100, said_at_root(1, "look at the parser"));
+    world.says_at_root(100, 1, "look at the parser");
     world.run_until(&mut instance, 5_000);
 
     let runs = runs(&world);
@@ -122,9 +122,9 @@ fn messages_arriving_while_it_works_are_queued_and_worked_in_order() {
     world.holding(&watching_a_channel(&[]));
     let mut instance = world.wake(seed(1));
 
-    world.schedule(100, said_at_root(1, "first"));
-    world.schedule(200, said_at_root(2, "second"));
-    world.schedule(300, said_at_root(3, "third"));
+    world.says_at_root(100, 1, "first");
+    world.says_at_root(200, 2, "second");
+    world.says_at_root(300, 3, "third");
     world.run_until(&mut instance, 10_000);
 
     let runs = runs(&world);
@@ -203,7 +203,7 @@ fn a_crash_mid_turn_picks_the_message_up_again() {
         let mut world = Simulation::new();
         world.holding(&watching_a_channel(&[]));
         let mut instance = world.wake(seed(seed_byte));
-        world.schedule(100, said_at_root(1, "look at the parser"));
+        world.says_at_root(100, 1, "look at the parser");
         world.run_until(&mut instance, 200);
         let mut instance = world.crash(seed(seed_byte));
         world.run_until(&mut instance, 10_000);
@@ -230,8 +230,8 @@ fn a_turn_that_fails_is_said_to_be_stuck_and_the_next_is_worked() {
     let mut instance = world.wake(seed(1));
     world.next_turn_ends(Err("the agent would not start".to_owned()));
 
-    world.schedule(100, said_at_root(1, "first"));
-    world.schedule(200, said_at_root(2, "second"));
+    world.says_at_root(100, 1, "first");
+    world.says_at_root(200, 2, "second");
     world.run_until(&mut instance, 10_000);
 
     assert_eq!(runs(&world).len(), 2);
@@ -253,7 +253,7 @@ fn a_foremans_warrant_names_the_thread_of_the_message_it_answers() {
     world.holding(&watching_a_channel(&[]));
     let mut instance = world.wake(seed(1));
 
-    world.schedule(100, said_at_root(1, "look at the parser"));
+    world.says_at_root(100, 1, "look at the parser");
     world.run_until(&mut instance, 150);
     let warrant = world.warrants().last().expect("a warrant").clone();
     let warranted = instance

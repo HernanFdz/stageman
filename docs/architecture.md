@@ -112,7 +112,8 @@ first.
   then took the generic half of that into **world**, and startup and the
   request path into the instance. What is left here is the application's own
   half: an entry point that draws a seed, serves the pages on a loopback port
-  and says where, and adapters for the effects only this application has.
+  and says where, and one adapter, which matches a server function's answer
+  to whoever asked.
 - **instance** — the deciding and the doing as one deterministic value: what
   the daemon knows, and what it does about each thing that happens, answered
   as effects. It is the seam
@@ -259,27 +260,26 @@ nobody is a wish.
   having: construction is what a later field would change, and a redacting
   `Debug` would not notice — `docs/conventions.md` §4's rule is about
   formatting, and this is about the wire.
-- **A channel's connection is never unattended.** The task that reads a
-  channel reads it, acknowledges, and hands over; it never waits for what it
-  handed over to finish. A turn takes minutes and a socket is answered in
-  milliseconds, so a task doing both stops answering the platform's pings,
+- **A channel's connection is never unattended.** What reads a channel
+  reads it, acknowledges, and hands over; it never waits for what it handed
+  over to finish. A turn takes minutes and a socket is answered in
+  milliseconds, so anything doing both stops answering the platform's pings,
   cannot see its warning that a connection is about to close, and loses
   whatever is said between that close and a replacement — with nothing said
   anywhere, because an ordinary ending is what it looks like from inside. See
-  `docs/decisions/0044-a-listener-only-listens.md`. *Defended by* the handing
-  over being a synchronous function, so that everything it starts must be
-  started on a task of its own, and by a reviewer — an `await` added there
-  would compile and would pass every test, since nothing under test is slow
-  enough to matter.
+  `docs/decisions/0044-a-listener-only-listens.md`. *Defended by* the type,
+  twice over, since
+  `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`:
+  the world's socket task knows no domain and can await nothing of it — it
+  turns each frame into an event and sends what it is handed — and the
+  lifecycle is instance state, so the acknowledgement is an effect of the
+  step the frame arrived in, and the replacement is asked for in the step
+  the platform's warning arrived in. Scenarios pin both, and the gap an
+  unscheduled close leaves.
 
-  Since 0056 the reviewer's half is gone: the reading task turns a frame into
-  an event and hands it to a step that is synchronous by type, and there is no
-  handling left for an `await` to be added to.
-
-  One thing deliberately stays on that task: the state change each recipient
-  makes as a message *arrives*. Order is the whole of what a foreman's inbox
-  promises, and spawning that would fill it in the order tasks were polled
-  rather than the order messages were read.
+  Order is kept by the same shape. A foreman's inbox promises arrival order,
+  and one socket's frames arrive as events on one channel, in the order they
+  were read, to an instance that steps them one at a time.
 - **No job blocks on a terminal.** A job that needs a human emits the question
   on a channel and stays alive. It never writes to standard output expecting an
   answer on standard input, because nobody is watching that terminal — that is

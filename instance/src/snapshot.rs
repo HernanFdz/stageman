@@ -90,8 +90,21 @@ pub fn of(running: &Running) -> Value {
             "routing": value(&running.routing.iter().collect::<Vec<_>>()),
             "probes": value(&running.probes.iter().collect::<Vec<_>>()),
             "sent": value(&running.sent.iter().collect::<Vec<_>>()),
+            "listeners": keyed(running.listeners.iter().map(|(project, listener)| {
+                (project, json!({
+                    "channel": format!("{:?}", listener.channel),
+                    "opening": listener.opening.expose(),
+                    "address": listener.speaking.address,
+                    "credential": listener.speaking.credential.expose(),
+                    "us": value(&listener.us),
+                    "phase": value(&listener.phase),
+                    "deaf_since": listener.deaf_since,
+                }))
+            })),
+            "sockets": value(&running.sockets.iter().collect::<Vec<_>>()),
+            "draining": value(&running.draining),
             "deferred": value(&running.deferred),
-            "timers": value(&running.timers),
+            "timers": value(&running.timers.iter().collect::<Vec<_>>()),
             "asked": value(&running.asked.iter().collect::<Vec<_>>()),
             "listing": value(&running.listing.iter().collect::<Vec<_>>()),
             "dirty": running.dirty,

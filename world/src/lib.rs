@@ -385,7 +385,11 @@ fn requesting<A: App>(
     let world = Arc::clone(world);
     drop(tokio::spawn(async move {
         let responded = request(&world.client, &method, &url, &headers, body, within).await;
-        world.send(Event::Responded { id, responded });
+        world.send(Event::Responded {
+            id,
+            responded,
+            at: now(),
+        });
     }));
 }
 
@@ -1818,6 +1822,7 @@ mod tests {
                         headers,
                         body,
                     },
+                ..
             } => {
                 assert_eq!(id, EffectId(2));
                 assert_eq!(status, 418, "a refusal is an answer");
@@ -1854,6 +1859,7 @@ mod tests {
             Event::Responded {
                 id: EffectId(3),
                 responded: Responded::Failed(why),
+                ..
             } => assert!(!why.is_empty()),
             other => panic!("expected a failure: {}", other.kind()),
         }
@@ -1874,6 +1880,7 @@ mod tests {
             Event::Responded {
                 id: EffectId(4),
                 responded: Responded::Failed(why),
+                ..
             } => assert!(why.contains("not a method"), "{why}"),
             other => panic!("expected a failure: {}", other.kind()),
         }

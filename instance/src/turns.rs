@@ -32,7 +32,8 @@ use stageman_agent::{
     AgentError, Answer, Command, Conversation, Exchange, Opening, StopReason, Tools,
 };
 use stageman_core::{
-    Agent, JobId, Kit, Platform, Progress, Project, Role, Secret, Speaking, State, Thread, Waiting,
+    Agent, Channel, JobId, Kit, Platform, Progress, Project, Role, Secret, Speaking, State, Thread,
+    Waiting,
 };
 use stageman_vocabulary::{Effect as Generic, EffectId, Ended, Finished};
 
@@ -279,9 +280,10 @@ pub fn speaking_for(state: &State, job: JobId) -> Option<(Speaking, Thread)> {
 ///
 /// A binding with no credential to listen with is not listened to, and it is
 /// not an error: it looks exactly like a platform that has sent nothing.
-pub fn listening_on(project: &Project) -> Option<(Secret, Speaking)> {
-    let bound = project.channels.get(&stageman_core::Channel::Slack)?;
-    Some((bound.listen_credential.clone()?, bound.speaking()))
+pub fn listening_on(project: &Project) -> Option<(Channel, Secret, Speaking)> {
+    project.channels.iter().find_map(|(channel, bound)| {
+        Some((*channel, bound.listen_credential.clone()?, bound.speaking()))
+    })
 }
 
 /// A failure and everything underneath it, as one line of prose.

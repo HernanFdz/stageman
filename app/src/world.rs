@@ -2,24 +2,21 @@
 //! how whoever needs an answer waits for it.
 //!
 //! The loop, the channel and the generic mechanisms are the world crate's.
-//! What is here is what only stageman knows how to perform — listening on
-//! a channel, until that moves too — and the one thing the generic world
-//! cannot do for it: match an answer to whoever asked. A server function
-//! sends an event carrying an identifier and waits for the effect that
-//! carries it back, and the map below is where it waits. See
-//! `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`.
-//!
-//! The listener runs on a task of its own, and `docs/conventions.md` §3
-//! keeps it off the loop that answers the dashboard. The disk, the agent's
-//! process, the probe of a job's tunnel and every message posted are the
-//! world crate's; nothing here names a container runtime or a platform's
-//! endpoint any more.
+//! What is here is the one thing the generic world cannot do for this
+//! application: match an answer to whoever asked. A server function sends
+//! an event carrying an identifier and waits for the effect that carries it
+//! back, and the map below is where it waits. It is what
+//! `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`
+//! keeps in the application hole on purpose, and the whole of what is left
+//! for this application to perform: the disk, the agent's process, the
+//! probe of a job's tunnel, every message posted and every channel listened
+//! to are the world crate's, so nothing here names a container runtime or a
+//! platform.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use stageman_core::Secret;
 use stageman_instance::{AppEffect, AppEvent, Event, Request, RequestId, Response, Stageman};
 use stageman_world::{Perform, World};
 
@@ -86,7 +83,10 @@ impl Asking {
         let (answer, waiting) = tokio::sync::oneshot::channel();
         let id = self.minted();
         self.waiting.lock().insert(id, answer);
-        self.send(AppEvent::Request { id, request });
+        self.send(AppEvent::Request {
+            id,
+            request: Box::new(request),
+        });
         waiting.await.ok()
     }
 
@@ -103,51 +103,30 @@ impl Asking {
     }
 }
 
-/// What performs this application's own effects.
-///
-/// Cheap to clone and handed whole to every task it spawns, which is why the
-/// state sits behind one shared inner value.
+/// What performs this application's own effects: one, which is answering
+/// whoever asked.
 #[derive(Clone)]
-pub struct Performer(Arc<Inner>);
-
-struct Inner {
-    /// Where events go back, and where answers are matched to askers.
-    asking: Arc<Asking>,
-}
+pub struct Performer(Arc<Asking>);
 
 impl Performer {
     /// A performer for this way in.
     #[must_use]
-    pub fn new(asking: Arc<Asking>) -> Self {
-        Self(Arc::new(Inner { asking }))
+    pub const fn new(asking: Arc<Asking>) -> Self {
+        Self(asking)
     }
 }
 
 impl Perform<Stageman> for Performer {
-    /// Performs one of the application's own effects, on a task of its own.
+    /// Performs the one effect of the application's own: an answer, handed
+    /// to whoever is waiting on it.
     ///
-    /// Skipped by mutation testing, like everything here that drives the
-    /// runtime or the network: every arm performs an effect and decides
-    /// nothing a test could check without one.
+    /// Skipped by mutation testing: it hands over and decides nothing, and
+    /// a mutant that hands nothing over is caught only by a page that never
+    /// arrives, which is a slow way of saying the same thing.
     #[mutants::skip]
     async fn perform(&self, effect: AppEffect) {
-        match effect {
-            AppEffect::Listen {
-                project,
-                opening,
-                speaking,
-            } => crate::listening::listen_to(
-                Arc::clone(&self.0.asking),
-                crate::listening::Listening {
-                    project,
-                    opening: Secret::new(opening),
-                    speaking: speaking.into(),
-                },
-            ),
-            AppEffect::Respond { id, response } => {
-                self.0.asking.answered(id, response);
-            }
-        }
+        let AppEffect::Respond { id, response } = effect;
+        self.0.answered(id, response);
     }
 }
 
@@ -179,13 +158,10 @@ mod tests {
             let asking = Arc::clone(&asking);
             tokio::spawn(async move { asking.ask(Request::Instance).await })
         };
-        let Some(Event::App(AppEvent::Request {
-            id,
-            request: Request::Instance,
-        })) = soon(events.recv()).await
-        else {
+        let Some(Event::App(AppEvent::Request { id, request })) = soon(events.recv()).await else {
             panic!("the request, as an event");
         };
+        assert!(*request == Request::Instance, "the request, whole");
         asking.answered(id, Response::Agents(Vec::new()));
         assert_eq!(
             soon(asked).await.expect("the task"),

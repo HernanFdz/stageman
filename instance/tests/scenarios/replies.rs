@@ -1,6 +1,6 @@
 //! A reply arriving on a job's thread, run against the simulated world.
 
-use crate::simulation::{Simulation, job, said_in, seed, thread, watching_a_channel};
+use crate::simulation::{Simulation, job, seed, thread, watching_a_channel};
 use stageman_core::{JobId, Outcome, Progress, State, Waiting};
 
 fn progress_of(state: &State, id: JobId) -> Progress {
@@ -24,7 +24,7 @@ fn a_reply_to_an_idle_job_resumes_it_after_the_record_lands() {
     let mut instance = world.wake(seed(1));
     world.run_until(&mut instance, 10);
 
-    world.schedule(100, said_in(1, "use postgres"));
+    world.says_in(100, 1, "use postgres");
     world.run_until(&mut instance, 5_000);
 
     let shape = world.shape();
@@ -77,7 +77,7 @@ fn a_dropped_turn_forgets_only_its_own_warrant() {
 
     // The reply is taken, and the write that would let it resume fails.
     world.next_write_fails("the disk is full");
-    world.schedule(100, said_in(1, "use postgres"));
+    world.says_in(100, 1, "use postgres");
     world.run_until(&mut instance, 200);
 
     assert!(
@@ -106,7 +106,7 @@ fn a_reply_to_a_working_job_is_refused_and_said_so() {
     let mut instance = world.wake(seed(1));
 
     // Before its resumed turn ends.
-    world.schedule(100, said_in(1, "also check the tests"));
+    world.says_in(100, 1, "also check the tests");
     world.run_until(&mut instance, 200);
 
     assert_eq!(
@@ -137,8 +137,8 @@ fn two_replies_arriving_together_resume_one_turn() {
     world.container(&name, held);
     let mut instance = world.wake(seed(1));
 
-    world.schedule(100, said_in(1, "first"));
-    world.schedule(100, said_in(1, "second"));
+    world.says_in(100, 1, "first");
+    world.says_in(100, 1, "second");
     world.run_until(&mut instance, 5_000);
 
     let runs = world.talks();
@@ -163,7 +163,7 @@ fn a_reply_to_a_job_that_is_over_is_refused_with_its_own_notice() {
     )]));
     let mut instance = world.wake(seed(1));
 
-    world.schedule(100, said_in(1, "one more thing"));
+    world.says_in(100, 1, "one more thing");
     world.run_until(&mut instance, 200);
 
     assert_eq!(
@@ -191,7 +191,7 @@ fn a_mention_in_a_thread_belonging_to_nothing_is_answered() {
     world.container(&name, held);
     let mut instance = world.wake(seed(1));
 
-    world.schedule(100, said_in(7, "hello?"));
+    world.says_in(100, 7, "hello?");
     world.run_until(&mut instance, 200);
 
     assert_eq!(
@@ -214,18 +214,8 @@ fn a_message_without_a_mention_or_from_this_instance_reaches_nobody() {
     world.container(&name, held);
     let mut instance = world.wake(seed(1));
 
-    let mut plain = said_in(1, "people talking to each other");
-    if let stageman_instance::Event::App(stageman_instance::AppEvent::Heard { message, .. }) =
-        &mut plain
-    {
-        message.mentions = false;
-    }
-    let mut ours = said_in(1, "something this instance posted");
-    if let stageman_instance::Event::App(stageman_instance::AppEvent::Heard { message, .. }) =
-        &mut ours
-    {
-        message.from_us = true;
-    }
+    let plain = world.said_in_plainly(1, "people talking to each other");
+    let ours = world.said_in_by_us(1, "something this instance posted");
     world.schedule(100, plain);
     world.schedule(101, ours);
     world.run_until(&mut instance, 200);
@@ -253,7 +243,7 @@ fn a_crash_before_the_record_lands_loses_the_reply_but_not_the_job() {
     world.container(&name, held);
     let mut instance = world.wake(seed(1));
 
-    world.schedule(100, said_in(1, "use postgres"));
+    world.says_in(100, 1, "use postgres");
     // The reply is taken at 100 and its write lands at 101; the daemon dies
     // in between.
     world.run_until(&mut instance, 100);
@@ -292,7 +282,7 @@ fn a_failed_write_fails_the_turn_before_it_starts() {
     let mut instance = world.wake(seed(1));
     world.next_write_fails("the disk is full");
 
-    world.schedule(100, said_in(1, "use postgres"));
+    world.says_in(100, 1, "use postgres");
     world.run_until(&mut instance, 5_000);
 
     assert!(world.talks().is_empty(), "{:?}", world.talks());

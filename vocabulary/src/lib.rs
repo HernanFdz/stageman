@@ -330,6 +330,10 @@ pub enum Event<A: App> {
         id: EffectId,
         /// How.
         responded: Responded,
+        /// When, in milliseconds since the epoch, stamped by the world for
+        /// the same reason a served request is: a failure to reach a
+        /// platform is what a gap with no connection can begin with.
+        at: u64,
     },
     /// A socket received one text frame.
     ///
@@ -407,9 +411,10 @@ impl<A: App> Clone for Event<A> {
                 id: *id,
                 probed: *probed,
             },
-            Self::Responded { id, responded } => Self::Responded {
+            Self::Responded { id, responded, at } => Self::Responded {
                 id: *id,
                 responded: responded.clone(),
+                at: *at,
             },
             Self::Frame { id, text, at } => Self::Frame {
                 id: *id,
@@ -1203,10 +1208,12 @@ mod tests {
                     headers: [("content-type".to_owned(), "application/json".to_owned())].into(),
                     body: Bytes::new(b"{\"ok\":true}".to_vec()),
                 },
+                at: 1_757_000_000_004,
             },
             Event::Responded {
                 id: EffectId(7),
                 responded: Responded::Failed("the name did not resolve".to_owned()),
+                at: 1_757_000_000_004,
             },
             Event::Frame {
                 id: EffectId(8),
@@ -1492,6 +1499,7 @@ mod tests {
                 headers: BTreeMap::new(),
                 body: Bytes::new(Vec::new()),
             },
+            at: 5,
         };
         assert!(responded(1, 200) == responded(1, 200));
         assert!(
