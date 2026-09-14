@@ -16,9 +16,17 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# Speaking HTTP is a mechanism like running a process is: this crate serves
+# what it is told to bind, hands each request's head to whoever is deciding,
+# and forwards one to a port when told to. None of it names a domain.
+bytes = "1.12.1"
+http-body-util = "0.1.5"
+hyper = { version = "1.11.1", features = ["client", "http1", "server"] }
+hyper-util = { version = "0.1.20", features = ["tokio"] }
 mutants = "0.0.4"
+parking_lot = "0.12.5"
 stageman-vocabulary = { workspace = true }
-tokio = { version = "1.53.1", features = ["io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1.44"
 
 # Only what the tests need: an application to instantiate the generic types

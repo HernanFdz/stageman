@@ -3953,7 +3953,12 @@ dependencies = [
 name = "stageman-world"
 version = "0.0.0"
 dependencies = [
+ "bytes",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "mutants",
+ "parking_lot",
  "serde",
  "stageman-vocabulary",
  "tempfile",

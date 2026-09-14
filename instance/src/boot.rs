@@ -289,7 +289,12 @@ impl Boot {
             Event::Ran { id, finished } => self.ran(id, finished),
             Event::Read { id, contents } => self.read(id, contents),
             Event::Written { id, outcome } => self.written(id, outcome),
-            Event::Woke { .. } => Booting::Asking(Vec::new()),
+            // Booting asks for no timer and no listener, so an answer to
+            // either is somebody else's and is ignored rather than acted on.
+            Event::Woke { .. }
+            | Event::Bound { .. }
+            | Event::Arrived { .. }
+            | Event::Body { .. } => Booting::Asking(Vec::new()),
         }
     }
 

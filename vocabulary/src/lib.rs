@@ -65,6 +65,68 @@ pub trait App: Send + Sync + 'static {
     type Effect: Serialize + DeserializeOwned + Clone + PartialEq + Named + Send + 'static;
 }
 
+/// What identifies a request the world is holding open for an answer.
+///
+/// Minted by the world rather than by the instance, which is the opposite of
+/// every other identifier here and for the reason they go the other way:
+/// whoever holds the thing open is whoever can name it, and a request is a
+/// connection the world accepted. The instance is told one arrived and
+/// answers with the identifier it was given.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct RequestId(pub u64);
+
+/// A request, as much of it as arrives before anything is decided.
+///
+/// The head and no body: a body is read only where the answer depends on
+/// one, and then only up to a limit somebody set.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Arrival {
+    /// What it asks to do.
+    pub method: String,
+    /// What it asks about, query and all.
+    pub path: String,
+    /// Its headers, by lowercased name, joined with commas where a name
+    /// arrived more than once — which is what reading them as a map costs,
+    /// and what makes a request a value a scenario can compare.
+    pub headers: BTreeMap<String, String>,
+    /// Who sent it, as an address.
+    pub peer: String,
+    /// When it arrived, in milliseconds since the epoch.
+    ///
+    /// Stamped by the world, because a generic world cannot know which
+    /// handlers keep a time and which ignore it.
+    pub at: u64,
+}
+
+/// What to do about a request the world is holding open.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Answer {
+    /// Answer it now, and close the matter.
+    Respond {
+        /// The status.
+        status: u16,
+        /// What to send with it, by header name.
+        headers: BTreeMap<String, String>,
+        /// The body.
+        body: Bytes,
+    },
+    /// Forward it to a port on this machine's loopback, whole, and forward
+    /// back whatever answers — including an upgrade, so that a websocket
+    /// through this is still a websocket.
+    Proxy {
+        /// Where.
+        port: u16,
+    },
+    /// Read its body and hand it back, then ask again.
+    ///
+    /// Bounded, because whoever sent it is not always somebody trusted and
+    /// a body held whole is held in memory.
+    Read {
+        /// How many bytes to take before giving up on it.
+        limit: usize,
+    },
+}
+
 /// What identifies an effect the instance is waiting to have answered.
 ///
 /// Minted by the instance, from a counter, so that it is as deterministic as
@@ -126,6 +188,31 @@ pub enum Event<A: App> {
         /// How.
         finished: Finished,
     },
+    /// Answers [`Effect::Bind`]: the address was taken, or could not be.
+    Bound {
+        /// Which bind.
+        id: EffectId,
+        /// The port it got, or why it got none.
+        outcome: Result<u16, String>,
+    },
+    /// A request arrived on a bound address and is being held open for an
+    /// answer. Answered by [`Effect::Answer`].
+    Arrived {
+        /// Which listener it arrived on.
+        listener: EffectId,
+        /// What answers it.
+        id: RequestId,
+        /// The request, head only.
+        request: Arrival,
+    },
+    /// Answers [`Answer::Read`]: the body of a request that was asked for.
+    Body {
+        /// Which request.
+        id: RequestId,
+        /// Its body, or why it could not be read — which includes being
+        /// longer than the limit it was asked for under.
+        outcome: Result<Bytes, String>,
+    },
     /// Answers [`Effect::Wake`].
     Woke {
         /// Which wake.
@@ -152,6 +239,23 @@ impl<A: App> Clone for Event<A> {
                 id: *id,
                 finished: finished.clone(),
             },
+            Self::Bound { id, outcome } => Self::Bound {
+                id: *id,
+                outcome: outcome.clone(),
+            },
+            Self::Arrived {
+                listener,
+                id,
+                request,
+            } => Self::Arrived {
+                listener: *listener,
+                id: *id,
+                request: request.clone(),
+            },
+            Self::Body { id, outcome } => Self::Body {
+                id: *id,
+                outcome: outcome.clone(),
+            },
             Self::Woke { id } => Self::Woke { id: *id },
             Self::App(event) => Self::App(event.clone()),
         }
@@ -160,32 +264,10 @@ impl<A: App> Clone for Event<A> {
 
 impl<A: App> PartialEq for Event<A> {
     fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (
-                Self::Read { id, contents },
-                Self::Read {
-                    id: their_id,
-                    contents: theirs,
-                },
-            ) => id == their_id && contents == theirs,
-            (
-                Self::Written { id, outcome },
-                Self::Written {
-                    id: their_id,
-                    outcome: theirs,
-                },
-            ) => id == their_id && outcome == theirs,
-            (
-                Self::Ran { id, finished },
-                Self::Ran {
-                    id: their_id,
-                    finished: theirs,
-                },
-            ) => id == their_id && finished == theirs,
-            (Self::Woke { id }, Self::Woke { id: their_id }) => id == their_id,
-            (Self::App(mine), Self::App(theirs)) => mine == theirs,
-            _ => false,
-        }
+        // Through the one representation both sides share, which is what a
+        // scenario compares anyway — and field by field is where a
+        // comparison silently starts agreeing about two different things.
+        serde_json::to_value(self).ok() == serde_json::to_value(other).ok()
     }
 }
 
@@ -195,6 +277,9 @@ impl<A: App> Named for Event<A> {
             Self::Read { .. } => "Read",
             Self::Written { .. } => "Written",
             Self::Ran { .. } => "Ran",
+            Self::Bound { .. } => "Bound",
+            Self::Arrived { .. } => "Arrived",
+            Self::Body { .. } => "Body",
             Self::Woke { .. } => "Woke",
             Self::App(event) => event.kind(),
         }
@@ -250,6 +335,24 @@ pub enum Effect<A: App> {
         /// How long from now.
         after: Duration,
     },
+    /// Take an address, so that requests arriving on it are events.
+    ///
+    /// Answered with the port it got, which is how a port of zero — give me
+    /// whichever is free — becomes a port anything can be told about.
+    Bind {
+        /// What answers it.
+        id: EffectId,
+        /// The address, as a person would type it.
+        address: String,
+    },
+    /// What to do about a request that arrived. Unanswered, except by
+    /// [`Event::Body`] when what was asked for is the body.
+    Answer {
+        /// Which request.
+        id: RequestId,
+        /// What to do about it.
+        answer: Answer,
+    },
     /// Write to the process's standard output, which is where whoever
     /// started it is reading. Unanswered.
     Print {
@@ -302,6 +405,14 @@ impl<A: App> Clone for Effect<A> {
                 id: *id,
                 after: *after,
             },
+            Self::Bind { id, address } => Self::Bind {
+                id: *id,
+                address: address.clone(),
+            },
+            Self::Answer { id, answer } => Self::Answer {
+                id: *id,
+                answer: answer.clone(),
+            },
             Self::Print { text } => Self::Print { text: text.clone() },
             Self::Exit { message } => Self::Exit {
                 message: message.clone(),
@@ -326,6 +437,8 @@ impl<A: App> Named for Effect<A> {
             Self::Write { .. } => "Write",
             Self::Run { .. } => "Run",
             Self::Wake { .. } => "Wake",
+            Self::Bind { .. } => "Bind",
+            Self::Answer { .. } => "Answer",
             Self::Print { .. } => "Print",
             Self::Exit { .. } => "Exit",
             Self::App(effect) => effect.kind(),
@@ -575,7 +688,12 @@ pub(crate) mod doorbell {
                         },
                     ]
                 }
-                Event::Written { .. } | Event::Ran { .. } | Event::Woke { .. } => Vec::new(),
+                Event::Written { .. }
+                | Event::Ran { .. }
+                | Event::Woke { .. }
+                | Event::Bound { .. }
+                | Event::Arrived { .. }
+                | Event::Body { .. } => Vec::new(),
             }
         }
 
@@ -588,7 +706,7 @@ pub(crate) mod doorbell {
 #[cfg(test)]
 mod tests {
     use super::doorbell::{Doorbell, Told};
-    use super::{Bytes, Effect, EffectId, Event, Finished, Named};
+    use super::{Answer, Arrival, Bytes, Effect, EffectId, Event, Finished, Named, RequestId};
 
     /// The hole carries the application's own, and the kind is what a log
     /// may say.
@@ -633,6 +751,26 @@ mod tests {
                 id: EffectId(4),
                 after: std::time::Duration::from_secs(1),
             },
+            Effect::Bind {
+                id: EffectId(5),
+                address: "127.0.0.1:0".to_owned(),
+            },
+            Effect::Answer {
+                id: RequestId(1),
+                answer: Answer::Respond {
+                    status: 200,
+                    headers: [("content-type".to_owned(), "text/plain".to_owned())].into(),
+                    body: Bytes::new(b"ok".to_vec()),
+                },
+            },
+            Effect::Answer {
+                id: RequestId(2),
+                answer: Answer::Proxy { port: 8080 },
+            },
+            Effect::Answer {
+                id: RequestId(3),
+                answer: Answer::Read { limit: 1024 },
+            },
             Effect::Print {
                 text: "hello\n".to_owned(),
             },
@@ -641,14 +779,24 @@ mod tests {
             },
         ];
         let kinds: Vec<&str> = effects.iter().map(Named::kind).collect();
-        assert_eq!(kinds, ["Read", "Write", "Run", "Wake", "Print", "Exit"]);
+        assert_eq!(
+            kinds,
+            [
+                "Read", "Write", "Run", "Wake", "Bind", "Answer", "Answer", "Answer", "Print",
+                "Exit"
+            ]
+        );
         for effect in &effects {
             let served = serde_json::to_string(effect).expect("it serialises");
             let back: Effect<Doorbell> = serde_json::from_str(&served).expect("and back");
             assert!(back == *effect, "{served}");
             assert!(back.clone() == *effect);
         }
+    }
 
+    /// Every event crosses whole and names its kind, the same way.
+    #[test]
+    fn every_event_crosses_whole_and_names_its_kind() {
         let events: Vec<Event<Doorbell>> = vec![
             Event::Read {
                 id: EffectId(1),
@@ -671,9 +819,33 @@ mod tests {
                 finished: Finished::NotFound,
             },
             Event::Woke { id: EffectId(4) },
+            Event::Bound {
+                id: EffectId(5),
+                outcome: Ok(47_201),
+            },
+            Event::Arrived {
+                listener: EffectId(5),
+                id: RequestId(1),
+                request: Arrival {
+                    method: "GET".to_owned(),
+                    path: "/jobs?open=1".to_owned(),
+                    headers: [("host".to_owned(), "stageman.test".to_owned())].into(),
+                    peer: "127.0.0.1:53124".to_owned(),
+                    at: 1_757_000_000_000,
+                },
+            },
+            Event::Body {
+                id: RequestId(1),
+                outcome: Ok(Bytes::new(b"{}".to_vec())),
+            },
         ];
         let kinds: Vec<&str> = events.iter().map(Named::kind).collect();
-        assert_eq!(kinds, ["Read", "Written", "Ran", "Ran", "Woke"]);
+        assert_eq!(
+            kinds,
+            [
+                "Read", "Written", "Ran", "Ran", "Woke", "Bound", "Arrived", "Body"
+            ]
+        );
         for event in &events {
             let served = serde_json::to_string(event).expect("it serialises");
             let back: Event<Doorbell> = serde_json::from_str(&served).expect("and back");

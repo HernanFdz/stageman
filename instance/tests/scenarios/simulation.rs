@@ -909,6 +909,11 @@ impl Simulation {
                 let at = self.now + u64::try_from(after.as_millis()).expect("a short wait");
                 self.schedule(at, Event::Woke { id });
             }
+            // Nothing in the instance takes an address or answers a
+            // request yet; when it does, this world will hold them.
+            Effect::Bind { .. } | Effect::Answer { .. } => {
+                panic!("the simulation was asked to listen, which nothing does yet")
+            }
             Effect::Print { text } => self.printed.push(text),
             Effect::Exit { message } => self.exited = Some(message),
             Effect::App(effect) => return Some(effect),

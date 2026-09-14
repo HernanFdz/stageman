@@ -670,9 +670,15 @@ impl Running {
             Event::Written { id, outcome } => self.written(id, outcome, &mut effects),
             Event::Woke { id } => self.woke(id, &mut effects),
             Event::Ran { id, finished } => self.ran(id, &finished, &mut effects),
-            Event::Read { .. } => {
+            // Nothing here asks for a file or a listener while awake yet;
+            // both arrive as families land, and until then an answer to
+            // something nobody asked is said rather than acted on.
+            Event::Read { .. }
+            | Event::Bound { .. }
+            | Event::Arrived { .. }
+            | Event::Body { .. } => {
                 tracing::warn!(
-                    "a file was read that this instance did not ask for while awake; ignored"
+                    "answered something this instance did not ask for while awake; ignored"
                 );
             }
             Event::App(event) => self.told(event, &mut effects),
