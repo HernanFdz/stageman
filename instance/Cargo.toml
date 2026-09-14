@@ -1,0 +1,52 @@
+# The deciding and the doing as one deterministic value — see
+# `docs/decisions/0056-the-instance-decides-and-the-world-performs.md`.
+#
+# It names the four crates below for their types and their pure functions, and
+# nothing that can perform an effect: no async runtime, nothing that opens a
+# socket or a file. That absence is the enforcement of
+# `docs/conventions.md` §3's rule that nothing inside the instance performs
+# an effect, which is why it is stated here rather than only there.
+
+[package]
+name = "stageman-instance"
+description = "The deterministic half of stageman: state, decisions, and the effects it asks for. Internal to the workspace."
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# An attribute and nothing else — it compiles to nothing unless cargo-mutants
+# is the one building.
+mutants = "0.0.4"
+# Seeded from outside and never from the machine: the instance's only source
+# of randomness, and the reason a scenario reproduces.
+rand = "0.10.2"
+serde = { version = "1.0.228", features = ["derive"] }
+# The file is JSON, per
+# `docs/decisions/0011-state-is-a-snapshot-not-a-database.md`, and the
+# instance reads and writes it itself since 0056.
+serde_json = "1.0.151"
+stageman-agent.workspace = true
+stageman-core.workspace = true
+stageman-foreman.workspace = true
+stageman-job.workspace = true
+stageman-vocabulary.workspace = true
+stageman-wire.workspace = true
+thiserror = "2.0.20"
+tracing = "0.1.44"
+uuid = { version = "1.26.0", features = ["serde"] }
+
+[lints]
+workspace = true
+
+# The recorded flows are files rather than functions, so this target makes a
+# test of each at run time instead of at compile time. See `tests/replays.rs`.
+[[test]]
+name = "replays"
+harness = false
+
+[dev-dependencies]
+libtest-mimic = "0.8.2"

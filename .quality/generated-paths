@@ -44,3 +44,13 @@ app/bundle/
 # has none. That is the heuristic's limit rather than a distinction worth
 # relying on.
 dist/install.sh
+
+# written by: cargo mutants   (via `just mutants`, so via `just verify`)
+#
+# Where the mutation tester records what it found. The gate reads it for one
+# reason: a run that exits non-zero has not always missed a mutant, and the
+# lists on disk are what tell a genuine survivor from a run that could not
+# finish. Nothing compiles against it, and a clone that has never run the
+# mutation tester simply has no lists — which reads, correctly, as nothing
+# missed.
+mutants.out

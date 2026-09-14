@@ -26,8 +26,9 @@ proxy on the host side, and that proxy binds the host port when the container
 is created and accepts every connection to it for as long as the container
 runs — then discovers there is nothing inside to forward to, and closes.
 Accepting is the proxy's, not the container's. So a probe that only connects
-succeeds against every running container, `rest` answers `Showing::Still`
-every time, and `halt` is never reached at any of the three moments 0043 names.
+succeeds against every running container, the probe answers that the tunnel
+is answering every time, and `halt` is never reached at any of the three
+moments 0043 names.
 Measured on both:
 
 | | connect | first read |

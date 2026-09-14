@@ -24,9 +24,13 @@ property `README.md` claims: the instance file is portable and useless without
 the key.
 
 Where the two would live was measured rather than assumed, because the
-library's own naming is misleading. `choose_base_strategy` returns the XDG
-strategy everywhere except Windows — on macOS as well, despite a sibling
-function that returns Apple's own directories.
+library's own naming was misleading: its function for choosing a base
+strategy returns the XDG strategy everywhere except Windows — on macOS as
+well, despite a sibling function that returns Apple's own directories. Since
+`docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`
+the instance reads its environment as a map rather than from the process, so
+those rules are ported into the instance crate instead of asked of the
+library, and the table below is what the port must still produce.
 
 | platform | key | instance | separate |
 |---|---|---|---|

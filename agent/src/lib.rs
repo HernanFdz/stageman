@@ -77,22 +77,58 @@ pub use agent_client_protocol::schema::v1::StopReason;
 /// [`printed`], which reads past this and discards the rest.
 const STDERR_LIMIT: usize = 8 * 1024;
 
-/// Where a container runtime is looked for, in order.
+/// Which platform this binary was made for, as far as anything here needs to
+/// care.
 ///
-/// Absolute paths and never a search of `PATH`, which is the whole of what
-/// `docs/conventions.md` §3 forbids: an inherited variable differs between the
-/// shell you tested in and what a service manager supplies, and a list
-/// compiled in does not. Deterministic in the same way on every machine is the
-/// property being bought.
-///
-/// Ordered, and the order is a decision rather than an accident. Docker first
-/// because it is what most machines that have anything have; the package
-/// manager locations before the system ones on each platform, because a
-/// hand-installed runtime is the one somebody chose. A machine with both gets
-/// the first, and that is the cost of not asking — see
-/// `docs/decisions/0023-the-container-runtime-is-discovered-once.md`.
-#[cfg(target_os = "macos")]
-const CANDIDATES: &[&str] = &[
+/// Handed to the instance at construction rather than read inside it, so that
+/// what a start does is a function of what it was given: a flow recorded on
+/// one platform replays on another by handing the replay the target the file
+/// names, and a test on any machine can ask what a start would do on a
+/// platform this is not. See
+/// `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Target {
+    /// A mac.
+    MacOs,
+    /// A Linux machine.
+    Linux,
+    /// A Windows machine.
+    Windows,
+    /// Anything else, which knows nowhere to look for a runtime and says so
+    /// rather than failing to build.
+    Unknown,
+}
+
+impl Target {
+    /// What this binary was made for.
+    ///
+    /// The one place a compile-time condition decides anything about a
+    /// platform. Everything downstream branches on the value instead, which
+    /// is what lets the same build answer for a platform it is not running
+    /// on.
+    #[must_use]
+    pub const fn compiled() -> Self {
+        #[cfg(target_os = "macos")]
+        {
+            Self::MacOs
+        }
+        #[cfg(target_os = "linux")]
+        {
+            Self::Linux
+        }
+        #[cfg(target_os = "windows")]
+        {
+            Self::Windows
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        {
+            Self::Unknown
+        }
+    }
+}
+
+/// Where a container runtime is looked for on a mac, in order.
+const MACOS_CANDIDATES: &[&str] = &[
     "/usr/local/bin/docker",
     "/opt/homebrew/bin/docker",
     "/Applications/Docker.app/Contents/Resources/bin/docker",
@@ -100,11 +136,8 @@ const CANDIDATES: &[&str] = &[
     "/usr/local/bin/podman",
 ];
 
-/// Where a container runtime is looked for, in order.
-///
-/// See the macOS list above for why this is a list of absolute paths.
-#[cfg(target_os = "linux")]
-const CANDIDATES: &[&str] = &[
+/// Where a container runtime is looked for on a Linux machine, in order.
+const LINUX_CANDIDATES: &[&str] = &[
     "/usr/bin/docker",
     "/usr/local/bin/docker",
     "/snap/bin/docker",
@@ -112,52 +145,39 @@ const CANDIDATES: &[&str] = &[
     "/usr/local/bin/podman",
 ];
 
-/// Where a container runtime is looked for, in order.
-///
-/// See the macOS list above for why this is a list of absolute paths.
-#[cfg(target_os = "windows")]
-const CANDIDATES: &[&str] = &[
+/// Where a container runtime is looked for on a Windows machine, in order.
+const WINDOWS_CANDIDATES: &[&str] = &[
     r"C:\Program Files\Docker\Docker\resources\bin\docker.exe",
     r"C:\Program Files\RedHat\Podman\podman.exe",
 ];
 
-/// Nothing is known about where a runtime lives on this platform.
+/// Every place a runtime is looked for on that platform, in order, for a
+/// start that has to try them and for a refusal that has to say where it
+/// looked.
 ///
-/// An empty list rather than a compile error, so that a platform nobody has
-/// tried still builds and fails honestly at startup with "none found" — which
-/// is a message somebody can act on, unlike a build that will not finish.
-#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-const CANDIDATES: &[&str] = &[];
-
-/// The first of [`candidates`] that is a file, as a runtime.
+/// Absolute paths and never a search of `PATH`, which is the whole of what
+/// `docs/conventions.md` §3 forbids: an inherited variable differs between
+/// the shell you tested in and what a service manager supplies, and a list
+/// compiled in does not.
 ///
-/// The whole of discovery, and deliberately a pure function of the list rather
-/// than a lazy static reading a fixed one. The static lives in the binary,
-/// because *what to do when there is none* is a decision about a program that
-/// cannot run rather than knowledge about container runtimes — and because a
-/// function taking its list can be tested for the absence, which a static
-/// reading the real list on a machine that has Docker never can.
+/// Ordered, and the order is a decision rather than an accident. Docker
+/// first because it is what most machines that have anything have; the
+/// package manager locations before the system ones on each platform,
+/// because a hand-installed runtime is the one somebody chose. A machine
+/// with both gets the first, and that is the cost of not asking — see
+/// `docs/decisions/0023-the-container-runtime-is-discovered-once.md`.
 ///
-/// # Examples
-///
-/// ```
-/// use stageman_agent::first_present;
-///
-/// assert!(first_present(&["/nowhere/at/all/docker"]).is_none());
-/// ```
+/// A platform nothing here knows gets an empty list, so it still builds and
+/// refuses honestly at startup with "none found", which is a message
+/// somebody can act on unlike a build that will not finish.
 #[must_use]
-pub fn first_present(candidates: &[&str]) -> Option<ContainerRuntime> {
-    candidates
-        .iter()
-        .map(PathBuf::from)
-        .find(|candidate| candidate.is_file())
-        .map(ContainerRuntime::new)
-}
-
-/// Every place a runtime was looked for, for a message that has to say.
-#[must_use]
-pub const fn candidates() -> &'static [&'static str] {
-    CANDIDATES
+pub const fn candidates(target: Target) -> &'static [&'static str] {
+    match target {
+        Target::MacOs => MACOS_CANDIDATES,
+        Target::Linux => LINUX_CANDIDATES,
+        Target::Windows => WINDOWS_CANDIDATES,
+        Target::Unknown => &[],
+    }
 }
 
 /// Where the container runtime lives.
@@ -532,32 +552,6 @@ fn ours_arguments() -> Vec<String> {
     ]
 }
 
-/// Every image this project has built and still has, by name.
-///
-/// # Errors
-///
-/// Fails if the runtime cannot be run, or refuses the query.
-#[mutants::skip]
-async fn ours(runtime: &ContainerRuntime) -> Result<Vec<String>, AgentError> {
-    let listed = tokio::process::Command::new(runtime.path())
-        .args(ours_arguments())
-        .kill_on_drop(true)
-        .output()
-        .await
-        .map_err(|source| AgentError::Runtime {
-            path: runtime.path().to_owned(),
-            source,
-        })?;
-
-    if !listed.status.success() {
-        return Err(AgentError::Unusable {
-            path: runtime.path().to_owned(),
-            message: String::from_utf8_lossy(&listed.stderr).trim().to_owned(),
-        });
-    }
-    Ok(tagged(&String::from_utf8_lossy(&listed.stdout)))
-}
-
 /// The image names in what a listing reported.
 ///
 /// Pure, so what a sweep works from can be tested without a runtime. Two
@@ -565,7 +559,11 @@ async fn ours(runtime: &ContainerRuntime) -> Result<Vec<String>, AgentError> {
 /// runtime prints when it found nothing, and anything still carrying the
 /// runtime's word for *no name*, which is an image that lost its name between
 /// the listing and now and is not one this project can address.
-fn tagged(reported: &str) -> Vec<String> {
+///
+/// Public because the instance reads it: the listing is asked for there, and
+/// this is what its lines mean.
+#[must_use]
+pub fn tagged(reported: &str) -> Vec<String> {
     reported
         .lines()
         .map(str::trim)
@@ -581,7 +579,14 @@ fn tagged(reported: &str) -> Vec<String> {
 /// wants exactly this. And a sweep that removed them would race the path that
 /// has just built one and not yet created its container, which is a job
 /// failing on an image that was there a moment ago.
-fn keeping() -> Vec<Image> {
+///
+/// Public, with [`kept`], because the instance decides what a sweep removes:
+/// since
+/// `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`
+/// the listing is asked for there and read there, and what is left is this —
+/// knowledge about images rather than about one run.
+#[must_use]
+pub fn keeping() -> Vec<Image> {
     Agent::ALL
         .iter()
         .copied()
@@ -596,78 +601,13 @@ fn keeping() -> Vec<Image> {
 
 /// Whether a name is one of the images this build would use.
 ///
-/// Pulled out of [`reclaim`] and named, for the reason `keeping` is: the loop
-/// around it drives a runtime and cannot be tested cheaply, and this is the
-/// decision that says whether anything is removed at all. Inverted, a sweep
-/// reclaims exactly the images the next container wants and keeps the ones
-/// nothing will ask for again.
-fn kept(keeping: &[Image], image: &str) -> bool {
+/// Named and public, for the reason [`keeping`] is: the sweep around it is
+/// the instance's now, and this is the decision that says whether anything
+/// is removed at all. Inverted, a sweep reclaims exactly the images the next
+/// container wants and keeps the ones nothing will ask for again.
+#[must_use]
+pub fn kept(keeping: &[Image], image: &str) -> bool {
     keeping.iter().any(|keep| keep.as_argument() == image)
-}
-
-/// Removes one image unless something is using it.
-///
-/// **Unforced, and that is the whole of it.** The refusal is the runtime's
-/// own, decided atomically against every container it has — including
-/// containers this instance did not create and cannot see the point of. So
-/// there is no window in which a container is created from an image this has
-/// just decided was unused, and no need to ask what is using it first.
-///
-/// Total, like [`present`]: a refusal means something needs it, which is not a
-/// failure, and a runtime broken badly enough to matter fails loudly
-/// everywhere else in the same breath.
-#[mutants::skip]
-async fn discarded(runtime: &ContainerRuntime, image: &str) -> bool {
-    tokio::process::Command::new(runtime.path())
-        .args(["rmi", image])
-        .kill_on_drop(true)
-        .output()
-        .await
-        .is_ok_and(|removed| removed.status.success())
-}
-
-/// Removes every image of this project's that nothing needs, and says how many
-/// went.
-///
-/// What stops images accumulating once they have names:
-/// `docs/decisions/0051-an-image-is-named-by-the-recipe-it-is-built-from.md`
-/// makes every container from one recipe share one image, and this is what
-/// reclaims the image of a recipe that has been *edited* — the one case a
-/// shared name does not cover, because the old name goes on naming an image
-/// nothing will ask for again.
-///
-/// Deliberately blind to what a container is for. An image held by another
-/// instance's container is kept because that container is using it, not
-/// because this recognised it, which is what makes this safe to run while
-/// something else is running.
-///
-/// # Errors
-///
-/// Fails only if the runtime will not say what images it has. An image that
-/// will not go is kept and not counted, which is the ordinary outcome for
-/// every image a container needs.
-///
-/// Skipped by mutation testing, like everything here that drives the runtime:
-/// what it decides is the private `kept` beside it, which has its own test, and
-/// what it does is spawn a process per image.
-#[mutants::skip]
-pub async fn reclaim(runtime: &ContainerRuntime) -> Result<usize, AgentError> {
-    let ours = ours(runtime).await?;
-    let keeping = keeping();
-
-    // Collected rather than counted up, for the reason the sweep in **app**
-    // gives: the gate denies arithmetic that can overflow, and the escapes
-    // that quiet it are the ones that produce silent wrong values.
-    let mut gone: Vec<String> = Vec::new();
-    for image in ours {
-        if kept(&keeping, &image) {
-            continue;
-        }
-        if discarded(runtime, &image).await {
-            gone.push(image);
-        }
-    }
-    Ok(gone.len())
 }
 
 /// The arguments that start a container just long enough to be greeted.
@@ -1025,7 +965,19 @@ const WORKSPACE: &str = "/workspace";
 /// pure question about configuration and lives in the domain crate; what they
 /// are called here is knowledge about one agent and lives in its adapter. See
 /// `docs/conventions.md` §3.
-fn delivered(handout: &Handout) -> Result<Vec<(String, Secret)>, AgentError> {
+/// Exactly the environment a container running this handout is given, in the
+/// order it is set: the agent's own credential under the variable its
+/// adapter reads, the platform credentials under the variables their tools
+/// read, and the project's variables last, refused on collision.
+///
+/// Pure, so that whoever decides what a process is handed can decide this
+/// too, and the world only sets it.
+///
+/// # Errors
+///
+/// Fails if a project's variable claims a name this project delivers itself,
+/// which would change who pays — `docs/decisions/0008-one-credential-per-agent.md`.
+pub fn environment(handout: &Handout) -> Result<Vec<(String, Secret)>, AgentError> {
     let mut set: Vec<(String, Secret)> = vec![match handout.agent() {
         Agent::Claude => (
             claude_credential_variable(handout.agent_credential()).to_owned(),
@@ -1338,7 +1290,7 @@ fn carrying(image: &Image, delivering: &[(String, Secret)]) -> Vec<String> {
 }
 
 /// What an agent said in reply to one question.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Answer {
     /// Everything the agent said, in order.
     ///
@@ -1389,7 +1341,7 @@ pub async fn ask(
     tools: Option<&Tools>,
     question: &str,
 ) -> Result<Answer, AgentError> {
-    let delivering = delivered(handout)?;
+    let delivering = environment(handout)?;
     let image = build(runtime, handout.agent(), handout.role()).await?;
     let container = spawn(
         runtime,
@@ -1523,24 +1475,13 @@ const fn agent_label(agent: Agent) -> &'static str {
 }
 
 /// The agent a label names, if it names one this build knows.
-fn labelled(text: &str) -> Option<Agent> {
+/// The agent a label names, if this build knows it.
+#[must_use]
+pub fn labelled(text: &str) -> Option<Agent> {
     Agent::ALL
         .iter()
         .copied()
         .find(|agent| agent_label(*agent) == text)
-}
-
-/// The arguments that ask a runtime which agent a container was made for.
-///
-/// Pure, so the query can be asserted without a container. Both runtimes take
-/// the same template.
-fn made_for_arguments(name: &str) -> Vec<String> {
-    vec![
-        "inspect".to_owned(),
-        "--format".to_owned(),
-        format!("{{{{index .Config.Labels \"{AGENT_LABEL}\"}}}}"),
-        name.to_owned(),
-    ]
 }
 
 /// Which agent a container was made for, if it says.
@@ -1557,7 +1498,13 @@ fn made_for_arguments(name: &str) -> Vec<String> {
 #[mutants::skip]
 pub async fn made_for(runtime: &ContainerRuntime, name: &str) -> Result<Option<Agent>, AgentError> {
     let asked = tokio::process::Command::new(runtime.path())
-        .args(made_for_arguments(name))
+        .args(
+            Command::Label {
+                name: name.to_owned(),
+                label: Label::Agent,
+            }
+            .arguments(),
+        )
         .kill_on_drop(true)
         .output()
         .await
@@ -1573,19 +1520,6 @@ pub async fn made_for(runtime: &ContainerRuntime, name: &str) -> Result<Option<A
         });
     }
     Ok(labelled(String::from_utf8_lossy(&asked.stdout).trim()))
-}
-
-/// The arguments that ask a runtime which instance started a container.
-///
-/// Pure, so the query can be asserted without a container. The same template
-/// as [`made_for_arguments`], and both runtimes take it.
-fn started_by_arguments(name: &str) -> Vec<String> {
-    vec![
-        "inspect".to_owned(),
-        "--format".to_owned(),
-        format!("{{{{index .Config.Labels \"{INSTANCE_LABEL}\"}}}}"),
-        name.to_owned(),
-    ]
 }
 
 /// Which instance started a container, if it says.
@@ -1606,7 +1540,13 @@ pub async fn started_by(
     name: &str,
 ) -> Result<Option<InstanceId>, AgentError> {
     let asked = tokio::process::Command::new(runtime.path())
-        .args(started_by_arguments(name))
+        .args(
+            Command::Label {
+                name: name.to_owned(),
+                label: Label::Instance,
+            }
+            .arguments(),
+        )
         .kill_on_drop(true)
         .output()
         .await
@@ -1631,7 +1571,9 @@ pub async fn started_by(
 /// that is not an identifier is treated the same way: unreadable rather than
 /// somebody else's, because guessing the other way round would let a sweep
 /// remove a container it could not actually place.
-fn minted(text: &str) -> Option<InstanceId> {
+/// The instance a label names, if it names one this build can read.
+#[must_use]
+pub fn minted(text: &str) -> Option<InstanceId> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return None;
@@ -1721,6 +1663,47 @@ fn retained_arguments(
     arguments
 }
 
+/// Everything a container is started with, decided elsewhere and handed
+/// over as plain data.
+///
+/// What a handout decides, rendered: the environment is already the list of
+/// variables the container is given, and the role is what decides the
+/// image — see `docs/decisions/0036-a-foremans-image-is-not-a-jobs.md`.
+#[derive(Debug, Clone)]
+pub struct Launch {
+    /// Which agent runs in it.
+    pub agent: Agent,
+    /// What it runs as.
+    pub role: Role,
+    /// Exactly the environment it is given, in order, and nothing inherited.
+    pub environment: Vec<(String, Secret)>,
+    /// The repository checked out before the agent speaks, for a job.
+    pub repository: Option<String>,
+    /// The platform whose tool makes the checkout, if a credential for one
+    /// is held.
+    pub platform: Option<Platform>,
+    /// What the agent runs on.
+    pub kit: Kit,
+}
+
+impl Launch {
+    /// What a handout decides, rendered.
+    ///
+    /// # Errors
+    ///
+    /// Fails as [`environment`] does.
+    pub fn of(handout: &Handout) -> Result<Self, AgentError> {
+        Ok(Self {
+            agent: handout.agent(),
+            role: handout.role(),
+            environment: environment(handout)?,
+            repository: handout.repository().map(str::to_owned),
+            platform: handout.platform(Platform::GitHub).map(|_| Platform::GitHub),
+            kit: handout.kit().clone(),
+        })
+    }
+}
+
 /// Starts a retained container for an agent and puts the first question to it.
 ///
 /// The container survives this process, under `name`. Nothing removes it —
@@ -1737,18 +1720,14 @@ fn retained_arguments(
 #[mutants::skip]
 pub async fn begin(
     runtime: &ContainerRuntime,
-    handout: &Handout,
+    launch: &Launch,
     name: &str,
     instance: InstanceId,
     tools: Option<&Tools>,
     question: &str,
 ) -> Result<Answer, AgentError> {
-    let delivering = delivered(handout)?;
-    // Which image is decided by the handout rather than passed in beside it.
-    // That is what stops a container holding a foreman's credentials from
-    // being started on a job's image — see
-    // `docs/decisions/0036-a-foremans-image-is-not-a-jobs.md`.
-    let image = build(runtime, handout.agent(), handout.role()).await?;
+    let delivering = &launch.environment;
+    let image = build(runtime, launch.agent, launch.role).await?;
     // Created rather than run, so there is a moment between existing and
     // starting in which the thread can be put in place. `run` would have
     // started it immediately and left nowhere to do that.
@@ -1756,9 +1735,9 @@ pub async fn begin(
         .args(retained_arguments(
             name,
             &image,
-            handout.agent(),
+            launch.agent,
             instance,
-            &delivering,
+            delivering,
         ))
         .envs(
             delivering
@@ -1788,12 +1767,11 @@ pub async fn begin(
     // A foreman's handout carries no repository, and its image has no tool to
     // clone with, so the step is a job's alone. With one platform, holding
     // its credential is what decides which tool makes the clone.
-    if let Some(repository) = handout.repository() {
-        let platform = handout.platform(Platform::GitHub).map(|_| Platform::GitHub);
-        check_out(runtime, name, repository, platform).await?;
+    if let Some(repository) = &launch.repository {
+        check_out(runtime, name, repository, launch.platform).await?;
     }
     let container = spawn(runtime, &agent_arguments(name), &[])?;
-    converse(container, Opening::Fresh, tools, handout.kit(), question).await
+    converse(container, Opening::Fresh, tools, &launch.kit, question).await
 }
 
 /// What makes sure a container is up, without attaching to it.
@@ -2019,10 +1997,179 @@ pub async fn halt(runtime: &ContainerRuntime, name: &str) -> Result<(), AgentErr
     })
 }
 
-/// Every container this project has left behind, by name.
+/// One question the runtime is asked, as a value.
 ///
-/// Found by label rather than by reading the instance, so that a container
-/// whose job the snapshot has lost is still findable.
+/// Rendered to the arguments the runtime is given and read back from them,
+/// and the two directions are tested against each other, so that whatever
+/// decides to ask — the instance, since
+/// `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`
+/// — and whatever answers in a simulation cannot drift apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Command {
+    /// Whether the runtime answers at all, which is also how a candidate for
+    /// one is found to be present.
+    Version,
+    /// The names of every container this project started, or only the
+    /// running ones.
+    Containers {
+        /// Only those up right now.
+        running_only: bool,
+    },
+    /// What one label on a container says.
+    Label {
+        /// The container.
+        name: String,
+        /// Which label.
+        label: Label,
+    },
+    /// Stop a container, leaving it where it is.
+    Halt {
+        /// The container.
+        name: String,
+    },
+    /// Remove a container and everything inside it.
+    ///
+    /// Forced, because a container that is still running is one this has
+    /// decided is finished with, and stopping it first would be two commands
+    /// with a window between them.
+    Discard {
+        /// The container.
+        name: String,
+    },
+    /// Where a container's tunnel is published on the host, if anywhere.
+    Port {
+        /// The container.
+        name: String,
+    },
+    /// Every image this project has built and still holds.
+    Images,
+    /// Remove one image.
+    RemoveImage {
+        /// Its name and tag.
+        image: String,
+    },
+}
+
+/// The labels a container of this project's carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Label {
+    /// Which instance started it.
+    Instance,
+    /// Which agent it was made for.
+    Agent,
+}
+
+impl Label {
+    const fn key(self) -> &'static str {
+        match self {
+            Self::Instance => INSTANCE_LABEL,
+            Self::Agent => AGENT_LABEL,
+        }
+    }
+
+    fn of(key: &str) -> Option<Self> {
+        match key {
+            INSTANCE_LABEL => Some(Self::Instance),
+            AGENT_LABEL => Some(Self::Agent),
+            _ => None,
+        }
+    }
+}
+
+impl Command {
+    /// The arguments that ask it, which both runtimes take.
+    #[must_use]
+    pub fn arguments(&self) -> Vec<String> {
+        match self {
+            Self::Version => vec!["version".to_owned()],
+            Self::Containers { running_only } => {
+                let mut arguments = vec!["ps".to_owned()];
+                if !running_only {
+                    arguments.push("--all".to_owned());
+                }
+                arguments.extend([
+                    "--filter".to_owned(),
+                    format!("label={OWNER_LABEL}"),
+                    "--format".to_owned(),
+                    "{{.Names}}".to_owned(),
+                ]);
+                arguments
+            }
+            Self::Label { name, label } => vec![
+                "inspect".to_owned(),
+                "--format".to_owned(),
+                format!("{{{{index .Config.Labels \"{}\"}}}}", label.key()),
+                name.clone(),
+            ],
+            Self::Halt { name } => vec!["stop".to_owned(), name.clone()],
+            Self::Discard { name } => {
+                vec!["rm".to_owned(), "--force".to_owned(), name.clone()]
+            }
+            Self::Port { name } => vec!["port".to_owned(), name.clone(), TUNNEL_PORT.to_string()],
+            Self::Images => ours_arguments(),
+            Self::RemoveImage { image } => vec!["rmi".to_owned(), image.clone()],
+        }
+    }
+
+    /// The question these arguments ask, if they ask one this build renders.
+    #[must_use]
+    pub fn parse(arguments: &[String]) -> Option<Self> {
+        let words: Vec<&str> = arguments.iter().map(String::as_str).collect();
+        match words.as_slice() {
+            ["version"] => Some(Self::Version),
+            ["ps", "--all", "--filter", filter, "--format", "{{.Names}}"]
+                if *filter == format!("label={OWNER_LABEL}") =>
+            {
+                Some(Self::Containers {
+                    running_only: false,
+                })
+            }
+            ["ps", "--filter", filter, "--format", "{{.Names}}"]
+                if *filter == format!("label={OWNER_LABEL}") =>
+            {
+                Some(Self::Containers { running_only: true })
+            }
+            ["inspect", "--format", template, name] => {
+                let key = template
+                    .strip_prefix("{{index .Config.Labels \"")?
+                    .strip_suffix("\"}}")?;
+                Some(Self::Label {
+                    name: (*name).to_owned(),
+                    label: Label::of(key)?,
+                })
+            }
+            ["stop", name] => Some(Self::Halt {
+                name: (*name).to_owned(),
+            }),
+            ["rm", "--force", name] => Some(Self::Discard {
+                name: (*name).to_owned(),
+            }),
+            ["port", name, published] if *published == TUNNEL_PORT.to_string() => {
+                Some(Self::Port {
+                    name: (*name).to_owned(),
+                })
+            }
+            [
+                "images",
+                "--filter",
+                filter,
+                "--format",
+                "{{.Repository}}:{{.Tag}}",
+            ] if *filter == format!("reference={REPOSITORY}") => Some(Self::Images),
+            ["rmi", image] => Some(Self::RemoveImage {
+                image: (*image).to_owned(),
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// Every container this project has ever started that the runtime still
+/// holds, by name.
+///
+/// The names a container carries are the only thing a listing is asked for:
+/// the two runtimes format a listing's labels differently, and an inspection
+/// is the one shape both take, so labels are asked per container.
 ///
 /// # Errors
 ///
@@ -2031,26 +2178,27 @@ pub async fn halt(runtime: &ContainerRuntime, name: &str) -> Result<(), AgentErr
 pub async fn abandoned(runtime: &ContainerRuntime) -> Result<Vec<String>, AgentError> {
     listed(
         runtime,
-        &["ps", "--all", "--filter", &format!("label={OWNER_LABEL}")],
+        &Command::Containers {
+            running_only: false,
+        },
     )
     .await
 }
 
-/// The names a listing query reports.
+/// Every container this project started that is up right now, by name.
 ///
-/// Shared by the two that ask it, which differ by one flag. Written once
-/// because the format string is the part that has to match on both — a listing
-/// that printed anything else would be parsed as container names and produce a
-/// sweep acting on nothing.
+/// # Errors
 ///
-/// Skipped by mutation testing, like everything here that drives the runtime:
-/// what it does is spawn a process and hand the output to [`names`], which is
-/// where the deciding is and is tested directly.
+/// Fails if the runtime cannot be run, or refuses the query.
 #[mutants::skip]
-async fn listed(runtime: &ContainerRuntime, query: &[&str]) -> Result<Vec<String>, AgentError> {
+pub async fn running(runtime: &ContainerRuntime) -> Result<Vec<String>, AgentError> {
+    listed(runtime, &Command::Containers { running_only: true }).await
+}
+
+#[mutants::skip]
+async fn listed(runtime: &ContainerRuntime, query: &Command) -> Result<Vec<String>, AgentError> {
     let listed = tokio::process::Command::new(runtime.path())
-        .args(query)
-        .args(["--format", "{{.Names}}"])
+        .args(query.arguments())
         .kill_on_drop(true)
         .output()
         .await
@@ -2068,17 +2216,13 @@ async fn listed(runtime: &ContainerRuntime, query: &[&str]) -> Result<Vec<String
     Ok(names(&String::from_utf8_lossy(&listed.stdout)))
 }
 
-/// The container names in what a listing reported.
-///
-/// Pure, so what a sweep works from can be tested without a runtime. A blank
-/// line is dropped rather than carried: the runtime prints one when it found
-/// nothing, and a name that is the empty string reaches a subcommand that
-/// would then address something other than what was meant.
-fn names(reported: &str) -> Vec<String> {
+/// The names in a listing, one per line, however the runtime spaced them.
+#[must_use]
+pub fn names(reported: &str) -> Vec<String> {
     reported
         .lines()
         .map(str::trim)
-        .filter(|name| !name.is_empty())
+        .filter(|line| !line.is_empty())
         .map(str::to_owned)
         .collect()
 }
@@ -2134,6 +2278,11 @@ pub async fn tunnel_port(
 
 /// The host port in what the runtime reported, if it reported one.
 ///
+/// Public because the instance reads it: since
+/// `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`
+/// the command is rendered there and its output parsed there, and this is
+/// the parser.
+///
 /// Pure, so every shape either runtime prints can be tested without a
 /// container. It takes the port from the *last* colon onwards rather than
 /// splitting on colons, because a mapping published on IPv6 is printed as
@@ -2143,31 +2292,12 @@ pub async fn tunnel_port(
 /// The first line that yields a port wins. Nothing here prefers one family
 /// over the other: both reach the same container, and this connects over
 /// loopback where both work.
-fn published(reported: &str) -> Option<u16> {
+#[must_use]
+pub fn published(reported: &str) -> Option<u16> {
     reported
         .lines()
         .filter_map(|line| line.trim().rsplit(':').next())
         .find_map(|port| port.trim().parse().ok())
-}
-
-/// Every container this project has running right now, by name.
-///
-/// The same question [`abandoned`] asks, narrowed to what is up. Since
-/// `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`
-/// those are two different sets and the difference is the point: a container
-/// that is merely retained costs a writable layer, and one that is running
-/// costs whatever is running in it.
-///
-/// # Errors
-///
-/// Fails if the runtime cannot be run, or refuses the query.
-#[mutants::skip]
-pub async fn running(runtime: &ContainerRuntime) -> Result<Vec<String>, AgentError> {
-    listed(
-        runtime,
-        &["ps", "--filter", &format!("label={OWNER_LABEL}")],
-    )
-    .await
 }
 
 /// Removes a container and everything inside it.
@@ -2538,6 +2668,101 @@ mod tests {
 
     /// A container's label names its agent both ways, and an unknown label
     /// names nobody.
+    /// Every question renders to arguments and reads back as itself, and
+    /// arguments that ask nothing this build renders read as nothing.
+    #[test]
+    fn every_command_reads_back_from_its_own_arguments() {
+        let every = [
+            Command::Version,
+            Command::Containers {
+                running_only: false,
+            },
+            Command::Containers { running_only: true },
+            Command::Label {
+                name: "stageman-job-1".to_owned(),
+                label: Label::Instance,
+            },
+            Command::Label {
+                name: "stageman-foreman-2".to_owned(),
+                label: Label::Agent,
+            },
+            Command::Halt {
+                name: "stageman-job-1".to_owned(),
+            },
+            Command::Discard {
+                name: "stageman-job-1".to_owned(),
+            },
+            Command::Port {
+                name: "stageman-job-1".to_owned(),
+            },
+            Command::Images,
+            Command::RemoveImage {
+                image: "stageman:0123".to_owned(),
+            },
+        ];
+        for command in every {
+            assert_eq!(
+                Command::parse(&command.arguments()),
+                Some(command.clone()),
+                "{command:?}"
+            );
+        }
+        assert_eq!(Command::parse(&["rm".to_owned(), "-f".to_owned()]), None);
+        assert_eq!(
+            Command::parse(&[
+                "ps".to_owned(),
+                "--all".to_owned(),
+                "--filter".to_owned(),
+                "label=other".to_owned(),
+                "--format".to_owned(),
+                "{{.Names}}".to_owned()
+            ]),
+            None,
+            "another project's containers are not this one's question"
+        );
+        assert_eq!(
+            Command::parse(&[
+                "ps".to_owned(),
+                "--filter".to_owned(),
+                "label=other".to_owned(),
+                "--format".to_owned(),
+                "{{.Names}}".to_owned()
+            ]),
+            None,
+            "and no more so when only the running ones are asked for"
+        );
+        assert_eq!(
+            Command::parse(&[
+                "inspect".to_owned(),
+                "--format".to_owned(),
+                "{{index .Config.Labels \"other\"}}".to_owned(),
+                "x".to_owned()
+            ]),
+            None
+        );
+        assert_eq!(
+            Command::parse(&[
+                "port".to_owned(),
+                "stageman-job-1".to_owned(),
+                "80".to_owned()
+            ]),
+            None,
+            "another port is another question"
+        );
+        assert_eq!(
+            Command::parse(&[
+                "images".to_owned(),
+                "--filter".to_owned(),
+                "reference=other".to_owned(),
+                "--format".to_owned(),
+                "{{.Repository}}:{{.Tag}}".to_owned()
+            ]),
+            None,
+            "another project's images are not this one's question"
+        );
+        assert_eq!(names(" a \n\nb\n"), vec!["a".to_owned(), "b".to_owned()]);
+    }
+
     #[test]
     fn an_agents_label_reads_back_as_that_agent() {
         for agent in Agent::ALL {
@@ -2550,7 +2775,11 @@ mod tests {
         assert_eq!(labelled(""), None, "no label is no agent");
         assert_eq!(labelled("gpt"), None, "a label this build does not know");
         assert_eq!(
-            made_for_arguments("stageman-foreman-x"),
+            Command::Label {
+                name: "stageman-foreman-x".to_owned(),
+                label: Label::Agent,
+            }
+            .arguments(),
             vec![
                 "inspect",
                 "--format",
@@ -3134,44 +3363,31 @@ mod tests {
         );
     }
 
-    #[test]
-    fn nothing_installed_is_an_absence_rather_than_a_failure() {
-        assert_eq!(first_present(&[]), None);
-        assert_eq!(first_present(&["/nowhere/at/all/docker"]), None);
-    }
-
-    #[test]
-    fn the_first_path_that_is_there_is_the_one_used() {
-        let real = ["/usr/bin/false", "/bin/false"]
-            .into_iter()
-            .find(|candidate| Path::new(candidate).is_file())
-            .expect("a standard utility");
-
-        let found = first_present(&["/nowhere/at/all/docker", real]);
-
-        assert_eq!(found, Some(ContainerRuntime::new(PathBuf::from(real))));
-    }
-
-    /// A directory is not a runtime, which `exists` would not have caught.
-    #[test]
-    fn a_directory_where_a_runtime_would_be_is_not_one() {
-        assert_eq!(first_present(&["/usr/bin"]), None);
-    }
-
     /// Every candidate is absolute, which is the property that makes this not
     /// a `PATH` search.
     #[test]
     fn nothing_is_looked_for_relative_to_wherever_this_started() {
-        assert!(
-            !candidates().is_empty(),
-            "this platform knows nowhere to look"
-        );
-        for candidate in candidates() {
-            assert!(
-                Path::new(candidate).is_absolute(),
-                "{candidate} is not an absolute path"
-            );
+        // Every platform's list, on whichever machine this runs, which is
+        // the point of the lists being values rather than one compiled
+        // arm: what a mac would look for is checkable from a Linux box.
+        for target in [Target::MacOs, Target::Linux, Target::Windows] {
+            let looked = candidates(target);
+            assert!(!looked.is_empty(), "{target:?} knows nowhere to look");
+            for candidate in looked {
+                let absolute = if target == Target::Windows {
+                    // A drive letter, which is what absolute means there and
+                    // what `Path` cannot tell from a Unix machine.
+                    candidate.starts_with(r"C:\")
+                } else {
+                    Path::new(candidate).is_absolute()
+                };
+                assert!(absolute, "{candidate} is not an absolute path");
+            }
         }
+        assert!(
+            candidates(Target::Unknown).is_empty(),
+            "a platform nothing knows looks nowhere"
+        );
     }
 
     #[tokio::test]
@@ -3445,7 +3661,7 @@ mod tests {
     /// the delivery helper is fallible now — unwrapping it in six places would
     /// say less than naming the expectation once.
     fn names_of(handout: &Handout) -> Vec<String> {
-        delivered(handout)
+        environment(handout)
             .expect("a handout with no reserved name")
             .into_iter()
             .map(|(name, _)| name)
@@ -3462,7 +3678,7 @@ mod tests {
                 id: "1728312345.678901".to_owned(),
             });
 
-        let delivering = delivered(&handout).expect("a handout with no reserved name");
+        let delivering = environment(&handout).expect("a handout with no reserved name");
         let named = names_of(&handout);
 
         assert!(
@@ -3558,7 +3774,7 @@ mod tests {
         let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
         let handout = Handout::for_foreman(&state, project).expect("a watched project");
 
-        let delivered = delivered(&handout).expect("a handout with no reserved name");
+        let delivered = environment(&handout).expect("a handout with no reserved name");
 
         assert_eq!(delivered.len(), 1, "{delivered:?}");
         assert_eq!(delivered[0].0, "CLAUDE_CODE_OAUTH_TOKEN");
@@ -3598,7 +3814,7 @@ mod tests {
         let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project)
             .expect("a watched project");
 
-        let delivering = delivered(&handout).expect("no reserved name here");
+        let delivering = environment(&handout).expect("no reserved name here");
         let found = delivering
             .iter()
             .find(|(name, _)| name == "STRIPE_API_KEY")
@@ -3653,7 +3869,7 @@ mod tests {
             let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project)
                 .expect("a watched project");
 
-            let refused = delivered(&handout).expect_err("that name is ours");
+            let refused = environment(&handout).expect_err("that name is ours");
 
             assert!(
                 matches!(refused, AgentError::ReservedVariable { ref name } if name == claimed),
@@ -3700,7 +3916,7 @@ mod tests {
 
         let arguments = session_arguments(
             &built(),
-            &delivered(&handout).expect("a handout with no reserved name"),
+            &environment(&handout).expect("a handout with no reserved name"),
         );
         let line = arguments.join(" ");
 
@@ -3724,7 +3940,7 @@ mod tests {
 
         let arguments = session_arguments(
             &built(),
-            &delivered(&handout).expect("a handout with no reserved name"),
+            &environment(&handout).expect("a handout with no reserved name"),
         );
 
         assert!(!arguments.iter().any(|a| a == "none"), "{arguments:?}");
@@ -3755,7 +3971,7 @@ mod tests {
             &built(),
             Agent::Claude,
             an_instance(),
-            &delivered(&handout).expect("a handout with no reserved name"),
+            &environment(&handout).expect("a handout with no reserved name"),
         );
         let line = arguments.join(" ");
 
@@ -3799,7 +4015,7 @@ mod tests {
             &built(),
             Agent::Claude,
             an_instance(),
-            &delivered(&handout).expect("a handout with no reserved name"),
+            &environment(&handout).expect("a handout with no reserved name"),
         );
         let line = arguments.join(" ");
 
@@ -3825,7 +4041,7 @@ mod tests {
             &built(),
             Agent::Claude,
             an_instance(),
-            &delivered(&handout).expect("a handout with no reserved name"),
+            &environment(&handout).expect("a handout with no reserved name"),
         );
 
         let line = arguments.join(" ");
@@ -3861,7 +4077,11 @@ mod tests {
     /// The question is asked of the named container, and of nothing else.
     #[test]
     fn asking_which_instance_started_a_container_names_that_container() {
-        let arguments = started_by_arguments("stageman-job-abc");
+        let arguments = Command::Label {
+            name: "stageman-job-abc".to_owned(),
+            label: Label::Instance,
+        }
+        .arguments();
         assert_eq!(arguments[0], "inspect");
         assert_eq!(
             arguments.last().map(String::as_str),
@@ -3970,10 +4190,33 @@ mod tests {
             &built(),
             Agent::Claude,
             an_instance(),
-            &delivered(&handout).expect("a handout with no reserved name"),
+            &environment(&handout).expect("a handout with no reserved name"),
         );
 
         assert!(arguments.iter().any(|a| a == "--init"), "{arguments:?}");
+    }
+
+    /// Runs one of the commands the instance renders, against a real
+    /// runtime.
+    ///
+    /// What the instance asks the world for is an argument list, so a test
+    /// that drives the same list is evidence about the thing it will meet.
+    fn asking(runtime: &ContainerRuntime, command: &Command) -> std::process::Output {
+        std::process::Command::new(runtime.path())
+            .args(command.arguments())
+            .output()
+            .expect("the runtime runs")
+    }
+
+    /// Every image of ours the runtime holds right now.
+    fn ours_now(runtime: &ContainerRuntime) -> Vec<String> {
+        let listed = asking(runtime, &Command::Images);
+        assert!(
+            listed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&listed.stderr)
+        );
+        tagged(&String::from_utf8_lossy(&listed.stdout))
     }
 
     /// A sweep removes an image nothing needs, keeps the ones a container is
@@ -4031,14 +4274,24 @@ mod tests {
             String::from_utf8_lossy(&created.stderr)
         );
 
-        reclaim(&runtime).await.expect("the runtime answers");
+        // The sweep as the instance performs it: ask which images are ours,
+        // keep the ones this build would only rebuild, remove the rest. The
+        // deciding is pure and tested in memory; what needs a live runtime
+        // is what the two commands actually do.
+        let keeping = keeping();
+        for image in ours_now(&runtime) {
+            if kept(&keeping, &image) {
+                continue;
+            }
+            drop(asking(&runtime, &Command::RemoveImage { image }));
+        }
 
         // Asserted on what is left rather than on how many went, because
         // another test may be sweeping the same daemon at the same moment and
         // the count is the one thing that is genuinely theirs to change. What
         // is left is not: an image nothing needs is gone whoever removed it,
         // and one a container needs survives either way.
-        let left = ours(&runtime).await.expect("the runtime answers");
+        let left = ours_now(&runtime);
         assert!(
             !left.contains(&stale),
             "a name nothing needs is still here: {left:?}",
@@ -4128,7 +4381,7 @@ mod tests {
 
         let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
         let handout = Handout::for_foreman(&state, project).expect("a watched project");
-        let delivering = delivered(&handout).expect("a handout with no reserved name");
+        let delivering = environment(&handout).expect("a handout with no reserved name");
         let image = build(&runtime, Agent::Claude, Role::Foreman)
             .await
             .expect("the image builds");
@@ -4473,7 +4726,7 @@ mod tests {
 
             let first = begin(
                 &runtime,
-                &handout,
+                &Launch::of(&handout).expect("a handout with no reserved name"),
                 name,
                 an_instance(),
                 None,
@@ -4525,7 +4778,7 @@ mod tests {
                 std::time::Duration::from_secs(6),
                 begin(
                     &runtime,
-                    &handout,
+                    &Launch::of(&handout).expect("a handout with no reserved name"),
                     name,
                     an_instance(),
                     None,

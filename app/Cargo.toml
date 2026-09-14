@@ -1,4 +1,4 @@
-# The one you run. It may name all three internal crates; nothing may name it.
+# The one you run. It may name every internal crate; nothing may name it.
 #
 # **Not a published package**, per
 # `docs/decisions/0039-a-release-is-a-tagged-binary.md` — a registry builds with
@@ -19,7 +19,7 @@ version.workspace = true
 # Inherited rather than repeated. Workspace inheritance is opt-in per field, so
 # without this line the workspace's `publish = false` applies to everything
 # except the one package anybody would try to publish — which is the shape of
-# mistake that looks configured and is not. The four internal crates declare it
+# mistake that looks configured and is not. The internal crates declare it
 # themselves and always have.
 publish.workspace = true
 edition.workspace = true
@@ -42,7 +42,6 @@ repository.workspace = true
 [features]
 default = ["server"]
 server = [
-    "dep:etcetera",
     "dep:parking_lot",
     "dep:rand",
     "dep:futures-util",
@@ -55,10 +54,11 @@ server = [
     "dep:stageman-core",
     "dep:stageman-job",
     "dep:stageman-foreman",
+    "dep:stageman-instance",
+    "dep:stageman-world",
     "dep:tokio",
     "dep:tracing",
     "dep:tracing-subscriber",
-    "dep:uuid",
     "dioxus/fullstack",
     "dioxus/router",
     "dioxus/server",
@@ -82,6 +82,10 @@ dioxus = "=0.7.9"
 # function has to serialise, and what the browser is handed must be nothing
 # more than that.
 serde = { version = "1.0.228", features = ["derive"] }
+# Both halves: what crosses to a browser, as the instance builds it and the
+# page reads it. The one internal crate the browser's half may name, because
+# it names nothing — see `docs/architecture.md` §1.
+stageman-wire = { workspace = true }
 # Both halves. An error returned by a server function is matched on by the
 # browser, so the type and its `Display` have to exist there too — which is
 # what makes `docs/conventions.md` §3's typed-errors rule true on the wire
@@ -111,7 +115,6 @@ lucide-dioxus = { version = "2.43.0", features = [
     "shapes",
 ] }
 
-etcetera = { version = "0.11.0", optional = true }
 parking_lot = { version = "0.12.5", optional = true }
 rand = { version = "0.10.2", optional = true }
 # The daemon's own half of a channel. A job's agent posts through a tool in its
@@ -159,6 +162,11 @@ stageman-agent = { workspace = true, optional = true }
 stageman-core = { workspace = true, optional = true }
 stageman-job = { workspace = true, optional = true }
 stageman-foreman = { workspace = true, optional = true }
+stageman-instance = { workspace = true, optional = true }
+# Both halves, like the wire crate and for the same reason: it names nothing
+# but serialisation.
+stageman-vocabulary = { workspace = true }
+stageman-world = { workspace = true, optional = true }
 tokio = { version = "1.53.1", features = [
     "io-util",
     "macros",
@@ -171,7 +179,6 @@ tracing-subscriber = { version = "0.3.23", features = [
     "env-filter",
     "fmt",
 ], optional = true }
-uuid = { version = "1.26.0", features = ["v4"], optional = true }
 tw_merge = "0.1"
 
 [lints]
@@ -183,6 +190,11 @@ workspace = true
 # gate's wasm pass, for tests that are not compiled there.
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 tempfile = "3.27.0"
+# For the example alone, which mints identifiers for a state it invents. The
+# daemon mints nothing: every identifier it makes comes from the instance's
+# seeded generator, which is the whole of
+# `docs/decisions/0056-the-instance-decides-and-the-world-performs.md`.
+uuid = { version = "1.26.0", features = ["v4"] }
 
 # The example and the integration test state what the browser cannot build.
 # `required-features` makes cargo skip a target rather than fail on it, so the

@@ -131,7 +131,7 @@ same reason, because a suite that counted what was left behind would now pass
 on the leak and fail on the feature.
 
 **The sweep gains a legal state it does not currently have.** An idle job whose
-container is running is neither of the two cases `reconcile` reasons about —
+container is running is neither of the two cases the sweep reasons about —
 a working job whose container stopped, and a container whose job is not
 working — so a sweep that has not been told about it will either put the job
 back to work or report it as unplaceable. Both are wrong and both are quiet.

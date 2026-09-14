@@ -40,10 +40,9 @@ use std::process::{Child, ChildStdout, Command, Output, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use stageman::Store;
 use stageman_core::{
-    Agent, AgentConfig, Channel, ChannelConfig, Job, JobId, Key, Kit, KitConfig, KitName, Progress,
-    Project, ProjectId, Secret, State, Timestamp, Waiting,
+    Agent, AgentConfig, Channel, ChannelConfig, Job, JobId, Key, Kit, KitConfig, KitName,
+    NONCE_LEN, Progress, Project, ProjectId, Secret, State, Timestamp, Waiting,
 };
 
 /// A key, as an operator would supply it: thirty-two bytes of base64.
@@ -57,7 +56,13 @@ const KEY: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
 /// meant to set.
 fn run(snapshot: &PathBuf, variables: &[(&str, &str)]) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_stageman"));
-    command.env_clear().env("STAGEMAN_STATE", snapshot);
+    // The dashboard is bound before the instance boots, so a refusal these
+    // tests look for is reached only if the port was free: whichever is.
+    command
+        .env_clear()
+        .env("IP", "127.0.0.1")
+        .env("PORT", "0")
+        .env("STAGEMAN_STATE", snapshot);
     for (name, value) in variables {
         command.env(name, value);
     }
@@ -370,6 +375,21 @@ fn watching(name: &str, repository: &str) -> State {
     }
 }
 
+/// Puts a state on the disk, sealed as the instance would seal it, for the
+/// binary to open.
+///
+/// Written here rather than through the binary, because what these tests are
+/// about is what a start does with a file that already exists.
+fn written(snapshot: &Path, state: &State) {
+    let mut fresh = (1_u8..).map(|n| [n; NONCE_LEN]);
+    let mut nonces = || fresh.next().expect("fewer credentials than a byte counts");
+    let sealed = state
+        .seal(&key(), &mut nonces)
+        .expect("a well-formed state seals");
+    let encoded = serde_json::to_vec_pretty(&sealed).expect("a snapshot encodes");
+    std::fs::write(snapshot, encoded).expect("the snapshot is written");
+}
+
 fn scratch() -> (tempfile::TempDir, PathBuf) {
     let directory = tempfile::tempdir().expect("a temporary directory");
     let snapshot = directory.path().join("state.json");
@@ -603,6 +623,49 @@ fn a_key_that_is_not_key_material_is_refused_without_echoing_it() {
     assert!(!said.contains("far-too-short"), "it echoed the key: {said}");
 }
 
+/// A file that exists and cannot be read is refused as such, rather than
+/// treated as a first run and written over.
+///
+/// A directory where the file should be is the cheapest unreadable file
+/// there is, and the failure it must not produce is the quiet one: an
+/// instance that could not be read, replaced by an empty one that could.
+#[test]
+fn an_instance_that_cannot_be_read_is_not_mistaken_for_a_first_run() {
+    let (kept, _) = scratch();
+
+    let finished = run(&kept.path().to_path_buf(), &[("STAGEMAN_KEY", KEY)]);
+
+    assert!(!finished.status.success());
+    let said = String::from_utf8_lossy(&finished.stderr);
+    assert!(said.contains("could not be read"), "{said}");
+}
+
+/// Two instances started from nothing are two instances.
+///
+/// The identity is minted from the seed the daemon draws for the instance,
+/// and a seed that was not drawn would give every fresh instance the same
+/// one — which is how one development instance's sweep would come to remove
+/// the real one's containers. Read off the files, because the identity is
+/// the one thing on them the state does not carry.
+#[test]
+fn two_instances_started_from_nothing_are_told_apart() {
+    let (_one_kept, one) = scratch();
+    let (_two_kept, two) = scratch();
+    drop(serving(&one, &[("STAGEMAN_KEY", KEY)]));
+    drop(serving(&two, &[("STAGEMAN_KEY", KEY)]));
+
+    let identity = |path: &Path| {
+        let text = std::fs::read_to_string(path).expect("it wrote an instance");
+        let snapshot: serde_json::Value = serde_json::from_str(&text).expect("it is JSON");
+        snapshot
+            .get("instance")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .expect("an instance names itself")
+    };
+    assert_ne!(identity(&one), identity(&two));
+}
+
 /// The whole of what this first piece of the dashboard claims: a page, served,
 /// with real state already rendered into it.
 ///
@@ -615,7 +678,7 @@ fn a_key_that_is_not_key_material_is_refused_without_echoing_it() {
 fn the_dashboard_arrives_with_the_instance_already_on_it() {
     let (_kept, snapshot) = scratch();
     let watched = watching("aviary", "https://example.invalid/aviary");
-    drop(Store::create(snapshot.clone(), key(), watched).expect("it can write"));
+    written(&snapshot, &watched);
 
     let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
     let page = running.get("/");
@@ -640,7 +703,7 @@ fn the_dashboard_arrives_with_the_instance_already_on_it() {
 fn the_route_the_page_reads_through_answers_on_its_own() {
     let (_kept, snapshot) = scratch();
     let watched = watching("aviary", "https://example.invalid/aviary");
-    drop(Store::create(snapshot.clone(), key(), watched).expect("it can write"));
+    written(&snapshot, &watched);
 
     let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
     let answer = running.get("/api/instance");
@@ -662,7 +725,7 @@ fn the_route_the_page_reads_through_answers_on_its_own() {
 fn nothing_served_carries_a_credential() {
     let (_kept, snapshot) = scratch();
     let watched = watching("aviary", "https://example.invalid/aviary");
-    drop(Store::create(snapshot.clone(), key(), watched).expect("it can write"));
+    written(&snapshot, &watched);
 
     let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
 
@@ -768,7 +831,7 @@ fn the_dashboard_counts_working_jobs_rather_than_all_of_them() {
             "it did not work".to_owned(),
         ))),
     );
-    drop(Store::create(snapshot.clone(), key(), state).expect("it can write"));
+    written(&snapshot, &state);
 
     let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
     let answer = running.get("/api/instance");
@@ -788,7 +851,7 @@ fn the_dashboard_counts_working_jobs_rather_than_all_of_them() {
 fn an_agent_a_project_still_names_cannot_be_forgotten() {
     let (_kept, snapshot) = scratch();
     let watched = watching("aviary", "https://example.invalid/aviary");
-    drop(Store::create(snapshot.clone(), key(), watched).expect("it can write"));
+    written(&snapshot, &watched);
 
     let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
     let refused = running.post("/api/agents/forget", r#"{"agent":"claude"}"#);

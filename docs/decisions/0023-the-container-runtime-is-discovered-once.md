@@ -54,6 +54,18 @@ none it prints what it looked for and stops the process; startup forces it
 before anything else, so that is the first thing that can fail and the last
 thing that needs saying.
 
+**Both halves of that paragraph were overtaken by
+`docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`,
+and the sentence above them was not.** The list is still compiled in, still
+per-platform and still ordered the same way. What changed is who reads it and
+how a candidate is tried: the instance is handed a value naming the platform
+this build was made for, holds every platform's list, and asks the world to
+*run* each candidate in turn rather than to look for the file. So there is no
+static and no discovery function — finding the file proved nothing anyway,
+since a client installed with no daemon behind it is a file that answers
+nothing — and a start on a platform is a thing any machine can now test,
+because the value can name a platform this is not.
+
 The split is deliberate: *where a runtime might be* is knowledge about
 container runtimes and belongs in the library, while *what to do when there is
 none* is a decision about a program that cannot run and belongs in the program.

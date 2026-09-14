@@ -85,6 +85,15 @@ image-check:
 # `check` rather than out of the bar for the reason it always did — the first
 # one costs minutes and a network, and `check` is the command you run
 # constantly.
+# The recorded flows in `instance/tests/replays/` are what a fresh instance is
+# replayed against, so rewriting one is a deliberate act and its diff is the
+# review. Nothing in the gate writes them: a test that quietly agreed with
+# itself would check nothing at all. See
+# `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`.
+[doc("Rewrite the recorded flows from an actual run — the diff is the review")]
+record:
+    STAGEMAN_RECORD=1 cargo nextest run --package stageman-instance -E 'binary(scenarios)'
+
 [doc("Run every container test — what `verify` adds")]
 containers: image-handshake
 

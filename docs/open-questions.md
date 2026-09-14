@@ -325,28 +325,73 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   that adapter landing, and worth deciding in the same change as its kit
   variant, since that variant is where the provider has to be named.
 
+- **Should the instance keep a flight recorder?** Everything it does is a
+  function of what it was constructed from and the events it was fed since,
+  per `docs/decisions/0056-the-instance-decides-and-the-world-performs.md`,
+  so a daemon that kept that sequence in memory and wrote it out when
+  something went wrong would turn any production failure into a scenario
+  that reproduces exactly. The design makes it cheap. What makes it a
+  question is that the sequence holds what people said on channels and the
+  bodies of tool calls, and the file it started from holds sealed
+  credentials — a second place secrets could live, with a retention and a
+  redaction question of its own. Settled by the first failure a log line
+  could not explain, and not before: noted so that it is not forgotten,
+  deliberately not built.
+
 ## Next
 
 Intended next steps, in order, each with its reason. Written as intentions, not
 progress: "next X, because Y" — never "X is 60% done", which is both derivable
 and wrong within a day.
 
-- Next, implement `docs/decisions/0034-tools-are-served-not-shipped.md`,
-  because everything queued behind it inherits the shape and one of those
-  things is how a job speaks. The instance serves its own tools over the
-  listener it already has; the two programs, the endpoint file, the thread
-  file and the mechanism that copies them into a stopped container all go; and
-  the warrant becomes per session rather than per container, delivered on the
-  session declaration and re-supplied on every resume.
+- Next, empty the application hole, because
+  `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`
+  is finished when nothing application-specific is left for a world to
+  perform, and what remains is four families rather than a design question.
+  The order below is the record's, and each one is the same shape of work as
+  the families already moved: render the command or the frame inside the
+  instance, read the answer inside it, and delete what the app was doing.
 
-  **The one thing worth building carefully is the failure.** An endpoint the
-  container cannot reach does not error — session creation succeeds and the
-  agent simply has no tools, which reads exactly like an agent that chose not
-  to use them. That is the shape this record was written to avoid inheriting,
-  so it wants a test that asserts the tools are *there*, not merely that a
-  session started.
+  **A turn**, which is the largest: a process kept open, its lines arriving
+  as events and going out as effects, so that the conversation with an agent
+  becomes a state machine a scenario can drive. The record expects this to
+  gain the case nothing tests today — a setting accepted and silently
+  ignored — and it is what still keeps a container runtime's path in the
+  app's performer.
 
-- Next, cover Slack against regression, because it works and nothing in the
+  **A probe**, which is the smallest and is not reducible to the others:
+  `docs/decisions/0047-a-tunnel-answers-only-when-something-behind-it-does.md`
+  measured what it has to mean, and a published port answers whether or not
+  anything is behind it.
+
+  **A channel's lifecycle**, which is a websocket and a request: connect,
+  acknowledge, refresh before the platform closes, retry, and measure the
+  deaf window — all of which `docs/decisions/0044-a-listener-only-listens.md`
+  could argue for and nothing could test.
+
+  Then the hole holds nothing, `AppEvent` and `AppEffect` are empty, and the
+  performer in the app crate goes with them.
+
+- Then make the container tests a recorder, because what they check is what
+  the pinned runtime and the pinned agent actually do, which is a recording
+  rather than a test. A recipe runs reality, captures what it prints and how
+  it answers, and writes the captures as the fixtures the in-memory tests
+  replay; the assumptions that cannot be recorded — that a published port
+  accepts and then closes — stay in that recipe as checks against the real
+  runtime. The gate then runs entirely in memory, which is what
+  `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`
+  asks for and what makes the bar cheap enough to keep raising.
+
+- Then add exploration, because replay pins what somebody thought of and
+  nothing yet finds what nobody did. A seed is a random world under the same
+  simulation, answering effects with faults and crashes and checking an
+  invariant after every step; a seed found failing is committed as a replay,
+  so the bug costs one run to rule out for ever. It belongs outside the gate,
+  on a recipe with a seed count and a budget and a workflow with a manual
+  trigger and a schedule, with one fixed seed in `just verify` so the harness
+  cannot rot unnoticed.
+
+- Then cover Slack against regression, because it works and nothing in the
   repository would notice if it stopped. Both directions have been driven end
   to end against a real workspace — a job speaks on its project's channel, and
   a reply reaches it through the thread it was said in. So the open item is
@@ -416,5 +461,9 @@ and wrong within a day.
   builders, the label constant, the name parser — is a unit test by definition
   and stays where it is. Roughly half of the ignored tests are in each group,
   so this is a move for some and not a reorganisation of all.
+
+  The scenarios of 0056 belong there too, and the simulated world with them:
+  test support that names the instance and nothing in the app, which is the
+  same rule from the other direction.
 
 

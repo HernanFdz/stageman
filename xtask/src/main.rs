@@ -465,14 +465,32 @@ fn run_mutants(base_arg: Option<&str>) -> Result<String, String> {
 fn finish(status: std::io::Result<std::process::ExitStatus>, ok: &str) -> Result<String, String> {
     match status {
         Ok(status) if status.success() => Ok(ok.to_owned()),
-        Ok(_) => Err(
-            "mutants: surviving mutants — the tests would not notice this code \
-                      being wrong. Write a test that fails under the mutation, or mark a \
-                      genuinely equivalent mutant with #[mutants::skip] and say why."
-                .to_owned(),
-        ),
+        Ok(_) => Err(why_it_failed()),
         Err(error) => Err(format!("running cargo mutants: {error}")),
     }
+}
+
+/// What a failed run actually found, which is not always a mutant.
+///
+/// A run that cannot finish — no space left for a build, a tool missing, a
+/// baseline that does not compile — exits non-zero having missed nothing,
+/// and telling somebody to write a test then sends them looking for a defect
+/// that is not there. What it found is on disk, so that is what is read.
+fn why_it_failed() -> String {
+    let found = |name: &str| {
+        fs::read_to_string(Path::new("mutants.out").join(name))
+            .is_ok_and(|listed| !listed.trim().is_empty())
+    };
+    if !found("missed.txt") && !found("timeout.txt") {
+        return "mutants: the run did not finish, and nothing was missed — what stopped it \
+                is in the output above. A full disk and a baseline that will not build \
+                both land here."
+            .to_owned();
+    }
+    "mutants: surviving mutants — the tests would not notice this code being wrong. \
+     Write a test that fails under the mutation, or mark a genuinely equivalent mutant \
+     with #[mutants::skip] and say why."
+        .to_owned()
 }
 
 // -------------------------------------------------------------------- checks

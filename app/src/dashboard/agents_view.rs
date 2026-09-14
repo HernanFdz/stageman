@@ -7,39 +7,18 @@
 //! agents is not broken, it is new — and this is the screen that ends that.
 //!
 //! **A credential travels one way.** It is sent here and never sent back:
-//! nothing on this page carries one, and [`Agent`] below has nowhere to put
-//! one, which is the invariant in `docs/architecture.md` §2 expressed as a
-//! type rather than as care.
+//! nothing on this page carries one, and [`Agent`] has nowhere to put one,
+//! which is the invariant in `docs/architecture.md` §2 expressed as a type
+//! rather than as care.
 
 use dioxus::prelude::*;
 #[cfg(feature = "server")]
-use dioxus::server::axum::Extension;
-use serde::{Deserialize, Serialize};
+use stageman_instance::{Request, Response};
 
 use super::error::{DashboardError, DashboardResult};
 use crate::ui::{Badge, BadgeTone, Button, ButtonVariant, Card, EmptyState};
 
-/// One agent this instance could run, as much of it as a page may know.
-///
-/// Note what is absent and cannot be added: the credential. This type is the
-/// enforcement, not the route below it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Agent {
-    /// What the browser names it back as.
-    pub id: String,
-    /// What it is called on screen.
-    pub name: String,
-    /// What it is good for.
-    pub description: String,
-    /// Whether a credential has been supplied for it.
-    pub configured: bool,
-    /// The projects that would break if it were forgotten.
-    ///
-    /// Empty means it can go. Anything else is what a refusal would say, and
-    /// carrying it here means the page can grey the button *and* explain,
-    /// rather than letting somebody find out by pressing it.
-    pub used_by: Vec<String>,
-}
+pub use stageman_wire::Agent;
 
 /// Every agent, whether or not it is configured.
 ///
@@ -49,16 +28,12 @@ pub struct Agent {
 /// # Errors
 ///
 /// Fails if this process is not operating an instance.
-#[cfg_attr(
-    feature = "server",
-    expect(
-        clippy::unused_async,
-        reason = "the shape a server function is required to have"
-    )
-)]
-#[get("/api/agents", instance: Extension<std::sync::Arc<crate::Store>>)]
+#[get("/api/agents")]
 pub async fn agents() -> DashboardResult<Vec<Agent>> {
-    Ok(super::listed(&instance.0.read()))
+    match super::ask(Request::Agents).await? {
+        Response::Agents(listing) => Ok(listing),
+        other => Err(super::unexpected(&other)),
+    }
 }
 
 /// Gives an agent a credential, or replaces the one it has.
@@ -71,78 +46,26 @@ pub async fn agents() -> DashboardResult<Vec<Agent>> {
 ///
 /// Fails if the agent is not one this instance can run, or if the credential
 /// is empty.
-#[cfg_attr(
-    feature = "server",
-    expect(
-        clippy::unused_async,
-        reason = "the shape a server function is required to have"
-    )
-)]
-#[post("/api/agents/configure", instance: Extension<std::sync::Arc<crate::Store>>)]
+#[post("/api/agents/configure")]
 pub async fn configure(agent: String, credential: String) -> DashboardResult<Vec<Agent>> {
-    let named = super::named(&agent)?;
-    let credential = credential.trim();
-    if credential.is_empty() {
-        return Err(DashboardError::CredentialMissing);
+    match super::ask(Request::Configure { agent, credential }).await? {
+        Response::Agents(listing) => Ok(listing),
+        other => Err(super::unexpected(&other)),
     }
-
-    let mut state = instance.0.update();
-    state.agents.insert(
-        named,
-        stageman_core::AgentConfig {
-            auth_token: stageman_core::Secret::new(credential.to_owned()),
-        },
-    );
-    let listing = super::listed(&state);
-    // Explicitly, because releasing this guard is what writes the snapshot —
-    // the borrow ending *is* the save, and leaving it to the end of the
-    // function would put the most consequential line of this route in the one
-    // place nobody reads.
-    drop(state);
-
-    Ok(listing)
 }
 
 /// Removes an agent's credential, if nothing depends on it.
-///
-/// The check happens **before** the change and not after, which matters more
-/// than it looks: the store validates on write and logs a refusal rather than
-/// returning it, so mutating first would leave an instance that is invalid in
-/// memory and correct on disk. Asking `used_by` first is what
-/// `docs/decisions/0021-an-instance-starts-empty.md` intends by it.
 ///
 /// # Errors
 ///
 /// Fails if the agent is not one this instance can run, or if a project still
 /// names it.
-#[cfg_attr(
-    feature = "server",
-    expect(
-        clippy::unused_async,
-        reason = "the shape a server function is required to have"
-    )
-)]
-#[post("/api/agents/forget", instance: Extension<std::sync::Arc<crate::Store>>)]
+#[post("/api/agents/forget")]
 pub async fn forget(agent: String) -> DashboardResult<Vec<Agent>> {
-    let named = super::named(&agent)?;
-
-    // Checked while holding the guard that would write, so that nothing can
-    // start depending on this agent between the question and the answer.
-    let mut state = instance.0.update();
-    let dependents = super::dependents(&state, named);
-    if !dependents.is_empty() {
-        drop(state);
-        return Err(DashboardError::AgentInUse {
-            agent,
-            projects: dependents,
-        });
+    match super::ask(Request::ForgetAgent { agent }).await? {
+        Response::Agents(listing) => Ok(listing),
+        other => Err(super::unexpected(&other)),
     }
-
-    state.agents.remove(&named);
-    let listing = super::listed(&state);
-    drop(state);
-
-    Ok(listing)
 }
 
 /// The agents screen.

@@ -23,8 +23,7 @@
 //! the credential invariant and `docs/conventions.md` §4 for why prompts are
 //! held to a test.
 
-use stageman_agent::{AgentError, Answer, ContainerRuntime};
-use stageman_core::{Agent, Handout, InstanceId, JobId, ProjectId, VariableName};
+use stageman_core::{JobId, ProjectId, VariableName};
 
 /// What every foreman's container is named for.
 ///
@@ -121,136 +120,6 @@ Starting a job on {repository}.
 
 Whatever it has to say appears in this thread. Job {job}."
     )
-}
-
-/// Starts a foreman's session, or continues the one it already has.
-///
-/// **Which of the two is asked of the runtime, never of the instance.** A
-/// container is the truth about whether a session exists —
-/// `docs/decisions/0015-a-job-survives-the-daemon-dying.md` makes that the
-/// rule for jobs and it holds no less here, where the container outlives every
-/// turn and the snapshot it would otherwise be remembered in. A foreman that
-/// believed it had a session and did not would fail every turn until somebody
-/// looked.
-///
-/// The opening is sent only when a session is being made. After that every
-/// turn is a message on the same session, which is what lets a foreman
-/// remember what it was already asked.
-///
-/// Skipped by mutation testing, like everything that drives the runtime: every
-/// path through this starts or resumes a container. What it decides that can
-/// be checked cheaply is pure and has its own test — `continuing`, `keeps`, and
-/// every prompt it sends.
-///
-/// # Errors
-///
-/// Fails if the runtime cannot be reached, or the agent cannot be run.
-#[mutants::skip]
-pub async fn attend(
-    runtime: &ContainerRuntime,
-    handout: &Handout,
-    watching: Watching<'_>,
-    instance: InstanceId,
-    tools: &stageman_agent::Tools,
-    turn: Turn<'_>,
-) -> Result<Answer, ForemanError> {
-    let Watching {
-        project,
-        repository,
-        kits,
-    } = watching;
-    let name = container(project);
-    let existing = stageman_agent::abandoned(runtime)
-        .await
-        .map_err(ForemanError::Agent)?;
-
-    if continuing(&existing, &name) {
-        // The turn boundary `docs/decisions/0048-a-job-runs-on-a-kit.md` puts
-        // a kit change at. A container made for another agent is another
-        // image, so it goes and a fresh one is begun — with the session, which
-        // is the price that record accepts. A container made for this agent
-        // is kept whatever its settings were, because settings are settled
-        // again every turn.
-        let made_for = stageman_agent::made_for(runtime, &name)
-            .await
-            .map_err(ForemanError::Agent)?;
-        if !keeps(made_for, handout.agent()) {
-            stageman_agent::discard(runtime, &name)
-                .await
-                .map_err(ForemanError::Agent)?;
-            let first = format!("{}\n\n{}", opening(repository), asked(turn, kits));
-            return stageman_agent::begin(runtime, handout, &name, instance, Some(tools), &first)
-                .await
-                .map_err(ForemanError::Agent);
-        }
-
-        // The thread comes from the handout every turn, which is the whole
-        // point: one container, a different thread each time. The address this
-        // instance answers at used to be written in beside it; it now travels
-        // on the session declaration `resume` sends, which is what lets a
-        // restarted instance name a different port — see
-        // `docs/decisions/0034-tools-are-served-not-shipped.md`.
-        // The kit goes with every turn, not only the first: a loaded session
-        // forgets what it was set to, so a foreman resumed on its own would run
-        // on the agent's defaults — `docs/decisions/0048-a-job-runs-on-a-kit.md`.
-        stageman_agent::resume(
-            runtime,
-            &name,
-            handout.kit(),
-            Some(tools),
-            &asked(turn, kits),
-        )
-        .await
-        .map_err(ForemanError::Agent)
-    } else {
-        // The opening and the first message together, because a session that
-        // was told who it is and then asked nothing would have spent a turn
-        // saying hello.
-        let first = format!("{}\n\n{}", opening(repository), asked(turn, kits));
-        stageman_agent::begin(runtime, handout, &name, instance, Some(tools), &first)
-            .await
-            .map_err(ForemanError::Agent)
-    }
-}
-
-/// Whether this foreman already has a session to carry on.
-///
-/// A comparison, and therefore worth extracting: mutation testing inverted it
-/// without a test noticing, and inverting it is the worst available outcome —
-/// every foreman that had a session would be told the opening again as though
-/// it were new, and every foreman that had none would be asked to resume one
-/// that does not exist.
-#[must_use]
-fn continuing(existing: &[String], name: &str) -> bool {
-    existing.iter().any(|found| found == name)
-}
-
-/// Whether a foreman's existing container is kept for the agent it now wants.
-///
-/// Kept when it was made for that agent, and kept when it cannot say — a
-/// container from before the label existed could only have been made for the
-/// agent its project named then, and discarding every foreman's memory on the
-/// first turn after an upgrade would be a real cost paid against no evidence.
-/// Replaced only when the label names a different agent, which is the one
-/// case where keeping it would run the wrong image.
-///
-/// Skipped by mutation testing, and equivalent rather than untested: [`Agent`]
-/// has one member, so a label can never name a different one and this is
-/// `true` for every input there is. **Delete this attribute in the commit that
-/// adds a second agent**, and give the test below its replaced case — the
-/// same instruction `State::used_by` carries, for the same reason.
-#[must_use]
-#[mutants::skip]
-fn keeps(made_for: Option<Agent>, wanted: Agent) -> bool {
-    made_for.is_none_or(|made| made == wanted)
-}
-
-/// A foreman's turn could not be taken.
-#[derive(Debug, thiserror::Error)]
-pub enum ForemanError {
-    /// The agent could not be run, or would not answer.
-    #[error("the foreman's agent could not be run")]
-    Agent(#[source] AgentError),
 }
 
 /// The first thing a project's foreman is ever told.
@@ -742,7 +611,7 @@ reasons nobody knows."
 
 #[cfg(test)]
 mod tests {
-    use super::{Agent, JobId, ProjectId, VariableName, Voice, resumption_notice};
+    use super::{JobId, ProjectId, VariableName, Voice, resumption_notice};
 
     /// Where a job of this project would be reachable.
     ///
@@ -1294,36 +1163,6 @@ when you finish."
         assert!(framed.contains("propose rather than merge"), "{framed}");
     }
 
-    /// Whether a session is carried on is decided from what the runtime has.
-    ///
-    /// Inverting this is the worst outcome available: every foreman with a
-    /// session would be greeted as new, and every foreman without one asked to
-    /// resume nothing. Mutation testing found it untested.
-    #[test]
-    fn a_session_is_continued_only_when_its_container_is_there() {
-        let project = ProjectId::from_uuid(stageman_core::Uuid::from_u128(7));
-        let mine = super::container(project);
-        let another = super::container(ProjectId::from_uuid(stageman_core::Uuid::from_u128(8)));
-
-        assert!(super::continuing(std::slice::from_ref(&mine), &mine));
-        assert!(super::continuing(&[another.clone(), mine.clone()], &mine));
-
-        assert!(
-            !super::continuing(&[], &mine),
-            "nothing running is a new session"
-        );
-        assert!(
-            !super::continuing(&[another], &mine),
-            "another project's foreman is not this one's session"
-        );
-        // A job's container is not a session to carry on either, however many
-        // of them are about.
-        assert!(!super::continuing(
-            &["stageman-job-00000000-0000-0000-0000-000000000007".to_owned()],
-            &mine
-        ));
-    }
-
     /// A foreman's container is named for its project, both ways.
     ///
     /// Total and reversible, like a job's: every project has exactly one such
@@ -1492,25 +1331,6 @@ inferred is one a person will act on, and you have no way to check it."
             !once.contains("General-purpose."),
             "a list said once goes stale the first time a project is edited: {once}"
         );
-    }
-
-    /// A foreman's container is kept unless it was made for another agent.
-    ///
-    /// Both directions and the unlabelled case, because the wrong answer in
-    /// each is a different failure: replacing a kept container discards a
-    /// foreman's memory for nothing, and keeping a replaced one runs the wrong
-    /// image with the right credentials.
-    #[test]
-    fn a_foremans_container_is_kept_unless_it_was_made_for_another_agent() {
-        assert!(super::keeps(Some(Agent::Claude), Agent::Claude));
-        assert!(
-            super::keeps(None, Agent::Claude),
-            "a container from before the label could only be this agent's"
-        );
-        // The one agent there is cannot be another, so the replaced case is
-        // asserted the moment a second exists: `Agent::ALL` is where it will
-        // appear, and this is the line to extend then.
-        assert_eq!(Agent::ALL, &[Agent::Claude]);
     }
 
     /// The instruction has to say a foreman assigns work rather than doing it.

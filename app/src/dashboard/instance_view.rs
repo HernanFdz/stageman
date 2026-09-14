@@ -6,101 +6,28 @@
 
 use dioxus::prelude::*;
 #[cfg(feature = "server")]
-use dioxus::server::axum::Extension;
-use serde::{Deserialize, Serialize};
+use stageman_instance::{Request, Response};
 
-use super::Project;
 use super::error::DashboardResult;
 use crate::ui::{Badge, BadgeTone, Card, EmptyState};
 
-/// One instance, as much of it as a page is allowed to know.
-///
-/// Counts and names, and nothing that could be a credential. That is a
-/// property of this type rather than of the function below: a field added here
-/// is a field the browser gets, and there is no second place to check.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Instance {
-    /// Where this machine's container runtime was found.
-    ///
-    /// A path rather than a version, because the operator's next question when
-    /// something misbehaves is *which one is it using*. Not optional: nothing
-    /// gets far enough to serve this page without one, per
-    /// `docs/decisions/0023-the-container-runtime-is-discovered-once.md`.
-    ///
-    /// It comes from the machine rather than from the instance, so it is the
-    /// one field here that is not derived from the state below it — and it is
-    /// a `String` rather than an `Option<String>` because by the time anything
-    /// can ask, a runtime has been found and proved to answer.
-    pub container_runtime: String,
-    /// How many agents are configured.
-    ///
-    /// A count and not a list, because an agent's configuration is a
-    /// credential and listing them is the agents view's problem rather than
-    /// this one's.
-    pub agents: usize,
-    /// The projects this instance watches.
-    pub projects: Vec<Project>,
-}
+pub use stageman_wire::Instance;
 
 /// Everything the dashboard shows, read from the instance this process is
 /// operating.
 ///
-/// One route rather than one per pane, because there is one snapshot behind
+/// One route rather than one per pane, because there is one instance behind
 /// all of it and splitting it would mean two reads that could disagree.
-///
-/// The instance arrives as an `axum` extension, declared in the attribute
-/// rather than in the signature: what the macro adds there exists on the
-/// server and is absent from what the client calls. That is deliberate over
-/// the alternative — `ServeConfig`'s context providers reach the virtual DOM
-/// and so are present while a page is rendered and *missing* when the client
-/// calls the same route afterwards. One mechanism that works on both paths
-/// beats two that each work on one, and the failure mode of getting this wrong
-/// is a route that passes every server-rendering test and fails the first time
-/// a browser calls it.
 ///
 /// # Errors
 ///
-/// Fails if the server was assembled without an instance behind it, which is a
-/// fault in this process rather than in anything a request did.
-// Required by the macro and unused by this body, which reads a lock rather
-// than waiting for anything. Scoped to the feature because the client's half
-// of this function *is* full of awaits, so an unconditional expectation would
-// go unfulfilled there — and `unfulfilled_lint_expectations` is denied.
-#[cfg_attr(
-    feature = "server",
-    expect(
-        clippy::unused_async,
-        reason = "the shape a server function is required to have"
-    )
-)]
-#[get("/api/instance", instance: Extension<std::sync::Arc<crate::Store>>)]
+/// Fails if this process is not operating an instance, which is a fault in
+/// this process rather than in anything a request did.
+#[get("/api/instance")]
 pub async fn instance() -> DashboardResult<Instance> {
-    Ok(Instance::of(&instance.0.read()))
-}
-
-#[cfg(feature = "server")]
-impl Instance {
-    /// What to show, for this instance on this machine.
-    ///
-    /// Deliberately not a `From` implementation, which it was until the
-    /// runtime stopped being part of the state: `From` promises a function of
-    /// its input, and this reads a process-wide discovery as well — see
-    /// `docs/decisions/0023-the-container-runtime-is-discovered-once.md`. A
-    /// trait implementation that quietly depends on a global is the kind of
-    /// thing that reads correctly and is wrong.
-    ///
-    /// Everything the browser is shown is assembled here, in one place that
-    /// can be read as a list. On the server only: the domain type it reads
-    /// from is not compiled for the browser at all, which is the point.
-    fn of(state: &stageman_core::State) -> Self {
-        Self {
-            container_runtime: crate::RUNTIME.path().display().to_string(),
-            agents: state.agents.len(),
-            // The same projection the projects screen reads, rather than a
-            // second one. This screen shows fewer of its fields; that is a
-            // decision about the view and not a reason for another type.
-            projects: super::watching(state),
-        }
+    match super::ask(Request::Instance).await? {
+        Response::Instance(shown) => Ok(shown),
+        other => Err(super::unexpected(&other)),
     }
 }
 

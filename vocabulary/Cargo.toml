@@ -1,0 +1,29 @@
+# The events and effects the instance and the world exchange, as an
+# application-agnostic set of mechanisms generic over a hole the application
+# fills with its own. See
+# `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`.
+#
+# It names nothing but serialisation, which is the point: the instance names
+# this crate and may not name anything that performs an effect, and the world
+# names this crate and may not name the domain. Compiled for the browser's
+# target too, because nothing in it stops that and the gate's wasm pass would
+# otherwise need to know which side of the split it is on.
+
+[package]
+name = "stageman-vocabulary"
+description = "What stageman's instance and world say to each other. Internal to the workspace."
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+json-patch = "4.2.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.151"
+
+
+[lints]
+workspace = true

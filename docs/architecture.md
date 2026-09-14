@@ -90,23 +90,85 @@ first.
   source, because a `cfg` hides code from the compiler and not a dependency
   from cargo.
 
+  Since `docs/decisions/0056-the-instance-decides-and-the-world-performs.md`
+  it is also the **world**: the loop that steps the instance, the listeners
+  and servers that turn what happens into events, the adapters that perform
+  effects — the runtime through **agent**, the channels, the disk — and
+  nothing that decides.
+  `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`
+  then took the generic half of that into **world**, and startup and the
+  request path into the instance. What is left here is the application's own
+  half: an entry point that draws a seed, serves the pages on a loopback port
+  and says where, and adapters for the effects only this application has.
+- **instance** — the deciding and the doing as one deterministic value: what
+  the daemon knows, and what it does about each thing that happens, answered
+  as effects. It is the seam
+  `docs/decisions/0056-the-instance-decides-and-the-world-performs.md` draws.
+  Everything above the four crates that used to await the runtime or the
+  network lives here as a handler for an event, and nothing here can perform
+  an effect, read a clock, or draw on entropy of its own. What it keeps goes
+  to the disk, and it seals and opens that file itself; what it merely holds,
+  a restart begins without.
+
+  It **answers what a person types**: it takes that address itself, decides
+  on every request's host, and forwards a job's name to that job's container
+  and everything else to the pages the app serves on a loopback port. So the
+  dashboard is a presentation server it proxies to, and the same path carries
+  both.
+
+  It **boots itself**, from a seed, the environment, and which platform this
+  build was made for: whether a runtime answers, where its key is, what its
+  file holds and what the last run left behind are all things it asks for and
+  is answered about. The platform is handed over rather than read, so that
+  nothing inside branches on the machine it was compiled for.
+  So a start that refuses — no runtime, an unreadable file, a key that is not
+  key material — is a sequence of effects rather than a path through somebody
+  else's `main`, and a scenario pins it. See
+  `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`.
+- **wire** — the plain serialisable types that cross to a browser: views,
+  drafts, and the dashboard's error. Its own crate rather than a module of
+  **app**, because the instance answers a request with one and the app is the
+  world that carries it, and neither may name the other for it. It names
+  nothing, which is what keeps
+  `docs/decisions/0022-the-browser-never-sees-the-domain.md` true from the
+  other side.
+- **vocabulary** — the events and effects the instance and the world exchange,
+  as an application-agnostic set of mechanisms — a file, a process, a request,
+  a socket, a port, a timer — generic over a hole the application fills with
+  its own. It names nothing but serialisation, and its types serialise in full
+  and format not at all. See
+  `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`.
+- **world** — what performs the vocabulary on the async runtime, and the only
+  crate that names that runtime. It knows no domain: it steps whatever it is
+  given, performs each generic effect as the mechanism it names, and hands the
+  application's own effects to whatever the entry point supplied. Small enough
+  to be read rather than tested, which is the point of the two crates being
+  separate.
+
 Dependencies point inward. **core** names nothing. **agent** may name **core**.
 **foreman** and **job** may name **core** and **agent** — both run agents,
 for different shapes of work — and may never name each other; everything they
 share is a type in **core**, which is what keeps the deciding and the doing from
-growing into one another. **app** may name all four; nothing may name **app**.
+growing into one another. **vocabulary** names nothing but serialisation.
+**instance** may name the four, **wire** and **vocabulary**, for their types
+and their pure functions, and nothing that can perform an effect. **wire**
+names nothing. **world** names **vocabulary** and the async runtime, and no
+crate of this project's above it. **app** may name all of them; nothing may
+name **app**.
 
 There is one more direction, and it is inside **app** rather than between
-crates: **nothing served to a browser may name any of the four.** The rule
-looks like the same one and is not — the others are about what a crate is
-allowed to know, and this one is about what leaves the machine.
+crates: **nothing served to a browser may name any of the four, nor the
+instance; wire is the one crate it may.** The rule looks like the same one and
+is not — the others are about what a crate is allowed to know, and this one is
+about what leaves the machine.
 
 So the foreman does not start a job, despite being the thing that decides
-one should exist. It emits a request as a **core** type, and **app** — the only
-crate allowed to name both sides — hands that request to **job**. This is worth
-a sentence of its own because "the foreman creates jobs" is the natural
-reading of the bullet above, and acting on that reading is the first thing that
-breaks the rule.
+one should exist. It emits a request as a **core** type; the **instance**
+decides what to do with it and asks for a turn as an effect; and **app** — the
+world, and still the only crate allowed to name every side — performs it with
+**job**. This is worth a sentence of its own because "the foreman creates jobs"
+is the natural reading of the bullet above, and acting on that reading is the
+first thing that breaks the rule.
 
 The directories are named for the concepts above and the packages are not —
 they carry a prefix, and the app is published as the project's own name. That
@@ -197,6 +259,10 @@ nobody is a wish.
   would compile and would pass every test, since nothing under test is slow
   enough to matter.
 
+  Since 0056 the reviewer's half is gone: the reading task turns a frame into
+  an event and hands it to a step that is synchronous by type, and there is no
+  handling left for an `await` to be added to.
+
   One thing deliberately stays on that task: the state change each recipient
   makes as a message *arrives*. Order is the whole of what a foreman's inbox
   promises, and spawning that would fill it in the order tasks were polled
@@ -215,6 +281,16 @@ nobody is a wish.
   and has no setter — and by the adapter settling every option before the
   first prompt of every turn, failing the turn if the agent refuses one or
   reports it unchanged. See `docs/decisions/0048-a-job-runs-on-a-kit.md`.
+
+- **The instance performs no effect.** It answers an event with effects as
+  values and learns nothing from making one, so the same file, seed and
+  events produce the same effects and the same states, every time. *Defended
+  by* the manifest — the instance crate names no async runtime and nothing
+  that opens a socket or a file — by the type of its one method after
+  construction, which takes an event and returns effects, and by a reviewer
+  reading any change there against one question: could this line answer
+  differently on another run? See
+  `docs/decisions/0056-the-instance-decides-and-the-world-performs.md`.
 
 **Deliberately not an invariant: that every job traces to a recorded signal.**
 Each job carries a reason (`docs/conventions.md` §2), but nothing enforces it
@@ -237,6 +313,13 @@ The split into deciding and doing is the one real seam in the system, and the
 crates exist to make the code map match it — see
 `docs/decisions/0003-four-crates-around-a-core.md`, which also records why a
 trait-per-boundary design was rejected on a green field.
+
+It has since gained a second seam that runs through it rather than beside it:
+the boundary between what this project decides and what it asks of the
+outside, drawn by
+`docs/decisions/0056-the-instance-decides-and-the-world-performs.md` so that
+everything on the inside can be run, and crashed, and run again, without the
+outside at all.
 
 Everything else follows from two decisions taken before any code existed. That
 the agent inside a job is somebody else's product, not ours, is what makes the

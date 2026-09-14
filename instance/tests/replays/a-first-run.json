@@ -1,0 +1,436 @@
+{
+  "meta": {
+    "title": "A first run finds no file, writes one, and is announced on the strength of that write"
+  },
+  "init": {
+    "seed": "0101010101010101010101010101010101010101010101010101010101010101",
+    "environment": {
+      "HOME": "/sim/home",
+      "STAGEMAN_KEY": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+      "STAGEMAN_STATE": "/sim/instance.json"
+    },
+    "target": "Linux",
+    "effects": [
+      {
+        "Run": {
+          "id": 1,
+          "program": "/usr/bin/docker",
+          "arguments": [
+            "version"
+          ],
+          "environment": {
+            "HOME": "/sim/home"
+          },
+          "stdin": null
+        }
+      },
+      {
+        "Bind": {
+          "id": 2,
+          "address": "127.0.0.1:8080"
+        }
+      },
+      {
+        "Bind": {
+          "id": 3,
+          "address": "0.0.0.0:47113"
+        }
+      }
+    ],
+    "state": {
+      "booting": "runtime"
+    }
+  },
+  "turns": [
+    {
+      "at": 0,
+      "event": {
+        "App": {
+          "Presenting": {
+            "port": 9000
+          }
+        }
+      },
+      "effects": [],
+      "changed": []
+    },
+    {
+      "at": 0,
+      "event": {
+        "Ran": {
+          "id": 1,
+          "finished": {
+            "Exited": {
+              "status": 0,
+              "stdout": {
+                "text": "/usr/bin/docker version 0.0-simulated\n"
+              },
+              "stderr": {
+                "text": ""
+              }
+            }
+          }
+        }
+      },
+      "effects": [
+        {
+          "Read": {
+            "id": 4,
+            "path": "/sim/instance.json"
+          }
+        }
+      ],
+      "changed": [
+        {
+          "op": "replace",
+          "path": "/booting",
+          "value": "file"
+        }
+      ]
+    },
+    {
+      "at": 0,
+      "event": {
+        "Bound": {
+          "id": 2,
+          "outcome": {
+            "Ok": 8080
+          }
+        }
+      },
+      "effects": [],
+      "changed": []
+    },
+    {
+      "at": 0,
+      "event": {
+        "Bound": {
+          "id": 3,
+          "outcome": {
+            "Ok": 47113
+          }
+        }
+      },
+      "effects": [],
+      "changed": []
+    },
+    {
+      "at": 0,
+      "event": {
+        "Read": {
+          "id": 4,
+          "contents": {
+            "Ok": null
+          }
+        }
+      },
+      "effects": [
+        {
+          "Run": {
+            "id": 5,
+            "program": "/usr/bin/docker",
+            "arguments": [
+              "ps",
+              "--all",
+              "--filter",
+              "label=stageman.job",
+              "--format",
+              "{{.Names}}"
+            ],
+            "environment": {
+              "HOME": "/sim/home"
+            },
+            "stdin": null
+          }
+        },
+        {
+          "Run": {
+            "id": 6,
+            "program": "/usr/bin/docker",
+            "arguments": [
+              "ps",
+              "--filter",
+              "label=stageman.job",
+              "--format",
+              "{{.Names}}"
+            ],
+            "environment": {
+              "HOME": "/sim/home"
+            },
+            "stdin": null
+          }
+        }
+      ],
+      "changed": [
+        {
+          "op": "replace",
+          "path": "/booting",
+          "value": "listing"
+        }
+      ]
+    },
+    {
+      "at": 0,
+      "event": {
+        "Ran": {
+          "id": 5,
+          "finished": {
+            "Exited": {
+              "status": 0,
+              "stdout": {
+                "text": ""
+              },
+              "stderr": {
+                "text": ""
+              }
+            }
+          }
+        }
+      },
+      "effects": [],
+      "changed": []
+    },
+    {
+      "at": 0,
+      "event": {
+        "Ran": {
+          "id": 6,
+          "finished": {
+            "Exited": {
+              "status": 0,
+              "stdout": {
+                "text": ""
+              },
+              "stderr": {
+                "text": ""
+              }
+            }
+          }
+        }
+      },
+      "effects": [
+        {
+          "App": {
+            "Booted": {
+              "runtime": "/usr/bin/docker",
+              "domain": "localhost"
+            }
+          }
+        },
+        {
+          "Run": {
+            "id": 7,
+            "program": "/usr/bin/docker",
+            "arguments": [
+              "images",
+              "--filter",
+              "reference=stageman",
+              "--format",
+              "{{.Repository}}:{{.Tag}}"
+            ],
+            "environment": {
+              "HOME": "/sim/home"
+            },
+            "stdin": null
+          }
+        },
+        {
+          "Wake": {
+            "id": 8,
+            "after": {
+              "secs": 60,
+              "nanos": 0
+            }
+          }
+        },
+        {
+          "Write": {
+            "id": 9,
+            "path": "/sim/instance.json",
+            "bytes": {
+              "text": "{\n  \"instance\": \"3301e8d7-e754-4b2c-b57b-0a4ca73f253c\",\n  \"agents\": {},\n  \"projects\": {}\n}"
+            },
+            "private": false
+          }
+        }
+      ],
+      "changed": [
+        {
+          "op": "add",
+          "path": "/kept",
+          "value": {
+            "agents": {},
+            "projects": {}
+          }
+        },
+        {
+          "op": "add",
+          "path": "/held",
+          "value": {
+            "id": "3301e8d7-e754-4b2c-b57b-0a4ca73f253c",
+            "key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+            "key_source": "STAGEMAN_KEY",
+            "path": "/sim/instance.json",
+            "domain": "localhost",
+            "serving": 8080,
+            "address": "127.0.0.1:8080",
+            "runtime": "/usr/bin/docker",
+            "runtime_environment": {
+              "HOME": "/sim/home"
+            },
+            "next": 10,
+            "turns": [],
+            "warrants": {},
+            "interrupted": [],
+            "asking": [],
+            "tunnels": [],
+            "routing": [],
+            "deferred": [
+              [
+                9,
+                []
+              ]
+            ],
+            "timers": [
+              8
+            ],
+            "asked": [
+              [
+                7,
+                "Images"
+              ]
+            ],
+            "listing": [],
+            "dirty": false,
+            "staged": [],
+            "announced": false,
+            "swept": {
+              "resumed": 0,
+              "lost": 0,
+              "cleared": 0,
+              "unidentified": 0,
+              "forgotten": 0,
+              "unclaimed": 0,
+              "elsewhere": 0
+            }
+          }
+        },
+        {
+          "op": "remove",
+          "path": "/booting"
+        }
+      ]
+    },
+    {
+      "at": 0,
+      "event": {
+        "Ran": {
+          "id": 7,
+          "finished": {
+            "Exited": {
+              "status": 0,
+              "stdout": {
+                "text": "stageman:unneeded\n"
+              },
+              "stderr": {
+                "text": ""
+              }
+            }
+          }
+        }
+      },
+      "effects": [
+        {
+          "Run": {
+            "id": 10,
+            "program": "/usr/bin/docker",
+            "arguments": [
+              "rmi",
+              "stageman:unneeded"
+            ],
+            "environment": {
+              "HOME": "/sim/home"
+            },
+            "stdin": null
+          }
+        }
+      ],
+      "changed": [
+        {
+          "op": "replace",
+          "path": "/held/next",
+          "value": 11
+        },
+        {
+          "op": "replace",
+          "path": "/held/asked/0/0",
+          "value": 10
+        },
+        {
+          "op": "replace",
+          "path": "/held/asked/0/1",
+          "value": {
+            "Reclaimed": {
+              "image": "stageman:unneeded"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "at": 0,
+      "event": {
+        "Ran": {
+          "id": 10,
+          "finished": {
+            "Exited": {
+              "status": 0,
+              "stdout": {
+                "text": ""
+              },
+              "stderr": {
+                "text": ""
+              }
+            }
+          }
+        }
+      },
+      "effects": [],
+      "changed": [
+        {
+          "op": "remove",
+          "path": "/held/asked/0"
+        }
+      ]
+    },
+    {
+      "at": 1,
+      "event": {
+        "Written": {
+          "id": 9,
+          "outcome": {
+            "Ok": null
+          }
+        }
+      },
+      "effects": [
+        {
+          "Print": {
+            "text": "\nstageman is running.\n  version    none — not a release build\n  runtime    /usr/bin/docker\n  key        STAGEMAN_KEY\n  instance   /sim/instance.json\n  domain     localhost\n\n  dashboard  http://127.0.0.1:8080\n\n"
+          }
+        }
+      ],
+      "changed": [
+        {
+          "op": "remove",
+          "path": "/held/deferred/0"
+        },
+        {
+          "op": "replace",
+          "path": "/held/announced",
+          "value": true
+        }
+      ]
+    }
+  ]
+}

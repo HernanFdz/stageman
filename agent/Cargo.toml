@@ -12,6 +12,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# For the answer an agent gives, which crosses the vocabulary as a value.
+serde = { version = "1.0.228", features = ["derive"] }
 agent-client-protocol = "2.0.0"
 futures = "0.3.34"
 parking_lot = "0.12.5"

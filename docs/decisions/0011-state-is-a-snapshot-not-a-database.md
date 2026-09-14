@@ -3,7 +3,11 @@
 ## Status
 Accepted. Supersedes `docs/decisions/0004-one-encrypted-sqlite-file.md`. The
 credential handling in that record is carried forward unchanged; what is
-superseded is the choice of an embedded database as the store.
+superseded is the choice of an embedded database as the store. Narrowed by
+`docs/decisions/0056-the-instance-decides-and-the-world-performs.md`: the
+snapshot is still written on every change, but the instance asks for the
+write as an effect and holds back anything outward-facing until it has
+landed.
 
 ## Context
 

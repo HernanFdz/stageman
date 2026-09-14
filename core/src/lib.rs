@@ -2027,7 +2027,7 @@ pub enum Recipient {
 ///
 /// Deliberately not serialised, for the reason a handout is not: this
 /// describes a process about to be started, never anything kept.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Role {
     /// The one long-lived agent a project's foreman thinks with.
     Foreman,

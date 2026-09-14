@@ -1,0 +1,39 @@
+# What performs the vocabulary on the async runtime, and the only crate of
+# this project's that names that runtime. It knows no domain: it steps
+# whatever it is given, performs each generic effect as the mechanism it
+# names, and hands the application's own effects to whatever the entry point
+# supplied. See
+# `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`.
+
+[package]
+name = "stageman-world"
+description = "What performs stageman's vocabulary on the async runtime. Internal to the workspace."
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Speaking HTTP is a mechanism like running a process is: this crate serves
+# what it is told to bind, hands each request's head to whoever is deciding,
+# and forwards one to a port when told to. None of it names a domain.
+bytes = "1.12.1"
+http-body-util = "0.1.5"
+hyper = { version = "1.11.1", features = ["client", "http1", "server"] }
+hyper-util = { version = "0.1.20", features = ["tokio"] }
+mutants = "0.0.4"
+parking_lot = "0.12.5"
+stageman-vocabulary = { workspace = true }
+tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+tracing = "0.1.44"
+
+# Only what the tests need: an application to instantiate the generic types
+# with, and somewhere to write files that is not this repository.
+[dev-dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+tempfile = "3.27.0"
+
+[lints]
+workspace = true
