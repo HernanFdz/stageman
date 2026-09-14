@@ -2,7 +2,8 @@
 //!
 //! An [`Event`] is what the world tells the instance and an [`Effect`] is
 //! what the instance asks of the world. Both are plain data: the mechanisms a
-//! process reaches the outside through — a file, a process, a timer, its own
+//! process reaches the outside through — a file, a process run once, a
+//! process kept open and spoken to line by line, a request, a timer, its own
 //! standard output, its own exit — and one hole an [`App`] fills with its own
 //! events and effects, which the world never interprets and hands to whatever
 //! the application supplied to perform them. See
@@ -16,9 +17,9 @@
 //! kind, from [`Named`]. That absence is a rule rather than an omission, and
 //! `docs/conventions.md` §4 says why.
 //!
-//! The remaining mechanisms — a request, a socket, a port — arrive one family
-//! at a time as the instance starts speaking them, so that each family's
-//! shape is decided by its use.
+//! The remaining mechanisms — a socket, a port — arrive one family at a time
+//! as the instance starts speaking them, so that each family's shape is
+//! decided by its use.
 
 pub mod scenario;
 
@@ -165,6 +166,31 @@ pub enum Finished {
     Failed(String),
 }
 
+/// How a process that was kept open came to an end.
+///
+/// Its output is not here, because it already arrived line by line; what is
+/// here is what a process run once would have answered with less that: the
+/// status, and what it wrote to its standard error, which is where a process
+/// that fails says why.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Ended {
+    /// It ran and exited, on its own or because it was closed.
+    Exited {
+        /// Its exit status, or none if a signal ended it — which is what
+        /// being closed looks like.
+        status: Option<i32>,
+        /// What it wrote to its standard error, from the beginning and up to
+        /// a bound the world keeps: a process that fails says so at once,
+        /// and one that runs for an hour says a great deal that is not that.
+        stderr: Bytes,
+    },
+    /// There is no such program.
+    NotFound,
+    /// It could not be started, or could not be waited on, for some other
+    /// reason.
+    Failed(String),
+}
+
 /// One thing the world tells the instance.
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "")]
@@ -222,6 +248,24 @@ pub enum Event<A: App> {
         /// Which wake.
         id: EffectId,
     },
+    /// A process kept open wrote one line to its standard output.
+    ///
+    /// Every line arrives, in order, and every one arrives before
+    /// [`Event::Ended`] for the same process.
+    Line {
+        /// Which process, by the identifier it was opened under.
+        id: EffectId,
+        /// The line, without its newline.
+        line: String,
+    },
+    /// A process kept open came to an end, on its own or because it was
+    /// closed. Answers [`Effect::Open`], eventually, and [`Effect::Close`].
+    Ended {
+        /// Which process, by the identifier it was opened under.
+        id: EffectId,
+        /// How.
+        ended: Ended,
+    },
     /// Something of the application's own.
     App(A::Event),
 }
@@ -261,6 +305,14 @@ impl<A: App> Clone for Event<A> {
                 outcome: outcome.clone(),
             },
             Self::Woke { id } => Self::Woke { id: *id },
+            Self::Line { id, line } => Self::Line {
+                id: *id,
+                line: line.clone(),
+            },
+            Self::Ended { id, ended } => Self::Ended {
+                id: *id,
+                ended: ended.clone(),
+            },
             Self::App(event) => Self::App(event.clone()),
         }
     }
@@ -285,6 +337,8 @@ impl<A: App> Named for Event<A> {
             Self::Arrived { .. } => "Arrived",
             Self::Body { .. } => "Body",
             Self::Woke { .. } => "Woke",
+            Self::Line { .. } => "Line",
+            Self::Ended { .. } => "Ended",
             Self::App(event) => event.kind(),
         }
     }
@@ -331,6 +385,45 @@ pub enum Effect<A: App> {
         environment: Environment,
         /// What it is given on its standard input, then end of file.
         stdin: Option<Bytes>,
+    },
+    /// Start a program and keep it open: every line it writes to its
+    /// standard output is an [`Event::Line`], every [`Effect::Send`] is a
+    /// line on its standard input, and how it ends is an [`Event::Ended`].
+    ///
+    /// Not answered by anything of its own. A program that could not be
+    /// started ends at once, distinctly, and one that could is spoken to
+    /// from the next effect on — so the lines that open a conversation are
+    /// asked for in the same step as the process.
+    Open {
+        /// Which process, on every line and on its end.
+        id: EffectId,
+        /// The program, by path.
+        program: PathBuf,
+        /// Its arguments.
+        arguments: Vec<String>,
+        /// Exactly the environment it is given, and nothing inherited.
+        environment: Environment,
+    },
+    /// Write one line to a process kept open, newline included by the world.
+    /// Unanswered: a process that has ended is not written to, and its end
+    /// is the event that says so.
+    Send {
+        /// Which process.
+        id: EffectId,
+        /// The line, without its newline.
+        line: String,
+    },
+    /// End a process kept open: its standard input is closed and it is
+    /// killed, and its end arrives as [`Event::Ended`] like any other.
+    ///
+    /// Both at once rather than the first and then the second after a grace,
+    /// because a grace is a wait nothing here can decide the length of, and
+    /// the process on the far side of the pipe is somebody else's — see
+    /// `docs/decisions/0053-a-job-is-stopped-or-retired-by-a-person.md`,
+    /// which measured that a closed pipe is what ends an agent.
+    Close {
+        /// Which process.
+        id: EffectId,
     },
     /// Wake the instance later. Answered by [`Event::Woke`].
     Wake {
@@ -405,6 +498,22 @@ impl<A: App> Clone for Effect<A> {
                 environment: environment.clone(),
                 stdin: stdin.clone(),
             },
+            Self::Open {
+                id,
+                program,
+                arguments,
+                environment,
+            } => Self::Open {
+                id: *id,
+                program: program.clone(),
+                arguments: arguments.clone(),
+                environment: environment.clone(),
+            },
+            Self::Send { id, line } => Self::Send {
+                id: *id,
+                line: line.clone(),
+            },
+            Self::Close { id } => Self::Close { id: *id },
             Self::Wake { id, after } => Self::Wake {
                 id: *id,
                 after: *after,
@@ -440,6 +549,9 @@ impl<A: App> Named for Effect<A> {
             Self::Read { .. } => "Read",
             Self::Write { .. } => "Write",
             Self::Run { .. } => "Run",
+            Self::Open { .. } => "Open",
+            Self::Send { .. } => "Send",
+            Self::Close { .. } => "Close",
             Self::Wake { .. } => "Wake",
             Self::Bind { .. } => "Bind",
             Self::Answer { .. } => "Answer",
@@ -697,7 +809,9 @@ pub(crate) mod doorbell {
                 | Event::Woke { .. }
                 | Event::Bound { .. }
                 | Event::Arrived { .. }
-                | Event::Body { .. } => Vec::new(),
+                | Event::Body { .. }
+                | Event::Line { .. }
+                | Event::Ended { .. } => Vec::new(),
             }
         }
 
@@ -710,7 +824,9 @@ pub(crate) mod doorbell {
 #[cfg(test)]
 mod tests {
     use super::doorbell::{Doorbell, Told};
-    use super::{Answer, Arrival, Bytes, Effect, EffectId, Event, Finished, Named, RequestId};
+    use super::{
+        Answer, Arrival, Bytes, Effect, EffectId, Ended, Event, Finished, Named, RequestId,
+    };
 
     /// The hole carries the application's own, and the kind is what a log
     /// may say.
@@ -751,6 +867,17 @@ mod tests {
                 environment: [("HOME".to_owned(), "/home/x".to_owned())].into(),
                 stdin: None,
             },
+            Effect::Open {
+                id: EffectId(11),
+                program: "/usr/bin/docker".into(),
+                arguments: vec!["exec".to_owned(), "-i".to_owned(), "x".to_owned()],
+                environment: [("HOME".to_owned(), "/home/x".to_owned())].into(),
+            },
+            Effect::Send {
+                id: EffectId(11),
+                line: r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#.to_owned(),
+            },
+            Effect::Close { id: EffectId(11) },
             Effect::Wake {
                 id: EffectId(4),
                 after: std::time::Duration::from_secs(1),
@@ -789,8 +916,8 @@ mod tests {
         assert_eq!(
             kinds,
             [
-                "Read", "Write", "Run", "Wake", "Bind", "Answer", "Answer", "Answer", "Print",
-                "Exit"
+                "Read", "Write", "Run", "Open", "Send", "Close", "Wake", "Bind", "Answer",
+                "Answer", "Answer", "Print", "Exit"
             ]
         );
         for effect in &effects {
@@ -826,6 +953,25 @@ mod tests {
                 finished: Finished::NotFound,
             },
             Event::Woke { id: EffectId(4) },
+            Event::Line {
+                id: EffectId(11),
+                line: r#"{"jsonrpc":"2.0","id":1,"result":{}}"#.to_owned(),
+            },
+            Event::Ended {
+                id: EffectId(11),
+                ended: Ended::Exited {
+                    status: None,
+                    stderr: Bytes::new(b"closed\n".to_vec()),
+                },
+            },
+            Event::Ended {
+                id: EffectId(12),
+                ended: Ended::NotFound,
+            },
+            Event::Ended {
+                id: EffectId(13),
+                ended: Ended::Failed("no permission".to_owned()),
+            },
             Event::Bound {
                 id: EffectId(5),
                 outcome: Ok(47_201),
@@ -850,7 +996,8 @@ mod tests {
         assert_eq!(
             kinds,
             [
-                "Read", "Written", "Ran", "Ran", "Woke", "Bound", "Arrived", "Body"
+                "Read", "Written", "Ran", "Ran", "Woke", "Line", "Ended", "Ended", "Ended",
+                "Bound", "Arrived", "Body"
             ]
         );
         for event in &events {
@@ -970,6 +1117,34 @@ mod tests {
         assert!(ran(1, Finished::NotFound) == ran(1, Finished::NotFound));
         assert!(ran(1, Finished::NotFound) != ran(1, Finished::Failed("no".to_owned())));
         assert!(ran(1, Finished::NotFound) != ran(2, Finished::NotFound));
+
+        let line = |id: u64, line: &str| Event::<Doorbell>::Line {
+            id: EffectId(id),
+            line: line.to_owned(),
+        };
+        assert!(line(1, "a") == line(1, "a"));
+        assert!(
+            line(1, "a") != line(1, "b"),
+            "the same process, another line"
+        );
+        assert!(
+            line(1, "a") != line(2, "a"),
+            "another process, the same line"
+        );
+
+        let ended = |id: u64, status: Option<i32>| Event::<Doorbell>::Ended {
+            id: EffectId(id),
+            ended: Ended::Exited {
+                status,
+                stderr: Bytes::new(Vec::new()),
+            },
+        };
+        assert!(ended(1, Some(0)) == ended(1, Some(0)));
+        assert!(
+            ended(1, Some(0)) != ended(1, None),
+            "exiting and being killed are different ends"
+        );
+        assert!(ended(1, Some(0)) != ended(2, Some(0)));
 
         // Effects compare through the one representation both sides share,
         // so the field that differs here is the one a reader would miss.

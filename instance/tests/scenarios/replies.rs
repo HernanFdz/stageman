@@ -32,17 +32,14 @@ fn a_reply_to_an_idle_job_resumes_it_after_the_record_lands() {
         .iter()
         .position(|line| line.starts_with("<- Written"))
         .expect("the record was written");
-    let resumed = shape
-        .iter()
-        .position(|line| line.starts_with("-> RunTurn"))
-        .expect("the job was resumed");
+    let resumed = world.first_turn().expect("the job was resumed");
     assert!(
         persisted < resumed,
         "the turn waits for the record to land: {shape:?}"
     );
-    let run = &shape[resumed];
-    assert!(run.contains("A person replied on the channel:"), "{run}");
-    assert!(run.contains("use postgres"), "{run}");
+    let run = world.talks().last().expect("the agent was spoken to");
+    assert!(run.was_told("A person replied on the channel:"), "{run:?}");
+    assert!(run.was_told("use postgres"), "{run:?}");
     assert_eq!(
         progress_of(instance.state(), idle),
         Progress::Idle(Waiting::Silent)
@@ -118,14 +115,10 @@ fn a_reply_to_a_working_job_is_refused_and_said_so() {
     );
     assert_eq!(progress_of(instance.state(), working), Progress::Working);
     assert_eq!(
-        world
-            .shape()
-            .iter()
-            .filter(|line| line.starts_with("-> RunTurn"))
-            .count(),
+        world.talks().len(),
         1,
         "only the resume waking asked for: {:?}",
-        world.shape()
+        world.talks()
     );
 }
 
@@ -148,13 +141,9 @@ fn two_replies_arriving_together_resume_one_turn() {
     world.schedule(100, said_in(1, "second"));
     world.run_until(&mut instance, 5_000);
 
-    let shape = world.shape();
-    let runs: Vec<&String> = shape
-        .iter()
-        .filter(|line| line.starts_with("-> RunTurn"))
-        .collect();
-    assert_eq!(runs.len(), 1, "{shape:?}");
-    assert!(runs.first().expect("one").contains("first"));
+    let runs = world.talks();
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert!(runs.first().expect("one").was_told("first"));
     assert_eq!(
         world.posts().first().map(|(_, text)| text.as_str()),
         Some(stageman_foreman::busy_notice()),
@@ -279,11 +268,11 @@ fn a_crash_before_the_record_lands_loses_the_reply_but_not_the_job() {
     world.run_until(&mut instance, 5_000);
     assert!(
         !world
-            .shape()
+            .talks()
             .iter()
-            .any(|line| line.contains("use postgres") && line.starts_with("-> RunTurn")),
+            .any(|talk| talk.was_told("use postgres")),
         "{:?}",
-        world.shape()
+        world.talks()
     );
 }
 
@@ -306,14 +295,7 @@ fn a_failed_write_fails_the_turn_before_it_starts() {
     world.schedule(100, said_in(1, "use postgres"));
     world.run_until(&mut instance, 5_000);
 
-    assert!(
-        !world
-            .shape()
-            .iter()
-            .any(|line| line.starts_with("-> RunTurn")),
-        "{:?}",
-        world.shape()
-    );
+    assert!(world.talks().is_empty(), "{:?}", world.talks());
     let Progress::Idle(Waiting::Failed(why)) = progress_of(instance.state(), idle) else {
         panic!("the turn that never started is a failure");
     };

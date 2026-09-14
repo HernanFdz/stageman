@@ -3,16 +3,17 @@
 //! world.
 
 use crate::simulation::{
-    Simulation, holding_a_message, project, said_at_root, seed, thread, watching_a_channel,
+    Simulation, Talk, holding_a_message, project, said_at_root, seed, thread, watching_a_channel,
 };
 use stageman_agent::Command;
 use stageman_foreman::Starting;
 
-fn runs(world: &Simulation) -> Vec<String> {
+/// The foreman's conversations so far, in order.
+fn runs(world: &Simulation) -> Vec<Talk> {
     world
-        .shape()
+        .talks_in(&stageman_foreman::container(project()))
         .into_iter()
-        .filter(|line| line.starts_with("-> RunTurn") && line.contains("\"Foreman\""))
+        .cloned()
         .collect()
 }
 
@@ -45,12 +46,9 @@ fn a_first_message_opens_a_session_and_is_acknowledged_first() {
     let runs = runs(&world);
     assert_eq!(runs.len(), 1, "{shape:?}");
     let run = &runs[0];
-    assert!(
-        run.contains("Begin"),
-        "no container, so a session is begun: {run}"
-    );
-    assert!(run.contains("You are the foreman for"), "{run}");
-    assert!(run.contains("look at the parser"), "{run}");
+    assert!(run.began(), "no container, so a session is begun: {run:?}");
+    assert!(run.was_told("You are the foreman for"), "{run:?}");
+    assert!(run.was_told("look at the parser"), "{run:?}");
     assert!(world.exists(&stageman_foreman::container(project())));
     assert_eq!(
         world.posts(),
@@ -76,14 +74,17 @@ fn what_a_containers_agent_may_see_is_decided_here() {
     world.schedule(100, said_at_root(1, "look at the parser"));
     world.run_until(&mut instance, 5_000);
 
-    let runs = runs(&world);
-    let [run] = runs.as_slice() else {
-        panic!("one turn: {runs:?}");
-    };
-    assert!(
-        run.contains(r#""ANTHROPIC_API_KEY":"agent-token""#),
-        "the agent's own credential, in the variable its adapter reads: {run}"
+    let container = stageman_foreman::container(project());
+    assert_eq!(runs(&world).len(), 1);
+    let given = world
+        .environment_of(&container)
+        .expect("the container was made here");
+    assert_eq!(
+        given.get("ANTHROPIC_API_KEY").map(String::as_str),
+        Some("agent-token"),
+        "the agent's own credential, in the variable its adapter reads: {given:?}"
     );
+    assert_eq!(given.len(), 1, "and nothing else: {given:?}");
 }
 
 /// A foreman with a container continues its session rather than opening one.
@@ -100,11 +101,15 @@ fn a_foreman_with_a_container_continues_its_session() {
 
     let runs = runs(&world);
     assert_eq!(runs.len(), 1);
-    assert!(runs[0].contains("Resume"), "{}", runs[0]);
-    assert!(!runs[0].contains("You are the foreman for"), "{}", runs[0]);
+    assert!(runs[0].resumed(), "{:?}", runs[0]);
     assert!(
-        runs[0].contains("A person said this to you on the channel"),
-        "{}",
+        !runs[0].was_told("You are the foreman for"),
+        "{:?}",
+        runs[0]
+    );
+    assert!(
+        runs[0].was_told("A person said this to you on the channel"),
+        "{:?}",
         runs[0]
     );
 }
@@ -125,7 +130,7 @@ fn messages_arriving_while_it_works_are_queued_and_worked_in_order() {
     let runs = runs(&world);
     assert_eq!(runs.len(), 3, "{:?}", world.shape());
     for (run, said) in runs.iter().zip(["first", "second", "third"]) {
-        assert!(run.contains(said), "in arrival order: {run}");
+        assert!(run.was_told(said), "in arrival order: {run:?}");
     }
     assert_eq!(
         world.posts(),
@@ -136,21 +141,18 @@ fn messages_arriving_while_it_works_are_queued_and_worked_in_order() {
         ]
     );
     // Never two turns at once: each begins after the last ended.
-    let shape = world.shape();
-    let mut open = 0_u8;
-    for line in &shape {
-        if line.starts_with("-> RunTurn") && line.contains("\"Foreman\"") {
-            open += 1;
-            assert_eq!(
-                open, 1,
-                "a second turn started before the first ended: {shape:?}"
-            );
-        }
-        if line.starts_with("<- TurnEnded") && line.contains("\"Foreman\"") {
-            open -= 1;
-        }
+    for pair in runs.windows(2) {
+        let [earlier, later] = pair else {
+            panic!("a pair");
+        };
+        assert!(
+            earlier
+                .ended_at
+                .is_some_and(|ended| ended < later.opened_at),
+            "a second turn started before the first ended: {runs:?}"
+        );
     }
-    assert_eq!(open, 0);
+    assert!(runs.iter().all(|run| run.ended_at.is_some()));
 }
 
 /// A foreman found holding a message on waking is told its wait had a
@@ -181,10 +183,10 @@ fn a_foreman_interrupted_mid_turn_is_picked_up_on_waking() {
         .lines()
         .next()
         .expect("the interruption's first line");
-    assert!(runs[0].contains(told_first), "{}", runs[0]);
+    assert!(runs[0].was_told(told_first), "{:?}", runs[0]);
     assert!(
-        !runs[1].contains(told_first),
-        "the next was never begun: {}",
+        !runs[1].was_told(told_first),
+        "the next was never begun: {:?}",
         runs[1]
     );
     assert_eq!(
@@ -197,7 +199,7 @@ fn a_foreman_interrupted_mid_turn_is_picked_up_on_waking() {
 /// A crash mid-turn is the same case, and the same seed gives the same trace.
 #[test]
 fn a_crash_mid_turn_picks_the_message_up_again() {
-    fn scenario(seed_byte: u8) -> Vec<String> {
+    fn scenario(seed_byte: u8) -> (Vec<String>, Vec<Talk>) {
         let mut world = Simulation::new();
         world.holding(&watching_a_channel(&[]));
         let mut instance = world.wake(seed(seed_byte));
@@ -205,20 +207,16 @@ fn a_crash_mid_turn_picks_the_message_up_again() {
         world.run_until(&mut instance, 200);
         let mut instance = world.crash(seed(seed_byte));
         world.run_until(&mut instance, 10_000);
-        world.shape()
+        (world.shape(), runs(&world))
     }
 
-    let first = scenario(4);
-    assert_eq!(first, scenario(4));
-    let runs: Vec<&String> = first
-        .iter()
-        .filter(|line| line.starts_with("-> RunTurn") && line.contains("\"Foreman\""))
-        .collect();
+    let (first, runs) = scenario(4);
+    assert_eq!(first, scenario(4).0);
     assert_eq!(runs.len(), 2, "{first:?}");
-    assert!(runs[0].contains("Begin"), "{}", runs[0]);
+    assert!(runs[0].began(), "{:?}", runs[0]);
     assert!(
-        runs[1].contains("Resume") && runs[1].contains("You were interrupted"),
-        "the container survived the crash, the session with it: {}",
+        runs[1].resumed() && runs[1].was_told("You were interrupted"),
+        "the container survived the crash, the session with it: {:?}",
         runs[1]
     );
 }

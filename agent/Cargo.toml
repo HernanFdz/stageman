@@ -14,9 +14,11 @@ repository.workspace = true
 [dependencies]
 # For the answer an agent gives, which crosses the vocabulary as a value.
 serde = { version = "1.0.228", features = ["derive"] }
+# The protocol is JSON-RPC over lines, and since
+# `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`
+# the conversation is a machine that renders and reads those lines here.
+serde_json = "1.0.151"
 agent-client-protocol = "2.0.0"
-futures = "0.3.34"
-parking_lot = "0.12.5"
 # One hash, over the recipe a build is given, so that an image can be named
 # by what is in it — see
 # `docs/decisions/0051-an-image-is-named-by-the-recipe-it-is-built-from.md`.
@@ -28,11 +30,9 @@ stageman-core.workspace = true
 mutants = "0.0.4"
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["process", "io-util", "sync"] }
-tokio-util = { version = "0.7.19", features = ["compat"] }
 
 [lints]
 workspace = true
 
 [dev-dependencies]
-serde_json = "1.0.151"
 tokio = { version = "1.53.1", features = ["macros", "rt", "time"] }

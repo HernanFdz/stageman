@@ -2,17 +2,16 @@
 //! how whoever needs an answer waits for it.
 //!
 //! The loop, the channel and the generic mechanisms are the world crate's.
-//! What is here is what only stageman knows how to perform — a turn, a
-//! probe, a container's fate, a channel's posting — and the one thing the
-//! generic world cannot do for it: match an answer to whoever asked. A server
-//! function, the tools endpoint and the tunnel layer each send an event
-//! carrying an identifier and wait for the effect that carries it back, and
-//! the map below is where they wait. See
+//! What is here is what only stageman knows how to perform — a probe, a
+//! channel's posting — and the one thing the generic world cannot do for
+//! it: match an answer to whoever asked. A server function sends an event
+//! carrying an identifier and waits for the effect that carries it back,
+//! and the map below is where it waits. See
 //! `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`.
 //!
-//! Everything here runs on a task of its own: a turn takes minutes, and
-//! `docs/conventions.md` §3 keeps that off the loop that answers the
-//! dashboard. The disk is the world crate's, written inline there.
+//! Everything here runs on a task of its own: a probe waits on a socket,
+//! and `docs/conventions.md` §3 keeps that off the loop that answers the
+//! dashboard. The disk and the agent's process are the world crate's.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,9 +19,7 @@ use std::sync::{Arc, OnceLock};
 
 use stageman_agent::ContainerRuntime;
 use stageman_core::{Channel, Secret, Speaking};
-use stageman_instance::{
-    AppEffect, AppEvent, Event, Request, RequestId, Response, Run, Speaker, Stageman,
-};
+use stageman_instance::{AppEffect, AppEvent, Event, Request, RequestId, Response, Stageman};
 use stageman_world::{Perform, World};
 
 /// The application's way in, once an instance has been opened.
@@ -112,32 +109,25 @@ impl Asking {
 #[derive(Clone)]
 pub struct Performer(Arc<Inner>);
 
-/// The runtime every container effect goes through, once the instance has
-/// found one and said so.
+/// The runtime the probe goes through, once the instance has found one and
+/// said so.
 ///
-/// A static rather than a field, for the reason the domain beside it is one:
-/// what borrows it is a task that outlives the call that spawned it, and a
-/// process has exactly one running instance to have found one. On its way
-/// out either way — every effect that needs a runtime will carry its path.
+/// A static rather than a field: what borrows it is a task that outlives the
+/// call that spawned it, and a process has exactly one running instance to
+/// have found one. On its way out with the probe, which is the one effect
+/// left that needs it.
 static RUNTIME: OnceLock<ContainerRuntime> = OnceLock::new();
 
 struct Inner {
     /// Where events go back, and where answers are matched to askers.
     asking: Arc<Asking>,
-    /// The turns running right now, by whose they are, each with the handle
-    /// that stops it. In memory and never written down: a turn does not
-    /// survive this process, so neither should anything about one.
-    turns: parking_lot::Mutex<BTreeMap<Speaker, Arc<tokio::sync::Notify>>>,
 }
 
 impl Performer {
     /// A performer for this way in.
     #[must_use]
     pub fn new(asking: Arc<Asking>) -> Self {
-        Self(Arc::new(Inner {
-            asking,
-            turns: parking_lot::Mutex::new(BTreeMap::new()),
-        }))
+        Self(Arc::new(Inner { asking }))
     }
 
     /// Performs an effect on a task of its own, with the runtime the
@@ -187,15 +177,6 @@ impl Perform<Stageman> for Performer {
             AppEffect::Booted { runtime } => {
                 if RUNTIME.set(ContainerRuntime::new(runtime)).is_err() {
                     tracing::error!("the instance booted twice; the second runtime is ignored");
-                }
-            }
-            AppEffect::RunTurn { speaker, run } => self.turn(speaker, run),
-            AppEffect::StopTurn { speaker } => {
-                // A permit rather than a wake-up, so that a stop arriving in
-                // the instant between the turn starting and it waiting is not
-                // dropped on the floor.
-                if let Some(stopping) = self.0.turns.lock().get(&speaker) {
-                    stopping.notify_one();
                 }
             }
             AppEffect::Probe { job } => self.spawn(move |inner, runtime| async move {
@@ -254,109 +235,9 @@ impl Perform<Stageman> for Performer {
     }
 }
 
-impl Performer {
-    /// Runs one turn on a task of its own, and reports how it ended.
-    ///
-    /// **Asking rather than killing** is what stopping means: the future
-    /// running the agent is dropped, which closes the pipe the agent is
-    /// speaking on and ends it, and the container carries on because the
-    /// agent is no longer what it runs — see
-    /// `docs/decisions/0053-a-job-is-stopped-or-retired-by-a-person.md`.
-    #[mutants::skip]
-    fn turn(&self, speaker: Speaker, run: Run) {
-        let stopping = Arc::new(tokio::sync::Notify::new());
-        self.0.turns.lock().insert(speaker, Arc::clone(&stopping));
-        self.spawn(move |inner, runtime| async move {
-            // Where the tools are is decided by the instance, which took
-            // the address and knows which port it actually got.
-            let tools = |endpoint: String, warrant: String| {
-                stageman_agent::Tools::new(endpoint, Secret::new(warrant))
-            };
-            let running = async {
-                match run {
-                    Run::Begin {
-                        container,
-                        instance,
-                        agent,
-                        tools: endpoint,
-                        role,
-                        environment,
-                        repository,
-                        platform,
-                        kit,
-                        warrant,
-                        kickoff,
-                    } => {
-                        let launch = stageman_agent::Launch {
-                            agent,
-                            role,
-                            environment: environment
-                                .into_iter()
-                                .map(|(name, value)| (name, Secret::new(value)))
-                                .collect(),
-                            repository,
-                            platform,
-                            kit,
-                        };
-                        stageman_agent::begin(
-                            runtime,
-                            &launch,
-                            &container,
-                            instance,
-                            Some(&tools(endpoint, warrant)),
-                            &kickoff,
-                        )
-                        .await
-                    }
-                    Run::Resume {
-                        container,
-                        kit,
-                        warrant,
-                        tools: endpoint,
-                        text,
-                    } => {
-                        stageman_agent::resume(
-                            runtime,
-                            &container,
-                            &kit,
-                            Some(&tools(endpoint, warrant)),
-                            &text,
-                        )
-                        .await
-                    }
-                }
-            };
-            let outcome = tokio::select! {
-                answered = running => answered.map_err(|why| because(&why)),
-                () = stopping.notified() => Err("stopped".to_owned()),
-            };
-            inner.turns.lock().remove(&speaker);
-            inner.asking.send(AppEvent::TurnEnded { speaker, outcome });
-        });
-    }
-}
-
-/// A failure and everything underneath it, as one line of prose.
-///
-/// `to_string` on an error renders only its outermost line, and every error
-/// that reaches a job's record wraps a more specific one — so recording the
-/// outer line alone throws away the only part that says what actually went
-/// wrong. One line rather than several, because this goes into a record a
-/// dashboard shows as prose.
-fn because(failure: &dyn std::error::Error) -> String {
-    let mut told = failure.to_string();
-    let mut cause = std::error::Error::source(failure);
-    while let Some(reason) = cause {
-        told.push_str(": ");
-        told.push_str(&reason.to_string());
-        cause = reason.source();
-    }
-    told
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{Asking, because};
+    use super::Asking;
     use stageman_instance::{AppEvent, Event, Request, Response};
     use stageman_world::World;
     use std::sync::Arc;
@@ -392,18 +273,5 @@ mod tests {
             soon(asked).await.expect("the task"),
             Some(Response::Agents(Vec::new()))
         );
-    }
-
-    /// The chain is what there is to read.
-    #[test]
-    fn a_failure_is_recorded_with_everything_underneath_it() {
-        let inner = std::io::Error::other("the disk is full");
-        let outer = stageman_agent::AgentError::Runtime {
-            path: std::path::PathBuf::from("/usr/local/bin/docker"),
-            source: inner,
-        };
-        let told = because(&outer);
-        assert!(told.contains("the disk is full"), "{told}");
-        assert!(told.contains(": "), "{told}");
     }
 }

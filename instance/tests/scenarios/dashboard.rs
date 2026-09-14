@@ -447,7 +447,7 @@ fn starting_a_job_by_hand_runs_its_first_turn_once_the_record_has_landed() {
     );
     assert_eq!(started.reason, "started by hand from the dashboard");
     assert!(started.tunnel.contains(&started.id));
-    assert!(first(&sim, "-> Write") < first(&sim, "-> RunTurn"));
+    assert!(first(&sim, "-> Write") < sim.first_turn().expect("a turn"));
     let begun = JobId::from_uuid(Uuid::parse_str(&started.id).expect("an identifier"));
     assert!(sim.is_running(&stageman_job::container(begun)));
 
@@ -509,7 +509,7 @@ fn a_job_started_by_hand_on_a_bound_project_opens_its_thread_first() {
         panic!("the project's screen");
     };
     assert_eq!(shown.jobs.len(), 1);
-    assert!(first(&sim, "-> OpenThread") < first(&sim, "-> RunTurn"));
+    assert!(first(&sim, "-> OpenThread") < sim.first_turn().expect("a turn"));
     assert_eq!(sim.posts().len(), 1);
     let started = JobId::from_uuid(Uuid::parse_str(&shown.jobs[0].id).expect("an identifier"));
     assert!(
@@ -535,6 +535,9 @@ fn stopping_a_job_ends_its_turn_and_leaves_it_paused() {
     let (name, held) = Simulation::ours(&stageman_job::container(job(2)));
     sim.container(&name, held);
     let mut instance = sim.wake(seed(1));
+    // Far enough for the resumed job's agent to be running, so that the
+    // stop reaches a process rather than a step still to come.
+    sim.run_until(&mut instance, 3);
     let id = project().to_string();
 
     for effect in instance.step(request(
@@ -558,7 +561,7 @@ fn stopping_a_job_ends_its_turn_and_leaves_it_paused() {
         Some(Standing::Working),
         "still working until the world says the turn ended"
     );
-    assert_eq!(count(&sim, "-> StopTurn"), 1);
+    assert_eq!(count(&sim, "-> Close"), 1);
 
     sim.run_until(&mut instance, 10);
     assert_eq!(
@@ -586,11 +589,7 @@ fn stopping_a_job_ends_its_turn_and_leaves_it_paused() {
             job: job(2).to_string(),
         },
     );
-    assert_eq!(
-        count(&sim, "-> StopTurn"),
-        1,
-        "nothing to stop in an idle job"
-    );
+    assert_eq!(count(&sim, "-> Close"), 1, "nothing to stop in an idle job");
     assert_eq!(
         ask(
             &mut sim,

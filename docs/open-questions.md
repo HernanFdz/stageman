@@ -347,22 +347,18 @@ and wrong within a day.
 - Next, empty the application hole, because
   `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`
   is finished when nothing application-specific is left for a world to
-  perform, and what remains is four families rather than a design question.
+  perform, and what remains is two families rather than a design question.
   The order below is the record's, and each one is the same shape of work as
-  the families already moved: render the command or the frame inside the
-  instance, read the answer inside it, and delete what the app was doing.
-
-  **A turn**, which is the largest: a process kept open, its lines arriving
-  as events and going out as effects, so that the conversation with an agent
-  becomes a state machine a scenario can drive. The record expects this to
-  gain the case nothing tests today — a setting accepted and silently
-  ignored — and it is what still keeps a container runtime's path in the
-  app's performer.
+  the families already moved — the turn most recently, which is now the
+  commands it runs and a process kept open, with the conversation a machine
+  the scenarios drive: render the command or the frame inside the instance,
+  read the answer inside it, and delete what the app was doing.
 
   **A probe**, which is the smallest and is not reducible to the others:
   `docs/decisions/0047-a-tunnel-answers-only-when-something-behind-it-does.md`
   measured what it has to mean, and a published port answers whether or not
-  anything is behind it.
+  anything is behind it. It is what still keeps a container runtime's path
+  in the app's performer.
 
   **A channel's lifecycle**, which is a websocket and a request: connect,
   acknowledge, refresh before the platform closes, retry, and measure the

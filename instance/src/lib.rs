@@ -65,7 +65,7 @@ pub use stageman_vocabulary::Seed;
 pub use sweep::Swept;
 pub use tunnel::{DEFAULT_DOMAIN, Domain, Routed, address, decode};
 pub use vocabulary::{
-    AppEffect, AppEvent, Container, Message, Posting, RequestId, Run, Speaker, Warranted,
+    AppEffect, AppEvent, Container, Message, Posting, RequestId, Speaker, Warranted,
 };
 
 /// This application, as the vocabulary sees it: what fills its hole.
@@ -315,6 +315,31 @@ enum Asked {
         /// Its name and tag.
         image: String,
     },
+    /// Whether a turn's image is there.
+    Present {
+        /// Whose turn.
+        speaker: Speaker,
+    },
+    /// A build of an image, for every turn waiting on it.
+    Built {
+        /// Its name and tag.
+        image: String,
+    },
+    /// Whether a turn's container was made.
+    Created {
+        /// Whose turn.
+        speaker: Speaker,
+    },
+    /// Whether a turn's container is up.
+    Started {
+        /// Whose turn.
+        speaker: Speaker,
+    },
+    /// Whether a turn's repository was checked out.
+    CheckedOut {
+        /// Whose turn.
+        speaker: Speaker,
+    },
 }
 
 /// What booting hands an awake instance.
@@ -405,6 +430,12 @@ pub struct Running {
     next: u64,
     /// The turns in flight, by whose they are.
     turns: BTreeMap<Speaker, Turn>,
+    /// Whose turn each open agent process belongs to, by the identifier the
+    /// process was opened under: what routes a line back to its conversation.
+    talking: BTreeMap<EffectId, Speaker>,
+    /// The builds in flight, by image, with every turn waiting on each. One
+    /// build at a time per image, for the reason `crate::turns` gives.
+    building: BTreeMap<String, Vec<Speaker>>,
     /// The credentials minted for those turns.
     warrants: BTreeMap<String, Warranted>,
     /// The foremen found mid-turn on waking, until each is picked up.
@@ -482,6 +513,8 @@ impl Running {
             rng,
             next,
             turns: BTreeMap::new(),
+            talking: BTreeMap::new(),
+            building: BTreeMap::new(),
             warrants: BTreeMap::new(),
             interrupted: BTreeSet::new(),
             asking: BTreeMap::new(),
@@ -520,14 +553,27 @@ impl Running {
     /// what a scenario shows is the argument list that actually runs — and
     /// the answer is routed by the identifier it carries back.
     fn ask(&mut self, command: &Command, asked: Asked) -> Effect {
+        self.asking(command, asked, self.runtime_environment.clone(), None)
+    }
+
+    /// Asks the runtime something with an environment and an input of its
+    /// own: the one that makes a container carries its credentials, and the
+    /// one that builds an image carries its recipe.
+    fn asking(
+        &mut self,
+        command: &Command,
+        asked: Asked,
+        environment: Environment,
+        stdin: Option<stageman_vocabulary::Bytes>,
+    ) -> Effect {
         let id = self.effect_id();
         self.asked.insert(id, asked);
         Generic::Run {
             id,
             program: self.runtime.clone(),
             arguments: command.arguments(),
-            environment: self.runtime_environment.clone(),
-            stdin: None,
+            environment,
+            stdin,
         }
     }
 
@@ -611,6 +657,12 @@ impl Running {
             }
             Asked::Listing => self.listing(finished, effects),
             Asked::Labelled { name, label } => self.labelled(&name, label, finished, effects),
+            // A turn's steps, each answered to the turn it belongs to.
+            Asked::Present { speaker } => self.looked(speaker, finished, effects),
+            Asked::Built { image } => self.built(&image, finished, effects),
+            Asked::Created { speaker } => self.made(speaker, finished, effects),
+            Asked::Started { speaker } => self.held(speaker, finished, effects),
+            Asked::CheckedOut { speaker } => self.checked_out(speaker, finished, effects),
             Asked::Port { job } => {
                 if let Some(why) = complaint(finished) {
                     tracing::debug!(%job, %why, "the runtime could not say where a job's tunnel is");
@@ -756,6 +808,8 @@ impl Running {
                 request,
             } => self.arrived(listener, id, &request, &mut effects),
             Event::Body { id, outcome } => self.read(id, outcome, &mut effects),
+            Event::Line { id, line } => self.line(id, &line, &mut effects),
+            Event::Ended { id, ended } => self.process_ended(id, &ended, &mut effects),
             Event::Read { .. } | Event::Bound { .. } => {
                 tracing::warn!(
                     "answered something this instance did not ask for while awake; ignored"
@@ -777,7 +831,6 @@ impl Running {
             AppEvent::Presenting { .. } => {
                 tracing::debug!("told again where the presentation server is; ignored");
             }
-            AppEvent::TurnEnded { speaker, outcome } => self.ended(speaker, outcome, effects),
             AppEvent::Probed { job, answering } => {
                 if !answering {
                     // Halted, so the port it was on reaches nothing.
@@ -877,31 +930,26 @@ impl Running {
 
     /// What becomes of effects that waited on a write that never landed.
     ///
-    /// Notices are simply not said. A turn that was to start is not started,
-    /// and the job it was for is recorded as failed for that reason: the
-    /// alternative is a job that says working with nothing running in it,
-    /// which a reply could never reach. The record is a change of its own,
-    /// so the next write carries it — and if that one lands, the job can be
-    /// given something again.
+    /// Notices are simply not said. A command the runtime was to be given is
+    /// not given, and forgotten as asked, so its answer is not waited for. A
+    /// turn whose first step that was is not started, and the job it was for
+    /// is recorded as failed for that reason: the alternative is a job that
+    /// says working with nothing running in it, which a reply could never
+    /// reach. The record is a change of its own, so the next write carries
+    /// it — and if that one lands, the job can be given something again.
     fn dropped(&mut self, effects: Vec<Effect>) {
         tracing::warn!(
             dropped = effects.len(),
             "what waited on the write is dropped"
         );
         for effect in effects {
-            if let Effect::App(AppEffect::RunTurn {
-                speaker: speaker @ Speaker::Job(job),
-                ..
-            }) = effect
+            let Effect::Run { id, .. } = effect else {
+                continue;
+            };
+            if let Some(Asked::Present { speaker } | Asked::Started { speaker }) =
+                self.asked.remove(&id)
             {
-                self.turns.remove(&speaker);
-                self.warrants.retain(|_, known| known.speaker != speaker);
-                self.record(
-                    job,
-                    Progress::Idle(stageman_core::Waiting::Failed(
-                        "the instance could not be written, so the turn was not started".to_owned(),
-                    )),
-                );
+                self.abandoned(speaker);
             }
         }
     }

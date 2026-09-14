@@ -8,8 +8,8 @@
 
 use stageman_core::{InstanceId, JobId, Outcome, Progress, State};
 
-use crate::turns::{Turn, listening_on};
-use crate::vocabulary::{AppEffect, Container, Run, Speaker};
+use crate::turns::{Run, Turn, listening_on};
+use crate::vocabulary::{AppEffect, Container, Speaker};
 use crate::{Asked, Command};
 use crate::{Effect, Emit as _, Running, SETTLING_INTERVAL};
 
@@ -284,17 +284,17 @@ impl Running {
             };
             let speaker = Speaker::Job(*job);
             let warrant = self.warrant(speaker, thread);
-            self.turns.insert(speaker, Turn::quiet());
-            effects.emit(AppEffect::RunTurn {
+            let first = self.turn(
                 speaker,
-                run: Run::Resume {
+                Turn::quiet(Run::Resume {
                     container: stageman_job::container(*job),
                     kit,
                     warrant,
                     tools: self.tools.clone(),
                     text: stageman_foreman::resumption_notice().to_owned(),
-                },
-            });
+                }),
+            );
+            effects.push(first);
         }
 
         // A hard kill leaves containers running, and nothing of this

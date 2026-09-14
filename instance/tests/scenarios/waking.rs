@@ -3,26 +3,13 @@
 
 use std::collections::BTreeMap;
 
-use crate::simulation::{
-    Held, Simulation, another_instance, job, project, seed, this_instance, watching,
-};
+use crate::simulation::{Simulation, Talk, another_instance, job, project, seed, watching};
 use stageman_agent::Command;
 use stageman_agent::{Answer, StopReason};
-use stageman_core::{Agent, JobId, Outcome, Progress, ProjectId, State, Uuid, Waiting};
+use stageman_core::{JobId, Outcome, Progress, ProjectId, State, Uuid, Waiting};
 
 fn progress_of(state: &State, id: JobId) -> Progress {
     state.job(id).expect("the job").progress.clone()
-}
-
-/// A container of this instance's, up, that is or is not showing something.
-const fn up(serving: bool) -> Held {
-    Held {
-        instance: Some(this_instance()),
-        agent: Some(Agent::Claude),
-        running: true,
-        serving,
-        port: None,
-    }
 }
 
 const fn ended(stop_reason: StopReason) -> Answer {
@@ -172,12 +159,13 @@ fn a_working_job_with_a_container_is_resumed_and_its_ending_recorded() {
     let mut instance = world.wake(seed(1));
     world.run_until(&mut instance, 2_000);
 
-    let shape = world.shape();
     assert!(
-        shape.iter().any(|line| line.starts_with("-> RunTurn")
-            && line.contains("\"Job\"")
-            && line.contains("Resume")),
-        "{shape:?}"
+        world
+            .talks_in(&name)
+            .first()
+            .is_some_and(|talk| talk.resumed()),
+        "the session in its container was picked up: {:?}",
+        world.talks()
     );
     assert_eq!(
         progress_of(instance.state(), working),
@@ -212,10 +200,10 @@ fn a_resumed_turn_that_fails_is_recorded_as_failed() {
     let mut instance = world.wake(seed(1));
     world.run_until(&mut instance, 2_000);
 
-    assert_eq!(
-        progress_of(instance.state(), working),
-        Progress::Idle(Waiting::Failed("the credential was refused".to_owned()))
-    );
+    let Progress::Idle(Waiting::Failed(why)) = progress_of(instance.state(), working) else {
+        panic!("an agent that died is a failed turn");
+    };
+    assert!(why.contains("the credential was refused"), "{why}");
 }
 
 /// A turn that ended badly is recorded as failed, saying how.
@@ -299,23 +287,11 @@ fn waking_removes_what_is_ours_and_over_and_leaves_the_rest() {
     }
     world.container(
         &stageman_job::container(theirs),
-        Held {
-            instance: Some(another_instance()),
-            agent: Some(Agent::Claude),
-            running: true,
-            serving: false,
-            port: None,
-        },
+        Simulation::theirs(Some(another_instance()), true),
     );
     world.container(
         &stageman_job::container(unlabelled),
-        Held {
-            instance: None,
-            agent: None,
-            running: false,
-            serving: false,
-            port: None,
-        },
+        Simulation::theirs(None, false),
     );
 
     let mut instance = world.wake(seed(1));
@@ -383,7 +359,7 @@ fn settling_stops_what_shows_nothing_and_keeps_what_shows_something() {
         (working, Progress::Working),
     ]));
     for (id, serving) in [(showing, true), (silent, false), (working, false)] {
-        world.container(&stageman_job::container(id), up(serving));
+        world.container(&stageman_job::container(id), Simulation::up(serving));
     }
 
     let mut instance = world.wake(seed(1));
@@ -439,18 +415,12 @@ fn settling_asks_only_about_what_is_ours() {
     world.holding(&watching(&[]));
     world.container(
         &stageman_job::container(theirs),
-        Held {
-            instance: Some(another_instance()),
-            agent: Some(Agent::Claude),
-            running: true,
-            serving: false,
-            port: None,
-        },
+        Simulation::theirs(Some(another_instance()), true),
     );
     let mut instance = world.wake(seed(1));
     // Appears after waking, as a container another process of this instance
     // might have started: no record, our label.
-    world.container(&stageman_job::container(ours), up(false));
+    world.container(&stageman_job::container(ours), Simulation::up(false));
     world.run_until(&mut instance, 61_000);
 
     assert!(
@@ -467,7 +437,7 @@ fn settling_asks_only_about_what_is_ours() {
 /// mid-flight and a restart that puts both back to work.
 #[test]
 fn the_same_seed_gives_the_same_trace_across_a_crash() {
-    fn scenario(seed_byte: u8) -> (Vec<String>, Progress, Progress) {
+    fn scenario(seed_byte: u8) -> (Vec<String>, Vec<Talk>, Progress, Progress) {
         let mut world = Simulation::new();
         let one = job(1);
         let two = job(2);
@@ -486,13 +456,14 @@ fn the_same_seed_gives_the_same_trace_across_a_crash() {
         world.run_until(&mut instance, 5_000);
         (
             world.shape(),
+            world.talks().to_vec(),
             progress_of(instance.state(), one),
             progress_of(instance.state(), two),
         )
     }
 
-    let (first, one, two) = scenario(3);
-    let (again, _, _) = scenario(3);
+    let (first, talks, one, two) = scenario(3);
+    let (again, _, _, _) = scenario(3);
     assert_eq!(first, again, "the same seed must give the same trace");
     assert_eq!(
         one,
@@ -505,27 +476,21 @@ fn the_same_seed_gives_the_same_trace_across_a_crash() {
         1
     );
     assert_eq!(
-        first
-            .iter()
-            .filter(|line| line.starts_with("-> RunTurn"))
-            .count(),
+        talks.len(),
         4,
-        "each job was put to work twice, once each side of the crash: {first:?}"
+        "each job was put to work twice, once each side of the crash: {talks:?}"
     );
     assert_eq!(
-        first
-            .iter()
-            .filter(|line| line.starts_with("<- TurnEnded"))
-            .count(),
+        talks.iter().filter(|talk| talk.ended_at.is_some()).count(),
         2,
-        "the turns cut off by the crash never ended: {first:?}"
+        "the turns cut off by the crash never ended: {talks:?}"
     );
 }
 
-/// A turn crosses to the world with what the world has to hand over, its
-/// warrant included and in the clear — a trace serialises in full, and what
-/// keeps a credential out of a log is that nothing here formats — and the
-/// warrant is known for exactly as long as the turn runs.
+/// A turn's warrant reaches the agent on the line that declares the tools,
+/// in the clear — a trace serialises in full, and what keeps a credential
+/// out of a log is that nothing here formats — and the warrant is known for
+/// exactly as long as the turn runs.
 #[test]
 fn a_turn_carries_what_the_world_is_handed_and_its_warrant_lives_as_long_as_it_does() {
     let mut world = Simulation::new();
@@ -535,20 +500,19 @@ fn a_turn_carries_what_the_world_is_handed_and_its_warrant_lives_as_long_as_it_d
     world.container(&name, held);
 
     let mut instance = world.wake(seed(1));
-    let run = world
-        .shape()
-        .into_iter()
-        .find(|line| line.starts_with("-> RunTurn"))
-        .expect("a turn was run");
+    // Far enough for the session to be loaded, and not for the turn to end.
+    world.run_until(&mut instance, 10);
     let warrant = world
         .warrants()
         .first()
         .expect("a warrant was handed over")
         .clone();
-    assert!(
-        run.contains(warrant.as_str()),
-        "the warrant crosses in full, for the world to hand over: {run}"
-    );
+    let declared = world
+        .shape()
+        .into_iter()
+        .find(|line| line.starts_with("-> Send") && line.contains(warrant.as_str()))
+        .expect("the warrant crosses in full, on the line that declares the tools");
+    assert!(declared.contains("session/load"), "{declared}");
     assert!(
         warrant.as_str().len() >= 64,
         "unguessable: {}",

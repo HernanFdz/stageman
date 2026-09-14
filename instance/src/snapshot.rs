@@ -81,6 +81,8 @@ pub fn of(running: &Running) -> Value {
             "runtime_environment": value(&running.runtime_environment),
             "next": running.next,
             "turns": value(&running.turns.iter().collect::<Vec<_>>()),
+            "talking": value(&running.talking.iter().collect::<Vec<_>>()),
+            "building": value(&running.building),
             "warrants": value(&running.warrants),
             "interrupted": value(&running.interrupted),
             "asking": value(&running.asking.iter().collect::<Vec<_>>()),

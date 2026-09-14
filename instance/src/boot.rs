@@ -381,7 +381,9 @@ impl Boot {
             Event::Woke { .. }
             | Event::Bound { .. }
             | Event::Arrived { .. }
-            | Event::Body { .. } => Booting::Asking(Vec::new()),
+            | Event::Body { .. }
+            | Event::Line { .. }
+            | Event::Ended { .. } => Booting::Asking(Vec::new()),
         }
     }
 

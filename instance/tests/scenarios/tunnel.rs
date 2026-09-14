@@ -40,7 +40,9 @@ fn a_jobs_tunnel_is_looked_up_once_and_remembered() {
     let (name, held) = Simulation::ours(&stageman_job::container(job(1)));
     sim.container(&name, held);
     let mut instance = sim.wake(seed(1));
-    // Waking resumes the job, which starts its container on a port.
+    // Waking resumes the job, which starts its container on a port a
+    // moment later.
+    sim.run_until(&mut instance, 5);
     let port = sim
         .port_of(&stageman_job::container(job(1)))
         .expect("resumed, so running on a port");
@@ -123,6 +125,7 @@ fn a_port_that_can_have_moved_is_looked_up_again() {
     let (name, held) = Simulation::ours(&stageman_job::container(job(1)));
     sim.container(&name, held);
     let mut instance = sim.wake(seed(1));
+    sim.run_until(&mut instance, 5);
     let first = sim
         .port_of(&stageman_job::container(job(1)))
         .expect("resumed, so running on a port");

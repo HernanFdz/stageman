@@ -19,12 +19,12 @@ use stageman_core::{
 };
 use stageman_wire::{ChannelDraft, Draft, Ending, KitDraft, Refusal, VariableDraft};
 
+use crate::Effect;
 use crate::Running;
 use crate::turns::listening_on;
 use crate::views;
 use crate::vocabulary::{AppEffect, RequestId, Speaker};
 use crate::{Asked, Command};
-use crate::{Effect, Emit as _};
 
 /// Why a job started, when a person started it.
 ///
@@ -437,10 +437,7 @@ impl Running {
         let identifier = views::identify(&self.state, project)?;
         let named = identify_job(&self.state, identifier, job)
             .ok_or_else(|| Refusal::UnknownJob { id: job.to_owned() })?;
-        let speaker = Speaker::Job(named);
-        if let Some(turn) = self.turns.get_mut(&speaker) {
-            turn.stopping = true;
-            effects.emit(AppEffect::StopTurn { speaker });
+        if self.stop_turn(Speaker::Job(named), effects) {
             tracing::info!(job = %named, "asked to stop a job");
         } else {
             tracing::debug!(job = %named, "asked to stop a job with no turn in it");

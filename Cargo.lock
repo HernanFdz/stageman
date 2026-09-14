@@ -3865,16 +3865,13 @@ name = "stageman-agent"
 version = "0.0.0"
 dependencies = [
  "agent-client-protocol",
- "futures",
  "mutants",
- "parking_lot",
  "serde",
  "serde_json",
  "sha2",
  "stageman-core",
  "thiserror 2.0.20",
  "tokio",
- "tokio-util",
 ]
 
 [[package]]

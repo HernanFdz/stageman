@@ -5,26 +5,29 @@
 //! runtime and scheduling the events that answer them at virtual instants,
 //! and it records every event and effect as a trace a test can compare. The
 //! runtime's questions are recognised through the agent crate's own inverse
-//! of their rendering, never by matching on strings. A crash is a method:
-//! turns, timers and unanswered writes die, containers stay as they are, and
-//! the disk is what landed.
+//! of their rendering, never by matching on strings, and so are the lines
+//! the instance says to an agent: a process kept open here is a simulated
+//! adapter that reads each line back as what it asks and answers as the
+//! pinned adapter was measured to. A crash is a method: turns, timers and
+//! unanswered writes die, containers stay as they are, and the disk is what
+//! landed.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 
-use stageman_agent::{Answer, Command, Label, StopReason};
+use stageman_agent::{Answer, Command, Heard, Label, Said, StopReason};
 use stageman_core::{
     Agent, AgentConfig, Channel, ChannelConfig, Errand, InstanceId, Job, JobId, Key, Kit,
     KitConfig, KitName, NONCE_LEN, Nonce, Progress, Project, ProjectId, Secret, Snapshot, State,
     Thread, Timestamp, Uuid,
 };
 use stageman_instance::{
-    AppEffect, AppEvent, Effect, Event, Instance, Message, Request, RequestId, Response, Run, Seed,
+    AppEffect, AppEvent, Effect, Event, Instance, Message, Request, RequestId, Response, Seed,
     Target,
 };
 use stageman_vocabulary::scenario::{Meta, Recorder};
 use stageman_vocabulary::{
-    Answer as Answering, Arrival, Bytes, EffectId, Environment, Finished, Named as _,
+    Answer as Answering, Arrival, Bytes, EffectId, Ended, Environment, Finished, Named as _,
     RequestId as Asked,
 };
 
@@ -61,6 +64,82 @@ pub struct Held {
     /// The host port its tunnel is published on, once it has been started.
     /// A new one on every start, as the runtime does.
     pub port: Option<u16>,
+    /// The session its agent has written, if one has said anything: what a
+    /// resumed conversation finds, and what a fresh one leaves.
+    pub session: Option<String>,
+    /// The variables it was made with, valued: what the runtime was given
+    /// and told to forward.
+    pub environment: BTreeMap<String, String>,
+}
+
+/// One agent process the simulation keeps open: the adapter's half of a
+/// conversation, answering what it is sent.
+struct Adapter {
+    /// Which container it runs in.
+    container: String,
+    /// The session it serves, once one is made or loaded.
+    session: Option<String>,
+    /// What the session currently reports its options to be.
+    options: Vec<(String, String)>,
+    /// How the prompt ends: the next scripted outcome, or a clean ending
+    /// having said "done".
+    outcome: Result<Answer, String>,
+    /// Which conversation this is, in the record of them.
+    talk: usize,
+}
+
+/// One conversation the instance opened, as the simulation saw it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Talk {
+    /// Which container the agent was run in.
+    pub container: String,
+    /// Whether a session was made rather than the container's own loaded,
+    /// once the conversation got that far.
+    pub fresh: Option<bool>,
+    /// What the agent was asked, once it was.
+    pub prompt: Option<String>,
+    /// The credential the tools were declared with, once they were.
+    pub warrant: Option<String>,
+    /// Where in the trace the process was opened.
+    pub opened_at: usize,
+    /// Where in the trace its end was delivered, once it was.
+    pub ended_at: Option<usize>,
+}
+
+impl Talk {
+    /// Whether this conversation began a session, which is known once it
+    /// got as far as one.
+    pub fn began(&self) -> bool {
+        self.fresh == Some(true)
+    }
+
+    /// Whether this conversation resumed a session.
+    pub fn resumed(&self) -> bool {
+        self.fresh == Some(false)
+    }
+
+    /// Whether the agent was told something containing the words.
+    pub fn was_told(&self, words: &str) -> bool {
+        self.prompt
+            .as_deref()
+            .is_some_and(|prompt| prompt.contains(words))
+    }
+}
+
+/// What a session advertises before anything is set: the agent's defaults.
+fn defaults() -> Vec<(String, String)> {
+    ["mode", "model", "effort"]
+        .into_iter()
+        .map(|option| (option.to_owned(), "default".to_owned()))
+        .collect()
+}
+
+/// Options as the constructors take them.
+fn pairs(options: &[(String, String)]) -> Vec<(&str, &str)> {
+    options
+        .iter()
+        .map(|(option, current)| (option.as_str(), current.as_str()))
+        .collect()
 }
 
 /// Where a tunnel request was sent.
@@ -93,8 +172,20 @@ pub struct Simulation {
     /// Why the next addresses cannot be taken, front first.
     bind_failures: VecDeque<String>,
     /// How the next turns end, front first; a turn with nothing scripted ends
-    /// cleanly having said nothing.
+    /// cleanly having said "done".
     answers: VecDeque<Result<Answer, String>>,
+    /// Why the next builds fail, front first.
+    build_failures: VecDeque<String>,
+    /// Why the next checkouts fail, front first.
+    checkout_failures: VecDeque<String>,
+    /// The agent processes kept open, by the identifier each was opened
+    /// under, for as long as each runs.
+    adapters: BTreeMap<EffectId, Adapter>,
+    /// Every conversation opened, in order, and which process each was.
+    talks: Vec<Talk>,
+    talking: BTreeMap<EffectId, usize>,
+    /// How many sessions have been made, so each is named apart.
+    sessions_made: u32,
     /// Why the next posts on an agent's behalf fail, front first.
     post_failures: VecDeque<String>,
     /// What each request was answered with, by identifier.
@@ -107,9 +198,9 @@ pub struct Simulation {
     ports: u16,
     /// Threads opened so far, so each gets a number of its own.
     threads_opened: u32,
-    /// Jobs whose first turn the world has been asked to run. A job is on the
-    /// record before its container exists, so only after this may the oracle
-    /// expect the container.
+    /// Jobs whose container the world has been asked to make. A job is on
+    /// the record before its container exists, so only after this may the
+    /// oracle expect the container.
     begun: BTreeSet<JobId>,
     /// How long a turn takes.
     turn_takes: Now,
@@ -121,7 +212,6 @@ pub struct Simulation {
     /// One that nothing needs is what a sweep reclaims, and what it leaves
     /// is what the next container would have rebuilt anyway.
     images: Vec<String>,
-    warrants: Vec<String>,
     /// The addresses taken, by the bind that asked for each.
     listeners: BTreeMap<EffectId, String>,
     /// What each request said, until whoever is deciding asks to read it.
@@ -335,6 +425,12 @@ impl Simulation {
             write_failures: VecDeque::new(),
             bind_failures: VecDeque::new(),
             answers: VecDeque::new(),
+            build_failures: VecDeque::new(),
+            checkout_failures: VecDeque::new(),
+            adapters: BTreeMap::new(),
+            talks: Vec::new(),
+            talking: BTreeMap::new(),
+            sessions_made: 0,
             post_failures: VecDeque::new(),
             tool_answers: BTreeMap::new(),
             responses: BTreeMap::new(),
@@ -347,7 +443,6 @@ impl Simulation {
             posts: Vec::new(),
             listening: Vec::new(),
             images: vec!["stageman:unneeded".to_owned()],
-            warrants: Vec::new(),
             listeners: BTreeMap::new(),
             bodies: BTreeMap::new(),
             asking_next: 1,
@@ -404,7 +499,8 @@ impl Simulation {
         self.containers.insert(name.to_owned(), held);
     }
 
-    /// A container of this instance's, stopped and showing nothing.
+    /// A container of this instance's, stopped and showing nothing, whose
+    /// agent has written a session: what a job or a foreman leaves behind.
     pub fn ours(name: &str) -> (String, Held) {
         (
             name.to_owned(),
@@ -414,8 +510,38 @@ impl Simulation {
                 running: false,
                 serving: false,
                 port: None,
+                session: Some(format!("sess-{name}")),
+                environment: BTreeMap::new(),
             },
         )
+    }
+
+    /// A container up right now, of this instance's, showing something or
+    /// not, with a session in it.
+    pub fn up(serving: bool) -> Held {
+        Held {
+            instance: Some(this_instance()),
+            agent: Some(Agent::Claude),
+            running: true,
+            serving,
+            port: None,
+            session: Some("sess-left".to_owned()),
+            environment: BTreeMap::new(),
+        }
+    }
+
+    /// A container of somebody else's, up: another instance's, or one made
+    /// before instances were told apart.
+    pub fn theirs(instance: Option<InstanceId>, running: bool) -> Held {
+        Held {
+            instance,
+            agent: instance.map(|_| Agent::Claude),
+            running,
+            serving: false,
+            port: None,
+            session: None,
+            environment: BTreeMap::new(),
+        }
     }
 
     /// Scripts the next write to fail.
@@ -434,6 +560,44 @@ impl Simulation {
     /// Scripts the next post on an agent's behalf to fail.
     pub fn next_post_fails(&mut self, why: &str) {
         self.post_failures.push_back(why.to_owned());
+    }
+
+    /// Scripts the next build to fail, saying why.
+    pub fn next_build_fails(&mut self, why: &str) {
+        self.build_failures.push_back(why.to_owned());
+    }
+
+    /// Scripts the next checkout to fail, saying why.
+    pub fn next_checkout_fails(&mut self, why: &str) {
+        self.checkout_failures.push_back(why.to_owned());
+    }
+
+    /// Every conversation opened so far, in order.
+    pub fn talks(&self) -> &[Talk] {
+        &self.talks
+    }
+
+    /// The conversations opened in one container, in order.
+    pub fn talks_in(&self, container: &str) -> Vec<&Talk> {
+        self.talks
+            .iter()
+            .filter(|talk| talk.container == container)
+            .collect()
+    }
+
+    /// The variables a container was made with, valued, if it was made
+    /// here.
+    pub fn environment_of(&self, name: &str) -> Option<&BTreeMap<String, String>> {
+        self.containers.get(name).map(|held| &held.environment)
+    }
+
+    /// Where in the trace a turn was first asked for: the first command a
+    /// turn runs, which is whether its image is there for one that begins
+    /// and its container starting for one that resumes.
+    pub fn first_turn(&self) -> Option<usize> {
+        self.first_asking(|command| {
+            matches!(command, Command::Present { .. } | Command::Start { .. })
+        })
     }
 
     /// What a request was answered with, if it has been.
@@ -626,7 +790,8 @@ impl Simulation {
         self.exited.as_deref()
     }
 
-    /// Scripts how the next turn ends.
+    /// Scripts how the next turn ends: what its agent says and reports and
+    /// why it stops, or why its process dies instead of answering.
     pub fn next_turn_ends(&mut self, outcome: Result<Answer, String>) {
         self.answers.push_back(outcome);
     }
@@ -674,9 +839,10 @@ impl Simulation {
                     | Event::Written { .. }
                     | Event::Ran { .. }
                     | Event::Woke { .. }
+                    | Event::Line { .. }
+                    | Event::Ended { .. }
                     | Event::App(
                         AppEvent::Presenting { .. }
-                            | AppEvent::TurnEnded { .. }
                             | AppEvent::Probed { .. }
                             | AppEvent::ThreadOpened { .. }
                             | AppEvent::Posted { .. }
@@ -686,6 +852,9 @@ impl Simulation {
         });
         self.landing.clear();
         self.begun.clear();
+        // The agent processes die with the daemon that held their pipes;
+        // what they wrote into their containers stays.
+        self.adapters.clear();
         self.trace.push(format!("{}: CRASH", self.now));
         self.wake(seed)
     }
@@ -704,6 +873,12 @@ impl Simulation {
             && let Some(Some((path, bytes))) = self.landing.pop_front()
         {
             self.files.insert(path, bytes);
+        }
+        if let Event::Ended { id, .. } = &event
+            && let Some(&talk) = self.talking.get(id)
+            && let Some(talk) = self.talks.get_mut(talk)
+        {
+            talk.ended_at = Some(self.trace.len());
         }
         self.trace
             .push(format!("{at}: <- {}{}", event.kind(), serialised(&event)));
@@ -786,54 +961,395 @@ impl Simulation {
         }
     }
 
-    /// Runs a turn: beginning makes the container, resuming needs one, and
-    /// how it ends is the next scripted answer or a clean ending.
-    fn run_turn(&mut self, speaker: stageman_instance::Speaker, run: &Run) {
-        if let stageman_instance::Speaker::Job(job) = speaker {
-            self.begun.insert(job);
-        }
-        let (container, warrant) = match &run {
-            Run::Begin {
-                container, warrant, ..
-            }
-            | Run::Resume {
-                container, warrant, ..
-            } => (container.clone(), warrant.clone()),
-        };
-        self.warrants.push(warrant);
-        if matches!(run, Run::Begin { .. }) {
-            // Beginning makes the container, named before it exists.
-            self.containers.insert(
-                container.clone(),
-                Held {
-                    instance: Some(this_instance()),
-                    agent: Some(Agent::Claude),
-                    running: true,
-                    serving: false,
-                    port: None,
+    /// Keeps an agent process open: the adapter's half of a conversation,
+    /// in a container that has to be up.
+    fn opened(&mut self, id: EffectId, arguments: &[String]) {
+        let Some(Command::Exec { name }) = Command::parse(arguments) else {
+            self.schedule(
+                self.now,
+                Event::Ended {
+                    id,
+                    ended: Ended::Failed("the simulation keeps no such process open".to_owned()),
                 },
             );
-        }
-        // A start publishes the tunnel on a fresh host port, as the runtime
-        // does, whether the container is new or restarted.
-        self.ports += 1;
-        let port = self.ports;
-        let outcome = match self.containers.get_mut(&container) {
-            Some(held) => {
-                held.running = true;
-                held.port = Some(port);
-                self.answers.pop_front().unwrap_or_else(|| {
-                    Ok(Answer {
-                        text: "done".to_owned(),
-                        stop_reason: StopReason::EndTurn,
-                        reported: BTreeMap::new(),
-                    })
-                })
-            }
-            None => Err(format!("no such container: {container}")),
+            return;
         };
+        if !self.is_running(&name) {
+            self.schedule(
+                self.now,
+                Event::Ended {
+                    id,
+                    ended: Ended::Exited {
+                        status: Some(1),
+                        stderr: format!(
+                            "Error response from daemon: container {name} is not running\n"
+                        )
+                        .into(),
+                    },
+                },
+            );
+            return;
+        }
+        let outcome = self.answers.pop_front().unwrap_or_else(|| {
+            Ok(Answer {
+                text: "done".to_owned(),
+                stop_reason: StopReason::EndTurn,
+                reported: BTreeMap::new(),
+            })
+        });
+        self.talks.push(Talk {
+            container: name.clone(),
+            fresh: None,
+            prompt: None,
+            warrant: None,
+            opened_at: self.trace.len(),
+            ended_at: None,
+        });
+        let talk = self.talks.len() - 1;
+        self.talking.insert(id, talk);
+        self.adapters.insert(
+            id,
+            Adapter {
+                container: name,
+                session: None,
+                options: Vec::new(),
+                outcome,
+                talk,
+            },
+        );
+    }
+
+    /// One line said to an agent process, answered as the pinned adapter
+    /// was measured to answer: read back as what it asks, never matched as
+    /// a string.
+    fn sent(&mut self, id: EffectId, line: &str) {
+        let Some(said) = Said::parse(line) else {
+            return;
+        };
+        let presented = said.presented();
+        let Some(adapter) = self.adapters.get_mut(&id) else {
+            // A process that has ended is not written to.
+            return;
+        };
+        let talk = adapter.talk;
+        let reply_at = self.now + 1;
+        match said {
+            Said::Initialize { id: request } => self.schedule(
+                reply_at,
+                Event::Line {
+                    id,
+                    line: Heard::initialized(request).line(),
+                },
+            ),
+            Said::NewSession { id: request, .. } => {
+                self.session_opened(id, talk, request, None, presented);
+            }
+            Said::ListSessions { id: request } => {
+                let held = self
+                    .containers
+                    .get(&adapter.container)
+                    .and_then(|held| held.session.clone());
+                let known: Vec<&str> = held.iter().map(String::as_str).collect();
+                self.schedule(
+                    reply_at,
+                    Event::Line {
+                        id,
+                        line: Heard::sessions(request, &known).line(),
+                    },
+                );
+            }
+            Said::LoadSession {
+                id: request,
+                session,
+                ..
+            } => self.session_opened(id, talk, request, Some(session), presented),
+            Said::SetOption {
+                id: request,
+                option,
+                value,
+                ..
+            } => {
+                // Taken, and reported as what the script says the adapter
+                // reports where it says, else as asked.
+                let reported = adapter
+                    .outcome
+                    .as_ref()
+                    .ok()
+                    .and_then(|answer| answer.reported.get(&option).cloned())
+                    .unwrap_or(value);
+                match adapter
+                    .options
+                    .iter_mut()
+                    .find(|(named, _)| *named == option)
+                {
+                    Some((_, current)) => *current = reported,
+                    None => adapter.options.push((option, reported)),
+                }
+                let line = Heard::set(request, &pairs(&adapter.options)).line();
+                self.schedule(reply_at, Event::Line { id, line });
+            }
+            Said::Prompt {
+                id: request, text, ..
+            } => self.prompted(id, talk, request, text),
+            Said::Permitted { .. } | Said::Unserved { .. } => {}
+        }
+    }
+
+    /// A session made or loaded: made under a fresh name and written into
+    /// the container, or loaded as the one named; either way advertising
+    /// the agent's defaults, as measured — a loaded session forgets what it
+    /// was set to.
+    fn session_opened(
+        &mut self,
+        id: EffectId,
+        talk: usize,
+        request: i64,
+        loading: Option<String>,
+        presented: Option<String>,
+    ) {
+        let Some(adapter) = self.adapters.get_mut(&id) else {
+            return;
+        };
+        let fresh = loading.is_none();
+        let session = loading.unwrap_or_else(|| {
+            self.sessions_made += 1;
+            format!("sess-{}", self.sessions_made)
+        });
+        if fresh && let Some(held) = self.containers.get_mut(&adapter.container) {
+            held.session = Some(session.clone());
+        }
+        adapter.session = Some(session.clone());
+        adapter.options = defaults();
+        let advertised = pairs(&adapter.options);
+        let line = if fresh {
+            Heard::session_made(request, &session, &advertised).line()
+        } else {
+            Heard::loaded(request, &advertised).line()
+        };
+        if let Some(talk) = self.talks.get_mut(talk) {
+            talk.fresh = Some(fresh);
+            talk.warrant = presented;
+        }
+        self.schedule(self.now + 1, Event::Line { id, line });
+    }
+
+    /// The question put: answered as scripted after the turn's length, or
+    /// the process dies instead of answering.
+    fn prompted(&mut self, id: EffectId, talk: usize, request: i64, text: String) {
+        let Some(adapter) = self.adapters.get(&id) else {
+            return;
+        };
+        if let Some(talk) = self.talks.get_mut(talk) {
+            talk.prompt = Some(text);
+        }
+        let session = adapter.session.clone().unwrap_or_default();
         let at = self.now + self.turn_takes;
-        self.schedule(at, AppEvent::TurnEnded { speaker, outcome });
+        match adapter.outcome.clone() {
+            Ok(answer) => {
+                self.schedule(
+                    at,
+                    Event::Line {
+                        id,
+                        line: Heard::said(&session, &answer.text).line(),
+                    },
+                );
+                self.schedule(
+                    at,
+                    Event::Line {
+                        id,
+                        line: Heard::prompted(request, answer.stop_reason).line(),
+                    },
+                );
+            }
+            Err(why) => {
+                // The agent dies instead of answering, and its process ends
+                // with the complaint.
+                self.adapters.remove(&id);
+                self.schedule(
+                    at,
+                    Event::Ended {
+                        id,
+                        ended: Ended::Exited {
+                            status: Some(1),
+                            stderr: format!("{why}\n").into(),
+                        },
+                    },
+                );
+            }
+        }
+    }
+
+    /// Makes a container: from an image that is there, under a name nothing
+    /// holds, with the variables named taken from the environment the
+    /// runtime was given — which is what forwarding means.
+    fn made(
+        &mut self,
+        name: &str,
+        image: &str,
+        agent: Agent,
+        instance: InstanceId,
+        variables: &[String],
+        environment: &Environment,
+    ) -> Finished {
+        let exited = |stdout: String| Finished::Exited {
+            status: Some(0),
+            stdout: stdout.into(),
+            stderr: Bytes::new(Vec::new()),
+        };
+        let refused = |stderr: String| Finished::Exited {
+            status: Some(1),
+            stdout: Bytes::new(Vec::new()),
+            stderr: stderr.into(),
+        };
+        if !self.images.iter().any(|held| held == image) {
+            refused(format!("Unable to find image '{image}' locally\n"))
+        } else if self.containers.contains_key(name) {
+            refused(format!(
+                "Error response from daemon: Conflict. The container name \"/{name}\" is already in use\n"
+            ))
+        } else {
+            let given = variables
+                .iter()
+                .filter_map(|variable| {
+                    environment
+                        .get(variable)
+                        .map(|value| (variable.clone(), value.clone()))
+                })
+                .collect();
+            self.containers.insert(
+                name.to_owned(),
+                Held {
+                    instance: Some(instance),
+                    agent: Some(agent),
+                    running: false,
+                    serving: false,
+                    port: None,
+                    session: None,
+                    environment: given,
+                },
+            );
+            if let Some(job) = stageman_job::job_of(name) {
+                self.begun.insert(job);
+            }
+            exited("0123456789abcdef\n".to_owned())
+        }
+    }
+
+    /// The commands a turn runs, answered from what the simulation holds.
+    ///
+    /// Split from [`Simulation::ran`] by the line budget and nothing else.
+    fn ran_for_a_turn(
+        &mut self,
+        command: Command,
+        environment: &Environment,
+        stdin: Option<&Bytes>,
+    ) -> Finished {
+        let exited = |stdout: String| Finished::Exited {
+            status: Some(0),
+            stdout: stdout.into(),
+            stderr: Bytes::new(Vec::new()),
+        };
+        let refused = |stderr: String| Finished::Exited {
+            status: Some(1),
+            stdout: Bytes::new(Vec::new()),
+            stderr: stderr.into(),
+        };
+        match Some(command) {
+            Some(Command::Present { image }) => {
+                if self.images.contains(&image) {
+                    exited("sha256:simulated\n".to_owned())
+                } else {
+                    refused(format!(
+                        "Error response from daemon: No such image: {image}\n"
+                    ))
+                }
+            }
+            // A build reads its recipe from standard input, and one given
+            // none has nothing to build.
+            Some(Command::Build { image }) => {
+                if stdin.is_none_or(Bytes::is_empty) {
+                    refused("a build was given no recipe\n".to_owned())
+                } else if let Some(why) = self.build_failures.pop_front() {
+                    refused(why)
+                } else {
+                    if !self.images.contains(&image) {
+                        self.images.push(image);
+                    }
+                    exited("sha256:simulated\n".to_owned())
+                }
+            }
+            // Made from an image that is there, under a name nothing
+            // holds, with the variables named taken from the environment
+            // the runtime was given — which is what forwarding means.
+            Some(Command::Create {
+                name,
+                image,
+                agent,
+                instance,
+                variables,
+            }) => self.made(&name, &image, agent, instance, &variables, environment),
+            // A start publishes the tunnel on a fresh host port, as the
+            // runtime does, whether the container is new or restarted.
+            Some(Command::Start { name }) => {
+                self.ports += 1;
+                let port = self.ports;
+                match self.containers.get_mut(&name) {
+                    Some(held) => {
+                        held.running = true;
+                        held.port = Some(port);
+                        exited(format!("{name}\n"))
+                    }
+                    None => refused(format!(
+                        "Error response from daemon: No such container: {name}\n"
+                    )),
+                }
+            }
+            Some(Command::Checkout { name, .. }) => {
+                if !self.is_running(&name) {
+                    refused(format!(
+                        "Error response from daemon: container {name} is not running\n"
+                    ))
+                } else if let Some(why) = self.checkout_failures.pop_front() {
+                    refused(why)
+                } else {
+                    exited(String::new())
+                }
+            }
+            Some(Command::Exec { .. }) => {
+                Finished::Failed("the agent is run kept open, not once".to_owned())
+            }
+            None
+            | Some(
+                Command::Version
+                | Command::Containers { .. }
+                | Command::Label { .. }
+                | Command::Halt { .. }
+                | Command::Discard { .. }
+                | Command::Port { .. }
+                | Command::Images
+                | Command::RemoveImage { .. },
+            ) => Finished::Failed("not a turn's command".to_owned()),
+        }
+    }
+
+    /// Ends an agent process: whatever it was about to say is never said,
+    /// and its end arrives at once, killed.
+    fn closed(&mut self, id: EffectId) {
+        if self.adapters.remove(&id).is_none() {
+            return;
+        }
+        self.queue
+            .retain(|_, event| !matches!(event, Event::Line { id: whose, .. } if *whose == id));
+        self.schedule(
+            self.now,
+            Event::Ended {
+                id,
+                ended: Ended::Exited {
+                    status: None,
+                    stderr: Bytes::new(Vec::new()),
+                },
+            },
+        );
     }
 
     /// Accepts a write: it lands as its completion is delivered, unless it
@@ -852,7 +1368,14 @@ impl Simulation {
     /// Runs a program: the runtime's own questions are answered from what the
     /// simulation holds, recognised through the agent crate's own inverse
     /// rather than by matching on strings.
-    fn ran(&mut self, id: EffectId, program: &Path, arguments: &[String]) {
+    fn ran(
+        &mut self,
+        id: EffectId,
+        program: &Path,
+        arguments: &[String],
+        environment: &Environment,
+        stdin: Option<&Bytes>,
+    ) {
         let exited = |stdout: String| Finished::Exited {
             status: Some(0),
             stdout: stdout.into(),
@@ -917,27 +1440,27 @@ impl Simulation {
                     || exited(String::new()),
                     |port| exited(format!("127.0.0.1:{port}\n")),
                 ),
+                // A turn's commands take a moment each, so that a turn is a
+                // sequence a test can stop between the steps of, rather
+                // than one instant.
+                Some(
+                    command @ (Command::Present { .. }
+                    | Command::Build { .. }
+                    | Command::Create { .. }
+                    | Command::Start { .. }
+                    | Command::Checkout { .. }
+                    | Command::Exec { .. }),
+                ) => {
+                    let finished = self.ran_for_a_turn(command, environment, stdin);
+                    self.schedule(self.now + 1, Event::Ran { id, finished });
+                    return;
+                }
                 None => Finished::Failed("the simulation does not know this command".to_owned()),
             }
         } else {
             Finished::NotFound
         };
         self.schedule(self.now, Event::Ran { id, finished });
-    }
-
-    /// Ends the agent process, so the turn it was running ends with that
-    /// rather than with whatever the agent would have said.
-    fn stop_turn(&mut self, speaker: stageman_instance::Speaker) {
-        self.queue.retain(|_, event| {
-            !matches!(event, Event::App(AppEvent::TurnEnded { speaker: whose, .. }) if *whose == speaker)
-        });
-        self.schedule(
-            self.now,
-            AppEvent::TurnEnded {
-                speaker,
-                outcome: Err("stopped".to_owned()),
-            },
-        );
     }
 
     pub fn perform(&mut self, effect: Effect) {
@@ -958,7 +1481,6 @@ impl Simulation {
         };
         match effect {
             AppEffect::Booted { .. } => {}
-            AppEffect::RunTurn { speaker, run } => self.run_turn(speaker, &run),
             AppEffect::Probe { job } => {
                 let answering = self
                     .containers
@@ -970,7 +1492,6 @@ impl Simulation {
             AppEffect::Respond { id, response } => {
                 self.responses.insert(id, response);
             }
-            AppEffect::StopTurn { speaker } => self.stop_turn(speaker),
             AppEffect::OpenThread {
                 job, announcement, ..
             } => {
@@ -1024,8 +1545,9 @@ impl Simulation {
                 id,
                 program,
                 arguments,
-                ..
-            } => self.ran(id, &program, &arguments),
+                environment,
+                stdin,
+            } => self.ran(id, &program, &arguments, &environment, stdin.as_ref()),
             Effect::Wake { id, after } => {
                 let at = self.now + u64::try_from(after.as_millis()).expect("a short wait");
                 self.schedule(at, Event::Woke { id });
@@ -1061,6 +1583,9 @@ impl Simulation {
             Effect::Answer { id, answer } => self.answered(id, answer),
             Effect::Print { text } => self.printed.push(text),
             Effect::Exit { message } => self.exited = Some(message),
+            Effect::Open { id, arguments, .. } => self.opened(id, &arguments),
+            Effect::Send { id, line } => self.sent(id, &line),
+            Effect::Close { id } => self.closed(id),
             Effect::App(effect) => return Some(effect),
         }
         None
@@ -1107,9 +1632,14 @@ impl Simulation {
         Some(snapshot.open(&self.key).expect("and it opens"))
     }
 
-    /// The credentials handed to turns so far, oldest first.
-    pub fn warrants(&self) -> &[String] {
-        &self.warrants
+    /// The credentials the tools were declared with to agents so far,
+    /// oldest first: what each agent was actually handed, read back off its
+    /// session request.
+    pub fn warrants(&self) -> Vec<String> {
+        self.talks
+            .iter()
+            .filter_map(|talk| talk.warrant.clone())
+            .collect()
     }
 }
 
