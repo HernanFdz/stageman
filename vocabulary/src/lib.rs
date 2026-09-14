@@ -3,10 +3,11 @@
 //! An [`Event`] is what the world tells the instance and an [`Effect`] is
 //! what the instance asks of the world. Both are plain data: the mechanisms a
 //! process reaches the outside through — a file, a process run once, a
-//! process kept open and spoken to line by line, a request, a port probed, a
-//! timer, its own standard output, its own exit — and one hole an [`App`]
-//! fills with its own events and effects, which the world never interprets
-//! and hands to whatever the application supplied to perform them. See
+//! process kept open and spoken to line by line, a request served and a
+//! request made, a socket opened and spoken over, a port probed, a timer,
+//! its own standard output, its own exit — and one hole an [`App`] fills
+//! with its own events and effects, which the world never interprets and
+//! hands to whatever the application supplied to perform them. See
 //! `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`.
 //!
 //! **Everything here serialises in full and formats not at all.** A scenario
@@ -16,9 +17,6 @@
 //! nothing can format one into a log by accident; what the world logs is the
 //! kind, from [`Named`]. That absence is a rule rather than an omission, and
 //! `docs/conventions.md` §4 says why.
-//!
-//! The one mechanism still to come — a socket — arrives as the instance
-//! starts speaking it, so that its shape is decided by its use.
 
 pub mod scenario;
 
@@ -190,6 +188,38 @@ pub enum Ended {
     Failed(String),
 }
 
+/// How a request made once came to an end.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Responded {
+    /// It was answered, with whatever status: a refusal is an answer, and
+    /// what a status means is the deciding half's to know.
+    Answered {
+        /// The status.
+        status: u16,
+        /// Its headers, by lowercased name, joined with commas where a name
+        /// arrived more than once — as a served request's are.
+        headers: BTreeMap<String, String>,
+        /// The whole body.
+        body: Bytes,
+    },
+    /// It got no answer: the name did not resolve, nothing accepted, the
+    /// connection broke, or the far side never finished.
+    Failed(String),
+}
+
+/// How a socket came to an end.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Disconnected {
+    /// The far side ended it, with a closing handshake or without one — a
+    /// peer that vanished is the same ending seen one layer lower, and which
+    /// arrives is a matter of timing rather than of anything worth telling
+    /// apart.
+    Closed,
+    /// It could not be opened, or it broke: the protocol was violated, or
+    /// the transport failed in a way that is not a peer going away.
+    Failed(String),
+}
+
 /// What a port did when it was probed: connected to and read from once,
 /// with nothing written.
 ///
@@ -294,6 +324,38 @@ pub enum Event<A: App> {
         /// What it did.
         probed: Probed,
     },
+    /// Answers [`Effect::Request`]: how the request came to an end.
+    Responded {
+        /// Which request.
+        id: EffectId,
+        /// How.
+        responded: Responded,
+    },
+    /// A socket received one text frame.
+    ///
+    /// Every text frame arrives, in order, and every one arrives before
+    /// [`Event::Disconnected`] for the same socket. Text only: nothing here
+    /// speaks a binary frame, so one that arrives is dropped where it does.
+    Frame {
+        /// Which socket, by the identifier it was connected under.
+        id: EffectId,
+        /// The frame's text.
+        text: String,
+        /// When it arrived, in milliseconds since the epoch, stamped by the
+        /// world for the same reason a served request is.
+        at: u64,
+    },
+    /// A socket came to an end, on its own or because it was disconnected.
+    /// Answers [`Effect::Connect`], eventually, and [`Effect::Disconnect`].
+    Disconnected {
+        /// Which socket, by the identifier it was connected under.
+        id: EffectId,
+        /// How.
+        disconnected: Disconnected,
+        /// When, in milliseconds since the epoch: what a gap with no
+        /// connection is measured from.
+        at: u64,
+    },
     /// Something of the application's own.
     App(A::Event),
 }
@@ -345,6 +407,24 @@ impl<A: App> Clone for Event<A> {
                 id: *id,
                 probed: *probed,
             },
+            Self::Responded { id, responded } => Self::Responded {
+                id: *id,
+                responded: responded.clone(),
+            },
+            Self::Frame { id, text, at } => Self::Frame {
+                id: *id,
+                text: text.clone(),
+                at: *at,
+            },
+            Self::Disconnected {
+                id,
+                disconnected,
+                at,
+            } => Self::Disconnected {
+                id: *id,
+                disconnected: disconnected.clone(),
+                at: *at,
+            },
             Self::App(event) => Self::App(event.clone()),
         }
     }
@@ -372,6 +452,9 @@ impl<A: App> Named for Event<A> {
             Self::Line { .. } => "Line",
             Self::Ended { .. } => "Ended",
             Self::Probed { .. } => "Probed",
+            Self::Responded { .. } => "Responded",
+            Self::Frame { .. } => "Frame",
+            Self::Disconnected { .. } => "Disconnected",
             Self::App(event) => event.kind(),
         }
     }
@@ -483,6 +566,52 @@ pub enum Effect<A: App> {
         /// What to do about it.
         answer: Answer,
     },
+    /// Make one request and read its whole answer. Answered by
+    /// [`Event::Responded`].
+    ///
+    /// The method, the address, the headers and the body are all the
+    /// deciding half's: what is asked of whom, and what an answer means, are
+    /// meanings, and this is only the asking.
+    Request {
+        /// Which request, on the answer.
+        id: EffectId,
+        /// The method, as the protocol spells it.
+        method: String,
+        /// Where, scheme and all.
+        url: String,
+        /// The headers, by name.
+        headers: BTreeMap<String, String>,
+        /// The body, if it has one.
+        body: Option<Bytes>,
+    },
+    /// Open a socket to an address and keep it open: every text frame it
+    /// receives is an [`Event::Frame`], every [`Effect::Transmit`] is a
+    /// frame sent on it, and how it ends is an [`Event::Disconnected`].
+    ///
+    /// Not answered by anything of its own, like a process kept open: one
+    /// that could not be opened ends at once, distinctly, and one that could
+    /// is heard from as frames arrive. Which is why the first thing a far
+    /// side says is what tells the deciding half it is connected.
+    Connect {
+        /// Which socket, on every frame and on its end.
+        id: EffectId,
+        /// Where, scheme and all.
+        url: String,
+    },
+    /// Send one text frame on a socket. Unanswered: a socket that has ended
+    /// is not sent to, and its end is the event that says so.
+    Transmit {
+        /// Which socket.
+        id: EffectId,
+        /// The frame's text.
+        text: String,
+    },
+    /// End a socket: a closing handshake is begun and the connection let go
+    /// of, and its end arrives as [`Event::Disconnected`] like any other.
+    Disconnect {
+        /// Which socket.
+        id: EffectId,
+    },
     /// Connect to a port on this machine's loopback and read from it once,
     /// writing nothing, to learn what is there. Answered by
     /// [`Event::Probed`] with what the port did.
@@ -578,6 +707,28 @@ impl<A: App> Clone for Effect<A> {
                 id: *id,
                 answer: answer.clone(),
             },
+            Self::Request {
+                id,
+                method,
+                url,
+                headers,
+                body,
+            } => Self::Request {
+                id: *id,
+                method: method.clone(),
+                url: url.clone(),
+                headers: headers.clone(),
+                body: body.clone(),
+            },
+            Self::Connect { id, url } => Self::Connect {
+                id: *id,
+                url: url.clone(),
+            },
+            Self::Transmit { id, text } => Self::Transmit {
+                id: *id,
+                text: text.clone(),
+            },
+            Self::Disconnect { id } => Self::Disconnect { id: *id },
             Self::Probe { id, port, within } => Self::Probe {
                 id: *id,
                 port: *port,
@@ -612,6 +763,10 @@ impl<A: App> Named for Effect<A> {
             Self::Wake { .. } => "Wake",
             Self::Bind { .. } => "Bind",
             Self::Answer { .. } => "Answer",
+            Self::Request { .. } => "Request",
+            Self::Connect { .. } => "Connect",
+            Self::Transmit { .. } => "Transmit",
+            Self::Disconnect { .. } => "Disconnect",
             Self::Probe { .. } => "Probe",
             Self::Print { .. } => "Print",
             Self::Exit { .. } => "Exit",
@@ -870,7 +1025,10 @@ pub(crate) mod doorbell {
                 | Event::Body { .. }
                 | Event::Line { .. }
                 | Event::Ended { .. }
-                | Event::Probed { .. } => Vec::new(),
+                | Event::Probed { .. }
+                | Event::Responded { .. }
+                | Event::Frame { .. }
+                | Event::Disconnected { .. } => Vec::new(),
             }
         }
 
@@ -882,9 +1040,12 @@ pub(crate) mod doorbell {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::doorbell::{Doorbell, Told};
     use super::{
-        Answer, Arrival, Bytes, Effect, EffectId, Ended, Event, Finished, Named, Probed, RequestId,
+        Answer, Arrival, Bytes, Disconnected, Effect, EffectId, Ended, Event, Finished, Named,
+        Probed, RequestId, Responded,
     };
 
     /// The hole carries the application's own, and the kind is what a log
@@ -984,12 +1145,90 @@ mod tests {
                 "Answer", "Answer", "Probe", "Print", "Exit"
             ]
         );
-        for effect in &effects {
-            let served = serde_json::to_string(effect).expect("it serialises");
-            let back: Effect<Doorbell> = serde_json::from_str(&served).expect("and back");
-            assert!(back == *effect, "{served}");
-            assert!(back.clone() == *effect);
+        crosses_whole(&effects);
+    }
+
+    /// Everything round-trips through the one representation both sides
+    /// share, and comes back equal.
+    fn crosses_whole<T>(values: &[T])
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned + Clone + PartialEq,
+    {
+        for value in values {
+            let served = serde_json::to_string(value).expect("it serialises");
+            let back: T = serde_json::from_str(&served).expect("and back");
+            assert!(back == *value, "{served}");
+            assert!(back.clone() == *value);
         }
+    }
+
+    /// A request made and a socket spoken over cross whole and name their
+    /// kind, the same way.
+    #[test]
+    fn a_request_and_a_socket_cross_whole_and_name_their_kind() {
+        let effects: Vec<Effect<Doorbell>> = vec![
+            Effect::Request {
+                id: EffectId(7),
+                method: "POST".to_owned(),
+                url: "https://example.test/api/say".to_owned(),
+                headers: [("authorization".to_owned(), "Bearer x".to_owned())].into(),
+                body: Some(Bytes::new(b"{\"text\":\"hi\"}".to_vec())),
+            },
+            Effect::Connect {
+                id: EffectId(8),
+                url: "wss://example.test/socket".to_owned(),
+            },
+            Effect::Transmit {
+                id: EffectId(8),
+                text: r#"{"envelope_id":"e-1"}"#.to_owned(),
+            },
+            Effect::Disconnect { id: EffectId(8) },
+        ];
+        let kinds: Vec<&str> = effects.iter().map(Named::kind).collect();
+        assert_eq!(kinds, ["Request", "Connect", "Transmit", "Disconnect"]);
+        crosses_whole(&effects);
+
+        let events: Vec<Event<Doorbell>> = vec![
+            Event::Responded {
+                id: EffectId(7),
+                responded: Responded::Answered {
+                    status: 200,
+                    headers: [("content-type".to_owned(), "application/json".to_owned())].into(),
+                    body: Bytes::new(b"{\"ok\":true}".to_vec()),
+                },
+            },
+            Event::Responded {
+                id: EffectId(7),
+                responded: Responded::Failed("the name did not resolve".to_owned()),
+            },
+            Event::Frame {
+                id: EffectId(8),
+                text: r#"{"type":"hello"}"#.to_owned(),
+                at: 1_757_000_000_001,
+            },
+            Event::Disconnected {
+                id: EffectId(8),
+                disconnected: Disconnected::Closed,
+                at: 1_757_000_000_002,
+            },
+            Event::Disconnected {
+                id: EffectId(9),
+                disconnected: Disconnected::Failed("the handshake was refused".to_owned()),
+                at: 1_757_000_000_003,
+            },
+        ];
+        let kinds: Vec<&str> = events.iter().map(Named::kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                "Responded",
+                "Responded",
+                "Frame",
+                "Disconnected",
+                "Disconnected"
+            ]
+        );
+        crosses_whole(&events);
     }
 
     /// Every event crosses whole and names its kind, the same way.
@@ -1068,12 +1307,7 @@ mod tests {
                 "Bound", "Arrived", "Body", "Probed"
             ]
         );
-        for event in &events {
-            let served = serde_json::to_string(event).expect("it serialises");
-            let back: Event<Doorbell> = serde_json::from_str(&served).expect("and back");
-            assert!(back == *event, "{served}");
-            assert!(back.clone() == *event);
-        }
+        crosses_whole(&events);
         assert!(events[0] != events[4]);
     }
 
@@ -1237,6 +1471,39 @@ mod tests {
         assert!(
             write(true) != write(false),
             "a private write is not a public one"
+        );
+    }
+
+    /// One field apart is a different value for a request's answer and a
+    /// socket's frame too, including the time a frame arrived.
+    #[test]
+    fn one_field_apart_is_not_the_same_answer_or_frame() {
+        let responded = |id: u64, status: u16| Event::<Doorbell>::Responded {
+            id: EffectId(id),
+            responded: Responded::Answered {
+                status,
+                headers: BTreeMap::new(),
+                body: Bytes::new(Vec::new()),
+            },
+        };
+        assert!(responded(1, 200) == responded(1, 200));
+        assert!(
+            responded(1, 200) != responded(1, 429),
+            "the same request, answered differently"
+        );
+        assert!(responded(1, 200) != responded(2, 200));
+
+        let frame = |id: u64, text: &str, at: u64| Event::<Doorbell>::Frame {
+            id: EffectId(id),
+            text: text.to_owned(),
+            at,
+        };
+        assert!(frame(1, "a", 5) == frame(1, "a", 5));
+        assert!(frame(1, "a", 5) != frame(1, "b", 5), "another frame");
+        assert!(frame(1, "a", 5) != frame(2, "a", 5), "another socket");
+        assert!(
+            frame(1, "a", 5) != frame(1, "a", 6),
+            "the same frame at another time"
         );
     }
 }

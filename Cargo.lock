@@ -3950,15 +3950,18 @@ name = "stageman-world"
 version = "0.0.0"
 dependencies = [
  "bytes",
+ "futures-util",
  "http-body-util",
  "hyper",
  "hyper-util",
  "mutants",
  "parking_lot",
+ "reqwest",
  "serde",
  "stageman-vocabulary",
  "tempfile",
  "tokio",
+ "tokio-tungstenite 0.29.0",
  "tracing",
 ]
 

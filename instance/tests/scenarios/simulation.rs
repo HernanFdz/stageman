@@ -27,8 +27,8 @@ use stageman_instance::{
 };
 use stageman_vocabulary::scenario::{Meta, Recorder};
 use stageman_vocabulary::{
-    Answer as Answering, Arrival, Bytes, EffectId, Ended, Environment, Finished, Named as _,
-    Probed, RequestId as Asked,
+    Answer as Answering, Arrival, Bytes, Disconnected, EffectId, Ended, Environment, Finished,
+    Named as _, Probed, RequestId as Asked, Responded,
 };
 
 /// Virtual milliseconds.
@@ -849,6 +849,9 @@ impl Simulation {
                     | Event::Line { .. }
                     | Event::Ended { .. }
                     | Event::Probed { .. }
+                    | Event::Responded { .. }
+                    | Event::Frame { .. }
+                    | Event::Disconnected { .. }
                     | Event::App(
                         AppEvent::Presenting { .. }
                             | AppEvent::ThreadOpened { .. }
@@ -1601,6 +1604,27 @@ impl Simulation {
                 let probed = self.probed(port);
                 self.schedule(self.now, Event::Probed { id, probed });
             }
+            // Nothing asks for these yet: the channel is the next family.
+            Effect::Request { id, .. } => self.schedule(
+                self.now,
+                Event::Responded {
+                    id,
+                    responded: Responded::Failed(
+                        "the simulation does not answer requests yet".to_owned(),
+                    ),
+                },
+            ),
+            Effect::Connect { id, .. } => self.schedule(
+                self.now,
+                Event::Disconnected {
+                    id,
+                    disconnected: Disconnected::Failed(
+                        "the simulation opens no sockets yet".to_owned(),
+                    ),
+                    at: self.now,
+                },
+            ),
+            Effect::Transmit { .. } | Effect::Disconnect { .. } => {}
             Effect::Print { text } => self.printed.push(text),
             Effect::Exit { message } => self.exited = Some(message),
             Effect::Open { id, arguments, .. } => self.opened(id, &arguments),

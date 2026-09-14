@@ -825,7 +825,11 @@ impl Running {
             Event::Line { id, line } => self.line(id, &line, &mut effects),
             Event::Ended { id, ended } => self.process_ended(id, &ended, &mut effects),
             Event::Probed { id, probed } => self.probed(id, probed, &mut effects),
-            Event::Read { .. } | Event::Bound { .. } => {
+            Event::Read { .. }
+            | Event::Bound { .. }
+            | Event::Responded { .. }
+            | Event::Frame { .. }
+            | Event::Disconnected { .. } => {
                 tracing::warn!(
                     "answered something this instance did not ask for while awake; ignored"
                 );

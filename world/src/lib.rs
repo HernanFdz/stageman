@@ -27,6 +27,13 @@
 //! what that means: a port that accepted and closed at once is a fact about
 //! a socket, and whether anything was behind it is a question about what
 //! accepted, which the deciding half knows and this crate does not.
+//!
+//! **A request made is a task, and a socket is a task and a handle.** A
+//! request is sent and its whole answer handed back, whatever its status. A
+//! socket is opened and then read on one task, which also sends every frame
+//! it is handed; what the loop holds is where those frames go, and dropping
+//! that is what disconnects it — a closing handshake is begun, not waited
+//! for, because the far side is somebody else's and owes nothing.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -37,8 +44,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use stageman_vocabulary::{
-    Answer, App, Arrival, Bytes, Deciding, Effect, EffectId, Ended, Environment, Event, Finished,
-    Named, Probed, RequestId,
+    Answer, App, Arrival, Bytes, Deciding, Disconnected, Effect, EffectId, Ended, Environment,
+    Event, Finished, Named, Probed, RequestId, Responded,
 };
 
 /// The way in: events go to the loop, and nothing comes back this way.
@@ -60,6 +67,22 @@ pub struct World<A: App> {
     /// in here from being started until it ends or is closed, whichever
     /// comes first.
     open: parking_lot::Mutex<BTreeMap<EffectId, Opened>>,
+    /// Sockets open, by the identifier each was connected under. One is in
+    /// here from being connected until it ends or is disconnected.
+    sockets: parking_lot::Mutex<BTreeMap<EffectId, Socketed>>,
+    /// What makes requests. One for the process, so that a connection to a
+    /// place asked of twice is kept between the two.
+    client: reqwest::Client,
+}
+
+/// A socket, as far as the loop needs to reach it.
+///
+/// The socket itself is owned by the task speaking over it; what is held
+/// here is where a frame sent on it goes, and dropping that is what
+/// disconnects it.
+struct Socketed {
+    /// Where a frame sent on it goes.
+    frames: tokio::sync::mpsc::UnboundedSender<String>,
 }
 
 /// A process kept open, as far as the loop needs to reach it.
@@ -85,6 +108,8 @@ impl<A: App> World<A> {
                 held: parking_lot::Mutex::new(BTreeMap::new()),
                 next: AtomicU64::new(1),
                 open: parking_lot::Mutex::new(BTreeMap::new()),
+                sockets: parking_lot::Mutex::new(BTreeMap::new()),
+                client: reqwest::Client::new(),
             }),
             receiving,
         )
@@ -118,6 +143,32 @@ impl<A: App> World<A> {
         drop(lines);
         // Nobody at the other end means it already ended, which is fine.
         let _ = closing.send(());
+    }
+
+    /// Sends a frame on a socket, if it is still open.
+    ///
+    /// One that has ended is not sent to, and that is not an error: its end
+    /// is on its way as an event, and whoever sent the frame will hear it.
+    fn transmit(&self, id: EffectId, text: String) {
+        let delivered = self
+            .sockets
+            .lock()
+            .get(&id)
+            .is_some_and(|socket| socket.frames.send(text).is_ok());
+        undelivered(delivered);
+    }
+
+    /// Ends a socket: the closing handshake is begun and the connection let
+    /// go of.
+    ///
+    /// Disconnecting one that has already ended is nothing, because its end
+    /// was already said.
+    fn disconnect(&self, id: EffectId) {
+        if self.sockets.lock().remove(&id).is_none() {
+            tracing::debug!("asked to disconnect a socket that is not open; nothing to do");
+        }
+        // Dropping where its frames went is what the task speaking over it
+        // hears as the end.
     }
 
     /// Holds a request open, and says what identifies it.
@@ -253,34 +304,18 @@ async fn perform<A: App, P: Perform<A>>(
                 world.send(Event::Woke { id });
             }));
         }
-        Effect::Bind { id, address } => {
-            let world = Arc::clone(world);
-            drop(tokio::spawn(async move {
-                match tokio::net::TcpListener::bind(&address).await {
-                    Ok(listening) => {
-                        let port = listening.local_addr().map(|taken| taken.port());
-                        match port {
-                            Ok(port) => {
-                                world.send(Event::Bound {
-                                    id,
-                                    outcome: Ok(port),
-                                });
-                                accepting(listening, id, world).await;
-                            }
-                            Err(why) => world.send(Event::Bound {
-                                id,
-                                outcome: Err(why.to_string()),
-                            }),
-                        }
-                    }
-                    Err(why) => world.send(Event::Bound {
-                        id,
-                        outcome: Err(why.to_string()),
-                    }),
-                }
-            }));
-        }
+        Effect::Bind { id, address } => binding(world, id, address),
         Effect::Answer { id, answer } => world.answer(id, answer),
+        Effect::Request {
+            id,
+            method,
+            url,
+            headers,
+            body,
+        } => requesting(world, id, method, url, headers, body),
+        Effect::Connect { id, url } => connect(world, id, url),
+        Effect::Transmit { id, text } => world.transmit(id, text),
+        Effect::Disconnect { id } => world.disconnect(id),
         Effect::Probe { id, port, within } => probing(world, id, port, within),
         Effect::Print { text } => {
             // Whoever started this process is reading here, and a reader
@@ -301,6 +336,222 @@ async fn perform<A: App, P: Perform<A>>(
             std::process::exit(1);
         }
         Effect::App(effect) => performer.perform(effect).await,
+    }
+}
+
+/// Takes an address on a task of its own, says which port it got, and then
+/// accepts on it for as long as anything is stepping.
+#[mutants::skip]
+fn binding<A: App>(world: &Arc<World<A>>, id: EffectId, address: String) {
+    let world = Arc::clone(world);
+    drop(tokio::spawn(async move {
+        match tokio::net::TcpListener::bind(&address).await {
+            Ok(listening) => {
+                let port = listening.local_addr().map(|taken| taken.port());
+                match port {
+                    Ok(port) => {
+                        world.send(Event::Bound {
+                            id,
+                            outcome: Ok(port),
+                        });
+                        accepting(listening, id, world).await;
+                    }
+                    Err(why) => world.send(Event::Bound {
+                        id,
+                        outcome: Err(why.to_string()),
+                    }),
+                }
+            }
+            Err(why) => world.send(Event::Bound {
+                id,
+                outcome: Err(why.to_string()),
+            }),
+        }
+    }));
+}
+
+/// Makes a request on a task of its own, and answers with how it ended.
+#[mutants::skip]
+fn requesting<A: App>(
+    world: &Arc<World<A>>,
+    id: EffectId,
+    method: String,
+    url: String,
+    headers: BTreeMap<String, String>,
+    body: Option<Bytes>,
+) {
+    let world = Arc::clone(world);
+    drop(tokio::spawn(async move {
+        let responded = request(&world.client, &method, &url, &headers, body).await;
+        world.send(Event::Responded { id, responded });
+    }));
+}
+
+/// Makes one request and reads its whole answer.
+///
+/// Nothing here decides: a status is handed back whatever it is, because a
+/// refusal is an answer and what one means is the deciding half's to know.
+/// What fails here is what never became an answer at all.
+async fn request(
+    client: &reqwest::Client,
+    method: &str,
+    url: &str,
+    headers: &BTreeMap<String, String>,
+    body: Option<Bytes>,
+) -> Responded {
+    let Ok(method) = reqwest::Method::from_bytes(method.as_bytes()) else {
+        return Responded::Failed(format!("{method} is not a method"));
+    };
+    let mut building = client.request(method, url);
+    for (name, value) in headers {
+        building = building.header(name.as_str(), value.as_str());
+    }
+    if let Some(body) = body {
+        building = building.body(body.into_inner());
+    }
+    let answer = match building.send().await {
+        Ok(answer) => answer,
+        Err(why) => return Responded::Failed(why.to_string()),
+    };
+    let status = answer.status().as_u16();
+    let headers = named(answer.headers());
+    match answer.bytes().await {
+        Ok(body) => Responded::Answered {
+            status,
+            headers,
+            body: Bytes::new(body.to_vec()),
+        },
+        Err(why) => Responded::Failed(why.to_string()),
+    }
+}
+
+/// Opens a socket on a task of its own and speaks over it until it ends.
+///
+/// One that cannot be opened ends at once, so that whoever asked hears one
+/// thing either way. Skipped by mutation testing: it connects and wires a
+/// task, and everything decided is in what that task does, which the tests
+/// below drive over real sockets.
+#[mutants::skip]
+fn connect<A: App>(world: &Arc<World<A>>, id: EffectId, url: String) {
+    let world = Arc::clone(world);
+    drop(tokio::spawn(async move {
+        let socket = match tokio_tungstenite::connect_async(&url).await {
+            Ok((socket, _)) => socket,
+            Err(why) => {
+                world.send(Event::Disconnected {
+                    id,
+                    disconnected: Disconnected::Failed(why.to_string()),
+                    at: now(),
+                });
+                return;
+            }
+        };
+        let (frames, queued) = tokio::sync::mpsc::unbounded_channel::<String>();
+        drop(world.sockets.lock().insert(id, Socketed { frames }));
+        let disconnected = spoken(socket, queued, |text| {
+            world.send(Event::Frame {
+                id,
+                text,
+                at: now(),
+            });
+        })
+        .await;
+        // Gone from the map, so a frame sent now is dropped rather than
+        // queued for nobody.
+        drop(world.sockets.lock().remove(&id));
+        world.send(Event::Disconnected {
+            id,
+            disconnected,
+            at: now(),
+        });
+    }));
+}
+
+/// The socket one connection is spoken over.
+type Socket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// Speaks over an open socket until it ends: every text frame received is
+/// handed over, in order, and every frame queued is sent. The queue ending
+/// is what disconnecting looks like from here, and begins the closing
+/// handshake.
+async fn spoken(
+    socket: Socket,
+    mut queued: tokio::sync::mpsc::UnboundedReceiver<String>,
+    heard: impl Fn(String),
+) -> Disconnected {
+    use futures_util::{SinkExt as _, StreamExt as _};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let (mut sink, mut stream) = socket.split();
+    loop {
+        tokio::select! {
+            // What the far side said first, when both are ready, so that
+            // nothing this side sends overtakes what it should have heard.
+            biased;
+            frame = stream.next() => match frame {
+                Some(Ok(Message::Text(text))) => heard(text.as_str().to_owned()),
+                // A ping is answered by the library as the stream is polled,
+                // and a close from the far side is completed the same way;
+                // neither is anything to hear, and a binary frame is not
+                // something anything here speaks.
+                Some(Ok(_)) => {}
+                Some(Err(why)) if ordinary_end(&why) => return Disconnected::Closed,
+                Some(Err(why)) => return Disconnected::Failed(why.to_string()),
+                None => return Disconnected::Closed,
+            },
+            sending = queued.recv() => {
+                let Some(text) = sending else {
+                    // Disconnected: the closing handshake is begun and not
+                    // waited for, because the far side may never finish it
+                    // and is owed nothing.
+                    drop(sink.close().await);
+                    return Disconnected::Closed;
+                };
+                if let Err(why) = sink.send(Message::text(text)).await {
+                    // The far end is gone. The stream would say so on its
+                    // next poll, unless it never does, which is why this
+                    // does not wait to find out.
+                    return if ordinary_end(&why) {
+                        Disconnected::Closed
+                    } else {
+                        Disconnected::Failed(why.to_string())
+                    };
+                }
+            },
+        }
+    }
+}
+
+/// Whether a socket ending this way is the far side going away.
+///
+/// **Most endings are.** A long-lived connection is closed by its far side
+/// on a schedule of its own, and not always with a closing handshake first —
+/// a reset arrives as a protocol error and means nothing has gone wrong.
+/// Told apart from a genuine failure here, at the one place that sees the
+/// library's own error, so that the deciding half is handed an ending and
+/// not an error to classify.
+fn ordinary_end(why: &tokio_tungstenite::tungstenite::Error) -> bool {
+    use tokio_tungstenite::tungstenite::{Error, error::ProtocolError};
+
+    match why {
+        // A close the far side completed, and one it did not bother to —
+        // the same event, and which arrives depends on timing rather than on
+        // anything worth telling apart.
+        Error::ConnectionClosed
+        | Error::AlreadyClosed
+        | Error::Protocol(ProtocolError::ResetWithoutClosingHandshake) => true,
+        // A peer that vanished mid-read is the same event seen one layer
+        // lower, which is which depending on timing rather than on anything
+        // meaningful.
+        Error::Io(failure) => matches!(
+            failure.kind(),
+            std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::UnexpectedEof
+        ),
+        _ => false,
     }
 }
 
@@ -451,16 +702,17 @@ async fn run_once(
     }
 }
 
-/// Says so when a line went to a process that is not open.
+/// Says so when a line went to a process, or a frame to a socket, that is
+/// not open.
 ///
 /// Skipped by mutation testing because it is equivalent under one: what the
 /// test decides is whether a line is logged, and a log line is not something
-/// a test can see. That a line to a process that has ended goes nowhere is
-/// tested, by nothing arriving.
+/// a test can see. That what is sent to something that has ended goes
+/// nowhere is tested, by nothing arriving.
 #[mutants::skip]
 fn undelivered(delivered: bool) {
     if !delivered {
-        tracing::debug!("a line was sent to a process that is not open; dropped");
+        tracing::debug!("sent to a process or a socket that is not open; dropped");
     }
 }
 
@@ -887,7 +1139,9 @@ mod tests {
     use std::sync::Arc;
 
     use serde::{Deserialize, Serialize};
-    use stageman_vocabulary::{App, EffectId, Ended, Environment, Named, Probed};
+    use stageman_vocabulary::{
+        App, Disconnected, EffectId, Ended, Environment, Named, Probed, Responded,
+    };
 
     use super::{Answer, Bytes, Effect, Event, Perform, World, read, write, write_atomically};
 
@@ -1471,6 +1725,406 @@ mod tests {
         });
         assert_eq!(probed(&world, &mut events, port).await, Probed::Spoke);
         far.await.expect("the far end finished");
+    }
+
+    /// A request made is answered by what is behind the address, whole, and
+    /// a refusal is an answer.
+    ///
+    /// Behind it is a listener of this crate's, which is the cheapest honest
+    /// thing to ask: what comes back has been through the whole path rather
+    /// than a fixture, and what arrived there is what was sent.
+    #[tokio::test]
+    async fn a_request_made_is_answered_whole() {
+        let (world, mut events) = World::<Nothing>::new();
+        let port = bound(&world, &mut events, EffectId(1)).await;
+
+        answering(
+            &world,
+            Effect::Request {
+                id: EffectId(2),
+                method: "POST".to_owned(),
+                url: format!("http://127.0.0.1:{port}/api/say"),
+                headers: [
+                    ("authorization".to_owned(), "Bearer x".to_owned()),
+                    ("content-type".to_owned(), "application/json".to_owned()),
+                ]
+                .into(),
+                body: Some(Bytes::new(b"{\"text\":\"hi\"}".to_vec())),
+            },
+        )
+        .await;
+
+        let (id, request) = match next(&mut events).await {
+            Event::Arrived { id, request, .. } => (id, request),
+            other => panic!("expected an arrival: {}", other.kind()),
+        };
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.path, "/api/say");
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer x"),
+            "the headers reach the far side"
+        );
+        answering(
+            &world,
+            Effect::Answer {
+                id,
+                answer: Answer::Read { limit: 64 },
+            },
+        )
+        .await;
+        match next(&mut events).await {
+            Event::Body { outcome, .. } => assert_eq!(
+                outcome.expect("it read").as_text(),
+                Some("{\"text\":\"hi\"}"),
+                "and so does the body"
+            ),
+            other => panic!("expected a body: {}", other.kind()),
+        }
+        answering(
+            &world,
+            Effect::Answer {
+                id,
+                answer: Answer::Respond {
+                    status: 418,
+                    headers: [("content-type".to_owned(), "application/json".to_owned())].into(),
+                    body: Bytes::new(b"{\"ok\":false}".to_vec()),
+                },
+            },
+        )
+        .await;
+
+        match next(&mut events).await {
+            Event::Responded {
+                id,
+                responded:
+                    Responded::Answered {
+                        status,
+                        headers,
+                        body,
+                    },
+            } => {
+                assert_eq!(id, EffectId(2));
+                assert_eq!(status, 418, "a refusal is an answer");
+                assert_eq!(
+                    headers.get("content-type").map(String::as_str),
+                    Some("application/json")
+                );
+                assert_eq!(body.as_text(), Some("{\"ok\":false}"));
+            }
+            other => panic!("expected the answer: {}", other.kind()),
+        }
+    }
+
+    /// A request that never becomes an answer fails and says why: one to an
+    /// address nothing is behind, and one whose method is not a method.
+    #[tokio::test]
+    async fn a_request_that_gets_no_answer_fails_and_says_why() {
+        let (world, mut events) = World::<Nothing>::new();
+        let empty = {
+            let taken = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("it binds");
+            taken.local_addr().expect("it has an address").port()
+        };
+
+        answering(
+            &world,
+            Effect::Request {
+                id: EffectId(3),
+                method: "GET".to_owned(),
+                url: format!("http://127.0.0.1:{empty}/"),
+                headers: std::collections::BTreeMap::new(),
+                body: None,
+            },
+        )
+        .await;
+        match next(&mut events).await {
+            Event::Responded {
+                id: EffectId(3),
+                responded: Responded::Failed(why),
+            } => assert!(!why.is_empty()),
+            other => panic!("expected a failure: {}", other.kind()),
+        }
+
+        answering(
+            &world,
+            Effect::Request {
+                id: EffectId(4),
+                method: "NOT A METHOD".to_owned(),
+                url: format!("http://127.0.0.1:{empty}/"),
+                headers: std::collections::BTreeMap::new(),
+                body: None,
+            },
+        )
+        .await;
+        match next(&mut events).await {
+            Event::Responded {
+                id: EffectId(4),
+                responded: Responded::Failed(why),
+            } => assert!(why.contains("not a method"), "{why}"),
+            other => panic!("expected a failure: {}", other.kind()),
+        }
+    }
+
+    /// A far side to speak to: it greets, echoes what it hears, closes when
+    /// told to, and hangs up on a close from this side.
+    async fn far_side() -> (u16, tokio::task::JoinHandle<()>) {
+        use futures_util::{SinkExt as _, StreamExt as _};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("it binds");
+        let port = listener.local_addr().expect("it has an address").port();
+        let serving = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("it is reached");
+            let mut socket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("a handshake");
+            socket
+                .send(Message::text("hello"))
+                .await
+                .expect("it greets");
+            while let Some(Ok(frame)) = socket.next().await {
+                match frame {
+                    Message::Text(text) if text.as_str() == "bye" => {
+                        drop(socket.close(None).await);
+                        break;
+                    }
+                    Message::Text(text) => socket
+                        .send(Message::text(format!("heard {text}")))
+                        .await
+                        .expect("it echoes"),
+                    Message::Close(_) => break,
+                    _ => {}
+                }
+            }
+        });
+        (port, serving)
+    }
+
+    /// Connects to a far side and hears its greeting.
+    async fn connected(
+        world: &Arc<World<Nothing>>,
+        events: &mut tokio::sync::mpsc::UnboundedReceiver<Event<Nothing>>,
+        id: EffectId,
+        port: u16,
+    ) {
+        answering(
+            world,
+            Effect::Connect {
+                id,
+                url: format!("ws://127.0.0.1:{port}/socket"),
+            },
+        )
+        .await;
+        match next(events).await {
+            Event::Frame {
+                id: whose,
+                text,
+                at,
+            } => {
+                assert_eq!(whose, id);
+                assert_eq!(text, "hello", "the first frame is the greeting");
+                assert!(
+                    at > 1_700_000_000_000,
+                    "stamped with the time rather than with a number: {at}"
+                );
+            }
+            other => panic!("expected the greeting: {}", other.kind()),
+        }
+    }
+
+    /// A socket is heard from frame by frame, in order, and sent to; and
+    /// disconnecting it ends it, closed. What is sent after that goes
+    /// nowhere, and disconnecting again is nothing.
+    #[tokio::test]
+    async fn a_socket_is_spoken_over_frame_by_frame_and_ended_when_disconnected() {
+        let (world, mut events) = World::<Nothing>::new();
+        let (port, far) = far_side().await;
+        let id = EffectId(5);
+        connected(&world, &mut events, id, port).await;
+
+        for said in ["one", "two"] {
+            answering(
+                &world,
+                Effect::Transmit {
+                    id,
+                    text: said.to_owned(),
+                },
+            )
+            .await;
+            match next(&mut events).await {
+                Event::Frame { text, .. } => assert_eq!(text, format!("heard {said}")),
+                other => panic!("expected the echo: {}", other.kind()),
+            }
+        }
+
+        answering(&world, Effect::Disconnect { id }).await;
+        match next(&mut events).await {
+            Event::Disconnected {
+                id: whose,
+                disconnected,
+                ..
+            } => {
+                assert_eq!(whose, id);
+                assert!(disconnected == Disconnected::Closed);
+            }
+            other => panic!("expected the end: {}", other.kind()),
+        }
+        far.await.expect("the far end saw the close, and finished");
+
+        answering(
+            &world,
+            Effect::Transmit {
+                id,
+                text: "three".to_owned(),
+            },
+        )
+        .await;
+        answering(&world, Effect::Disconnect { id }).await;
+        nothing(&mut events).await;
+    }
+
+    /// A socket the far side closes ends closed, after its last frame; one
+    /// that cannot be opened at all ends at once, failed.
+    #[tokio::test]
+    async fn a_socket_the_far_side_closes_ends_closed_and_one_that_cannot_open_fails_at_once() {
+        let (world, mut events) = World::<Nothing>::new();
+        let (port, far) = far_side().await;
+        let id = EffectId(6);
+        connected(&world, &mut events, id, port).await;
+
+        answering(
+            &world,
+            Effect::Transmit {
+                id,
+                text: "bye".to_owned(),
+            },
+        )
+        .await;
+        match next(&mut events).await {
+            Event::Disconnected {
+                id: whose,
+                disconnected,
+                ..
+            } => {
+                assert_eq!(whose, id);
+                assert!(
+                    disconnected == Disconnected::Closed,
+                    "a closing handshake from the far side is an ordinary ending"
+                );
+            }
+            other => panic!("expected the end: {}", other.kind()),
+        }
+        far.await.expect("the far end finished");
+
+        let empty = {
+            let taken = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("it binds");
+            taken.local_addr().expect("it has an address").port()
+        };
+        answering(
+            &world,
+            Effect::Connect {
+                id: EffectId(7),
+                url: format!("ws://127.0.0.1:{empty}/socket"),
+            },
+        )
+        .await;
+        match next(&mut events).await {
+            Event::Disconnected {
+                id: EffectId(7),
+                disconnected: Disconnected::Failed(why),
+                ..
+            } => assert!(!why.is_empty()),
+            other => panic!("expected a failure to open: {}", other.kind()),
+        }
+    }
+
+    /// A far side that vanishes without a closing handshake is an ordinary
+    /// ending too, not a failure.
+    ///
+    /// Most endings of a long-lived connection are this one: the far side
+    /// closes on a schedule of its own and does not always say goodbye
+    /// first. Reported as a failure it would be a warning several times a
+    /// day on the healthy path, which is one people learn to scroll past.
+    #[tokio::test]
+    async fn a_far_side_that_vanishes_is_an_ordinary_ending() {
+        use futures_util::SinkExt as _;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let (world, mut events) = World::<Nothing>::new();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("it binds");
+        let port = listener.local_addr().expect("it has an address").port();
+        let (vanish, vanished) = tokio::sync::oneshot::channel::<()>();
+        let far = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("it is reached");
+            let mut socket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("a handshake");
+            socket
+                .send(Message::text("hello"))
+                .await
+                .expect("it greets");
+            drop(vanished.await);
+            // Dropped without a closing handshake, which is what a far side
+            // that went away looks like.
+            drop(socket);
+        });
+        let id = EffectId(8);
+        connected(&world, &mut events, id, port).await;
+
+        let _ = vanish.send(());
+        match next(&mut events).await {
+            Event::Disconnected {
+                id: whose,
+                disconnected,
+                ..
+            } => {
+                assert_eq!(whose, id);
+                assert!(disconnected == Disconnected::Closed);
+            }
+            other => panic!("expected the end: {}", other.kind()),
+        }
+        far.await.expect("the far end finished");
+    }
+
+    /// A connection ending is usually the far side going away, and has to
+    /// be told from a genuine failure.
+    ///
+    /// **Found by reading a real log.** A reset arrived as a protocol error
+    /// every few minutes, was reported as a warning, and the listener
+    /// quietly reconnected and carried on — so the warning meant nothing,
+    /// which is how somebody learns to skip past the one that does.
+    #[test]
+    fn an_ordinary_disconnection_is_told_from_a_failure() {
+        use tokio_tungstenite::tungstenite::{Error, error::ProtocolError};
+
+        for ending in [
+            Error::ConnectionClosed,
+            Error::AlreadyClosed,
+            Error::Protocol(ProtocolError::ResetWithoutClosingHandshake),
+            Error::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+            Error::Io(std::io::Error::from(std::io::ErrorKind::UnexpectedEof)),
+        ] {
+            assert!(super::ordinary_end(&ending), "{ending:?} is how they end");
+        }
+
+        for broken in [
+            Error::Protocol(ProtocolError::HandshakeIncomplete),
+            Error::Io(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            Error::AttackAttempt,
+        ] {
+            assert!(
+                !super::ordinary_end(&broken),
+                "{broken:?} is worth somebody reading"
+            );
+        }
     }
 
     /// An event sent reaches whoever is stepping, whole.
