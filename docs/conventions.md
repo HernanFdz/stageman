@@ -458,6 +458,15 @@ justify is usually obsolete.
   keeps: the instance's step is synchronous and short, everything that takes
   time is an effect the world performs on a task of its own, and a request is
   an event the loop answers between two others.
+
+  **And the server is behind a door rather than at it.** Since
+  `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`
+  the address a person types is taken by the instance, which decides on every
+  request's host and forwards: a job's name to that job's container, and
+  everything else to the framework, on a loopback port the kernel chose. So
+  the app crate is still an Axum server and is no longer *the* listener, and
+  a server function is the one thing that still asks the instance directly —
+  everything else arrives as a request the instance answers itself.
 - **The app's `server` feature is a contract with the framework, not a name.**
   The server-function macro emits `#[cfg(feature = "server")]` literally, so a
   feature spelled anything else silently moves every server function's body to

@@ -410,7 +410,7 @@ async fn asked<A: App>(
     loop {
         let Ok(answer) = answered.await else {
             tracing::warn!("nothing said what to do about a request, so nobody was answered");
-            return refused();
+            return nobody(&Bytes::new(Vec::new()));
         };
         match answer {
             Answer::Respond {
@@ -418,7 +418,9 @@ async fn asked<A: App>(
                 headers,
                 body,
             } => return responded(status, &headers, &body),
-            Answer::Proxy { port } => return relayed(port, parts, body).await,
+            Answer::Proxy { port, refused } => {
+                return relayed(port, &refused, parts, body).await;
+            }
             Answer::Read { limit } => {
                 let (outcome, read) = taken(body, limit).await;
                 body = read;
@@ -502,15 +504,15 @@ fn responded(
         .boxed();
     built.body(body).unwrap_or_else(|why| {
         tracing::warn!(%why, "an answer could not be built into a response");
-        refused()
+        nobody(&Bytes::new(Vec::new()))
     })
 }
 
-/// What is sent when nothing usable came back.
-fn refused() -> hyper::Response<Sent> {
+/// What is sent when nothing usable came back, saying what it was given.
+fn nobody(said: &Bytes) -> hyper::Response<Sent> {
     use http_body_util::BodyExt as _;
     let mut response = hyper::Response::new(
-        http_body_util::Full::new(bytes::Bytes::new())
+        http_body_util::Full::new(bytes::Bytes::from(said.as_slice().to_vec()))
             .map_err(|never| match never {})
             .boxed(),
     );
@@ -525,6 +527,7 @@ fn refused() -> hyper::Response<Sent> {
 /// until the message it belongs to is consumed.
 async fn relayed(
     port: u16,
+    refused: &Bytes,
     mut parts: hyper::http::request::Parts,
     body: Waiting,
 ) -> hyper::Response<Sent> {
@@ -539,7 +542,7 @@ async fn relayed(
         Ok(stream) => stream,
         Err(why) => {
             tracing::debug!(%port, %why, "nothing answered where a request was forwarded");
-            return refused();
+            return nobody(refused);
         }
     };
     let handshake =
@@ -548,7 +551,7 @@ async fn relayed(
         Ok(spoken) => spoken,
         Err(why) => {
             tracing::debug!(%port, %why, "a forwarded connection could not be opened");
-            return refused();
+            return nobody(refused);
         }
     };
     // With upgrades, so that a 101 leaves the connection to be taken over
@@ -568,7 +571,7 @@ async fn relayed(
         Ok(response) => response,
         Err(why) => {
             tracing::debug!(%port, %why, "a forwarded request was not answered");
-            return refused();
+            return nobody(refused);
         }
     };
 
@@ -954,7 +957,10 @@ mod tests {
             &world,
             Effect::Answer {
                 id,
-                answer: Answer::Proxy { port: behind },
+                answer: Answer::Proxy {
+                    port: behind,
+                    refused: Bytes::new(Vec::new()),
+                },
             },
         )
         .await;
@@ -1045,7 +1051,10 @@ mod tests {
             &world,
             Effect::Answer {
                 id,
-                answer: Answer::Proxy { port },
+                answer: Answer::Proxy {
+                    port,
+                    refused: Bytes::new(Vec::new()),
+                },
             },
         )
         .await;
@@ -1067,6 +1076,47 @@ mod tests {
             .expect("it comes back through the upgrade");
         assert_eq!(&echoed, b"hello");
         upstream.await.expect("the far end finished");
+    }
+
+    /// A forward to a port with nothing behind it says what it was told to.
+    ///
+    /// What it means for nothing to answer is the deciding half's to know,
+    /// so the words are carried rather than composed here.
+    #[tokio::test]
+    async fn a_forward_to_nothing_says_what_it_was_given_to_say() {
+        let (world, mut events) = World::<Nothing>::new();
+        let front = bound(&world, &mut events, EffectId(1)).await;
+        // Taken and let go of, so it is a port nothing is behind.
+        let empty = {
+            let taken = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("it binds");
+            taken.local_addr().expect("it has an address").port()
+        };
+
+        let asking = tokio::spawn(saying(
+            front,
+            "GET /page HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n".to_owned(),
+        ));
+        let id = match next(&mut events).await {
+            Event::Arrived { id, .. } => id,
+            other => panic!("expected an arrival: {}", other.kind()),
+        };
+        answering(
+            &world,
+            Effect::Answer {
+                id,
+                answer: Answer::Proxy {
+                    port: empty,
+                    refused: Bytes::new(b"nothing is showing".to_vec()),
+                },
+            },
+        )
+        .await;
+
+        let said = asking.await.expect("it finished");
+        assert!(said.starts_with("HTTP/1.1 502"), "{said}");
+        assert!(said.ends_with("nothing is showing"), "{said}");
     }
 
     /// An event sent reaches whoever is stepping, whole.

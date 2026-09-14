@@ -174,8 +174,13 @@ fn an_answer_to_another_question_moves_nothing() {
     let (mut instance, effects) = Instance::boot(seed(1), environment, TARGET);
 
     // A runtime candidate, and the address the tools are served on.
-    let [Effect::Run { id: version, .. }, Effect::Bind { .. }] = effects.as_slice() else {
-        panic!("a runtime question and a bind, and this is not them");
+    let [
+        Effect::Run { id: version, .. },
+        Effect::Bind { .. },
+        Effect::Bind { .. },
+    ] = effects.as_slice()
+    else {
+        panic!("a runtime question and two binds, and this is not them");
     };
 
     let mut walked = |at: &str, stray_event: Event, real: Event| {
@@ -310,9 +315,10 @@ fn a_runtime_command_is_given_this_environment_less_this_projects_own() {
             environment: given, ..
         },
         Effect::Bind { .. },
+        Effect::Bind { .. },
     ] = effects.as_slice()
     else {
-        panic!("a runtime question and a bind, and this is not them");
+        panic!("a runtime question and two binds, and this is not them");
     };
     assert_eq!(given.get("HOME").map(String::as_str), Some("/sim/home"));
     assert!(
@@ -335,8 +341,13 @@ fn the_deciding_half_a_replay_drives_is_this_instance() {
         Simulation::environment(),
         TARGET,
     );
-    let [Effect::Run { id, .. }, Effect::Bind { .. }] = effects.as_slice() else {
-        panic!("a runtime question and a bind, and this is not them");
+    let [
+        Effect::Run { id, .. },
+        Effect::Bind { .. },
+        Effect::Bind { .. },
+    ] = effects.as_slice()
+    else {
+        panic!("a runtime question and two binds, and this is not them");
     };
 
     let caused = Deciding::step(
@@ -395,75 +406,89 @@ fn what_an_awake_instance_holds_reads_in_full() {
     );
 }
 
-/// Waking waits for both addresses it was promised.
+/// Waking waits for every address it was promised, and for each of them.
 ///
-/// One is the dashboard's, which the entry point takes and tells it about;
-/// the other is the tools', which it takes itself. An instance that woke on
-/// either alone would tell a container where to reach tools on a port
-/// nothing had taken — and would do it on the very first turn, before
-/// anything could notice.
+/// There are three: the one a person types and the one a container reaches,
+/// which it takes itself, and the loopback port the pages are served on,
+/// which the entry point takes and tells it about. An instance that woke
+/// missing any of them would answer on an address nothing had taken, or
+/// tell the very first container to reach tools on a port nobody was
+/// listening to — on the first turn, before anything could notice.
 #[test]
 fn waking_waits_for_every_address_it_was_promised() {
-    let (mut instance, effects) = Instance::boot(seed(1), Simulation::environment(), TARGET);
-    let [
-        Effect::Run { id: version, .. },
-        Effect::Bind { id: binding, .. },
-    ] = effects.as_slice()
-    else {
-        panic!("a runtime question and a bind, and this is not them");
-    };
+    // Each of the three withheld in turn, because a condition that took any
+    // one for all of them reads exactly like one that takes all three.
+    for missing in ["the pages", "the dashboard", "the tools"] {
+        let (mut instance, effects) = Instance::boot(seed(1), Simulation::environment(), TARGET);
+        let [
+            Effect::Run { id: version, .. },
+            Effect::Bind { id: dashboard, .. },
+            Effect::Bind { id: tools, .. },
+        ] = effects.as_slice()
+        else {
+            panic!("a runtime question and two binds, and this is not them");
+        };
 
-    let asked = instance.step(Event::Ran {
-        id: *version,
-        finished: exited(),
-    });
-    let [Effect::Read { id: file, .. }] = asked.as_slice() else {
-        panic!("the key is in the environment, so the file is next");
-    };
-    let asked = instance.step(Event::Read {
-        id: *file,
-        contents: Ok(None),
-    });
-    let [Effect::Run { id: all, .. }, Effect::Run { id: up, .. }] = asked.as_slice() else {
-        panic!("both listings, asked at once");
-    };
-    instance.step(Event::Ran {
-        id: *all,
-        finished: exited(),
-    });
-    instance.step(Event::Ran {
-        id: *up,
-        finished: exited(),
-    });
-    instance.step(
-        AppEvent::Serving {
-            address: "127.0.0.1:8080".to_owned(),
-            port: 8080,
-        }
-        .into(),
-    );
+        let asked = instance.step(Event::Ran {
+            id: *version,
+            finished: exited(),
+        });
+        let [Effect::Read { id: file, .. }] = asked.as_slice() else {
+            panic!("the key is in the environment, so the file is next");
+        };
+        let asked = instance.step(Event::Read {
+            id: *file,
+            contents: Ok(None),
+        });
+        let [Effect::Run { id: all, .. }, Effect::Run { id: up, .. }] = asked.as_slice() else {
+            panic!("both listings, asked at once");
+        };
+        instance.step(Event::Ran {
+            id: *all,
+            finished: exited(),
+        });
+        instance.step(Event::Ran {
+            id: *up,
+            finished: exited(),
+        });
 
-    // Everything is known but the tools' address, and an answer to somebody
-    // else's bind is not an answer to this one's.
-    instance.step(Event::Bound {
-        id: EffectId(9999),
-        outcome: Ok(1234),
-    });
-    assert_eq!(
-        instance.snapshot(),
-        serde_json::json!({ "booting": "ready" }),
-        "it has everything but the address it took itself"
-    );
+        let pages = || AppEvent::Presenting { port: 9000 }.into();
+        let took = |id: &stageman_vocabulary::EffectId, port| Event::Bound {
+            id: *id,
+            outcome: Ok(port),
+        };
+        let (first, second) = match missing {
+            "the pages" => (took(dashboard, 8080), took(tools, 47_999)),
+            "the dashboard" => (pages(), took(tools, 47_999)),
+            _ => (pages(), took(dashboard, 8080)),
+        };
+        instance.step(first);
+        instance.step(second);
 
-    instance.step(Event::Bound {
-        id: *binding,
-        outcome: Ok(47_999),
-    });
-    assert!(
-        instance.snapshot().get("held").is_some(),
-        "and that address wakes it: {}",
-        instance.snapshot()
-    );
+        // An answer to somebody else's bind is not an answer to one of
+        // these, either.
+        instance.step(Event::Bound {
+            id: EffectId(9999),
+            outcome: Ok(1234),
+        });
+        assert_eq!(
+            instance.snapshot(),
+            serde_json::json!({ "booting": "ready" }),
+            "it woke without {missing}"
+        );
+
+        let last = match missing {
+            "the pages" => pages(),
+            "the dashboard" => took(dashboard, 8080),
+            _ => took(tools, 47_999),
+        };
+        instance.step(last);
+        assert!(
+            instance.snapshot().get("held").is_some(),
+            "{missing} was the last of them, and it did not wake: {}",
+            instance.snapshot()
+        );
+    }
 }
 
 /// One listing is not both.
@@ -479,8 +504,13 @@ fn one_listing_is_not_both() {
     let (mut instance, effects) = Instance::boot(seed(1), Simulation::environment(), TARGET);
 
     // A runtime candidate, and the address the tools are served on.
-    let [Effect::Run { id: version, .. }, Effect::Bind { .. }] = effects.as_slice() else {
-        panic!("a runtime question and a bind, and this is not them");
+    let [
+        Effect::Run { id: version, .. },
+        Effect::Bind { .. },
+        Effect::Bind { .. },
+    ] = effects.as_slice()
+    else {
+        panic!("a runtime question and two binds, and this is not them");
     };
     let asked = instance.step(Event::Ran {
         id: *version,
@@ -528,6 +558,26 @@ fn one_listing_is_not_both() {
         serde_json::json!({ "booting": "ready" }),
         "and both is everything booting was waiting on"
     );
+}
+
+/// An address a person cannot be sent to stops the start.
+///
+/// Unlike the tools', whose refusal is said and carried on from: what is
+/// lost there is a foreman's ability to start a job, and the dashboard is
+/// where an operator would go to fix that. Lose the dashboard and the
+/// repair is behind the door that just locked.
+#[test]
+fn a_dashboard_that_cannot_listen_refuses_the_start() {
+    let mut world = Simulation::new();
+    world.next_bind_fails("Address already in use (os error 48)");
+    let mut instance = world.wake(seed(1));
+    world.run_until(&mut instance, 1);
+
+    let refused = world.exited().expect("refused");
+    assert!(refused.contains("the dashboard cannot listen"), "{refused}");
+    assert!(refused.contains("127.0.0.1:8080"), "{refused}");
+    assert!(refused.contains("Address already in use"), "{refused}");
+    assert!(world.printed().is_empty(), "nothing is announced");
 }
 
 /// A machine with nowhere to keep an instance says so and stops.

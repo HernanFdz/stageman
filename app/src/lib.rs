@@ -29,7 +29,6 @@ mod listening;
 mod serving;
 #[cfg(feature = "server")]
 #[cfg(feature = "server")]
-pub(crate) mod tunnel;
 #[cfg(feature = "server")]
 pub mod world;
 

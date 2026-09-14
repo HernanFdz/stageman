@@ -189,6 +189,31 @@ pub fn domain(environment: &Environment) -> Domain {
         .unwrap_or_else(Domain::local)
 }
 
+/// The address a person reaches this instance on.
+///
+/// The framework's own rule, restated because the instance may read only the
+/// map it was constructed with: two variables spelled exactly as the
+/// framework's tooling sets them, and its defaults when neither is there.
+/// Restating somebody else's rule is drift waiting to happen, and what keeps
+/// it honest is that the integration tests run this binary and set both.
+///
+/// A port of zero is honoured here as it is everywhere else: whichever is
+/// free, learned from the bind rather than assumed, which is what lets every
+/// test that runs the binary have one of its own.
+#[must_use]
+pub fn dashboard_address(environment: &Environment) -> String {
+    let host = said(environment, "IP").unwrap_or("127.0.0.1");
+    let port = said(environment, "PORT")
+        .and_then(|named| named.parse::<u16>().ok())
+        .unwrap_or(8080);
+    // A v6 address is bracketed in an address and bare in the variable.
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
 /// Which port to serve the tools on, given what the environment said.
 ///
 /// Anything unreadable falls back rather than failing, and that is
@@ -352,6 +377,32 @@ mod tests {
                 Target::Linux
             ),
             Ok(PathBuf::from("/elsewhere/i.json"))
+        );
+    }
+
+    /// The dashboard is where the framework's own rule says, and a v6
+    /// address is bracketed so that it is an address rather than a guess.
+    #[test]
+    fn the_dashboard_is_where_the_frameworks_own_variables_say() {
+        use super::dashboard_address;
+
+        assert_eq!(dashboard_address(&environment(&[])), "127.0.0.1:8080");
+        assert_eq!(
+            dashboard_address(&environment(&[("IP", "0.0.0.0"), ("PORT", "3000")])),
+            "0.0.0.0:3000"
+        );
+        assert_eq!(
+            dashboard_address(&environment(&[("PORT", "0")])),
+            "127.0.0.1:0",
+            "zero is whichever is free"
+        );
+        assert_eq!(
+            dashboard_address(&environment(&[("PORT", "not a port")])),
+            "127.0.0.1:8080"
+        );
+        assert_eq!(
+            dashboard_address(&environment(&[("IP", "::1"), ("PORT", "8080")])),
+            "[::1]:8080"
         );
     }
 

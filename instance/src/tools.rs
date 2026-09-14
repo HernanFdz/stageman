@@ -546,23 +546,13 @@ impl Running {
         });
     }
 
-    /// A request arrived on a listener this instance took.
+    /// A call arrived on the listener the tools are served on.
     ///
     /// Nothing is decided from the head but the shape of the call: what it
     /// presented and where it came from are kept and judged once the body is
     /// there, so that a refusal for a credential nobody holds and one for a
     /// body that is not a call are refused by the same code.
-    pub fn arrived(
-        &mut self,
-        listener: stageman_vocabulary::EffectId,
-        id: RequestId,
-        request: &Arrival,
-        effects: &mut Vec<Effect>,
-    ) {
-        if Some(listener) != self.tools_listener {
-            Self::refuse(id, NOT_FOUND, effects);
-            return;
-        }
+    pub fn called(&mut self, id: RequestId, request: &Arrival, effects: &mut Vec<Effect>) {
         match (request.method.as_str(), request.path.as_str()) {
             ("POST", PATH) => {
                 self.calls.insert(

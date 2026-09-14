@@ -90,6 +90,8 @@ pub struct Simulation {
     exited: Option<String>,
     /// Why the next writes fail, front first.
     write_failures: VecDeque<String>,
+    /// Why the next addresses cannot be taken, front first.
+    bind_failures: VecDeque<String>,
     /// How the next turns end, front first; a turn with nothing scripted ends
     /// cleanly having said nothing.
     answers: VecDeque<Result<Answer, String>>,
@@ -100,7 +102,7 @@ pub struct Simulation {
     /// What each person's request was answered with, by identifier.
     responses: BTreeMap<RequestId, Response>,
     /// Where each tunnel request was sent, by identifier.
-    routes: BTreeMap<RequestId, Sent>,
+    routes: BTreeMap<Asked, Sent>,
     /// The last host port handed out.
     ports: u16,
     /// Threads opened so far, so each gets a number of its own.
@@ -120,9 +122,8 @@ pub struct Simulation {
     /// is what the next container would have rebuilt anyway.
     images: Vec<String>,
     warrants: Vec<String>,
-    /// The listeners taken, by the identifier that asked for them, and the
-    /// bodies of the requests arriving on them.
-    listeners: BTreeSet<EffectId>,
+    /// The addresses taken, by the bind that asked for each.
+    listeners: BTreeMap<EffectId, String>,
     /// What each request said, until whoever is deciding asks to read it.
     bodies: BTreeMap<Asked, Vec<u8>>,
     /// The next request identifier, minted here because the world holds a
@@ -291,12 +292,9 @@ pub fn holding_a_message(state: &mut State, n: u32, text: &str) {
         });
 }
 
-/// A request arriving for a job's name under the domain.
-pub const fn tunnel_asked(id: u64, job: JobId) -> Event {
-    Event::App(AppEvent::TunnelAsked {
-        id: RequestId(id),
-        job,
-    })
+/// The name a job's tunnel answers on, under the domain every scenario uses.
+pub fn tunnel_host(job: JobId) -> String {
+    format!("{}.localhost", job.as_uuid())
 }
 
 /// A person asking something of the dashboard.
@@ -335,6 +333,7 @@ impl Simulation {
             printed: Vec::new(),
             exited: None,
             write_failures: VecDeque::new(),
+            bind_failures: VecDeque::new(),
             answers: VecDeque::new(),
             post_failures: VecDeque::new(),
             tool_answers: BTreeMap::new(),
@@ -349,7 +348,7 @@ impl Simulation {
             listening: Vec::new(),
             images: vec!["stageman:unneeded".to_owned()],
             warrants: Vec::new(),
-            listeners: BTreeSet::new(),
+            listeners: BTreeMap::new(),
             bodies: BTreeMap::new(),
             asking_next: 1,
             commands: Vec::new(),
@@ -420,6 +419,14 @@ impl Simulation {
     }
 
     /// Scripts the next write to fail.
+    /// The next address asked for cannot be taken, and says why.
+    ///
+    /// The first one asked for is the dashboard's, which is the one whose
+    /// refusal stops a start.
+    pub fn next_bind_fails(&mut self, why: &str) {
+        self.bind_failures.push_back(why.to_owned());
+    }
+
     pub fn next_write_fails(&mut self, why: &str) {
         self.write_failures.push_back(why.to_owned());
     }
@@ -440,8 +447,8 @@ impl Simulation {
     }
 
     /// Where a tunnel request was sent, if it has been answered.
-    pub fn route(&self, id: u64) -> Option<Sent> {
-        self.routes.get(&RequestId(id)).copied()
+    pub fn route(&self, id: Asked) -> Option<Sent> {
+        self.routes.get(&id).copied()
     }
 
     /// The host port a container's tunnel is on now, if it is running.
@@ -467,8 +474,13 @@ impl Simulation {
     fn answered(&mut self, id: Asked, answer: Answering) {
         match answer {
             Answering::Respond { status, body, .. } => {
-                let body = (!body.is_empty())
-                    .then(|| serde_json::from_slice(body.as_slice()).expect("an answer is JSON"));
+                // A refusal to whoever visited a name, or an answer to a
+                // call: which it is, is which listener it arrived on, and a
+                // test knows because it said.
+                if status == 404 && !body.is_empty() {
+                    self.routes.insert(id, Sent::Nowhere);
+                }
+                let body = serde_json::from_slice(body.as_slice()).ok();
                 self.tool_answers.insert(id, (status, body));
             }
             Answering::Read { limit } => {
@@ -483,14 +495,24 @@ impl Simulation {
                 self.schedule(self.now, Event::Body { id, outcome });
             }
             // Nothing is forwarded yet: the tunnel is the next family.
-            Answering::Proxy { port } => {
-                panic!("a request was forwarded to {port}, which nothing asks for yet")
+            Answering::Proxy { port, .. } => {
+                self.routes.insert(id, Sent::To(port));
             }
         }
     }
 
-    /// Says a request arrived on the one listener taken, and holds its body
-    /// for whenever it is asked for.
+    /// Which listener is which, by the address it was taken on: the tools
+    /// are served on every interface and the dashboard is not.
+    fn listener(&self, tools: bool) -> EffectId {
+        self.listeners
+            .iter()
+            .find(|(_, address)| address.starts_with("0.0.0.0:") == tools)
+            .map(|(id, _)| *id)
+            .expect("an address was taken before anything arrived on it")
+    }
+
+    /// Says a request arrived on the tools' listener, and holds its body for
+    /// whenever it is asked for.
     pub fn arrives(
         &mut self,
         at: Now,
@@ -500,13 +522,27 @@ impl Simulation {
         peer: &str,
         body: &str,
     ) -> Asked {
+        self.arriving(self.listener(true), at, method, path, headers, peer, body)
+    }
+
+    /// Says a request arrived on one of them.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a request is a method, a path, headers, a peer and a body, and a test that \
+                  named them in a struct would read worse at every call"
+    )]
+    fn arriving(
+        &mut self,
+        listener: EffectId,
+        at: Now,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        peer: &str,
+        body: &str,
+    ) -> Asked {
         let id = Asked(self.asking_next);
         self.asking_next += 1;
-        let listener = *self
-            .listeners
-            .iter()
-            .next()
-            .expect("an address was taken before anything arrived on it");
         self.bodies.insert(id, body.as_bytes().to_vec());
         self.schedule(
             at,
@@ -526,6 +562,19 @@ impl Simulation {
             },
         );
         id
+    }
+
+    /// Says somebody visited a name this instance answers on.
+    pub fn visits(&mut self, at: Now, host: &str) -> Asked {
+        self.arriving(
+            self.listener(false),
+            at,
+            "GET",
+            "/",
+            &[("host", host)],
+            NEARBY,
+            "",
+        )
     }
 
     /// Says a tool call arrived, as an agent's client would make one.
@@ -610,14 +659,7 @@ impl Simulation {
         for effect in effects {
             self.perform(effect);
         }
-        self.stepped(
-            &mut instance,
-            AppEvent::Serving {
-                address: "127.0.0.1:8080".to_owned(),
-                port: 8080,
-            }
-            .into(),
-        );
+        self.stepped(&mut instance, AppEvent::Presenting { port: 9000 }.into());
         let now = self.now;
         self.run_until(&mut instance, now);
         instance
@@ -633,14 +675,12 @@ impl Simulation {
                     | Event::Ran { .. }
                     | Event::Woke { .. }
                     | Event::App(
-                        AppEvent::Serving { .. }
+                        AppEvent::Presenting { .. }
                             | AppEvent::TurnEnded { .. }
                             | AppEvent::Probed { .. }
                             | AppEvent::ThreadOpened { .. }
                             | AppEvent::Posted { .. }
                             | AppEvent::Request { .. }
-                            | AppEvent::TunnelAsked { .. }
-                            | AppEvent::TunnelFailed { .. }
                     )
             )
         });
@@ -930,9 +970,6 @@ impl Simulation {
             AppEffect::Respond { id, response } => {
                 self.responses.insert(id, response);
             }
-            AppEffect::Route { id, port } => {
-                self.routes.insert(id, port.map_or(Sent::Nowhere, Sent::To));
-            }
             AppEffect::StopTurn { speaker } => self.stop_turn(speaker),
             AppEffect::OpenThread {
                 job, announcement, ..
@@ -994,7 +1031,17 @@ impl Simulation {
                 self.schedule(at, Event::Woke { id });
             }
             Effect::Bind { id, address } => {
-                self.listeners.insert(id);
+                if let Some(why) = self.bind_failures.pop_front() {
+                    self.schedule(
+                        self.now,
+                        Event::Bound {
+                            id,
+                            outcome: Err(why),
+                        },
+                    );
+                    return None;
+                }
+                self.listeners.insert(id, address.clone());
                 // Whichever port was asked for, taken: a port of zero is
                 // answered with one nothing else here uses, as a real one
                 // would be.

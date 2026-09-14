@@ -98,7 +98,13 @@ pub struct Boot {
     runtime: Option<PathBuf>,
     key: Option<(Key, KeySource)>,
     opened: Option<(State, Option<InstanceId>)>,
-    serving: Option<(String, u16)>,
+    /// Where the presentation server is, once the entry point says.
+    presenting: Option<u16>,
+    /// The address a person reaches this instance on, and the bind that
+    /// answers for it.
+    dashboard_asked: (String, Option<EffectId>),
+    /// The port that bind took, once it has answered.
+    dashboard: Option<u16>,
     /// The port the tools were asked for, and the bind that answers for it.
     tools_asked: (u16, Option<EffectId>),
     /// The port the tools are served on, once that bind has answered.
@@ -145,6 +151,7 @@ impl Boot {
         let rng = StdRng::from_seed(seed);
         let domain = paths::domain(&environment);
         let tools_port = paths::tools_port(&environment);
+        let dashboard_address = paths::dashboard_address(&environment);
         let key_file = paths::key_file(&environment, target).ok();
         let instance_file = match paths::instance_file(&environment, target) {
             Ok(instance_file) => instance_file,
@@ -161,7 +168,9 @@ impl Boot {
                     runtime: None,
                     key: None,
                     opened: None,
-                    serving: None,
+                    presenting: None,
+                    dashboard_asked: (String::new(), None),
+                    dashboard: Some(0),
                     tools_asked: (0, None),
                     tools: Some(0),
                     waiting: Vec::new(),
@@ -190,31 +199,48 @@ impl Boot {
             runtime: None,
             key: None,
             opened: None,
-            serving: None,
+            presenting: None,
+            dashboard_asked: (dashboard_address, None),
+            dashboard: None,
             tools_asked: (tools_port, None),
             tools: None,
             waiting: Vec::new(),
             empty: State::default(),
         };
         let mut effects = boot.try_candidate(0);
-        effects.push(boot.take_the_tools_address());
+        effects.extend(boot.take_the_addresses());
         (boot, effects)
     }
 
-    /// Asks for the address a container reaches the tools on.
+    /// Asks for the two addresses this instance answers on.
     ///
-    /// Every interface, which is not a preference: it is the only address a
-    /// container can reach on every platform, measured on both runtimes —
-    /// see `docs/decisions/0033-the-job-endpoint-listens-beyond-loopback.md`.
-    /// Asked for while booting rather than after, so that no turn can begin
-    /// before the port a container would be told about is known.
-    fn take_the_tools_address(&mut self) -> Effect {
-        let id = self.effect_id();
-        self.tools_asked.1 = Some(id);
-        Generic::Bind {
-            id,
-            address: format!("0.0.0.0:{}", self.tools_asked.0),
-        }
+    /// The dashboard's is where a person types, and what arrives there is
+    /// routed by the name it was asked for: a job's tunnel to that job, and
+    /// everything else to the presentation server.
+    ///
+    /// The tools' is every interface, which is not a preference: it is the
+    /// only address a container can reach on every platform, measured on
+    /// both runtimes — see
+    /// `docs/decisions/0033-the-job-endpoint-listens-beyond-loopback.md`.
+    ///
+    /// Both while booting rather than after, so that nothing is served
+    /// before there is anything to answer with, and no turn begins before
+    /// the port a container would be told about is known.
+    fn take_the_addresses(&mut self) -> Vec<Effect> {
+        let dashboard = self.effect_id();
+        self.dashboard_asked.1 = Some(dashboard);
+        let tools = self.effect_id();
+        self.tools_asked.1 = Some(tools);
+        vec![
+            Generic::Bind {
+                id: dashboard,
+                address: self.dashboard_asked.0.clone(),
+            },
+            Generic::Bind {
+                id: tools,
+                address: format!("0.0.0.0:{}", self.tools_asked.0),
+            },
+        ]
     }
 
     /// What there is to show while nothing is known.
@@ -304,8 +330,8 @@ impl Boot {
     /// application's own to keep for later.
     pub fn step(&mut self, event: Event) -> Booting {
         match event {
-            Event::App(AppEvent::Serving { address, port }) => {
-                self.serving = Some((address, port));
+            Event::App(AppEvent::Presenting { port }) => {
+                self.presenting = Some(port);
                 self.maybe_awake(Vec::new())
             }
             Event::App(event) => {
@@ -317,6 +343,20 @@ impl Boot {
             Event::Written { id, outcome } => self.written(id, outcome),
             // Booting asks for no timer and no listener, so an answer to
             // either is somebody else's and is ignored rather than acted on.
+            Event::Bound { id, outcome } if Some(id) == self.dashboard_asked.1 => {
+                match outcome {
+                    Ok(taken) => self.dashboard = Some(taken),
+                    // Nothing else works without it: a dashboard nobody can
+                    // reach is the door every repair happens behind.
+                    Err(why) => {
+                        return Booting::Asking(self.refuse(format!(
+                            "the dashboard cannot listen on {}\n  caused by: {why}",
+                            self.dashboard_asked.0
+                        )));
+                    }
+                }
+                self.maybe_awake(Vec::new())
+            }
             Event::Bound { id, outcome } if Some(id) == self.tools_asked.1 => {
                 let asked = self.tools_asked.0;
                 self.tools = Some(match outcome {
@@ -711,7 +751,7 @@ impl Boot {
 
     /// Wakes once everything is known, including where the dashboard is.
     fn maybe_awake(&mut self, effects: Vec<Effect>) -> Booting {
-        if self.serving.is_none() || self.tools.is_none() {
+        if self.presenting.is_none() || self.dashboard.is_none() || self.tools.is_none() {
             return Booting::Asking(effects);
         }
         let containers = match std::mem::replace(&mut self.phase, Phase::Refused) {
@@ -721,14 +761,29 @@ impl Boot {
                 return Booting::Asking(effects);
             }
         };
-        let (Some(runtime), Some((key, source)), Some((state, named)), Some((address, port))) = (
+        let (
+            Some(runtime),
+            Some((key, source)),
+            Some((state, named)),
+            Some(port),
+            Some(presenting),
+        ) = (
             self.runtime.take(),
             self.key.take(),
             self.opened.take(),
-            self.serving.take(),
-        ) else {
+            self.dashboard.take(),
+            self.presenting.take(),
+        )
+        else {
             return Booting::Asking(self.refuse("booting lost a fact it had".to_owned()));
         };
+        // What a person types, with the port that was actually taken: asking
+        // for zero is asking for whichever is free, and what is announced
+        // has to be somewhere they can go.
+        let address = self.dashboard_asked.0.rsplit_once(':').map_or_else(
+            || self.dashboard_asked.0.clone(),
+            |(host, _)| format!("{host}:{port}"),
+        );
         let waiting = std::mem::take(&mut self.waiting);
         let mut running = Running::woken(crate::Facts {
             state,
@@ -743,6 +798,8 @@ impl Boot {
             runtime_environment: self.runtime_environment(),
             tools: self.tools.unwrap_or(self.tools_asked.0),
             tools_listener: self.tools_asked.1,
+            dashboard_listener: self.dashboard_asked.1,
+            presenting,
             address,
             port,
         });

@@ -132,16 +132,14 @@ impl From<Posting> for Speaking {
 /// nothing here is recorded with a timestamp.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AppEvent {
-    /// Where the dashboard is being served, once the world has bound it.
+    /// Where the presentation server answers, said by the entry point once
+    /// it has taken a loopback port for it.
     ///
-    /// The one application fact that exists before the instance and is not
-    /// in its environment: a port of zero there is a request for whichever
-    /// is free, and only the bind knows the answer. Until the listener is
-    /// the instance's own to bind, the world says.
-    Serving {
-        /// The address, as a person would type it after the scheme.
-        address: String,
-        /// The port, for what a job is told about its tunnel.
+    /// The application's own fact rather than something asked for: what
+    /// serves the pages is the framework, in this process, and the instance
+    /// forwards to it exactly as it forwards to a job's container.
+    Presenting {
+        /// The loopback port it is on.
         port: u16,
     },
     /// Answers [`AppEffect::RunTurn`]: the agent stopped, or could not be run.
@@ -189,40 +187,18 @@ pub enum AppEvent {
         /// What was asked.
         request: crate::requests::Request,
     },
-    /// A request arrived for a name one label below the domain, and that
-    /// label is a job's identifier. Answered by [`AppEffect::Route`], in
-    /// this step or once the runtime has said where the tunnel is. The
-    /// world decodes the hostname, which is shape; whether the job is one of
-    /// this instance's is state, and so is asked here.
-    TunnelAsked {
-        /// What the world is waiting to answer.
-        id: RequestId,
-        /// The job the name identifies.
-        job: JobId,
-    },
-    /// A connection to where a job's tunnel was last found did not go
-    /// through. Only failures are reported: a relay that worked needs no
-    /// decision, and one per request would be noise.
-    TunnelFailed {
-        /// Which job.
-        job: JobId,
-        /// What went wrong, for the log.
-        why: String,
-    },
 }
 
 impl Named for AppEvent {
     fn kind(&self) -> &'static str {
         match self {
-            Self::Serving { .. } => "Serving",
+            Self::Presenting { .. } => "Presenting",
             Self::TurnEnded { .. } => "TurnEnded",
             Self::Probed { .. } => "Probed",
             Self::Heard { .. } => "Heard",
             Self::ThreadOpened { .. } => "ThreadOpened",
             Self::Posted { .. } => "Posted",
             Self::Request { .. } => "Request",
-            Self::TunnelAsked { .. } => "TunnelAsked",
-            Self::TunnelFailed { .. } => "TunnelFailed",
         }
     }
 }
@@ -239,10 +215,8 @@ pub enum AppEffect {
     /// path, and the domain is the instance's to decide on once it binds
     /// its own listeners.
     Booted {
-        /// The container runtime that answered.
+        /// Where the container runtime this instance found is.
         runtime: PathBuf,
-        /// The domain, as it is compared and printed.
-        domain: String,
     },
     /// Run one turn of an agent. Answered by [`AppEvent::TurnEnded`].
     RunTurn {
@@ -267,15 +241,6 @@ pub enum AppEffect {
         thread: Thread,
         /// What.
         text: String,
-    },
-    /// Answer a tunnel request: where to forward it, or that nothing
-    /// answers on that name. Unanswered, except by [`AppEvent::TunnelFailed`]
-    /// when the forwarding does not go through.
-    Route {
-        /// Which request.
-        id: RequestId,
-        /// The host port to forward to, or none for a name nothing answers on.
-        port: Option<u16>,
     },
     /// Answer a person's request. Unanswered.
     Respond {
@@ -334,7 +299,6 @@ impl Named for AppEffect {
             Self::RunTurn { .. } => "RunTurn",
             Self::Probe { .. } => "Probe",
             Self::Say { .. } => "Say",
-            Self::Route { .. } => "Route",
             Self::Respond { .. } => "Respond",
             Self::StopTurn { .. } => "StopTurn",
             Self::OpenThread { .. } => "OpenThread",

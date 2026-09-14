@@ -59,14 +59,16 @@ fn a_first_run_writes_its_file_and_settles_later() {
     assert_eq!(
         shape_of(&world),
         [
-            // Booting: a runtime candidate and the tools address are asked
-            // for at once, the key is in the environment so only the file is
+            // Booting: a runtime candidate and both addresses are asked for
+            // at once, the key is in the environment so only the file is
             // read, and the listings find nothing to inspect.
             "booted",
             "-> Run",
             "-> Bind",
+            "-> Bind",
             "<- Ran",
             "-> Read",
+            "<- Bound",
             "<- Bound",
             "<- Read",
             "-> Run",

@@ -343,6 +343,10 @@ pub struct Facts {
     pub tools: u16,
     /// The listener they arrive on, where one was taken.
     pub tools_listener: Option<EffectId>,
+    /// The listener a person's requests arrive on.
+    pub dashboard_listener: Option<EffectId>,
+    /// The loopback port the presentation server answers on.
+    pub presenting: u16,
     /// Where the dashboard is served, as a person would type it.
     pub address: String,
     /// The port it is served on.
@@ -377,6 +381,11 @@ pub struct Running {
     tools: String,
     /// Which listener a tool call arrives on, where one was taken.
     tools_listener: Option<EffectId>,
+    /// Which listener a person's requests arrive on.
+    dashboard_listener: Option<EffectId>,
+    /// Where the presentation server is, which is where everything that is
+    /// not a job's tunnel is forwarded.
+    presenting: u16,
     /// What each tool call said about itself before its body was read.
     calls: BTreeMap<stageman_vocabulary::RequestId, Called>,
     /// What a listing being assembled has learned so far, by container.
@@ -405,8 +414,9 @@ pub struct Running {
     asking: BTreeMap<stageman_vocabulary::RequestId, Option<serde_json::Value>>,
     /// Where each job's tunnel was last found.
     tunnels: BTreeMap<JobId, u16>,
-    /// Tunnel requests waiting for the runtime to say where a job is.
-    routing: BTreeMap<JobId, Vec<RequestId>>,
+    /// Requests waiting for the runtime to say where a job's tunnel is, by
+    /// the identifier the world holds each one open under.
+    routing: BTreeMap<JobId, Vec<stageman_vocabulary::RequestId>>,
     /// Effects waiting on a write, by the write they wait on, in order.
     deferred: VecDeque<(EffectId, Vec<Effect>)>,
     /// The wakes asked for that have not gone off, each one the settling
@@ -441,6 +451,8 @@ impl Running {
             runtime_environment,
             tools,
             tools_listener,
+            dashboard_listener,
+            presenting,
             address,
             port,
         } = facts;
@@ -462,6 +474,8 @@ impl Running {
             runtime_environment,
             tools: paths::tools_endpoint(tools),
             tools_listener,
+            dashboard_listener,
+            presenting,
             calls: BTreeMap::new(),
             asked: BTreeMap::new(),
             listing: BTreeMap::new(),
@@ -492,7 +506,6 @@ impl Running {
     pub(crate) fn waking_up(&mut self, containers: &[Container]) -> Vec<Effect> {
         let mut effects = vec![Effect::App(AppEffect::Booted {
             runtime: self.runtime.clone(),
-            domain: self.domain.to_string(),
         })];
         let (swept, tally) = self.waking(containers);
         effects.extend(swept);
@@ -608,6 +621,35 @@ impl Running {
                 let port = stageman_agent::published(said(finished));
                 self.port_found(job, port, effects);
             }
+        }
+    }
+
+    /// A request arrived on one of the addresses this instance took.
+    ///
+    /// Which listener it came in on is the whole of the routing at this
+    /// level: one serves the tools an agent calls, and the other serves
+    /// whoever typed an address.
+    fn arrived(
+        &mut self,
+        listener: EffectId,
+        id: stageman_vocabulary::RequestId,
+        request: &stageman_vocabulary::Arrival,
+        effects: &mut Vec<Effect>,
+    ) {
+        if Some(listener) == self.tools_listener {
+            self.called(id, request, effects);
+        } else if Some(listener) == self.dashboard_listener {
+            self.visited(id, request, effects);
+        } else {
+            tracing::warn!("a request arrived on a listener this instance did not take; refused");
+            effects.push(Generic::Answer {
+                id,
+                answer: stageman_vocabulary::Answer::Respond {
+                    status: 404,
+                    headers: BTreeMap::new(),
+                    body: stageman_vocabulary::Bytes::new(Vec::new()),
+                },
+            });
         }
     }
 
@@ -732,8 +774,8 @@ impl Running {
     /// Handles one thing the application's own world said.
     fn told(&mut self, event: AppEvent, effects: &mut Vec<Effect>) {
         match event {
-            AppEvent::Serving { .. } => {
-                tracing::debug!("told again where the dashboard is served; ignored");
+            AppEvent::Presenting { .. } => {
+                tracing::debug!("told again where the presentation server is; ignored");
             }
             AppEvent::TurnEnded { speaker, outcome } => self.ended(speaker, outcome, effects),
             AppEvent::Probed { job, answering } => {
@@ -755,8 +797,6 @@ impl Running {
             AppEvent::ThreadOpened { job, outcome } => self.thread_opened(job, outcome),
             AppEvent::Posted { request, outcome } => self.posted(request, outcome),
             AppEvent::Request { id, request } => self.requested(id, request, effects),
-            AppEvent::TunnelAsked { id, job } => self.tunnel_asked(id, job, effects),
-            AppEvent::TunnelFailed { job, why } => self.tunnel_failed(job, &why),
         }
     }
 

@@ -87,10 +87,21 @@ at `<job-id>.<domain>`.**
   to be portable, and a value describing *this host's reachability* is exactly
   what another machine makes wrong.
 
-- **Routing is by the Host header, on the dashboard's listener**, in front of
-  the framework's router rather than as a route inside it. The apex is the
-  dashboard; anything whose bottom label parses as a `JobId` is that job's
-  tunnel. One listener, one port, one thing for an operator to point infra at.
+- **Routing is by the Host header, on the one listener a person reaches.**
+  The apex is the dashboard; anything whose bottom label parses as a `JobId`
+  is that job's tunnel. One listener, one port, one thing for an operator to
+  point infra at.
+
+  It was a layer in front of the framework's router until
+  `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`,
+  and the shape is now inverted rather than moved: the instance takes that
+  listener, decides on every request's host, and forwards — a job's name to
+  that job's container, and everything else to the framework, which serves
+  the pages on a loopback port of its own. What was a middleware bypassing
+  the router is a proxy that never reaches it, which is the same property
+  arrived at from the other side: an application somebody else's agent wrote
+  cannot collide with a path of the dashboard's, because it is never offered
+  one.
 
 - **Job-only.** A foreman has no workspace and nothing to serve, which makes
   this the mirror of the tool `docs/decisions/0034-tools-are-served-not-shipped.md`

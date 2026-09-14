@@ -176,23 +176,26 @@ fn report(failure: &StartupError) {
 }
 
 async fn start() -> Result<(), StartupError> {
-    // Bound before the instance is constructed, because where the dashboard
-    // is served is the one thing the instance is told rather than asks for:
-    // a port of zero is an ordinary request for whichever port is free, and
-    // the answer is only known here. It is also what makes the address the
-    // instance announces a readiness signal: the socket is already accepting
-    // by the time the line naming it appears.
-    let address = dioxus::cli_config::fullstack_address_or_localhost();
+    // The presentation server, on a loopback port the kernel chooses. It is
+    // not what a person reaches: the instance takes the address they type and
+    // forwards to this, exactly as it forwards to a job's container — see
+    // `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`.
+    // Bound before the instance is constructed, because the instance waits to
+    // be told where it is before it wakes, and nothing should be served
+    // before there is something behind it.
+    let address = SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0));
     let listener = tokio::net::TcpListener::bind(address)
         .await
         .map_err(|source| StartupError::Listen { address, source })?;
-    let serving = listener
+    let presenting = listener
         .local_addr()
-        .map_err(|source| StartupError::Listen { address, source })?;
+        .map_err(|source| StartupError::Listen { address, source })?
+        .port();
 
-    // Everything else the instance learns by asking: whether a runtime
-    // answers, its key, its file, what was left behind. Every way a start
-    // can refuse is an exit effect with its reason, performed by the world.
+    // Everything else the instance learns by asking: the addresses it
+    // answers on, whether a runtime answers, its key, its file, what was
+    // left behind. Every way a start can refuse is an exit effect with its
+    // reason, performed by the world.
     let environment: Environment = std::env::vars().collect();
     // The one place a compile-time condition says anything about a platform.
     // Everything downstream decides on the value, so a start can be recorded
@@ -201,10 +204,7 @@ async fn start() -> Result<(), StartupError> {
     let (world, events) = World::new();
     let asking = Asking::new(Arc::clone(&world));
     crate::world::adopt(Arc::clone(&asking));
-    asking.send(AppEvent::Serving {
-        address: serving.to_string(),
-        port: serving.port(),
-    });
+    asking.send(AppEvent::Presenting { port: presenting });
 
     stageman_world::run(
         instance,
@@ -251,14 +251,13 @@ async fn start() -> Result<(), StartupError> {
         );
     }
 
-    // Outermost, and that is the whole of it: a job's tunnel serves an
-    // application somebody else's agent wrote, so it must not pass through the
-    // server-function and static-file machinery on its way — a path collision
-    // would otherwise decide which of the two answers. Applied last because a
-    // layer added last is the one that runs first. See
+    // Nothing routes here any more. A job's tunnel serves an application
+    // somebody else's agent wrote and must not pass through the
+    // server-function and static-file machinery on its way, and it no longer
+    // can: what arrives here has already been routed by the instance, which
+    // forwards a job's name to that job's container and everything else to
+    // this — see
     // `docs/decisions/0042-a-job-shows-its-work-on-a-subdomain.md`.
-    let router = router.layer(axum::middleware::from_fn(crate::tunnel::route));
-
     axum::serve(listener, router)
         .await
         .map_err(StartupError::Serving)

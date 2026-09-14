@@ -96,10 +96,10 @@ first.
   effects — the runtime through **agent**, the channels, the disk — and
   nothing that decides.
   `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`
-  then took the generic half of that into **world** and startup into the
-  instance, so what is left here is the application's own half: an entry point
-  that draws a seed, binds the dashboard and steps, and adapters for the
-  effects only this application has.
+  then took the generic half of that into **world**, and startup and the
+  request path into the instance. What is left here is the application's own
+  half: an entry point that draws a seed, serves the pages on a loopback port
+  and says where, and adapters for the effects only this application has.
 - **instance** — the deciding and the doing as one deterministic value: what
   the daemon knows, and what it does about each thing that happens, answered
   as effects. It is the seam
@@ -109,6 +109,12 @@ first.
   an effect, read a clock, or draw on entropy of its own. What it keeps goes
   to the disk, and it seals and opens that file itself; what it merely holds,
   a restart begins without.
+
+  It **answers what a person types**: it takes that address itself, decides
+  on every request's host, and forwards a job's name to that job's container
+  and everything else to the pages the app serves on a loopback port. So the
+  dashboard is a presentation server it proxies to, and the same path carries
+  both.
 
   It **boots itself**, from a seed, the environment, and which platform this
   build was made for: whether a runtime answers, where its key is, what its

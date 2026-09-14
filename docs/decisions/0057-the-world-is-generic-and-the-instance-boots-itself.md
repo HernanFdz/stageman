@@ -264,13 +264,21 @@ channel's refresh before the platform closes, which
 runtime's commands as the exact argument lists that run, and its outputs as
 recorded from the real one.
 
-**The migration is on one branch, in phases, each with its scenarios**: the
-two crates and the application hole first, with the instance's existing
-effects moved into the hole and no behaviour changed; then boot and the file
-and process families; then the HTTP model — bind, route, print, the
-presentation server; then the conversation; then the channel's lifecycle;
-then the recorder, with the bar for pushing made in-memory. Each phase moves
-one family out of the hole, and the hole is empty when the last has landed.
+**The migration is in phases, each with its scenarios**: the two crates and
+the application hole first, with the instance's existing effects moved into
+the hole and no behaviour changed; then boot and the file and process
+families; then the HTTP model — bind, route, print, the presentation server;
+then the conversation; then the channel's lifecycle; then the recorder, with
+the bar for pushing made in-memory. Each phase moves one family out of the
+hole, and the hole is empty when the last has landed.
+
+They were meant to be one branch and one merge, and the first four landed
+that way before the branch got long enough that carrying it cost more than
+merging it. What makes that safe is a property the phases have anyway: each
+one leaves the program working, because a family that has not moved is still
+performed where it was. Which families are left is
+`docs/open-questions.md`, which is where an intention belongs; this record
+says what they are and why, which does not change as they land.
 
 **Reversing** is one rendering step per family: a generic effect is a
 semantic one rendered inside rather than outside, so any phase can be undone

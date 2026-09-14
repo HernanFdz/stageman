@@ -344,7 +344,54 @@ Intended next steps, in order, each with its reason. Written as intentions, not
 progress: "next X, because Y" — never "X is 60% done", which is both derivable
 and wrong within a day.
 
-- Next, cover Slack against regression, because it works and nothing in the
+- Next, empty the application hole, because
+  `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`
+  is finished when nothing application-specific is left for a world to
+  perform, and what remains is four families rather than a design question.
+  The order below is the record's, and each one is the same shape of work as
+  the families already moved: render the command or the frame inside the
+  instance, read the answer inside it, and delete what the app was doing.
+
+  **A turn**, which is the largest: a process kept open, its lines arriving
+  as events and going out as effects, so that the conversation with an agent
+  becomes a state machine a scenario can drive. The record expects this to
+  gain the case nothing tests today — a setting accepted and silently
+  ignored — and it is what still keeps a container runtime's path in the
+  app's performer.
+
+  **A probe**, which is the smallest and is not reducible to the others:
+  `docs/decisions/0047-a-tunnel-answers-only-when-something-behind-it-does.md`
+  measured what it has to mean, and a published port answers whether or not
+  anything is behind it.
+
+  **A channel's lifecycle**, which is a websocket and a request: connect,
+  acknowledge, refresh before the platform closes, retry, and measure the
+  deaf window — all of which `docs/decisions/0044-a-listener-only-listens.md`
+  could argue for and nothing could test.
+
+  Then the hole holds nothing, `AppEvent` and `AppEffect` are empty, and the
+  performer in the app crate goes with them.
+
+- Then make the container tests a recorder, because what they check is what
+  the pinned runtime and the pinned agent actually do, which is a recording
+  rather than a test. A recipe runs reality, captures what it prints and how
+  it answers, and writes the captures as the fixtures the in-memory tests
+  replay; the assumptions that cannot be recorded — that a published port
+  accepts and then closes — stay in that recipe as checks against the real
+  runtime. The gate then runs entirely in memory, which is what
+  `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`
+  asks for and what makes the bar cheap enough to keep raising.
+
+- Then add exploration, because replay pins what somebody thought of and
+  nothing yet finds what nobody did. A seed is a random world under the same
+  simulation, answering effects with faults and crashes and checking an
+  invariant after every step; a seed found failing is committed as a replay,
+  so the bug costs one run to rule out for ever. It belongs outside the gate,
+  on a recipe with a seed count and a budget and a workflow with a manual
+  trigger and a schedule, with one fixed seed in `just verify` so the harness
+  cannot rot unnoticed.
+
+- Then cover Slack against regression, because it works and nothing in the
   repository would notice if it stopped. Both directions have been driven end
   to end against a real workspace — a job speaks on its project's channel, and
   a reply reaches it through the thread it was said in. So the open item is

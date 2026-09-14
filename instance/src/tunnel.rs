@@ -7,9 +7,10 @@
 
 use stageman_core::{JobId, Progress};
 
-use crate::vocabulary::{AppEffect, RequestId};
+use stageman_vocabulary::{Answer, Arrival, Bytes, RequestId};
+
+use crate::Effect;
 use crate::{Asked, Command};
-use crate::{Effect, Emit as _};
 
 /// The domain assumed when nothing names one.
 ///
@@ -132,6 +133,18 @@ pub fn address(domain: &Domain, job: JobId, serving: u16) -> String {
     }
 }
 
+/// What a person sees when the address they used names no job of this
+/// instance's, or one that is over.
+const NOBODY: &str = "No job answers on this address.";
+
+/// What a person sees when a job's container is there and nothing behind
+/// its tunnel answers.
+const SHOWING_NOTHING: &str = "This job is not showing anything right now.";
+
+/// What a person sees if the presentation server is not answering, which is
+/// this process failing to reach itself.
+const DASHBOARD_SILENT: &str = "The dashboard is not answering.";
+
 /// What one hostname on this instance means.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Routed {
@@ -207,20 +220,73 @@ impl crate::Running {
     /// job's container is gone by decision, and a stale browser tab asking
     /// after one is ordinary. Requests that arrive while the runtime is being
     /// asked wait for the one answer rather than each asking again.
+    /// Somebody visited an address this instance answers on.
+    ///
+    /// Routed by the name they typed and nothing else: a label under this
+    /// instance's domain is a job's tunnel, and everything else is the
+    /// dashboard — see
+    /// `docs/decisions/0042-a-job-shows-its-work-on-a-subdomain.md`. The
+    /// header carries it, which is enough because what serves this speaks
+    /// HTTP/1.1, where the authority is always a header.
+    pub fn visited(&mut self, id: RequestId, request: &Arrival, effects: &mut Vec<Effect>) {
+        let host = request.headers.get("host").map_or("", String::as_str);
+        match decode(host, &self.domain) {
+            Routed::Dashboard => effects.push(Effect::Answer {
+                id,
+                answer: Answer::Proxy {
+                    port: self.presenting,
+                    refused: Bytes::new(DASHBOARD_SILENT.as_bytes().to_vec()),
+                },
+            }),
+            Routed::Stranger => {
+                tracing::warn!(
+                    %host,
+                    "a name under this instance's domain identifies no job — the domain may be \
+                     set to something other than what is forwarded here"
+                );
+                Self::nobody(id, effects);
+            }
+            Routed::Job(job) => self.tunnel_asked(id, job, effects),
+        }
+    }
+
+    /// Answers whoever asked, now that where a job's tunnel is, is known.
+    fn routed(id: RequestId, port: Option<u16>, effects: &mut Vec<Effect>) {
+        match port {
+            Some(port) => effects.push(Effect::Answer {
+                id,
+                answer: Answer::Proxy {
+                    port,
+                    refused: Bytes::new(SHOWING_NOTHING.as_bytes().to_vec()),
+                },
+            }),
+            None => Self::nobody(id, effects),
+        }
+    }
+
+    /// What a person sees when the address names no job that is showing.
+    fn nobody(id: RequestId, effects: &mut Vec<Effect>) {
+        effects.push(Effect::Answer {
+            id,
+            answer: Answer::Respond {
+                status: 404,
+                headers: [("content-type".to_owned(), "text/plain".to_owned())].into(),
+                body: Bytes::new(NOBODY.as_bytes().to_vec()),
+            },
+        });
+    }
+
     pub fn tunnel_asked(&mut self, id: RequestId, job: JobId, effects: &mut Vec<Effect>) {
         let showing = self
             .state
             .job(job)
             .is_some_and(|recorded| !matches!(recorded.progress, Progress::Retired(_)));
         if !showing {
-            effects.emit(AppEffect::Route { id, port: None });
+            Self::nobody(id, effects);
             return;
         }
-        if let Some(port) = self.tunnels.get(&job) {
-            effects.emit(AppEffect::Route {
-                id,
-                port: Some(*port),
-            });
+        if let Some(port) = self.tunnels.get(&job).copied() {
+            Self::routed(id, Some(port), effects);
             return;
         }
         let waiting = self.routing.entry(job).or_default();
@@ -242,22 +308,21 @@ impl crate::Running {
             self.tunnels.insert(job, port);
         }
         for id in self.routing.remove(&job).unwrap_or_default() {
-            effects.emit(AppEffect::Route { id, port });
+            Self::routed(id, port, effects);
         }
     }
 
-    /// Forgets where a job's tunnel was, so the next request asks again.
+    /// Forgets where a job's tunnel was, so that a look afterwards asks the
+    /// runtime rather than trusting a port that has moved.
     ///
-    /// The ordinary cause is a container that was restarted and is now on
-    /// another host port, which is what the runtime does on every start.
-    pub fn tunnel_failed(&mut self, job: JobId, why: &str) {
-        tracing::debug!(%job, why, "a job's tunnel did not answer");
-        self.forget_tunnel(job);
-    }
-
-    /// Forgets where a job's tunnel was: on a failed connection, and at every
-    /// moment the container is stopped, restarted or removed, so that a look
-    /// afterwards asks the runtime rather than trusting a port that has moved.
+    /// At every moment the container is stopped, restarted or removed, and
+    /// at every probe that finds nothing answering. It used to be forgotten
+    /// on a failed forward too, which is no longer something this hears
+    /// about: the world answers a forward to nothing itself, with the words
+    /// it was given. What that costs is the case where a container was
+    /// restarted by somebody else and moved — and the settling probe finds
+    /// that within its interval, which is the same recovery arriving a
+    /// minute later rather than a new one being needed.
     pub fn forget_tunnel(&mut self, job: JobId) {
         self.tunnels.remove(&job);
     }

@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use stageman_agent::ContainerRuntime;
-use stageman_core::{Channel, JobId, Secret, Speaking};
+use stageman_core::{Channel, Secret, Speaking};
 use stageman_instance::{
     AppEffect, AppEvent, Event, Request, RequestId, Response, Run, Speaker, Stageman,
 };
@@ -49,30 +49,6 @@ pub fn adopt(asking: Arc<Asking>) {
     }
 }
 
-/// Where a job's tunnel is, as the instance answers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Located {
-    /// Forward to this host port.
-    At(u16),
-    /// Nothing answers on that name.
-    Nowhere,
-}
-
-/// Somebody waiting for an answer, by what they asked.
-enum Answering {
-    /// A person, through a server function.
-    Person(tokio::sync::oneshot::Sender<Response>),
-    /// An agent, through the tools endpoint.
-    /// A browser, through the tunnel layer.
-    Tunnel(tokio::sync::oneshot::Sender<Located>),
-}
-
-/// What the instance answered, by what was asked.
-enum Answered {
-    Person(Response),
-    Tunnel(Located),
-}
-
 /// Sends the instance events, and matches its answers to whoever asked.
 pub struct Asking {
     /// The loop's way in.
@@ -80,7 +56,7 @@ pub struct Asking {
     /// The next request identifier. Never reused while this process runs.
     next: AtomicU64,
     /// Everyone waiting on an answer, by the identifier it will carry.
-    waiting: parking_lot::Mutex<BTreeMap<RequestId, Answering>>,
+    waiting: parking_lot::Mutex<BTreeMap<RequestId, tokio::sync::oneshot::Sender<Response>>>,
 }
 
 impl Asking {
@@ -111,17 +87,8 @@ impl Asking {
     pub async fn ask(&self, request: Request) -> Option<Response> {
         let (answer, waiting) = tokio::sync::oneshot::channel();
         let id = self.minted();
-        self.waiting.lock().insert(id, Answering::Person(answer));
+        self.waiting.lock().insert(id, answer);
         self.send(AppEvent::Request { id, request });
-        waiting.await.ok()
-    }
-
-    /// Asks where a job's tunnel is.
-    pub async fn tunnel(&self, job: JobId) -> Option<Located> {
-        let (answer, waiting) = tokio::sync::oneshot::channel();
-        let id = self.minted();
-        self.waiting.lock().insert(id, Answering::Tunnel(answer));
-        self.send(AppEvent::TunnelAsked { id, job });
         waiting.await.ok()
     }
 
@@ -129,19 +96,12 @@ impl Asking {
     ///
     /// Nobody waiting is not an error: a browser that gave up has already
     /// dropped its end, and the answer has nowhere to go.
-    fn answered(&self, id: RequestId, answered: Answered) {
-        let Some(waiting) = self.waiting.lock().remove(&id) else {
+    fn answered(&self, id: RequestId, response: Response) {
+        let Some(reply) = self.waiting.lock().remove(&id) else {
             tracing::debug!(?id, "an answer arrived for a request nobody is waiting on");
             return;
         };
-        match (waiting, answered) {
-            (Answering::Person(reply), Answered::Person(response)) => drop(reply.send(response)),
-            (Answering::Tunnel(reply), Answered::Tunnel(located)) => drop(reply.send(located)),
-            _ => tracing::error!(
-                ?id,
-                "the instance answered a request with the wrong kind of answer"
-            ),
-        }
+        drop(reply.send(response));
     }
 }
 
@@ -224,11 +184,10 @@ impl Perform<Stageman> for Performer {
     #[mutants::skip]
     async fn perform(&self, effect: AppEffect) {
         match effect {
-            AppEffect::Booted { runtime, domain } => {
+            AppEffect::Booted { runtime } => {
                 if RUNTIME.set(ContainerRuntime::new(runtime)).is_err() {
                     tracing::error!("the instance booted twice; the second runtime is ignored");
                 }
-                crate::tunnel::adopt(&domain);
             }
             AppEffect::RunTurn { speaker, run } => self.turn(speaker, run),
             AppEffect::StopTurn { speaker } => {
@@ -289,12 +248,8 @@ impl Perform<Stageman> for Performer {
                 },
             ),
             AppEffect::Respond { id, response } => {
-                self.0.asking.answered(id, Answered::Person(response));
+                self.0.asking.answered(id, response);
             }
-            AppEffect::Route { id, port } => self.0.asking.answered(
-                id,
-                Answered::Tunnel(port.map_or(Located::Nowhere, Located::At)),
-            ),
         }
     }
 }
@@ -401,7 +356,7 @@ fn because(failure: &dyn std::error::Error) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Answered, Asking, Located, because};
+    use super::{Asking, because};
     use stageman_instance::{AppEvent, Event, Request, Response};
     use stageman_world::World;
     use std::sync::Arc;
@@ -421,8 +376,6 @@ mod tests {
     async fn a_request_is_answered_by_the_effect_carrying_its_identifier() {
         let (world, mut events) = World::new();
         let asking = Asking::new(world);
-        let job = stageman_core::JobId::from_uuid(stageman_core::Uuid::from_u128(7));
-
         let asked = {
             let asking = Arc::clone(&asking);
             tokio::spawn(async move { asking.ask(Request::Instance).await })
@@ -434,43 +387,11 @@ mod tests {
         else {
             panic!("the request, as an event");
         };
-        asking.answered(id, Answered::Person(Response::Agents(Vec::new())));
+        asking.answered(id, Response::Agents(Vec::new()));
         assert_eq!(
             soon(asked).await.expect("the task"),
             Some(Response::Agents(Vec::new()))
         );
-
-        let locating = {
-            let asking = Arc::clone(&asking);
-            tokio::spawn(async move { asking.tunnel(job).await })
-        };
-        let Some(Event::App(AppEvent::TunnelAsked { id, job: asked })) = soon(events.recv()).await
-        else {
-            panic!("the question, as an event");
-        };
-        assert_eq!(asked, job);
-        asking.answered(id, Answered::Tunnel(Located::At(4242)));
-        assert_eq!(
-            soon(locating).await.expect("the task"),
-            Some(Located::At(4242))
-        );
-    }
-
-    /// An answer of the wrong kind reaches nobody, and the one waiting is
-    /// told there is no answer rather than left waiting.
-    #[tokio::test]
-    async fn an_answer_of_the_wrong_kind_answers_nobody() {
-        let (world, mut events) = World::new();
-        let asking = Asking::new(world);
-        let asked = {
-            let asking = Arc::clone(&asking);
-            tokio::spawn(async move { asking.ask(Request::Agents).await })
-        };
-        let Some(Event::App(AppEvent::Request { id, .. })) = soon(events.recv()).await else {
-            panic!("the request, as an event");
-        };
-        asking.answered(id, Answered::Tunnel(Located::Nowhere));
-        assert_eq!(soon(asked).await.expect("the task"), None);
     }
 
     /// The chain is what there is to read.

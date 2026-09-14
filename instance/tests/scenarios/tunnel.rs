@@ -4,19 +4,19 @@
 
 use stageman_agent::Command;
 use stageman_core::{Outcome, Progress, Waiting};
-use stageman_instance::{AppEvent, Effect, Instance};
+use stageman_instance::Instance;
+use stageman_vocabulary::RequestId;
 
 use crate::simulation::{
-    Sent, Simulation, job, said_in, seed, tunnel_asked, watching, watching_a_channel,
+    Sent, Simulation, job, said_in, seed, tunnel_host, watching, watching_a_channel,
 };
 
-/// Sends a tunnel request and performs whatever answers it in the step.
-fn visit(sim: &mut Simulation, instance: &mut Instance, id: u64, which: u128) {
-    for effect in instance.step(tunnel_asked(id, job(which))) {
-        sim.perform(effect);
-    }
-    let until = sim.now();
-    sim.run_until(instance, until);
+/// Visits a job's name and runs until it has been answered.
+fn visit(sim: &mut Simulation, instance: &mut Instance, which: u128) -> RequestId {
+    let now = sim.now();
+    let id = sim.visits(now, &tunnel_host(job(which)));
+    sim.run_until(instance, now);
+    id
 }
 
 /// How many times the runtime was asked where a tunnel is.
@@ -45,31 +45,43 @@ fn a_jobs_tunnel_is_looked_up_once_and_remembered() {
         .port_of(&stageman_job::container(job(1)))
         .expect("resumed, so running on a port");
 
-    // Two requests in one step, before the runtime has answered.
-    let mut effects = instance.step(tunnel_asked(1, job(1)));
-    effects.extend(instance.step(tunnel_asked(2, job(1))));
-    assert_eq!(
-        effects
-            .iter()
-            .filter(|effect| {
-                matches!(effect, Effect::Run { arguments, .. }
-                    if matches!(Command::parse(arguments), Some(Command::Port { .. })))
-            })
-            .count(),
-        1,
-        "asked once for both"
-    );
-    for effect in effects {
-        sim.perform(effect);
-    }
-    let until = sim.now();
-    sim.run_until(&mut instance, until);
-    assert_eq!(sim.route(1), Some(Sent::To(port)));
-    assert_eq!(sim.route(2), Some(Sent::To(port)));
+    // Two visits before the runtime has answered either.
+    let now = sim.now();
+    let first = sim.visits(now, &tunnel_host(job(1)));
+    let second = sim.visits(now, &tunnel_host(job(1)));
+    sim.run_until(&mut instance, now);
+    assert_eq!(looked(&sim), 1, "asked once for both");
+    assert_eq!(sim.route(first), Some(Sent::To(port)));
+    assert_eq!(sim.route(second), Some(Sent::To(port)));
 
-    visit(&mut sim, &mut instance, 3, 1);
-    assert_eq!(sim.route(3), Some(Sent::To(port)));
+    let third = visit(&mut sim, &mut instance, 1);
+    assert_eq!(sim.route(third), Some(Sent::To(port)));
     assert_eq!(looked(&sim), 1, "the third look asks nobody");
+}
+
+/// Everything that is not a job's name is forwarded to the pages.
+///
+/// The dashboard is a presentation server this instance proxies to, on a
+/// loopback port the entry point took and told it about — so the address a
+/// person types carries both, and neither can collide with the other.
+#[test]
+fn what_is_not_a_jobs_name_is_forwarded_to_the_pages() {
+    let mut sim = Simulation::new();
+    sim.holding(&watching(&[(job(1), Progress::Working)]));
+    let mut instance = sim.wake(seed(1));
+
+    let now = sim.now();
+    let apex = sim.visits(now, "localhost");
+    let page = sim.visits(now, "localhost:8080");
+    sim.run_until(&mut instance, now);
+
+    assert_eq!(sim.route(apex), Some(Sent::To(9000)));
+    assert_eq!(
+        sim.route(page),
+        Some(Sent::To(9000)),
+        "a port is not a name"
+    );
+    assert_eq!(looked(&sim), 0, "no runtime was asked about a page");
 }
 
 /// A name that identifies no job of this instance's, or a job that is over,
@@ -85,11 +97,11 @@ fn a_stranger_and_a_retired_job_are_answered_without_asking() {
     sim.container(&name, held);
     let mut instance = sim.wake(seed(1));
 
-    visit(&mut sim, &mut instance, 1, 99);
-    assert_eq!(sim.route(1), Some(Sent::Nowhere), "no such job");
-    visit(&mut sim, &mut instance, 2, 1);
+    let stranger = visit(&mut sim, &mut instance, 99);
+    assert_eq!(sim.route(stranger), Some(Sent::Nowhere), "no such job");
+    let over = visit(&mut sim, &mut instance, 1);
     assert_eq!(
-        sim.route(2),
+        sim.route(over),
         Some(Sent::Nowhere),
         "over, so nothing to show"
     );
@@ -97,8 +109,8 @@ fn a_stranger_and_a_retired_job_are_answered_without_asking() {
 
     // An idle job whose container is stopped is asked about, and found to
     // be reachable nowhere.
-    visit(&mut sim, &mut instance, 3, 2);
-    assert_eq!(sim.route(3), Some(Sent::Nowhere));
+    let stopped = visit(&mut sim, &mut instance, 2);
+    assert_eq!(sim.route(stopped), Some(Sent::Nowhere));
     assert_eq!(looked(&sim), 1);
 }
 
@@ -115,17 +127,17 @@ fn a_port_that_can_have_moved_is_looked_up_again() {
         .port_of(&stageman_job::container(job(1)))
         .expect("resumed, so running on a port");
 
-    visit(&mut sim, &mut instance, 1, 1);
-    assert_eq!(sim.route(1), Some(Sent::To(first)));
+    let once = visit(&mut sim, &mut instance, 1);
+    assert_eq!(sim.route(once), Some(Sent::To(first)));
     assert_eq!(looked(&sim), 1);
 
     // The turn ends and nothing answers on the tunnel, so the container is
     // halted; the port it was on reaches nothing now.
     sim.run_until(&mut instance, 2_000);
     assert!(!sim.is_running(&stageman_job::container(job(1))));
-    visit(&mut sim, &mut instance, 2, 1);
+    let halted = visit(&mut sim, &mut instance, 1);
     assert_eq!(
-        sim.route(2),
+        sim.route(halted),
         Some(Sent::Nowhere),
         "stopped, so nothing to reach"
     );
@@ -141,21 +153,7 @@ fn a_port_that_can_have_moved_is_looked_up_again() {
         .port_of(&stageman_job::container(job(1)))
         .expect("resumed again");
     assert_ne!(first, second, "the runtime publishes afresh on every start");
-    visit(&mut sim, &mut instance, 3, 1);
-    assert_eq!(sim.route(3), Some(Sent::To(second)));
+    let resumed = visit(&mut sim, &mut instance, 1);
+    assert_eq!(sim.route(resumed), Some(Sent::To(second)));
     assert_eq!(looked(&sim), 3, "resuming forgot the port");
-
-    // A connection that did not go through forgets it too.
-    for effect in instance.step(
-        AppEvent::TunnelFailed {
-            job: job(1),
-            why: "connection refused".to_owned(),
-        }
-        .into(),
-    ) {
-        sim.perform(effect);
-    }
-    visit(&mut sim, &mut instance, 4, 1);
-    assert_eq!(sim.route(4), Some(Sent::To(second)));
-    assert_eq!(looked(&sim), 4, "a failure forgot the port");
 }

@@ -116,6 +116,10 @@ pub enum Answer {
     Proxy {
         /// Where.
         port: u16,
+        /// What to say if nothing answers there, as the body of a gateway
+        /// refusal. Carried rather than composed here, because what it
+        /// means for nothing to answer is the deciding half's to know.
+        refused: Bytes,
     },
     /// Read its body and hand it back, then ask again.
     ///
@@ -765,7 +769,10 @@ mod tests {
             },
             Effect::Answer {
                 id: RequestId(2),
-                answer: Answer::Proxy { port: 8080 },
+                answer: Answer::Proxy {
+                    port: 8080,
+                    refused: Bytes::new(b"nothing there".to_vec()),
+                },
             },
             Effect::Answer {
                 id: RequestId(3),

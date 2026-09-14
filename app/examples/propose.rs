@@ -172,11 +172,10 @@ fn stood_up(path: &Path, key: &Key) -> Arc<Asking> {
     let (world, events) = stageman_world::World::new();
     let asking = Asking::new(Arc::clone(&world));
     stageman::world::adopt(Arc::clone(&asking));
-    // No dashboard is served here, and the instance is told so.
-    asking.send(stageman_instance::AppEvent::Serving {
-        address: "127.0.0.1:0".to_owned(),
-        port: 0,
-    });
+    // No pages are served here, and the instance is told a port anyway:
+    // it forwards what it cannot place to the presentation server, and
+    // nothing in this example visits one.
+    asking.send(stageman_instance::AppEvent::Presenting { port: 0 });
     let performer = Performer::new(Arc::clone(&asking));
     stageman_world::run(instance, effects, world, Arc::new(performer), events);
     asking

@@ -22,9 +22,8 @@
       "at": 0,
       "event": {
         "App": {
-          "Serving": {
-            "address": "127.0.0.1:8080",
-            "port": 8080
+          "Presenting": {
+            "port": 9000
           }
         }
       },
