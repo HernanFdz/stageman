@@ -3922,7 +3922,6 @@ dependencies = [
 name = "stageman-job"
 version = "0.0.0"
 dependencies = [
- "mutants",
  "stageman-agent",
  "stageman-core",
  "thiserror 2.0.20",

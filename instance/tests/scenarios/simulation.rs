@@ -28,7 +28,7 @@ use stageman_instance::{
 use stageman_vocabulary::scenario::{Meta, Recorder};
 use stageman_vocabulary::{
     Answer as Answering, Arrival, Bytes, EffectId, Ended, Environment, Finished, Named as _,
-    RequestId as Asked,
+    Probed, RequestId as Asked,
 };
 
 /// Virtual milliseconds.
@@ -495,7 +495,14 @@ impl Simulation {
     }
 
     /// Puts a container in the runtime.
-    pub fn container(&mut self, name: &str, held: Held) {
+    ///
+    /// One that is up has its tunnel published on a host port, as the
+    /// runtime would have it, unless the caller said which.
+    pub fn container(&mut self, name: &str, mut held: Held) {
+        if held.running && held.port.is_none() {
+            self.ports += 1;
+            held.port = Some(self.ports);
+        }
         self.containers.insert(name.to_owned(), held);
     }
 
@@ -841,9 +848,9 @@ impl Simulation {
                     | Event::Woke { .. }
                     | Event::Line { .. }
                     | Event::Ended { .. }
+                    | Event::Probed { .. }
                     | Event::App(
                         AppEvent::Presenting { .. }
-                            | AppEvent::Probed { .. }
                             | AppEvent::ThreadOpened { .. }
                             | AppEvent::Posted { .. }
                             | AppEvent::Request { .. }
@@ -1480,14 +1487,6 @@ impl Simulation {
             return;
         };
         match effect {
-            AppEffect::Booted { .. } => {}
-            AppEffect::Probe { job } => {
-                let answering = self
-                    .containers
-                    .get(&stageman_job::container(job))
-                    .is_some_and(|held| held.running && held.serving);
-                self.schedule(self.now, AppEvent::Probed { job, answering });
-            }
             AppEffect::Say { thread, text, .. } => self.posts.push((thread, text)),
             AppEffect::Respond { id, response } => {
                 self.responses.insert(id, response);
@@ -1528,6 +1527,23 @@ impl Simulation {
                     self.listening.len()
                 ));
             }
+        }
+    }
+
+    /// What a probe of a port finds, as the runtime's proxy was measured to
+    /// behave: a running container's published port accepts and closes at
+    /// once when nothing inside is serving, holds the connection open in
+    /// silence when something is, and a port no running container is
+    /// published on refuses.
+    fn probed(&self, port: u16) -> Probed {
+        match self
+            .containers
+            .values()
+            .find(|held| held.running && held.port == Some(port))
+        {
+            Some(held) if held.serving => Probed::Silent,
+            Some(_) => Probed::Closed,
+            None => Probed::Refused,
         }
     }
 
@@ -1581,6 +1597,10 @@ impl Simulation {
                 );
             }
             Effect::Answer { id, answer } => self.answered(id, answer),
+            Effect::Probe { id, port, .. } => {
+                let probed = self.probed(port);
+                self.schedule(self.now, Event::Probed { id, probed });
+            }
             Effect::Print { text } => self.printed.push(text),
             Effect::Exit { message } => self.exited = Some(message),
             Effect::Open { id, arguments, .. } => self.opened(id, &arguments),

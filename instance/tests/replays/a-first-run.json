@@ -210,13 +210,6 @@
       },
       "effects": [
         {
-          "App": {
-            "Booted": {
-              "runtime": "/usr/bin/docker"
-            }
-          }
-        },
-        {
           "Run": {
             "id": 7,
             "program": "/usr/bin/docker",
@@ -286,6 +279,7 @@
             "asking": [],
             "tunnels": [],
             "routing": [],
+            "probes": [],
             "deferred": [
               [
                 9,

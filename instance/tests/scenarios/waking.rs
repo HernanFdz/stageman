@@ -62,12 +62,11 @@ fn a_first_run_writes_its_file_and_settles_later() {
             "-> Run",
             "<- Ran",
             "<- Ran",
-            // Awake: the world is told which runtime answered, the sweep
-            // asks the runtime which images are ours, the file is written,
-            // and the address is announced only once that write has landed.
-            // The one image nothing needs is removed as soon as the listing
-            // says so, which is housekeeping and waits for nobody.
-            "-> Booted",
+            // Awake: the sweep asks the runtime which images are ours, the
+            // file is written, and the address is announced only once that
+            // write has landed. The one image nothing needs is removed as
+            // soon as the listing says so, which is housekeeping and waits
+            // for nobody.
             "-> Run",
             "-> Wake",
             "-> Write",
@@ -385,12 +384,13 @@ fn settling_stops_what_shows_nothing_and_keeps_what_shows_something() {
         progress_of(instance.state(), working),
         Progress::Idle(Waiting::Silent)
     );
-    // After waking, because booting asks the same question of the runtime
-    // before there is an instance to settle.
+    // After waking — from the first settling timer, which waking sets —
+    // because booting asks the same question of the runtime before there
+    // is an instance to settle.
     let woke = world
         .shape()
         .iter()
-        .position(|line| line.starts_with("-> Booted"))
+        .position(|line| line.starts_with("-> Wake"))
         .expect("it woke");
     let listed = world
         .commands_after(woke)

@@ -63,7 +63,7 @@ pub use requests::{Request, Response};
 pub use stageman_agent::Target;
 pub use stageman_vocabulary::Seed;
 pub use sweep::Swept;
-pub use tunnel::{DEFAULT_DOMAIN, Domain, Routed, address, decode};
+pub use tunnel::{ANSWERING_WITHIN, DEFAULT_DOMAIN, Domain, Routed, address, answering, decode};
 pub use vocabulary::{
     AppEffect, AppEvent, Container, Message, Posting, RequestId, Speaker, Warranted,
 };
@@ -289,8 +289,16 @@ enum Asked {
         /// The container.
         container: String,
     },
-    /// Where a job's tunnel is published on the host.
+    /// Where a job's tunnel is published on the host, for whoever is
+    /// waiting to be forwarded there.
     Port {
+        /// Whose.
+        job: JobId,
+    },
+    /// Where a job's tunnel is published on the host, on the way to probing
+    /// it. Apart from [`Asked::Port`] because the answers go different
+    /// ways: one is told to whoever is waiting, and this one is probed.
+    Probing {
         /// Whose.
         job: JobId,
     },
@@ -448,6 +456,9 @@ pub struct Running {
     /// Requests waiting for the runtime to say where a job's tunnel is, by
     /// the identifier the world holds each one open under.
     routing: BTreeMap<JobId, Vec<stageman_vocabulary::RequestId>>,
+    /// Tunnels being asked whether anything is behind them, by the
+    /// identifier the answer carries: whose each probe is.
+    probes: BTreeMap<EffectId, JobId>,
     /// Effects waiting on a write, by the write they wait on, in order.
     deferred: VecDeque<(EffectId, Vec<Effect>)>,
     /// The wakes asked for that have not gone off, each one the settling
@@ -520,6 +531,7 @@ impl Running {
             asking: BTreeMap::new(),
             tunnels: BTreeMap::new(),
             routing: BTreeMap::new(),
+            probes: BTreeMap::new(),
             deferred: VecDeque::new(),
             timers: BTreeSet::new(),
             // Written once on waking, before anything can depend on this
@@ -534,14 +546,9 @@ impl Running {
         }
     }
 
-    /// What waking asks for: the world told what booting found, the sweep,
-    /// and the first write.
+    /// What waking asks for: the sweep, and the first write.
     pub(crate) fn waking_up(&mut self, containers: &[Container]) -> Vec<Effect> {
-        let mut effects = vec![Effect::App(AppEffect::Booted {
-            runtime: self.runtime.clone(),
-        })];
-        let (swept, tally) = self.waking(containers);
-        effects.extend(swept);
+        let (mut effects, tally) = self.waking(containers);
         self.swept = Some(tally);
         self.flush(&mut effects);
         effects
@@ -672,6 +679,13 @@ impl Running {
                 // failed one mean the same thing here: nowhere to send them.
                 let port = stageman_agent::published(said(finished));
                 self.port_found(job, port, effects);
+            }
+            Asked::Probing { job } => {
+                if let Some(why) = complaint(finished) {
+                    tracing::debug!(%job, %why, "the runtime could not say where a job's tunnel is");
+                }
+                let port = stageman_agent::published(said(finished));
+                self.probing(job, port, effects);
             }
         }
     }
@@ -810,6 +824,7 @@ impl Running {
             Event::Body { id, outcome } => self.read(id, outcome, &mut effects),
             Event::Line { id, line } => self.line(id, &line, &mut effects),
             Event::Ended { id, ended } => self.process_ended(id, &ended, &mut effects),
+            Event::Probed { id, probed } => self.probed(id, probed, &mut effects),
             Event::Read { .. } | Event::Bound { .. } => {
                 tracing::warn!(
                     "answered something this instance did not ask for while awake; ignored"
@@ -830,21 +845,6 @@ impl Running {
         match event {
             AppEvent::Presenting { .. } => {
                 tracing::debug!("told again where the presentation server is; ignored");
-            }
-            AppEvent::Probed { job, answering } => {
-                if !answering {
-                    // Halted, so the port it was on reaches nothing.
-                    self.forget_tunnel(job);
-                }
-                if let Some(container) = probed(job, answering) {
-                    let halt = self.ask(
-                        &Command::Halt {
-                            name: container.clone(),
-                        },
-                        Asked::Halted { container },
-                    );
-                    effects.push(halt);
-                }
             }
             AppEvent::Heard { channel, message } => self.heard(channel, &message, effects),
             AppEvent::ThreadOpened { job, outcome } => self.thread_opened(job, outcome),
@@ -1066,46 +1066,5 @@ fn complaint(finished: &Finished) -> Option<String> {
         Finished::Exited { stderr, .. } => Some(stderr.as_text().unwrap_or("").trim().to_owned()),
         Finished::NotFound => Some("the runtime could not be run".to_owned()),
         Finished::Failed(why) => Some(why.clone()),
-    }
-}
-
-/// What to do about a job's tunnel, now the world has looked.
-///
-/// Answering means the container is left running for whoever is looking;
-/// nothing behind it means the container is stopped, keeping it and the
-/// session in it for the next reply.
-///
-/// It answers with the container to stop rather than stopping one, so the
-/// deciding is a function anything can call and the asking stays with the
-/// instance, which is what mints an identifier for the answer.
-fn probed(job: JobId, answering: bool) -> Option<String> {
-    if answering {
-        tracing::info!(
-            %job,
-            "its container is left running, because something is still answering on its tunnel"
-        );
-        None
-    } else {
-        Some(stageman_job::container(job))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::probed;
-    use stageman_core::{JobId, Uuid};
-
-    /// The whole of what deciding a container's life looks like from here:
-    /// answering keeps it, silence stops it.
-    #[test]
-    fn a_tunnel_that_answers_keeps_its_container_and_silence_stops_it() {
-        let job = JobId::from_uuid(Uuid::from_u128(5));
-
-        assert_eq!(probed(job, true), None, "answering keeps the container");
-        assert_eq!(
-            probed(job, false),
-            Some(stageman_job::container(job)),
-            "silence stops it, and that container and no other"
-        );
     }
 }

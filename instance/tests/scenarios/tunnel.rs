@@ -19,7 +19,8 @@ fn visit(sim: &mut Simulation, instance: &mut Instance, which: u128) -> RequestI
     id
 }
 
-/// How many times the runtime was asked where a tunnel is.
+/// How many times the runtime was asked where a tunnel is: by a visit, and
+/// by a probe, which asks the same question on its way to the port.
 ///
 /// Read back through the agent crate's own inverse rather than matched as a
 /// string: every runtime command is one generic effect now, so what tells
@@ -134,17 +135,24 @@ fn a_port_that_can_have_moved_is_looked_up_again() {
     assert_eq!(sim.route(once), Some(Sent::To(first)));
     assert_eq!(looked(&sim), 1);
 
-    // The turn ends and nothing answers on the tunnel, so the container is
-    // halted; the port it was on reaches nothing now.
+    // The turn ends and its tunnel is probed — which asks the runtime where
+    // the tunnel is, every time, rather than trusting the port a visit
+    // found — and nothing answers there, so the container is halted; the
+    // port it was on reaches nothing now.
     sim.run_until(&mut instance, 2_000);
     assert!(!sim.is_running(&stageman_job::container(job(1))));
+    assert_eq!(
+        looked(&sim),
+        2,
+        "the probe asked the runtime, not the record"
+    );
     let halted = visit(&mut sim, &mut instance, 1);
     assert_eq!(
         sim.route(halted),
         Some(Sent::Nowhere),
         "stopped, so nothing to reach"
     );
-    assert_eq!(looked(&sim), 2, "halting forgot the port");
+    assert_eq!(looked(&sim), 3, "halting forgot the port");
 
     // A reply resumes the job, which restarts the container on a fresh port.
     for effect in instance.step(said_in(1, "go on")) {
@@ -158,5 +166,5 @@ fn a_port_that_can_have_moved_is_looked_up_again() {
     assert_ne!(first, second, "the runtime publishes afresh on every start");
     let resumed = visit(&mut sim, &mut instance, 1);
     assert_eq!(sim.route(resumed), Some(Sent::To(second)));
-    assert_eq!(looked(&sim), 3, "resuming forgot the port");
+    assert_eq!(looked(&sim), 4, "resuming forgot the port");
 }

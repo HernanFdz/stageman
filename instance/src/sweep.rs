@@ -307,7 +307,7 @@ impl Running {
             .collect();
         let (placed, _) = resting(&up, &self.state);
         for job in placed {
-            effects.emit(AppEffect::Probe { job });
+            self.probe(job, &mut effects);
         }
 
         let reclaiming = self.ask(&Command::Images, Asked::Images);
@@ -401,14 +401,14 @@ impl Running {
     /// asked about only if its label says it is ours — another instance's
     /// container is very likely mid-turn, and one that cannot say is not worth
     /// guessing about when the cost of guessing wrong is somebody's work.
-    pub fn listed(&self, running: &[Container], effects: &mut Vec<Effect>) {
+    pub fn listed(&mut self, running: &[Container], effects: &mut Vec<Effect>) {
         let up: Vec<JobId> = running
             .iter()
             .filter_map(|container| stageman_job::job_of(&container.name))
             .collect();
         let (placed, unplaced) = resting(&up, &self.state);
         for job in placed {
-            effects.emit(AppEffect::Probe { job });
+            self.probe(job, effects);
         }
         for job in unplaced {
             let started = running
@@ -416,7 +416,7 @@ impl Running {
                 .find(|container| stageman_job::job_of(&container.name) == Some(job))
                 .and_then(|container| container.instance);
             if belonging(started, self.id) == Whose::Ours {
-                effects.emit(AppEffect::Probe { job });
+                self.probe(job, effects);
             } else {
                 tracing::debug!(
                     %job,

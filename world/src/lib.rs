@@ -22,6 +22,11 @@
 //! one waits for it to end — after the last line, so that its end is never
 //! announced before what it said. What the loop holds is where the lines go
 //! and what kills it, which is all closing one needs.
+//!
+//! **A probe is a connection and one read, and says what the port did.** Not
+//! what that means: a port that accepted and closed at once is a fact about
+//! a socket, and whether anything was behind it is a question about what
+//! accepted, which the deciding half knows and this crate does not.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -29,10 +34,11 @@ use std::io::{self, Write as _};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use stageman_vocabulary::{
     Answer, App, Arrival, Bytes, Deciding, Effect, EffectId, Ended, Environment, Event, Finished,
-    Named, RequestId,
+    Named, Probed, RequestId,
 };
 
 /// The way in: events go to the loop, and nothing comes back this way.
@@ -275,6 +281,7 @@ async fn perform<A: App, P: Perform<A>>(
             }));
         }
         Effect::Answer { id, answer } => world.answer(id, answer),
+        Effect::Probe { id, port, within } => probing(world, id, port, within),
         Effect::Print { text } => {
             // Whoever started this process is reading here, and a reader
             // that has gone away is not a reason to stop: the write is
@@ -294,6 +301,48 @@ async fn perform<A: App, P: Perform<A>>(
             std::process::exit(1);
         }
         Effect::App(effect) => performer.perform(effect).await,
+    }
+}
+
+/// Probes a port on a task of its own, and answers with what it did.
+fn probing<A: App>(world: &Arc<World<A>>, id: EffectId, port: u16, within: Duration) {
+    let world = Arc::clone(world);
+    drop(tokio::spawn(async move {
+        let probed = probe(port, within).await;
+        world.send(Event::Probed { id, probed });
+    }));
+}
+
+/// Connects to a port on loopback and reads from it once, writing nothing,
+/// and says what the port did.
+///
+/// One read of one byte, with the same budget for connecting and for
+/// reading. Whether a port that accepted and then closed had anything behind
+/// it is not decided here: that is a question about what accepted, and this
+/// crate does not know what did.
+///
+/// Public because the one test that can meet a real proxy — a port a
+/// container runtime published — has to live where that runtime can be
+/// named, and this crate names no runtime.
+pub async fn probe(port: u16, within: Duration) -> Probed {
+    use tokio::io::AsyncReadExt as _;
+
+    let Ok(Ok(mut stream)) = tokio::time::timeout(
+        within,
+        tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)),
+    )
+    .await
+    else {
+        return Probed::Refused;
+    };
+
+    let mut first = [0_u8; 1];
+    match tokio::time::timeout(within, stream.read(&mut first)).await {
+        // A clean end of file and a reset are the same thing seen through
+        // different far ends, and neither is a fault here.
+        Ok(Ok(0) | Err(_)) => Probed::Closed,
+        Ok(Ok(_)) => Probed::Spoke,
+        Err(_) => Probed::Silent,
     }
 }
 
@@ -838,7 +887,7 @@ mod tests {
     use std::sync::Arc;
 
     use serde::{Deserialize, Serialize};
-    use stageman_vocabulary::{App, EffectId, Ended, Environment, Named};
+    use stageman_vocabulary::{App, EffectId, Ended, Environment, Named, Probed};
 
     use super::{Answer, Bytes, Effect, Event, Perform, World, read, write, write_atomically};
 
@@ -1333,6 +1382,95 @@ mod tests {
         let said = asking.await.expect("it finished");
         assert!(said.starts_with("HTTP/1.1 502"), "{said}");
         assert!(said.ends_with("nothing is showing"), "{said}");
+    }
+
+    /// How long a probe here gives a port. Short, because one of the four
+    /// answers costs all of it: a port held open in silence is only known to
+    /// be by having waited.
+    const BRIEFLY: std::time::Duration = std::time::Duration::from_millis(200);
+
+    /// Probes a port through the world, and says what it did.
+    async fn probed(
+        world: &Arc<World<Nothing>>,
+        events: &mut tokio::sync::mpsc::UnboundedReceiver<Event<Nothing>>,
+        port: u16,
+    ) -> Probed {
+        answering(
+            world,
+            Effect::Probe {
+                id: EffectId(9),
+                port,
+                within: BRIEFLY,
+            },
+        )
+        .await;
+        match next(events).await {
+            Event::Probed { id, probed } => {
+                assert_eq!(id, EffectId(9));
+                probed
+            }
+            other => panic!("expected what the port did: {}", other.kind()),
+        }
+    }
+
+    /// A probe says what the port did, and each of the four things a port
+    /// can do is told from the other three.
+    ///
+    /// Bound and never accepted on is the held-open-and-silent case for
+    /// free: the handshake completes in the kernel's backlog and the read
+    /// then waits, which is the shape an HTTP server has before it is asked
+    /// anything. Accepted and dropped is the shape a container runtime's
+    /// proxy has with nothing behind it — the case a probe that only
+    /// connected could not see, and the one that once kept every container
+    /// running for ever. What that proxy actually does is not this crate's
+    /// to know, and is met by the test that publishes a real port.
+    #[tokio::test]
+    async fn a_port_probed_says_what_it_did() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (world, mut events) = World::<Nothing>::new();
+
+        // Taken and let go of, so nothing accepts on it.
+        let empty = {
+            let taken = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("it binds");
+            taken.local_addr().expect("it has an address").port()
+        };
+        assert_eq!(probed(&world, &mut events, empty).await, Probed::Refused);
+
+        let silent = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("it binds");
+        let port = silent.local_addr().expect("it has an address").port();
+        assert_eq!(
+            probed(&world, &mut events, port).await,
+            Probed::Silent,
+            "accepted in the backlog and never spoken to"
+        );
+        drop(silent);
+
+        let hanging_up = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("it binds");
+        let port = hanging_up.local_addr().expect("it has an address").port();
+        let far = tokio::spawn(async move {
+            let (stream, _) = hanging_up.accept().await.expect("it is reached");
+            drop(stream);
+        });
+        assert_eq!(probed(&world, &mut events, port).await, Probed::Closed);
+        far.await.expect("the far end finished");
+
+        let talking = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("it binds");
+        let port = talking.local_addr().expect("it has an address").port();
+        let far = tokio::spawn(async move {
+            let (mut stream, _) = talking.accept().await.expect("it is reached");
+            stream.write_all(b"220 hello\r\n").await.expect("it speaks");
+        });
+        assert_eq!(probed(&world, &mut events, port).await, Probed::Spoke);
+        far.await.expect("the far end finished");
     }
 
     /// An event sent reaches whoever is stepping, whole.

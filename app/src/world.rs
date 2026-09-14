@@ -2,22 +2,22 @@
 //! how whoever needs an answer waits for it.
 //!
 //! The loop, the channel and the generic mechanisms are the world crate's.
-//! What is here is what only stageman knows how to perform — a probe, a
-//! channel's posting — and the one thing the generic world cannot do for
-//! it: match an answer to whoever asked. A server function sends an event
-//! carrying an identifier and waits for the effect that carries it back,
-//! and the map below is where it waits. See
+//! What is here is what only stageman knows how to perform — a channel's
+//! posting and listening — and the one thing the generic world cannot do
+//! for it: match an answer to whoever asked. A server function sends an
+//! event carrying an identifier and waits for the effect that carries it
+//! back, and the map below is where it waits. See
 //! `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`.
 //!
-//! Everything here runs on a task of its own: a probe waits on a socket,
+//! Everything here runs on a task of its own: a post waits on the network,
 //! and `docs/conventions.md` §3 keeps that off the loop that answers the
-//! dashboard. The disk and the agent's process are the world crate's.
+//! dashboard. The disk, the agent's process and the probe of a job's tunnel
+//! are the world crate's; nothing here names a container runtime any more.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use stageman_agent::ContainerRuntime;
 use stageman_core::{Channel, Secret, Speaking};
 use stageman_instance::{AppEffect, AppEvent, Event, Request, RequestId, Response, Stageman};
 use stageman_world::{Perform, World};
@@ -109,15 +109,6 @@ impl Asking {
 #[derive(Clone)]
 pub struct Performer(Arc<Inner>);
 
-/// The runtime the probe goes through, once the instance has found one and
-/// said so.
-///
-/// A static rather than a field: what borrows it is a task that outlives the
-/// call that spawned it, and a process has exactly one running instance to
-/// have found one. On its way out with the probe, which is the one effect
-/// left that needs it.
-static RUNTIME: OnceLock<ContainerRuntime> = OnceLock::new();
-
 struct Inner {
     /// Where events go back, and where answers are matched to askers.
     asking: Arc<Asking>,
@@ -130,30 +121,11 @@ impl Performer {
         Self(Arc::new(Inner { asking }))
     }
 
-    /// Performs an effect on a task of its own, with the runtime the
-    /// instance found; one asked for before that is a fault in the instance
-    /// and is said rather than performed.
+    /// Performs an effect on a task of its own.
     ///
     /// Skipped by mutation testing, like the performer it serves: what it
-    /// does is spawn, and everything decided is inside the effect that task
-    /// performs, which cannot run without a container runtime.
-    #[mutants::skip]
-    fn spawn<F, Fut>(&self, effect: F)
-    where
-        F: FnOnce(Arc<Inner>, &'static ContainerRuntime) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = ()> + Send + 'static,
-    {
-        let Some(runtime) = RUNTIME.get() else {
-            tracing::error!("asked to drive a runtime before the instance found one");
-            return;
-        };
-        drop(tokio::spawn(effect(Arc::clone(&self.0), runtime)));
-    }
-
-    /// Performs an effect on a task of its own, needing no runtime.
-    ///
-    /// Skipped for the reason [`Performer::spawn`] is: it spawns, and what
-    /// the task does reaches a channel over the network.
+    /// does is spawn, and what the task does reaches a channel over the
+    /// network.
     #[mutants::skip]
     fn spawn_plain<F, Fut>(&self, effect: F)
     where
@@ -174,15 +146,6 @@ impl Perform<Stageman> for Performer {
     #[mutants::skip]
     async fn perform(&self, effect: AppEffect) {
         match effect {
-            AppEffect::Booted { runtime } => {
-                if RUNTIME.set(ContainerRuntime::new(runtime)).is_err() {
-                    tracing::error!("the instance booted twice; the second runtime is ignored");
-                }
-            }
-            AppEffect::Probe { job } => self.spawn(move |inner, runtime| async move {
-                let answering = stageman_job::answering(runtime, job).await;
-                inner.asking.send(AppEvent::Probed { job, answering });
-            }),
             AppEffect::Say {
                 speaking,
                 thread,
@@ -238,7 +201,9 @@ impl Perform<Stageman> for Performer {
 #[cfg(test)]
 mod tests {
     use super::Asking;
-    use stageman_instance::{AppEvent, Event, Request, Response};
+    use stageman_agent::{ContainerRuntime, TUNNEL_PORT};
+    use stageman_core::{Agent, JobId, Role, Uuid};
+    use stageman_instance::{ANSWERING_WITHIN, AppEvent, Event, Request, Response, answering};
     use stageman_world::World;
     use std::sync::Arc;
     use std::time::Duration;
@@ -273,5 +238,202 @@ mod tests {
             soon(asked).await.expect("the task"),
             Some(Response::Agents(Vec::new()))
         );
+    }
+
+    /// The container runtime, found rather than configured — allowed in a
+    /// test for the reason the rule itself gives: it is about a daemon under
+    /// a service manager, and this runs on somebody's machine.
+    fn located_runtime() -> ContainerRuntime {
+        let located = std::process::Command::new("sh")
+            .args(["-c", "command -v docker"])
+            .output()
+            .expect("looking for a container runtime");
+        let path = String::from_utf8(located.stdout).expect("a runtime path is text");
+        ContainerRuntime::new(std::path::PathBuf::from(path.trim()))
+    }
+
+    /// Waits until a container has said the thing that means it is ready.
+    ///
+    /// **Asks the container, never the port.** Waiting on the probe would
+    /// make the assertion that follows pass whenever the probe said yes,
+    /// which is the bug it is there to catch — a readiness check must not be
+    /// the thing under test.
+    async fn ready(runtime: &ContainerRuntime, name: &str, marker: &str) {
+        // Thirty seconds, counted in polls rather than measured against a
+        // deadline: adding a duration to an instant is arithmetic that can
+        // overflow, the gate rightly refuses it, and there is nothing here
+        // that needs a clock.
+        let mut printed = String::new();
+        for _ in 0..300 {
+            let said = std::process::Command::new(runtime.path())
+                .args(["logs", name])
+                .output()
+                .expect("the runtime reports what a container printed");
+            printed = format!(
+                "{}{}",
+                String::from_utf8_lossy(&said.stdout),
+                String::from_utf8_lossy(&said.stderr)
+            );
+            if printed.contains(marker) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("{name} never said {marker:?}; it said: {printed}");
+    }
+
+    /// Whether a job's tunnel answers, asked the way the instance asks it:
+    /// the world probes the port with the instance's budget, and the
+    /// instance reads what the port did.
+    async fn answers(port: u16) -> (bool, stageman_vocabulary::Probed) {
+        let probed = stageman_world::probe(port, ANSWERING_WITHIN).await;
+        (answering(probed), probed)
+    }
+
+    /// A published port answers for nobody when nothing is inside, and for
+    /// somebody when something is.
+    ///
+    /// **Here because this is the one crate that names both halves.** The
+    /// probe is the world's and knows no runtime; what its answer means is
+    /// the instance's; and only a port a real runtime published meets the
+    /// proxy that decides a container's life — `docs/conventions.md` §4. The
+    /// world crate's own test binds a socket and proves the probe can tell
+    /// the four things a port can do apart, and nothing about which of them
+    /// a proxy with nothing behind it does. With a probe that connected and
+    /// nothing more, the first assertion below fails on both runtimes, which
+    /// is precisely how every job container came to run for ever. It is the
+    /// recorder's, once that lands.
+    ///
+    /// Both directions, because a probe that answered nothing to everything
+    /// would pass the half that matters and destroy the feature: it would
+    /// stop a container somebody is looking at.
+    ///
+    /// Needs a runtime and no credential and no image of ours — anything
+    /// that stays up will do, and the entry point is overridden so nothing
+    /// is run. The job's identifier is shared with no other container test,
+    /// because two tests naming one container run at once and the second is
+    /// refused the name.
+    #[tokio::test]
+    #[ignore = "needs a container runtime and the network; run `just image-handshake`"]
+    async fn a_published_port_with_nothing_inside_answers_for_nobody() {
+        let runtime = located_runtime();
+        let name = stageman_job::container(JobId::from_uuid(Uuid::from_u128(43)));
+        stageman_agent::discard(&runtime, &name)
+            .await
+            .expect("a clean slate");
+        let anything = stageman_agent::build(&runtime, Agent::Claude, Role::Foreman)
+            .await
+            .expect("the image builds");
+
+        // Nothing inside is listening: the proxy is the only thing on the host
+        // port, and it is what a bare connection would find.
+        let empty = std::process::Command::new(runtime.path())
+            .args([
+                "run",
+                "--detach",
+                "--name",
+                &name,
+                "--label",
+                &format!("stageman.job={name}"),
+                "--publish",
+                &format!("127.0.0.1::{TUNNEL_PORT}"),
+                "--entrypoint",
+                "sh",
+                anything.as_argument(),
+                "-c",
+                "sleep 30",
+            ])
+            .output()
+            .expect("the runtime runs");
+        assert!(
+            empty.status.success(),
+            "{}",
+            String::from_utf8_lossy(&empty.stderr)
+        );
+
+        let port = stageman_agent::tunnel_port(&runtime, &name)
+            .await
+            .expect("the runtime answers")
+            .expect("a mapping was published");
+        // Reported rather than asserted, and only if this fails. Whether a
+        // bare connection succeeds is a property of the host: both runtimes
+        // proxy a published port by default and it does, which is the trap
+        // this test exists for, but Docker with `userland-proxy` disabled
+        // refuses instead and the assertion below then holds for a simpler
+        // reason. Saying which makes a failure here diagnosable rather than
+        // puzzling.
+        let trapped = tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
+            .await
+            .is_ok();
+        let (answering, probed) = answers(port).await;
+        assert!(
+            !answering,
+            "nothing is listening inside, so the proxy on {port} answers for nobody \
+             (the port {probed:?}; a bare connection to it succeeds here: {trapped})"
+        );
+
+        stageman_agent::discard(&runtime, &name)
+            .await
+            .expect("it is removable");
+
+        // And the other direction, on a container that genuinely serves, so
+        // that this cannot pass by answering `false` to everything.
+        //
+        // Node rather than a networking tool, because the base image is
+        // node and has no `nc`, `socat` or `python3` — the same absence
+        // `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`
+        // records about `ss` and `lsof`. It binds every interface, not
+        // loopback, or the proxy would have nothing to forward to; and it
+        // never writes, which makes it the held-open-and-silent case rather
+        // than the easy one.
+        let serving = std::process::Command::new(runtime.path())
+            .args([
+                "run",
+                "--detach",
+                "--name",
+                &name,
+                "--label",
+                &format!("stageman.job={name}"),
+                "--publish",
+                &format!("127.0.0.1::{TUNNEL_PORT}"),
+                "--entrypoint",
+                "node",
+                anything.as_argument(),
+                "-e",
+                &format!(
+                    "require('net').createServer().listen({TUNNEL_PORT}, '0.0.0.0', \
+                     () => console.log('listening'))"
+                ),
+            ])
+            .output()
+            .expect("the runtime runs");
+        assert!(
+            serving.status.success(),
+            "{}",
+            String::from_utf8_lossy(&serving.stderr)
+        );
+
+        // Waited for, and waited for by asking the container rather than the
+        // port. `--detach` returns once the container is started, which is
+        // before node has bound anything — so probing straight away finds the
+        // proxy with nothing behind it yet and reads exactly like the empty
+        // case above. That is what failed in continuous integration and passed
+        // on the machine that wrote it, which is the shape of every race worth
+        // the name.
+        ready(&runtime, &name, "listening").await;
+
+        let port = stageman_agent::tunnel_port(&runtime, &name)
+            .await
+            .expect("the runtime answers")
+            .expect("a mapping was published");
+        let (answering, probed) = answers(port).await;
+        assert!(
+            answering,
+            "something is listening inside, so {port} is showing it (the port {probed:?})"
+        );
+
+        stageman_agent::discard(&runtime, &name)
+            .await
+            .expect("it is removable");
     }
 }

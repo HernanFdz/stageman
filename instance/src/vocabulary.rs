@@ -11,12 +11,12 @@
 //! `docs/decisions/0056-the-instance-decides-and-the-world-performs.md` and
 //! `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`.
 //!
-//! Every family here is a meaning rather than a mechanism — probe a tunnel,
-//! say something — and each moves out of this hole into the generic
-//! vocabulary as the instance starts speaking the mechanism instead. A turn
-//! already has: it is the commands and the process in `crate::turns`.
-
-use std::path::PathBuf;
+//! Every family here is a meaning rather than a mechanism — say something,
+//! listen — and each moves out of this hole into the generic vocabulary as
+//! the instance starts speaking the mechanism instead. A turn already has,
+//! and so has the probe: the first is the commands and the process in
+//! `crate::turns`, and the second is a port asked of the runtime and read
+//! once, in `crate::tunnel`.
 
 use serde::{Deserialize, Serialize};
 use stageman_core::{Agent, Channel, InstanceId, JobId, ProjectId, Speaking, Thread};
@@ -139,14 +139,6 @@ pub enum AppEvent {
         /// The loopback port it is on.
         port: u16,
     },
-    /// Answers [`AppEffect::Probe`]: whether something is behind a job's
-    /// tunnel.
-    Probed {
-        /// Which job's tunnel was probed.
-        job: JobId,
-        /// Whether anything answered behind it.
-        answering: bool,
-    },
     /// Somebody said something on a channel this instance listens to.
     Heard {
         /// Which channel.
@@ -183,7 +175,6 @@ impl Named for AppEvent {
     fn kind(&self) -> &'static str {
         match self {
             Self::Presenting { .. } => "Presenting",
-            Self::Probed { .. } => "Probed",
             Self::Heard { .. } => "Heard",
             Self::ThreadOpened { .. } => "ThreadOpened",
             Self::Posted { .. } => "Posted",
@@ -198,19 +189,6 @@ impl Named for AppEvent {
 /// unanswered effect's failure is the world's to log.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AppEffect {
-    /// What booting found, for the world's own performer: which runtime
-    /// answers. Unanswered, and on its way out with the probe, which is the
-    /// one effect left that needs it.
-    Booted {
-        /// Where the container runtime this instance found is.
-        runtime: PathBuf,
-    },
-    /// Ask whether anything is behind a job's tunnel. Answered by
-    /// [`AppEvent::Probed`].
-    Probe {
-        /// Which job.
-        job: JobId,
-    },
     /// Post on a channel, in a thread, on the instance's own behalf.
     /// Unanswered: this is a notice about an outcome, and the outcome does
     /// not change because the notice of it did not arrive.
@@ -268,8 +246,6 @@ pub enum AppEffect {
 impl Named for AppEffect {
     fn kind(&self) -> &'static str {
         match self {
-            Self::Booted { .. } => "Booted",
-            Self::Probe { .. } => "Probe",
             Self::Say { .. } => "Say",
             Self::Respond { .. } => "Respond",
             Self::OpenThread { .. } => "OpenThread",
@@ -300,10 +276,6 @@ mod tests {
         };
         let events = [
             AppEvent::Presenting { port: 9000 },
-            AppEvent::Probed {
-                job,
-                answering: true,
-            },
             AppEvent::Heard {
                 channel: Channel::Slack,
                 message: super::Message {
@@ -331,21 +303,10 @@ mod tests {
         let kinds: Vec<&str> = events.iter().map(Named::kind).collect();
         assert_eq!(
             kinds,
-            [
-                "Presenting",
-                "Probed",
-                "Heard",
-                "ThreadOpened",
-                "Posted",
-                "Request"
-            ]
+            ["Presenting", "Heard", "ThreadOpened", "Posted", "Request"]
         );
 
         let effects = [
-            AppEffect::Booted {
-                runtime: "/usr/bin/docker".into(),
-            },
-            AppEffect::Probe { job },
             AppEffect::Say {
                 speaking: posting.clone(),
                 thread: thread.clone(),
@@ -373,18 +334,7 @@ mod tests {
             },
         ];
         let kinds: Vec<&str> = effects.iter().map(Named::kind).collect();
-        assert_eq!(
-            kinds,
-            [
-                "Booted",
-                "Probe",
-                "Say",
-                "Respond",
-                "OpenThread",
-                "Post",
-                "Listen"
-            ]
-        );
+        assert_eq!(kinds, ["Say", "Respond", "OpenThread", "Post", "Listen"]);
     }
 
     /// This application's own events and effects format no more than the

@@ -37,7 +37,7 @@ use stageman_core::{
 use stageman_vocabulary::{Effect as Generic, EffectId, Ended, Finished};
 
 use crate::vocabulary::{AppEffect, Speaker};
-use crate::{Asked, Effect, Emit as _, Running, complaint};
+use crate::{Asked, Effect, Running, complaint};
 
 /// Whether a turn begins a session or continues the one its container
 /// holds, and everything the container is started with.
@@ -729,7 +729,7 @@ impl Running {
         // The container is asked whether it is still showing something, at
         // one of the three moments 0043 names. Inward-facing, so it need not
         // wait for the record to land.
-        effects.emit(AppEffect::Probe { job });
+        self.probe(job, effects);
 
         // Said whichever way it went: the agent has already reported for
         // itself if it could, and this says the one thing the agent cannot,

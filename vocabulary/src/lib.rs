@@ -3,10 +3,10 @@
 //! An [`Event`] is what the world tells the instance and an [`Effect`] is
 //! what the instance asks of the world. Both are plain data: the mechanisms a
 //! process reaches the outside through — a file, a process run once, a
-//! process kept open and spoken to line by line, a request, a timer, its own
-//! standard output, its own exit — and one hole an [`App`] fills with its own
-//! events and effects, which the world never interprets and hands to whatever
-//! the application supplied to perform them. See
+//! process kept open and spoken to line by line, a request, a port probed, a
+//! timer, its own standard output, its own exit — and one hole an [`App`]
+//! fills with its own events and effects, which the world never interprets
+//! and hands to whatever the application supplied to perform them. See
 //! `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`.
 //!
 //! **Everything here serialises in full and formats not at all.** A scenario
@@ -17,9 +17,8 @@
 //! kind, from [`Named`]. That absence is a rule rather than an omission, and
 //! `docs/conventions.md` §4 says why.
 //!
-//! The remaining mechanisms — a socket, a port — arrive one family at a time
-//! as the instance starts speaking them, so that each family's shape is
-//! decided by its use.
+//! The one mechanism still to come — a socket — arrives as the instance
+//! starts speaking it, so that its shape is decided by its use.
 
 pub mod scenario;
 
@@ -191,6 +190,28 @@ pub enum Ended {
     Failed(String),
 }
 
+/// What a port did when it was probed: connected to and read from once,
+/// with nothing written.
+///
+/// The observation and not its meaning. What each of these says about
+/// whether anything is behind the port is the deciding half's to know —
+/// `docs/decisions/0047-a-tunnel-answers-only-when-something-behind-it-does.md`
+/// measured it for a container runtime's proxy, and a world that knows no
+/// runtime cannot know that a connection accepted and then closed means
+/// nothing was there. Four rather than a yes or no, so that a scenario can
+/// answer with exactly what a runtime was measured to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Probed {
+    /// Nothing accepted the connection.
+    Refused,
+    /// It accepted, and closed before saying anything.
+    Closed,
+    /// It accepted, and said something.
+    Spoke,
+    /// It accepted, and said nothing for as long as it was given.
+    Silent,
+}
+
 /// One thing the world tells the instance.
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "")]
@@ -266,6 +287,13 @@ pub enum Event<A: App> {
         /// How.
         ended: Ended,
     },
+    /// Answers [`Effect::Probe`]: what the port did.
+    Probed {
+        /// Which probe.
+        id: EffectId,
+        /// What it did.
+        probed: Probed,
+    },
     /// Something of the application's own.
     App(A::Event),
 }
@@ -313,6 +341,10 @@ impl<A: App> Clone for Event<A> {
                 id: *id,
                 ended: ended.clone(),
             },
+            Self::Probed { id, probed } => Self::Probed {
+                id: *id,
+                probed: *probed,
+            },
             Self::App(event) => Self::App(event.clone()),
         }
     }
@@ -339,6 +371,7 @@ impl<A: App> Named for Event<A> {
             Self::Woke { .. } => "Woke",
             Self::Line { .. } => "Line",
             Self::Ended { .. } => "Ended",
+            Self::Probed { .. } => "Probed",
             Self::App(event) => event.kind(),
         }
     }
@@ -450,6 +483,25 @@ pub enum Effect<A: App> {
         /// What to do about it.
         answer: Answer,
     },
+    /// Connect to a port on this machine's loopback and read from it once,
+    /// writing nothing, to learn what is there. Answered by
+    /// [`Event::Probed`] with what the port did.
+    ///
+    /// Read as well as connected to, because connecting alone proves
+    /// nothing where something accepts on another's behalf; and nothing
+    /// written, because whatever is behind the port is somebody else's and
+    /// bytes this process made up are not its to send.
+    Probe {
+        /// Which probe, on the answer.
+        id: EffectId,
+        /// The port.
+        port: u16,
+        /// How long to give it to say something, or to close, before it is
+        /// taken to be holding the connection open in silence. The deciding
+        /// half's to set, because what the far side is and how long it
+        /// takes to admit to being empty are things only it knows.
+        within: Duration,
+    },
     /// Write to the process's standard output, which is where whoever
     /// started it is reading. Unanswered.
     Print {
@@ -526,6 +578,11 @@ impl<A: App> Clone for Effect<A> {
                 id: *id,
                 answer: answer.clone(),
             },
+            Self::Probe { id, port, within } => Self::Probe {
+                id: *id,
+                port: *port,
+                within: *within,
+            },
             Self::Print { text } => Self::Print { text: text.clone() },
             Self::Exit { message } => Self::Exit {
                 message: message.clone(),
@@ -555,6 +612,7 @@ impl<A: App> Named for Effect<A> {
             Self::Wake { .. } => "Wake",
             Self::Bind { .. } => "Bind",
             Self::Answer { .. } => "Answer",
+            Self::Probe { .. } => "Probe",
             Self::Print { .. } => "Print",
             Self::Exit { .. } => "Exit",
             Self::App(effect) => effect.kind(),
@@ -811,7 +869,8 @@ pub(crate) mod doorbell {
                 | Event::Arrived { .. }
                 | Event::Body { .. }
                 | Event::Line { .. }
-                | Event::Ended { .. } => Vec::new(),
+                | Event::Ended { .. }
+                | Event::Probed { .. } => Vec::new(),
             }
         }
 
@@ -825,7 +884,7 @@ pub(crate) mod doorbell {
 mod tests {
     use super::doorbell::{Doorbell, Told};
     use super::{
-        Answer, Arrival, Bytes, Effect, EffectId, Ended, Event, Finished, Named, RequestId,
+        Answer, Arrival, Bytes, Effect, EffectId, Ended, Event, Finished, Named, Probed, RequestId,
     };
 
     /// The hole carries the application's own, and the kind is what a log
@@ -905,6 +964,11 @@ mod tests {
                 id: RequestId(3),
                 answer: Answer::Read { limit: 1024 },
             },
+            Effect::Probe {
+                id: EffectId(6),
+                port: 64_383,
+                within: std::time::Duration::from_millis(500),
+            },
             Effect::Print {
                 text: "hello\n".to_owned(),
             },
@@ -917,7 +981,7 @@ mod tests {
             kinds,
             [
                 "Read", "Write", "Run", "Open", "Send", "Close", "Wake", "Bind", "Answer",
-                "Answer", "Answer", "Print", "Exit"
+                "Answer", "Answer", "Probe", "Print", "Exit"
             ]
         );
         for effect in &effects {
@@ -991,13 +1055,17 @@ mod tests {
                 id: RequestId(1),
                 outcome: Ok(Bytes::new(b"{}".to_vec())),
             },
+            Event::Probed {
+                id: EffectId(6),
+                probed: Probed::Closed,
+            },
         ];
         let kinds: Vec<&str> = events.iter().map(Named::kind).collect();
         assert_eq!(
             kinds,
             [
                 "Read", "Written", "Ran", "Ran", "Woke", "Line", "Ended", "Ended", "Ended",
-                "Bound", "Arrived", "Body"
+                "Bound", "Arrived", "Body", "Probed"
             ]
         );
         for event in &events {
@@ -1145,6 +1213,17 @@ mod tests {
             "exiting and being killed are different ends"
         );
         assert!(ended(1, Some(0)) != ended(2, Some(0)));
+
+        let probed = |id: u64, probed: Probed| Event::<Doorbell>::Probed {
+            id: EffectId(id),
+            probed,
+        };
+        assert!(probed(1, Probed::Closed) == probed(1, Probed::Closed));
+        assert!(
+            probed(1, Probed::Closed) != probed(1, Probed::Silent),
+            "closing at once and holding open in silence are different answers"
+        );
+        assert!(probed(1, Probed::Closed) != probed(2, Probed::Closed));
 
         // Effects compare through the one representation both sides share,
         // so the field that differs here is the one a reader would miss.
