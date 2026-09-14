@@ -23,6 +23,12 @@
           },
           "stdin": null
         }
+      },
+      {
+        "Bind": {
+          "id": 2,
+          "address": "0.0.0.0:47113"
+        }
       }
     ],
     "state": {
@@ -64,7 +70,7 @@
       "effects": [
         {
           "Read": {
-            "id": 2,
+            "id": 3,
             "path": "/sim/instance.json"
           }
         }
@@ -80,8 +86,21 @@
     {
       "at": 0,
       "event": {
-        "Read": {
+        "Bound": {
           "id": 2,
+          "outcome": {
+            "Ok": 47113
+          }
+        }
+      },
+      "effects": [],
+      "changed": []
+    },
+    {
+      "at": 0,
+      "event": {
+        "Read": {
+          "id": 3,
           "contents": {
             "Ok": null
           }
@@ -90,7 +109,7 @@
       "effects": [
         {
           "Run": {
-            "id": 3,
+            "id": 4,
             "program": "/usr/bin/docker",
             "arguments": [
               "ps",
@@ -108,7 +127,7 @@
         },
         {
           "Run": {
-            "id": 4,
+            "id": 5,
             "program": "/usr/bin/docker",
             "arguments": [
               "ps",
@@ -136,7 +155,7 @@
       "at": 0,
       "event": {
         "Ran": {
-          "id": 3,
+          "id": 4,
           "finished": {
             "Exited": {
               "status": 0,
@@ -157,7 +176,7 @@
       "at": 0,
       "event": {
         "Ran": {
-          "id": 4,
+          "id": 5,
           "finished": {
             "Exited": {
               "status": 0,
@@ -182,7 +201,7 @@
         },
         {
           "Run": {
-            "id": 5,
+            "id": 6,
             "program": "/usr/bin/docker",
             "arguments": [
               "images",
@@ -199,7 +218,7 @@
         },
         {
           "Wake": {
-            "id": 6,
+            "id": 7,
             "after": {
               "secs": 60,
               "nanos": 0
@@ -208,7 +227,7 @@
         },
         {
           "Write": {
-            "id": 7,
+            "id": 8,
             "path": "/sim/instance.json",
             "bytes": {
               "text": "{\n  \"instance\": \"3301e8d7-e754-4b2c-b57b-0a4ca73f253c\",\n  \"agents\": {},\n  \"projects\": {}\n}"
@@ -241,7 +260,7 @@
             "runtime_environment": {
               "HOME": "/sim/home"
             },
-            "next": 8,
+            "next": 9,
             "turns": [],
             "warrants": {},
             "interrupted": [],
@@ -250,16 +269,16 @@
             "routing": [],
             "deferred": [
               [
-                7,
+                8,
                 []
               ]
             ],
             "timers": [
-              6
+              7
             ],
             "asked": [
               [
-                5,
+                6,
                 "Images"
               ]
             ],
@@ -288,7 +307,7 @@
       "at": 0,
       "event": {
         "Ran": {
-          "id": 5,
+          "id": 6,
           "finished": {
             "Exited": {
               "status": 0,
@@ -305,7 +324,7 @@
       "effects": [
         {
           "Run": {
-            "id": 8,
+            "id": 9,
             "program": "/usr/bin/docker",
             "arguments": [
               "rmi",
@@ -322,12 +341,12 @@
         {
           "op": "replace",
           "path": "/held/next",
-          "value": 9
+          "value": 10
         },
         {
           "op": "replace",
           "path": "/held/asked/0/0",
-          "value": 8
+          "value": 9
         },
         {
           "op": "replace",
@@ -344,7 +363,7 @@
       "at": 0,
       "event": {
         "Ran": {
-          "id": 8,
+          "id": 9,
           "finished": {
             "Exited": {
               "status": 0,
@@ -370,7 +389,7 @@
       "at": 1,
       "event": {
         "Written": {
-          "id": 7,
+          "id": 8,
           "outcome": {
             "Ok": null
           }

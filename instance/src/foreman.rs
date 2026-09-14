@@ -208,6 +208,7 @@ impl Running {
                 container: container.to_owned(),
                 kit: handout.kit().clone(),
                 warrant,
+                tools: self.tools.clone(),
                 text: asked,
             }
         } else {
@@ -248,6 +249,7 @@ impl Running {
                     .map(|_| stageman_core::Platform::GitHub),
                 kit: handout.kit().clone(),
                 warrant,
+                tools: self.tools.clone(),
                 kickoff: format!("{}\n\n{asked}", stageman_foreman::opening(&repository)),
             }
         };

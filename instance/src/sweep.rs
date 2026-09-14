@@ -291,6 +291,7 @@ impl Running {
                     container: stageman_job::container(*job),
                     kit,
                     warrant,
+                    tools: self.tools.clone(),
                     text: stageman_foreman::resumption_notice().to_owned(),
                 },
             });

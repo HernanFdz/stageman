@@ -99,6 +99,10 @@ pub struct Boot {
     key: Option<(Key, KeySource)>,
     opened: Option<(State, Option<InstanceId>)>,
     serving: Option<(String, u16)>,
+    /// The port the tools were asked for, and the bind that answers for it.
+    tools_asked: (u16, Option<EffectId>),
+    /// The port the tools are served on, once that bind has answered.
+    tools: Option<u16>,
     /// The application's own events that arrived meanwhile, in order.
     waiting: Vec<AppEvent>,
     /// What there is to show while nothing is known.
@@ -140,6 +144,7 @@ impl Boot {
     pub fn new(seed: Seed, environment: Environment, target: Target) -> (Self, Vec<Effect>) {
         let rng = StdRng::from_seed(seed);
         let domain = paths::domain(&environment);
+        let tools_port = paths::tools_port(&environment);
         let key_file = paths::key_file(&environment, target).ok();
         let instance_file = match paths::instance_file(&environment, target) {
             Ok(instance_file) => instance_file,
@@ -157,6 +162,8 @@ impl Boot {
                     key: None,
                     opened: None,
                     serving: None,
+                    tools_asked: (0, None),
+                    tools: Some(0),
                     waiting: Vec::new(),
                     empty: State::default(),
                 };
@@ -184,11 +191,30 @@ impl Boot {
             key: None,
             opened: None,
             serving: None,
+            tools_asked: (tools_port, None),
+            tools: None,
             waiting: Vec::new(),
             empty: State::default(),
         };
-        let effects = boot.try_candidate(0);
+        let mut effects = boot.try_candidate(0);
+        effects.push(boot.take_the_tools_address());
         (boot, effects)
+    }
+
+    /// Asks for the address a container reaches the tools on.
+    ///
+    /// Every interface, which is not a preference: it is the only address a
+    /// container can reach on every platform, measured on both runtimes —
+    /// see `docs/decisions/0033-the-job-endpoint-listens-beyond-loopback.md`.
+    /// Asked for while booting rather than after, so that no turn can begin
+    /// before the port a container would be told about is known.
+    fn take_the_tools_address(&mut self) -> Effect {
+        let id = self.effect_id();
+        self.tools_asked.1 = Some(id);
+        Generic::Bind {
+            id,
+            address: format!("0.0.0.0:{}", self.tools_asked.0),
+        }
     }
 
     /// What there is to show while nothing is known.
@@ -290,6 +316,27 @@ impl Boot {
             Event::Read { id, contents } => self.read(id, contents),
             Event::Written { id, outcome } => self.written(id, outcome),
             // Booting asks for no timer and no listener, so an answer to
+            // either is somebody else's and is ignored rather than acted on.
+            Event::Bound { id, outcome } if Some(id) == self.tools_asked.1 => {
+                let asked = self.tools_asked.0;
+                self.tools = Some(match outcome {
+                    Ok(taken) => taken,
+                    Err(why) => {
+                        // Said rather than refused over: what is lost is a
+                        // foreman's ability to start a job, and an instance
+                        // that will not start puts the repair behind the door
+                        // it just locked — `docs/conventions.md` §3.
+                        tracing::error!(
+                            port = asked,
+                            %why,
+                            "the tools could not be served, so no foreman can ask for a job"
+                        );
+                        asked
+                    }
+                });
+                self.maybe_awake(Vec::new())
+            }
+            // Booting asks for no timer and no request, so an answer to
             // either is somebody else's and is ignored rather than acted on.
             Event::Woke { .. }
             | Event::Bound { .. }
@@ -664,7 +711,7 @@ impl Boot {
 
     /// Wakes once everything is known, including where the dashboard is.
     fn maybe_awake(&mut self, effects: Vec<Effect>) -> Booting {
-        if self.serving.is_none() {
+        if self.serving.is_none() || self.tools.is_none() {
             return Booting::Asking(effects);
         }
         let containers = match std::mem::replace(&mut self.phase, Phase::Refused) {
@@ -694,6 +741,8 @@ impl Boot {
             path: self.instance_file.clone(),
             runtime,
             runtime_environment: self.runtime_environment(),
+            tools: self.tools.unwrap_or(self.tools_asked.0),
+            tools_listener: self.tools_asked.1,
             address,
             port,
         });

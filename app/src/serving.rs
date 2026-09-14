@@ -205,8 +205,14 @@ async fn start() -> Result<(), StartupError> {
         address: serving.to_string(),
         port: serving.port(),
     });
-    let performer = Performer::new(crate::tooling::endpoint(*crate::endpoint::PORT), asking);
-    stageman_world::run(instance, effects, world, Arc::new(performer), events);
+
+    stageman_world::run(
+        instance,
+        effects,
+        world,
+        Arc::new(Performer::new(asking)),
+        events,
+    );
 
     // Three states, and which one holds is a question about how this binary
     // was built rather than about how it is configured.
@@ -252,21 +258,6 @@ async fn start() -> Result<(), StartupError> {
     // layer added last is the one that runs first. See
     // `docs/decisions/0042-a-job-shows-its-work-on-a-subdomain.md`.
     let router = router.layer(axum::middleware::from_fn(crate::tunnel::route));
-
-    // Where a foreman asks for a job. Its own listener, on its own port and
-    // every interface — the dashboard stays on loopback, and this cannot,
-    // because a container reaches nothing else on every platform. See
-    // `docs/decisions/0033-the-job-endpoint-listens-beyond-loopback.md`.
-    match crate::endpoint::bind().await {
-        Ok(listening) => {
-            drop(tokio::spawn(async move {
-                if let Err(why) = crate::endpoint::serve(listening).await {
-                    tracing::error!(%why, "the job endpoint stopped");
-                }
-            }));
-        }
-        Err(why) => tracing::error!(%why, "no foreman can ask for a job"),
-    }
 
     axum::serve(listener, router)
         .await

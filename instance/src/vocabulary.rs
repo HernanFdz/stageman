@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use stageman_agent::Answer;
 use stageman_core::{
-    Agent, Channel, InstanceId, JobId, Kit, Platform, ProjectId, Role, Speaking, Thread, Timestamp,
+    Agent, Channel, InstanceId, JobId, Kit, Platform, ProjectId, Role, Speaking, Thread,
 };
 use stageman_vocabulary::Named;
 
@@ -166,25 +166,6 @@ pub enum AppEvent {
         /// What was heard.
         message: Message,
     },
-    /// An agent called the tools endpoint. Answered by
-    /// [`AppEffect::ToolAnswered`], in this step or a later one.
-    ///
-    /// The whole request, because everything the endpoint decides is
-    /// instance state: whether the credential names anyone, what its bearer
-    /// may be offered, and what each tool does.
-    ToolCalled {
-        /// What the world is waiting to answer.
-        id: RequestId,
-        /// When it arrived. Kept on a job the call creates.
-        at: Timestamp,
-        /// Whether the caller is on this machine, which is the only place a
-        /// container of ours can be.
-        nearby: bool,
-        /// The bearer credential presented, if any.
-        bearer: Option<String>,
-        /// The request body, as JSON.
-        body: serde_json::Value,
-    },
     /// Answers [`AppEffect::OpenThread`]: where a job's conversation
     /// happens, or why it could not be opened.
     ThreadOpened {
@@ -195,9 +176,9 @@ pub enum AppEvent {
     },
     /// Answers [`AppEffect::Post`]: whether the platform took the message.
     Posted {
-        /// Which request it was said for.
-        request: RequestId,
-        /// Why not, if not.
+        /// Which call on the tools endpoint was waiting on it.
+        request: stageman_vocabulary::RequestId,
+        /// Whether it was said, or why not.
         outcome: Result<(), String>,
     },
     /// A person asked something of the dashboard. Answered by
@@ -237,7 +218,6 @@ impl Named for AppEvent {
             Self::TurnEnded { .. } => "TurnEnded",
             Self::Probed { .. } => "Probed",
             Self::Heard { .. } => "Heard",
-            Self::ToolCalled { .. } => "ToolCalled",
             Self::ThreadOpened { .. } => "ThreadOpened",
             Self::Posted { .. } => "Posted",
             Self::Request { .. } => "Request",
@@ -311,15 +291,6 @@ pub enum AppEffect {
         /// Whose turn.
         speaker: Speaker,
     },
-    /// Answer a request the world is waiting on. Unanswered.
-    ToolAnswered {
-        /// Which request.
-        id: RequestId,
-        /// The HTTP status to answer with.
-        status: u16,
-        /// The body, if the status carries one.
-        body: Option<serde_json::Value>,
-    },
     /// Open the thread a job's conversation happens in, by posting its
     /// announcement at the root of the channel. Answered by
     /// [`AppEvent::ThreadOpened`].
@@ -334,8 +305,9 @@ pub enum AppEffect {
     /// Post on a channel on an agent's behalf. Answered by
     /// [`AppEvent::Posted`], because the agent is told whether it was heard.
     Post {
-        /// Which request is waiting on it.
-        request: RequestId,
+        /// Which call on the tools endpoint is waiting on it, as the world
+        /// holds it open.
+        request: stageman_vocabulary::RequestId,
         /// The channel and the credential that posts on it.
         speaking: Posting,
         /// Where in it.
@@ -365,7 +337,6 @@ impl Named for AppEffect {
             Self::Route { .. } => "Route",
             Self::Respond { .. } => "Respond",
             Self::StopTurn { .. } => "StopTurn",
-            Self::ToolAnswered { .. } => "ToolAnswered",
             Self::OpenThread { .. } => "OpenThread",
             Self::Post { .. } => "Post",
             Self::Listen { .. } => "Listen",
@@ -404,6 +375,9 @@ pub enum Run {
         kit: Kit,
         /// What the agent presents to the tools endpoint.
         warrant: String,
+        /// Where that endpoint is, as a container reaches it: the port
+        /// actually taken rather than the one asked for.
+        tools: String,
         /// The instruction it begins from.
         kickoff: String,
     },
@@ -416,6 +390,8 @@ pub enum Run {
         kit: Kit,
         /// What the agent presents to the tools endpoint, minted afresh.
         warrant: String,
+        /// Where that endpoint is, as a container reaches it.
+        tools: String,
         /// What the resumed agent is told.
         text: String,
     },

@@ -18,8 +18,10 @@ use stageman_core::{ChannelConfig, Kit, ProjectId, State, Timestamp, Waiting};
 
 use crate::Running;
 use crate::foreman::kits_offered;
-use crate::vocabulary::{AppEffect, RequestId, Speaker, Warranted};
-use crate::{Effect, Emit as _};
+use stageman_vocabulary::{Answer, Arrival, Bytes, RequestId};
+
+use crate::vocabulary::{AppEffect, Speaker, Warranted};
+use crate::{Called, Effect, Emit as _};
 
 /// The protocol version answered when a caller names none.
 const PROTOCOL: &str = "2025-06-18";
@@ -379,8 +381,22 @@ pub fn named_kit(state: &State, project: ProjectId, named: &str) -> Option<Kit> 
 /// The HTTP status a request is answered with.
 const OK: u16 = 200;
 const ACCEPTED: u16 = 202;
+const NO_CONTENT: u16 = 204;
 const BAD_REQUEST: u16 = 400;
 const FORBIDDEN: u16 = 403;
+const NOT_FOUND: u16 = 404;
+const METHOD_NOT_ALLOWED: u16 = 405;
+
+/// The one path the tools are served on.
+const PATH: &str = "/mcp";
+
+/// How much of a call's body is read before giving up on it.
+///
+/// A call is a small JSON object, and whoever sends one is somebody else's
+/// code running in a container: bounded because a body held whole is held in
+/// memory, and generous because the largest of them carries a message a
+/// person wrote.
+const LIMIT: usize = 1024 * 1024;
 
 impl Running {
     /// Answers one request on the tools endpoint, if whoever asked is allowed
@@ -511,7 +527,113 @@ impl Running {
 
     /// Answers a request, once whatever this step changed is on the disk.
     fn answer(&mut self, id: RequestId, status: u16, body: Option<serde_json::Value>) {
-        self.defer(AppEffect::ToolAnswered { id, status, body });
+        let (headers, body) = body.map_or_else(
+            || (std::collections::BTreeMap::new(), Bytes::new(Vec::new())),
+            |body| {
+                (
+                    [("content-type".to_owned(), "application/json".to_owned())].into(),
+                    Bytes::new(serde_json::to_vec(&body).unwrap_or_default()),
+                )
+            },
+        );
+        self.defer(Effect::Answer {
+            id,
+            answer: Answer::Respond {
+                status,
+                headers,
+                body,
+            },
+        });
+    }
+
+    /// A request arrived on a listener this instance took.
+    ///
+    /// Nothing is decided from the head but the shape of the call: what it
+    /// presented and where it came from are kept and judged once the body is
+    /// there, so that a refusal for a credential nobody holds and one for a
+    /// body that is not a call are refused by the same code.
+    pub fn arrived(
+        &mut self,
+        listener: stageman_vocabulary::EffectId,
+        id: RequestId,
+        request: &Arrival,
+        effects: &mut Vec<Effect>,
+    ) {
+        if Some(listener) != self.tools_listener {
+            Self::refuse(id, NOT_FOUND, effects);
+            return;
+        }
+        match (request.method.as_str(), request.path.as_str()) {
+            ("POST", PATH) => {
+                self.calls.insert(
+                    id,
+                    Called {
+                        nearby: nearby(&request.peer),
+                        bearer: presented(request),
+                        at: stamped(request.at),
+                    },
+                );
+                effects.push(Effect::Answer {
+                    id,
+                    answer: Answer::Read { limit: LIMIT },
+                });
+            }
+            // Every tool answers within its own call, so there is nothing
+            // this instance would ever push: the stream a client may offer
+            // to open is declined. Measured — a client offered one, was
+            // refused, and completed a tool call regardless.
+            ("GET", PATH) => Self::refuse(id, METHOD_NOT_ALLOWED, effects),
+            // Nothing is held per connection, because the credential decides
+            // everything and is presented on each request, so a client
+            // hanging up has nothing to release and is told so.
+            ("DELETE", PATH) => Self::refuse(id, NO_CONTENT, effects),
+            _ => Self::refuse(id, NOT_FOUND, effects),
+        }
+    }
+
+    /// The body of a call arrived, or could not be read.
+    pub fn read(
+        &mut self,
+        id: RequestId,
+        outcome: Result<Bytes, String>,
+        effects: &mut Vec<Effect>,
+    ) {
+        let Some(called) = self.calls.remove(&id) else {
+            tracing::warn!("a body arrived for a request this instance was not reading; ignored");
+            return;
+        };
+        let read = match outcome {
+            Ok(read) => read,
+            Err(why) => {
+                tracing::warn!(%why, "a call's body could not be read");
+                Self::refuse(id, BAD_REQUEST, effects);
+                return;
+            }
+        };
+        let Ok(body) = serde_json::from_slice::<serde_json::Value>(read.as_slice()) else {
+            Self::refuse(id, BAD_REQUEST, effects);
+            return;
+        };
+        self.tool_called(
+            id,
+            called.at,
+            called.nearby,
+            called.bearer.as_deref(),
+            &body,
+            effects,
+        );
+    }
+
+    /// Answers now, without waiting on a write, because nothing changed.
+    fn refuse(id: RequestId, status: u16, effects: &mut Vec<Effect>) {
+        effects.push(Effect::Answer {
+            id,
+            answer: Answer::Respond {
+                status,
+                headers: std::collections::BTreeMap::new(),
+                body: Bytes::new(Vec::new()),
+            },
+        });
     }
 
     /// Which project a bearer belongs to.
@@ -652,8 +774,156 @@ impl Running {
     }
 }
 
+/// Whether a request came from somewhere allowed to ask.
+///
+/// Not a security boundary — the warrant is that — but it costs three lines
+/// and removes an entire class of caller. The endpoint takes every interface
+/// because that is the only address a container can reach on every platform,
+/// and nothing routed from beyond this machine has any business here.
+///
+/// Loopback for a request from the host itself, and private ranges for one
+/// from a container: every container network is private by construction.
+fn nearby(peer: &str) -> bool {
+    use std::net::IpAddr;
+
+    // A peer is an address and a port, and the port is not the question.
+    let Some((address, _)) = peer.rsplit_once(':') else {
+        return false;
+    };
+    let Ok(address) = address.trim_matches(['[', ']']).parse::<IpAddr>() else {
+        return false;
+    };
+    match address {
+        IpAddr::V4(address) => {
+            address.is_loopback() || address.is_private() || address.is_link_local()
+        }
+        // A container reaching a host over IPv6 arrives from a unique-local
+        // address, which is the v6 spelling of private.
+        IpAddr::V6(address) => {
+            address.is_loopback()
+                || address.is_unique_local()
+                || address.is_unicast_link_local()
+                // A v4 address arriving mapped into v6, which is what a dual
+                // stack listener reports for an ordinary v4 peer.
+                || address
+                    .to_ipv4_mapped()
+                    .is_some_and(|mapped| mapped.is_loopback() || mapped.is_private())
+        }
+    }
+}
+
+/// The credential a request presented, if it presented one.
+///
+/// Bearer only, and compared nowhere here: this reads the header and the
+/// rest decides whether it names anything, so that a malformed header and an
+/// unknown credential reach the same refusal by the same path.
+fn presented(request: &Arrival) -> Option<String> {
+    request
+        .headers
+        .get("authorization")?
+        .strip_prefix("Bearer ")
+        .map(|presented| presented.trim().to_owned())
+}
+
+/// When a request arrived, as the domain spells a time.
+fn stamped(millis: u64) -> Timestamp {
+    let Ok(millis) = i64::try_from(millis) else {
+        return Timestamp::UNIX_EPOCH;
+    };
+    // A stamp outside what a timestamp can hold is a clock nobody can act
+    // on, and the epoch is the one value that reads as obviously wrong.
+    Timestamp::from_millisecond(millis).unwrap_or(Timestamp::UNIX_EPOCH)
+}
+
 #[cfg(test)]
 mod tests {
+    use super::{nearby, presented, stamped};
+    use stageman_core::Timestamp;
+    use stageman_vocabulary::Arrival;
+
+    /// A request head, as the world hands one over.
+    fn asking(peer: &str, headers: &[(&str, &str)]) -> Arrival {
+        Arrival {
+            method: "POST".to_owned(),
+            path: "/mcp".to_owned(),
+            headers: headers
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect(),
+            peer: peer.to_owned(),
+            at: 1_757_000_000_000,
+        }
+    }
+
+    /// Anything from this machine or its containers may ask; nothing else
+    /// may.
+    #[test]
+    fn only_something_on_this_machine_may_ask() {
+        for near in [
+            "127.0.0.1:52104",
+            "[::1]:52104",
+            // The bridge gateway a container arrives from on Linux, and the
+            // subnets the common runtimes hand out.
+            "172.17.0.1:52104",
+            "172.18.0.2:52104",
+            "10.88.0.3:52104",
+            "192.168.65.1:52104",
+            "[fd00::1]:52104",
+            "[::ffff:172.17.0.1]:52104",
+        ] {
+            assert!(nearby(near), "{near} is a container or this host");
+        }
+
+        for far in [
+            "8.8.8.8:52104",
+            "203.0.113.7:52104",
+            "[2606:4700::1111]:443",
+        ] {
+            assert!(!nearby(far), "{far} came from beyond this machine");
+        }
+
+        // A peer this cannot read is not one it may trust.
+        assert!(!nearby(""), "nothing is not an address");
+        assert!(!nearby("not-an-address:1"), "nor is that");
+    }
+
+    /// The credential is read from the one header and the one scheme.
+    #[test]
+    fn only_a_bearer_credential_is_presented() {
+        assert_eq!(presented(&asking("127.0.0.1:1", &[])), None);
+        assert_eq!(
+            presented(&asking(
+                "127.0.0.1:1",
+                &[("authorization", "Bearer  not-a-real-credential ")]
+            ))
+            .as_deref(),
+            Some("not-a-real-credential")
+        );
+        assert_eq!(
+            presented(&asking(
+                "127.0.0.1:1",
+                &[("authorization", "Basic bm90LWEtcmVhbC1jcmVkZW50aWFs")]
+            )),
+            None,
+            "another scheme presents nothing"
+        );
+    }
+
+    /// A stamp is the time it names, and one nothing can name is the epoch.
+    #[test]
+    fn a_stamp_is_the_time_the_world_said() {
+        assert_eq!(
+            stamped(1_757_000_000_000).to_string(),
+            "2025-09-04T15:33:20Z"
+        );
+        assert_eq!(stamped(0), Timestamp::UNIX_EPOCH);
+        assert_eq!(
+            stamped(u64::MAX),
+            Timestamp::UNIX_EPOCH,
+            "a clock nobody can act on reads as obviously wrong"
+        );
+    }
+
     use super::{Call, Claim, Starting, Tool, calling, decode, named_kit, tools};
     use crate::vocabulary::{Speaker, Warranted};
     use stageman_core::{

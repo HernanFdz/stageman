@@ -76,9 +76,13 @@ at `<job-id>.<domain>`.**
   host port is derived, and which jobs have a tunnel is which jobs have a
   container.
 
-- **The domain is an environment variable read once per process**, defaulting
-  to `localhost`, alongside the port variable in `app/src/endpoint.rs` and for
-  the same reason. Not a field on the snapshot: `core/src/lib.rs` already
+- **The domain is an environment variable**, defaulting to `localhost`,
+  beside the one naming the port a container reaches the tools on and for the
+  same reason. Both are read once, while booting, and handed to the instance
+  as facts: since
+  `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`
+  nothing reads an environment twice, because nothing reads the process's own
+  at all. Not a field on the snapshot: `core/src/lib.rs` already
   argues this case where the runtime's path used to live — a snapshot is meant
   to be portable, and a value describing *this host's reachability* is exactly
   what another machine makes wrong.

@@ -23,7 +23,10 @@ use stageman_instance::{
     Target,
 };
 use stageman_vocabulary::scenario::{Meta, Recorder};
-use stageman_vocabulary::{Bytes, EffectId, Environment, Finished, Named as _};
+use stageman_vocabulary::{
+    Answer as Answering, Arrival, Bytes, EffectId, Environment, Finished, Named as _,
+    RequestId as Asked,
+};
 
 /// Virtual milliseconds.
 pub type Now = u64;
@@ -93,7 +96,7 @@ pub struct Simulation {
     /// Why the next posts on an agent's behalf fail, front first.
     post_failures: VecDeque<String>,
     /// What each request was answered with, by identifier.
-    tool_answers: BTreeMap<RequestId, (u16, Option<serde_json::Value>)>,
+    tool_answers: BTreeMap<Asked, (u16, Option<serde_json::Value>)>,
     /// What each person's request was answered with, by identifier.
     responses: BTreeMap<RequestId, Response>,
     /// Where each tunnel request was sent, by identifier.
@@ -117,6 +120,14 @@ pub struct Simulation {
     /// is what the next container would have rebuilt anyway.
     images: Vec<String>,
     warrants: Vec<String>,
+    /// The listeners taken, by the identifier that asked for them, and the
+    /// bodies of the requests arriving on them.
+    listeners: BTreeSet<EffectId>,
+    /// What each request said, until whoever is deciding asks to read it.
+    bodies: BTreeMap<Asked, Vec<u8>>,
+    /// The next request identifier, minted here because the world holds a
+    /// request open.
+    asking_next: u64,
     /// Every runtime command asked for, as the agent crate reads it back and
     /// where in the trace it was asked — so a test names a question rather
     /// than a string, and can still say what came before it.
@@ -297,15 +308,11 @@ pub const fn request(id: u64, request: Request) -> Event {
 }
 
 /// A call on the tools endpoint from this machine, presenting a credential.
-pub fn tool_call(id: u64, bearer: &str, body: serde_json::Value) -> Event {
-    Event::App(AppEvent::ToolCalled {
-        id: RequestId(id),
-        at: Timestamp::UNIX_EPOCH,
-        nearby: true,
-        bearer: Some(bearer.to_owned()),
-        body,
-    })
-}
+/// Where a caller of the tools is, as the world reports a peer.
+pub const NEARBY: &str = "192.168.65.1:52104";
+
+/// Somewhere beyond this machine, which is nowhere a container is.
+pub const FARAWAY: &str = "203.0.113.7:52104";
 
 pub const fn key() -> Key {
     Key::new([7; 32])
@@ -342,6 +349,9 @@ impl Simulation {
             listening: Vec::new(),
             images: vec!["stageman:unneeded".to_owned()],
             warrants: Vec::new(),
+            listeners: BTreeSet::new(),
+            bodies: BTreeMap::new(),
+            asking_next: 1,
             commands: Vec::new(),
             key: key(),
             recording: None,
@@ -420,7 +430,7 @@ impl Simulation {
     }
 
     /// What a request was answered with, if it has been.
-    pub fn tool_answer(&self, id: RequestId) -> Option<&(u16, Option<serde_json::Value>)> {
+    pub fn tool_answer(&self, id: Asked) -> Option<&(u16, Option<serde_json::Value>)> {
         self.tool_answers.get(&id)
     }
 
@@ -453,6 +463,83 @@ impl Simulation {
     }
 
     /// Everything printed to standard output so far.
+    /// What to do about a request being held open.
+    fn answered(&mut self, id: Asked, answer: Answering) {
+        match answer {
+            Answering::Respond { status, body, .. } => {
+                let body = (!body.is_empty())
+                    .then(|| serde_json::from_slice(body.as_slice()).expect("an answer is JSON"));
+                self.tool_answers.insert(id, (status, body));
+            }
+            Answering::Read { limit } => {
+                let said = self.bodies.remove(&id).unwrap_or_default();
+                // The limit is honoured here as a real listener honours it:
+                // what is longer is not half-read, it is not read.
+                let outcome = if said.len() > limit {
+                    Err("the body is longer than the limit it was read under".to_owned())
+                } else {
+                    Ok(Bytes::new(said))
+                };
+                self.schedule(self.now, Event::Body { id, outcome });
+            }
+            // Nothing is forwarded yet: the tunnel is the next family.
+            Answering::Proxy { port } => {
+                panic!("a request was forwarded to {port}, which nothing asks for yet")
+            }
+        }
+    }
+
+    /// Says a request arrived on the one listener taken, and holds its body
+    /// for whenever it is asked for.
+    pub fn arrives(
+        &mut self,
+        at: Now,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        peer: &str,
+        body: &str,
+    ) -> Asked {
+        let id = Asked(self.asking_next);
+        self.asking_next += 1;
+        let listener = *self
+            .listeners
+            .iter()
+            .next()
+            .expect("an address was taken before anything arrived on it");
+        self.bodies.insert(id, body.as_bytes().to_vec());
+        self.schedule(
+            at,
+            Event::Arrived {
+                listener,
+                id,
+                request: Arrival {
+                    method: method.to_owned(),
+                    path: path.to_owned(),
+                    headers: headers
+                        .iter()
+                        .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                        .collect(),
+                    peer: peer.to_owned(),
+                    at: 1_757_000_000_000,
+                },
+            },
+        );
+        id
+    }
+
+    /// Says a tool call arrived, as an agent's client would make one.
+    pub fn calls(&mut self, at: Now, bearer: &str, body: &serde_json::Value) -> Asked {
+        self.arrives(
+            at,
+            "POST",
+            "/mcp",
+            &[("authorization", &format!("Bearer {bearer}"))],
+            NEARBY,
+            &serde_json::to_string(body).expect("a call is JSON"),
+        )
+    }
+
     /// Every runtime command asked for, in order.
     pub fn commands(&self) -> Vec<Command> {
         self.commands
@@ -840,9 +927,6 @@ impl Simulation {
                 self.schedule(self.now, AppEvent::Probed { job, answering });
             }
             AppEffect::Say { thread, text, .. } => self.posts.push((thread, text)),
-            AppEffect::ToolAnswered { id, status, body } => {
-                self.tool_answers.insert(id, (status, body));
-            }
             AppEffect::Respond { id, response } => {
                 self.responses.insert(id, response);
             }
@@ -909,11 +993,25 @@ impl Simulation {
                 let at = self.now + u64::try_from(after.as_millis()).expect("a short wait");
                 self.schedule(at, Event::Woke { id });
             }
-            // Nothing in the instance takes an address or answers a
-            // request yet; when it does, this world will hold them.
-            Effect::Bind { .. } | Effect::Answer { .. } => {
-                panic!("the simulation was asked to listen, which nothing does yet")
+            Effect::Bind { id, address } => {
+                self.listeners.insert(id);
+                // Whichever port was asked for, taken: a port of zero is
+                // answered with one nothing else here uses, as a real one
+                // would be.
+                let asked = address
+                    .rsplit_once(':')
+                    .and_then(|(_, port)| port.parse::<u16>().ok())
+                    .unwrap_or(0);
+                let taken = if asked == 0 { 47_999 } else { asked };
+                self.schedule(
+                    self.now,
+                    Event::Bound {
+                        id,
+                        outcome: Ok(taken),
+                    },
+                );
             }
+            Effect::Answer { id, answer } => self.answered(id, answer),
             Effect::Print { text } => self.printed.push(text),
             Effect::Exit { message } => self.exited = Some(message),
             Effect::App(effect) => return Some(effect),

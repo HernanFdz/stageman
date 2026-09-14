@@ -188,6 +188,7 @@ impl Running {
                     .map(|_| stageman_core::Platform::GitHub),
                 kit: handout.kit().clone(),
                 warrant,
+                tools: self.tools.clone(),
                 kickoff,
             },
         });

@@ -116,7 +116,7 @@ async fn propose() -> Result<(), String> {
     std::fs::write(&path, sealed(&state, &key)?)
         .map_err(|error| format!("the instance could not be written: {error}"))?;
 
-    let world = stood_up(&path, &key).await?;
+    let world = stood_up(&path, &key);
 
     println!("Proposing against {repository}");
     println!("This runs a real agent and opens a real pull request. It takes a few minutes.");
@@ -159,15 +159,9 @@ async fn propose() -> Result<(), String> {
 }
 
 /// Stands the world up the way the daemon stands it up, less the dashboard:
-/// the instance boots from an environment naming its file and its key, the
-/// loop steps it, and the tools endpoint answers the job's own calls.
-async fn stood_up(path: &Path, key: &Key) -> Result<Arc<Asking>, String> {
-    let listening = stageman::bind_tools()
-        .await
-        .map_err(|error| format!("the tools endpoint could not be bound: {error}"))?;
-    drop(tokio::spawn(async move {
-        drop(stageman::serve_tools(listening).await);
-    }));
+/// the instance boots from an environment naming its file and its key, takes
+/// the address a container reaches its tools on, and is stepped by the loop.
+fn stood_up(path: &Path, key: &Key) -> Arc<Asking> {
     let mut environment: Environment = std::env::vars().collect();
     environment.insert(
         stageman_instance::STATE_VARIABLE.to_owned(),
@@ -183,9 +177,9 @@ async fn stood_up(path: &Path, key: &Key) -> Result<Arc<Asking>, String> {
         address: "127.0.0.1:0".to_owned(),
         port: 0,
     });
-    let performer = Performer::new(stageman::tools_endpoint(), Arc::clone(&asking));
+    let performer = Performer::new(Arc::clone(&asking));
     stageman_world::run(instance, effects, world, Arc::new(performer), events);
-    Ok(asking)
+    asking
 }
 
 /// Waits for the job to stop working, by asking: nothing else in this process

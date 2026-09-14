@@ -39,6 +39,17 @@ pub const KEY_VARIABLE: &str = "STAGEMAN_KEY";
 /// What names the domain this instance answers on.
 pub const DOMAIN_VARIABLE: &str = "STAGEMAN_DOMAIN";
 
+/// What names a different port for the tools a container reaches.
+pub const TOOLS_VARIABLE: &str = "STAGEMAN_JOB_PORT";
+
+/// The port the tools are served on when nothing says otherwise.
+///
+/// High and unusual, because the point is to collide with nothing. It is not
+/// configuration in any meaningful sense — nobody needs to know it, and
+/// nothing is served there that a person would visit — but a port can always
+/// collide with something already running, so there is a way out.
+const DEFAULT_TOOLS_PORT: u16 = 47_113;
+
 /// The directory this instance's files go in, under the platform's own.
 const INSTANCE_DIRECTORY: &str = "stageman";
 
@@ -178,6 +189,40 @@ pub fn domain(environment: &Environment) -> Domain {
         .unwrap_or_else(Domain::local)
 }
 
+/// Which port to serve the tools on, given what the environment said.
+///
+/// Anything unreadable falls back rather than failing, and that is
+/// deliberate: a mistyped port should not stop an instance starting, because
+/// the endpoint is not what an operator came for. It is named at startup
+/// either way, so a fallback is visible rather than silent.
+///
+/// **Zero is honoured, and means whichever port is free.** No container can
+/// be told about a port chosen after it was asked for — except that one is,
+/// now: the address a container is given is composed from the port that was
+/// actually taken. What wants this is a test that runs the binary, which
+/// would otherwise fight over one fixed port with every other such test and
+/// with whatever instance the operator is running. That is not hypothetical:
+/// a leaked mutation-testing process held this port and a real daemon quietly
+/// could not bind it.
+#[must_use]
+pub fn tools_port(environment: &Environment) -> u16 {
+    said(environment, TOOLS_VARIABLE)
+        .and_then(|named| named.parse::<u16>().ok())
+        .unwrap_or(DEFAULT_TOOLS_PORT)
+}
+
+/// Where a container reaches the tools this instance serves.
+///
+/// One hostname for both runtimes, which is measured rather than assumed:
+/// `--add-host=host.docker.internal:host-gateway` is honoured by Docker and
+/// by Podman alike, so nothing here has to know which one is in use. The
+/// port is the one that was actually taken rather than the one asked for,
+/// which is the whole difference a port of zero makes.
+#[must_use]
+pub fn tools_endpoint(port: u16) -> String {
+    format!("http://host.docker.internal:{port}/mcp")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Domain, NoHome, Target, domain, instance_file, key_file};
@@ -307,6 +352,31 @@ mod tests {
                 Target::Linux
             ),
             Ok(PathBuf::from("/elsewhere/i.json"))
+        );
+    }
+
+    /// A mistyped port falls back, and zero is honoured.
+    #[test]
+    fn the_tools_port_is_what_the_environment_says_or_the_one_nothing_uses() {
+        use super::{DEFAULT_TOOLS_PORT, tools_endpoint, tools_port};
+
+        assert_eq!(tools_port(&environment(&[])), DEFAULT_TOOLS_PORT);
+        assert_eq!(
+            tools_port(&environment(&[("STAGEMAN_JOB_PORT", "not a port")])),
+            DEFAULT_TOOLS_PORT
+        );
+        assert_eq!(
+            tools_port(&environment(&[("STAGEMAN_JOB_PORT", "47114")])),
+            47_114
+        );
+        assert_eq!(
+            tools_port(&environment(&[("STAGEMAN_JOB_PORT", "0")])),
+            0,
+            "zero is a port a test asks for on purpose"
+        );
+        assert_eq!(
+            tools_endpoint(47_113),
+            "http://host.docker.internal:47113/mcp"
         );
     }
 

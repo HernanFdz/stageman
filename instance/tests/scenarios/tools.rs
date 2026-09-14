@@ -2,10 +2,9 @@
 //! simulated world.
 
 use crate::simulation::{
-    Simulation, job, said_at_root, seed, thread, tool_call, watching_a_channel,
+    FARAWAY, NEARBY, Simulation, job, said_at_root, seed, thread, watching_a_channel,
 };
 use stageman_core::{Progress, Waiting};
-use stageman_instance::RequestId;
 
 fn body(method: &str, params: serde_json::Value) -> serde_json::Value {
     let mut envelope = serde_json::Map::new();
@@ -64,27 +63,82 @@ fn with_a_foreman_working() -> (Simulation, stageman_instance::Instance, String)
 fn only_a_nearby_caller_with_a_minted_credential_is_served() {
     let (mut world, mut instance, warrant) = with_a_foreman_working();
 
-    let mut faraway = tool_call(1, &warrant, body("tools/list", serde_json::json!({})));
-    if let stageman_instance::Event::App(stageman_instance::AppEvent::ToolCalled {
-        nearby, ..
-    }) = &mut faraway
-    {
-        *nearby = false;
-    }
-    world.schedule(160, faraway);
-    world.schedule(
-        161,
-        tool_call(2, "not-minted", body("tools/list", serde_json::json!({}))),
+    // From beyond this machine, which is nowhere a container is.
+    let asked1 = world.arrives(
+        160,
+        "POST",
+        "/mcp",
+        &[("authorization", &format!("Bearer {warrant}"))],
+        FARAWAY,
+        &serde_json::to_string(&body("tools/list", serde_json::json!({}))).expect("JSON"),
     );
-    world.schedule(
-        162,
-        tool_call(3, &warrant, body("tools/list", serde_json::json!({}))),
+    let asked2 = world.calls(
+        161,
+        "not-minted",
+        &body("tools/list", serde_json::json!({})),
+    );
+    let asked3 = world.calls(162, &warrant, &body("tools/list", serde_json::json!({})));
+    world.run_until(&mut instance, 200);
+
+    assert_eq!(world.tool_answer(asked1).map(|a| a.0), Some(403));
+    assert_eq!(world.tool_answer(asked2).map(|a| a.0), Some(403));
+    assert_eq!(world.tool_answer(asked3).map(|a| a.0), Some(200));
+}
+
+/// What a client offers, what it hangs up on, and what it asks for by
+/// another name.
+///
+/// Every tool answers within its own call, so the stream a client may offer
+/// to open is declined; nothing is held per connection, so hanging up has
+/// nothing to release; and one path is served, so another is not found.
+#[test]
+fn a_stream_is_declined_a_hangup_accepted_and_another_path_is_not_found() {
+    let (mut world, mut instance, _) = with_a_foreman_working();
+
+    let offered = world.arrives(160, "GET", "/mcp", &[], NEARBY, "");
+    let hung_up = world.arrives(161, "DELETE", "/mcp", &[], NEARBY, "");
+    let elsewhere = world.arrives(162, "POST", "/elsewhere", &[], NEARBY, "");
+    world.run_until(&mut instance, 200);
+
+    assert_eq!(world.tool_answer(offered).map(|a| a.0), Some(405));
+    assert_eq!(world.tool_answer(hung_up).map(|a| a.0), Some(204));
+    assert_eq!(world.tool_answer(elsewhere).map(|a| a.0), Some(404));
+}
+
+/// A call is read up to a limit: a large one is answered, and one beyond
+/// the limit is refused rather than held.
+///
+/// The limit is generous because the largest call carries a message a person
+/// wrote, and bounded because whoever sends one is somebody else's code
+/// running in a container.
+#[test]
+fn a_call_is_read_up_to_a_limit_and_refused_beyond_it() {
+    let (mut world, mut instance, warrant) = with_a_foreman_working();
+
+    let large = world.calls(
+        160,
+        &warrant,
+        &body(
+            "tools/list",
+            serde_json::json!({"padding": "x".repeat(8 * 1024)}),
+        ),
+    );
+    let beyond = world.arrives(
+        161,
+        "POST",
+        "/mcp",
+        &[("authorization", &format!("Bearer {warrant}"))],
+        NEARBY,
+        &"x".repeat(2 * 1024 * 1024),
     );
     world.run_until(&mut instance, 200);
 
-    assert_eq!(world.tool_answer(RequestId(1)).map(|a| a.0), Some(403));
-    assert_eq!(world.tool_answer(RequestId(2)).map(|a| a.0), Some(403));
-    assert_eq!(world.tool_answer(RequestId(3)).map(|a| a.0), Some(200));
+    assert_eq!(
+        world.tool_answer(large).map(|a| a.0),
+        Some(200),
+        "eight kilobytes is an ordinary call"
+    );
+    assert_eq!(world.tool_answer(beyond).map(|a| a.0), Some(400));
 }
 
 /// The handshake, a notification, and the listing a foreman is offered.
@@ -92,44 +146,29 @@ fn only_a_nearby_caller_with_a_minted_credential_is_served() {
 fn a_foreman_is_greeted_and_offered_the_tools_that_start_jobs() {
     let (mut world, mut instance, warrant) = with_a_foreman_working();
 
-    world.schedule(
+    let asked1 = world.calls(
         160,
-        tool_call(
-            1,
-            &warrant,
-            body(
-                "initialize",
-                serde_json::json!({"protocolVersion": "2024-11-05"}),
-            ),
+        &warrant,
+        &body(
+            "initialize",
+            serde_json::json!({"protocolVersion": "2024-11-05"}),
         ),
     );
-    world.schedule(
+    let asked2 = world.calls(
         161,
-        tool_call(
-            2,
-            &warrant,
-            serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
-        ),
+        &warrant,
+        &serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
     );
-    world.schedule(
-        162,
-        tool_call(3, &warrant, body("tools/list", serde_json::json!({}))),
-    );
-    world.schedule(
-        163,
-        tool_call(4, &warrant, serde_json::json!({"not": "a request"})),
-    );
-    world.schedule(
+    let asked3 = world.calls(162, &warrant, &body("tools/list", serde_json::json!({})));
+    let asked4 = world.calls(163, &warrant, &serde_json::json!({"not": "a request"}));
+    let asked5 = world.calls(
         164,
-        tool_call(
-            5,
-            &warrant,
-            body("notifications/initialized", serde_json::json!({})),
-        ),
+        &warrant,
+        &body("notifications/initialized", serde_json::json!({})),
     );
     world.run_until(&mut instance, 200);
 
-    let greeting = world.tool_answer(RequestId(1)).expect("answered");
+    let greeting = world.tool_answer(asked1).expect("answered");
     assert_eq!(greeting.0, 200);
     let result = &greeting.1.as_ref().expect("a body")["result"];
     assert_eq!(result["protocolVersion"], "2024-11-05");
@@ -140,12 +179,12 @@ fn a_foreman_is_greeted_and_offered_the_tools_that_start_jobs() {
     );
 
     assert_eq!(
-        world.tool_answer(RequestId(2)),
+        world.tool_answer(asked2),
         Some(&(202, None)),
         "a notification wants no answer"
     );
 
-    let listing = world.tool_answer(RequestId(3)).expect("answered");
+    let listing = world.tool_answer(asked3).expect("answered");
     let names: Vec<&str> = listing.1.as_ref().expect("a body")["result"]["tools"]
         .as_array()
         .expect("tools")
@@ -160,11 +199,11 @@ fn a_foreman_is_greeted_and_offered_the_tools_that_start_jobs() {
         "the project's kits are enumerated"
     );
 
-    assert_eq!(world.tool_answer(RequestId(4)).map(|a| a.0), Some(400));
+    assert_eq!(world.tool_answer(asked4).map(|a| a.0), Some(400));
 
     // A notification that nonetheless carries an identifier is answering
     // something, and is answered with nothing rather than merely accepted.
-    let noted = world.tool_answer(RequestId(5)).expect("answered");
+    let noted = world.tool_answer(asked5).expect("answered");
     assert_eq!(noted.0, 200);
     assert_eq!(
         noted.1.as_ref().expect("a body")["result"],
@@ -179,19 +218,16 @@ fn minting_a_warrant_forgets_only_that_speakers_previous_one() {
     let (mut world, mut instance, first) = with_a_foreman_working();
 
     // The foreman starts a job, which mints the job its own warrant.
-    world.schedule(
+    let _ = world.calls(
         160,
-        tool_call(
-            1,
-            &first,
-            call(
-                "start_job",
-                serde_json::json!({
-                    "reason": "the parser is flaky",
-                    "instructions": "Fix the flaky test in the parser.",
-                    "kit": "Claude",
-                }),
-            ),
+        &first,
+        &call(
+            "start_job",
+            serde_json::json!({
+                "reason": "the parser is flaky",
+                "instructions": "Fix the flaky test in the parser.",
+                "kit": "Claude",
+            }),
         ),
     );
     world.run_until(&mut instance, 300);
@@ -202,12 +238,9 @@ fn minting_a_warrant_forgets_only_that_speakers_previous_one() {
     );
 
     // Another speaker's minting leaves the foreman's answering.
-    world.schedule(
-        400,
-        tool_call(2, &first, body("tools/list", serde_json::json!({}))),
-    );
+    let asked2 = world.calls(400, &first, &body("tools/list", serde_json::json!({})));
     world.run_until(&mut instance, 500);
-    assert_eq!(world.tool_answer(RequestId(2)).map(|a| a.0), Some(200));
+    assert_eq!(world.tool_answer(asked2).map(|a| a.0), Some(200));
 
     // The foreman's next turn mints it a new one, and the old one stops.
     world.run_until(&mut instance, 2_000);
@@ -215,17 +248,11 @@ fn minting_a_warrant_forgets_only_that_speakers_previous_one() {
     world.run_until(&mut instance, 2_200);
     let second = world.warrants().last().cloned().expect("the new warrant");
     assert_ne!(second, first);
-    world.schedule(
-        2_300,
-        tool_call(3, &first, body("tools/list", serde_json::json!({}))),
-    );
-    world.schedule(
-        2_301,
-        tool_call(4, &second, body("tools/list", serde_json::json!({}))),
-    );
+    let asked3 = world.calls(2_300, &first, &body("tools/list", serde_json::json!({})));
+    let asked4 = world.calls(2_301, &second, &body("tools/list", serde_json::json!({})));
     world.run_until(&mut instance, 2_400);
-    assert_eq!(world.tool_answer(RequestId(3)).map(|a| a.0), Some(403));
-    assert_eq!(world.tool_answer(RequestId(4)).map(|a| a.0), Some(200));
+    assert_eq!(world.tool_answer(asked3).map(|a| a.0), Some(403));
+    assert_eq!(world.tool_answer(asked4).map(|a| a.0), Some(200));
 }
 
 /// A foreman starts a job: the job is recorded, its thread is opened once
@@ -235,24 +262,21 @@ fn minting_a_warrant_forgets_only_that_speakers_previous_one() {
 fn a_foreman_starts_a_job_whose_thread_is_opened_before_its_agent_speaks() {
     let (mut world, mut instance, warrant) = with_a_foreman_working();
 
-    world.schedule(
+    let asked1 = world.calls(
         160,
-        tool_call(
-            1,
-            &warrant,
-            call(
-                "start_job",
-                serde_json::json!({
-                    "reason": "the parser is flaky",
-                    "instructions": "Fix the flaky test in the parser.",
-                    "kit": "Claude",
-                }),
-            ),
+        &warrant,
+        &call(
+            "start_job",
+            serde_json::json!({
+                "reason": "the parser is flaky",
+                "instructions": "Fix the flaky test in the parser.",
+                "kit": "Claude",
+            }),
         ),
     );
     world.run_until(&mut instance, 10_000);
 
-    let answer = world.tool_answer(RequestId(1)).expect("answered");
+    let answer = world.tool_answer(asked1).expect("answered");
     assert!(!is_error(answer), "{answer:?}");
     let said = text_of(answer);
     assert!(said.starts_with("started job "), "{said}");
@@ -317,21 +341,18 @@ fn a_foreman_starts_a_job_whose_thread_is_opened_before_its_agent_speaks() {
 #[test]
 fn starting_is_refused_to_a_job_and_for_a_kit_the_project_does_not_offer() {
     let (mut world, mut instance, foreman) = with_a_foreman_working();
-    world.schedule(
+    let asked1 = world.calls(
         160,
-        tool_call(
-            1,
-            &foreman,
-            call(
-                "start_job",
-                serde_json::json!({
-                    "reason": "why", "instructions": "what", "kit": "Nope",
-                }),
-            ),
+        &foreman,
+        &call(
+            "start_job",
+            serde_json::json!({
+                "reason": "why", "instructions": "what", "kit": "Nope",
+            }),
         ),
     );
     world.run_until(&mut instance, 200);
-    let refused = world.tool_answer(RequestId(1)).expect("answered");
+    let refused = world.tool_answer(asked1).expect("answered");
     assert!(is_error(refused));
     assert!(
         text_of(refused).contains("offers no kit called \"Nope\""),
@@ -358,21 +379,18 @@ fn starting_is_refused_to_a_job_and_for_a_kit_the_project_does_not_offer() {
     world.schedule(100, crate::simulation::said_in(1, "go on"));
     world.run_until(&mut instance, 150);
     let job_warrant = world.warrants().last().expect("the job's warrant").clone();
-    world.schedule(
+    let asked2 = world.calls(
         160,
-        tool_call(
-            2,
-            &job_warrant,
-            call(
-                "start_job",
-                serde_json::json!({
-                    "reason": "why", "instructions": "what", "kit": "Claude",
-                }),
-            ),
+        &job_warrant,
+        &call(
+            "start_job",
+            serde_json::json!({
+                "reason": "why", "instructions": "what", "kit": "Claude",
+            }),
         ),
     );
     world.run_until(&mut instance, 200);
-    let refused = world.tool_answer(RequestId(2)).expect("answered");
+    let refused = world.tool_answer(asked2).expect("answered");
     assert!(is_error(refused));
     assert!(text_of(refused).contains("serves no tool called \"start_job\""));
 }
@@ -383,42 +401,33 @@ fn starting_is_refused_to_a_job_and_for_a_kit_the_project_does_not_offer() {
 fn saying_posts_in_the_warrants_thread_and_reports_a_failure_to_the_agent() {
     let (mut world, mut instance, warrant) = with_a_foreman_working();
 
-    world.schedule(
+    let asked1 = world.calls(
         160,
-        tool_call(
-            1,
-            &warrant,
-            call("say", serde_json::json!({"message": "On it."})),
-        ),
+        &warrant,
+        &call("say", serde_json::json!({"message": "On it."})),
     );
     world.run_until(&mut instance, 200);
-    let answer = world.tool_answer(RequestId(1)).expect("answered");
+    let answer = world.tool_answer(asked1).expect("answered");
     assert!(!is_error(answer));
     assert_eq!(text_of(answer), "said");
     assert!(world.posts().contains(&(thread(1), "On it.".to_owned())));
 
     world.next_post_fails("channel_not_found");
-    world.schedule(
+    let asked2 = world.calls(
         210,
-        tool_call(
-            2,
-            &warrant,
-            call("say", serde_json::json!({"message": "Again."})),
-        ),
+        &warrant,
+        &call("say", serde_json::json!({"message": "Again."})),
     );
-    world.schedule(
+    let asked3 = world.calls(
         211,
-        tool_call(
-            3,
-            &warrant,
-            call("say", serde_json::json!({"message": "   "})),
-        ),
+        &warrant,
+        &call("say", serde_json::json!({"message": "   "})),
     );
     world.run_until(&mut instance, 300);
-    let failed = world.tool_answer(RequestId(2)).expect("answered");
+    let failed = world.tool_answer(asked2).expect("answered");
     assert!(is_error(failed), "{failed:?}");
     assert_eq!(text_of(failed), "it could not be said: channel_not_found");
-    let empty = world.tool_answer(RequestId(3)).expect("answered");
+    let empty = world.tool_answer(asked3).expect("answered");
     assert!(is_error(empty));
     assert_eq!(text_of(empty), "nothing was said, so nothing was posted");
 }
@@ -441,32 +450,26 @@ fn a_jobs_claim_is_recorded_when_its_turn_ends() {
     world.run_until(&mut instance, 150);
     let warrant = world.warrants().last().expect("the job's warrant").clone();
 
-    world.schedule(
+    let asked1 = world.calls(
         200,
-        tool_call(
-            1,
-            &warrant,
-            call(
-                "stopping",
-                serde_json::json!({"because": "ready_for_review"}),
-            ),
+        &warrant,
+        &call(
+            "stopping",
+            serde_json::json!({"because": "ready_for_review"}),
         ),
     );
-    world.schedule(
+    let asked2 = world.calls(
         201,
-        tool_call(
-            2,
-            &warrant,
-            call("stopping", serde_json::json!({"because": "gave_up"})),
-        ),
+        &warrant,
+        &call("stopping", serde_json::json!({"because": "gave_up"})),
     );
     world.run_until(&mut instance, 5_000);
 
     assert_eq!(
-        text_of(world.tool_answer(RequestId(1)).expect("answered")),
+        text_of(world.tool_answer(asked1).expect("answered")),
         "noted"
     );
-    let refused = world.tool_answer(RequestId(2)).expect("answered");
+    let refused = world.tool_answer(asked2).expect("answered");
     assert!(is_error(refused));
     assert!(
         text_of(refused).contains("not one of the reasons"),
@@ -482,31 +485,25 @@ fn a_jobs_claim_is_recorded_when_its_turn_ends() {
     // A foreman may not, and a warrant from a turn that has ended names
     // nobody any more.
     let (mut world, mut instance, foreman) = with_a_foreman_working();
-    world.schedule(
+    let asked3 = world.calls(
         160,
-        tool_call(
-            3,
-            &foreman,
-            call(
-                "stopping",
-                serde_json::json!({"because": "ready_for_review"}),
-            ),
+        &foreman,
+        &call(
+            "stopping",
+            serde_json::json!({"because": "ready_for_review"}),
         ),
     );
     world.run_until(&mut instance, 5_000);
-    let refused = world.tool_answer(RequestId(3)).expect("answered");
+    let refused = world.tool_answer(asked3).expect("answered");
     assert!(is_error(refused));
-    world.schedule(
+    let asked4 = world.calls(
         6_000,
-        tool_call(
-            4,
-            &foreman,
-            call("say", serde_json::json!({"message": "late"})),
-        ),
+        &foreman,
+        &call("say", serde_json::json!({"message": "late"})),
     );
     world.run_until(&mut instance, 6_100);
     assert_eq!(
-        world.tool_answer(RequestId(4)).map(|a| a.0),
+        world.tool_answer(asked4).map(|a| a.0),
         Some(403),
         "the turn ended, the warrant with it"
     );
@@ -517,17 +514,14 @@ fn a_jobs_claim_is_recorded_when_its_turn_ends() {
 fn a_jobs_whole_life_runs_the_same_twice() {
     fn scenario() -> Vec<String> {
         let (mut world, mut instance, warrant) = with_a_foreman_working();
-        world.schedule(
+        let _ = world.calls(
             160,
-            tool_call(
-                1,
-                &warrant,
-                call(
-                    "start_job",
-                    serde_json::json!({
-                        "reason": "why", "instructions": "what", "kit": "Claude",
-                    }),
-                ),
+            &warrant,
+            &call(
+                "start_job",
+                serde_json::json!({
+                    "reason": "why", "instructions": "what", "kit": "Claude",
+                }),
             ),
         );
         world.run_until(&mut instance, 3_000);

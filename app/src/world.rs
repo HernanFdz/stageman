@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use stageman_agent::ContainerRuntime;
-use stageman_core::{Channel, JobId, Secret, Speaking, Timestamp};
+use stageman_core::{Channel, JobId, Secret, Speaking};
 use stageman_instance::{
     AppEffect, AppEvent, Event, Request, RequestId, Response, Run, Speaker, Stageman,
 };
@@ -63,7 +63,6 @@ enum Answering {
     /// A person, through a server function.
     Person(tokio::sync::oneshot::Sender<Response>),
     /// An agent, through the tools endpoint.
-    Tool(tokio::sync::oneshot::Sender<(u16, Option<serde_json::Value>)>),
     /// A browser, through the tunnel layer.
     Tunnel(tokio::sync::oneshot::Sender<Located>),
 }
@@ -71,7 +70,6 @@ enum Answering {
 /// What the instance answered, by what was asked.
 enum Answered {
     Person(Response),
-    Tool(u16, Option<serde_json::Value>),
     Tunnel(Located),
 }
 
@@ -118,30 +116,6 @@ impl Asking {
         waiting.await.ok()
     }
 
-    /// Hands the instance a call on the tools endpoint, whole.
-    ///
-    /// The status and the body the endpoint answers with, or `None` if the
-    /// instance stopped before answering.
-    pub async fn call(
-        &self,
-        at: Timestamp,
-        nearby: bool,
-        bearer: Option<String>,
-        body: serde_json::Value,
-    ) -> Option<(u16, Option<serde_json::Value>)> {
-        let (answer, waiting) = tokio::sync::oneshot::channel();
-        let id = self.minted();
-        self.waiting.lock().insert(id, Answering::Tool(answer));
-        self.send(AppEvent::ToolCalled {
-            id,
-            at,
-            nearby,
-            bearer,
-            body,
-        });
-        waiting.await.ok()
-    }
-
     /// Asks where a job's tunnel is.
     pub async fn tunnel(&self, job: JobId) -> Option<Located> {
         let (answer, waiting) = tokio::sync::oneshot::channel();
@@ -162,9 +136,6 @@ impl Asking {
         };
         match (waiting, answered) {
             (Answering::Person(reply), Answered::Person(response)) => drop(reply.send(response)),
-            (Answering::Tool(reply), Answered::Tool(status, body)) => {
-                drop(reply.send((status, body)));
-            }
             (Answering::Tunnel(reply), Answered::Tunnel(located)) => drop(reply.send(located)),
             _ => tracing::error!(
                 ?id,
@@ -191,8 +162,6 @@ pub struct Performer(Arc<Inner>);
 static RUNTIME: OnceLock<ContainerRuntime> = OnceLock::new();
 
 struct Inner {
-    /// Where a container reaches the tools this instance serves.
-    endpoint: String,
     /// Where events go back, and where answers are matched to askers.
     asking: Arc<Asking>,
     /// The turns running right now, by whose they are, each with the handle
@@ -204,9 +173,8 @@ struct Inner {
 impl Performer {
     /// A performer for this way in.
     #[must_use]
-    pub fn new(endpoint: String, asking: Arc<Asking>) -> Self {
+    pub fn new(asking: Arc<Asking>) -> Self {
         Self(Arc::new(Inner {
-            endpoint,
             asking,
             turns: parking_lot::Mutex::new(BTreeMap::new()),
         }))
@@ -323,9 +291,6 @@ impl Perform<Stageman> for Performer {
             AppEffect::Respond { id, response } => {
                 self.0.asking.answered(id, Answered::Person(response));
             }
-            AppEffect::ToolAnswered { id, status, body } => {
-                self.0.asking.answered(id, Answered::Tool(status, body));
-            }
             AppEffect::Route { id, port } => self.0.asking.answered(
                 id,
                 Answered::Tunnel(port.map_or(Located::Nowhere, Located::At)),
@@ -347,8 +312,10 @@ impl Performer {
         let stopping = Arc::new(tokio::sync::Notify::new());
         self.0.turns.lock().insert(speaker, Arc::clone(&stopping));
         self.spawn(move |inner, runtime| async move {
-            let tools = |warrant: String| {
-                stageman_agent::Tools::new(inner.endpoint.clone(), Secret::new(warrant))
+            // Where the tools are is decided by the instance, which took
+            // the address and knows which port it actually got.
+            let tools = |endpoint: String, warrant: String| {
+                stageman_agent::Tools::new(endpoint, Secret::new(warrant))
             };
             let running = async {
                 match run {
@@ -356,6 +323,7 @@ impl Performer {
                         container,
                         instance,
                         agent,
+                        tools: endpoint,
                         role,
                         environment,
                         repository,
@@ -380,7 +348,7 @@ impl Performer {
                             &launch,
                             &container,
                             instance,
-                            Some(&tools(warrant)),
+                            Some(&tools(endpoint, warrant)),
                             &kickoff,
                         )
                         .await
@@ -389,13 +357,14 @@ impl Performer {
                         container,
                         kit,
                         warrant,
+                        tools: endpoint,
                         text,
                     } => {
                         stageman_agent::resume(
                             runtime,
                             &container,
                             &kit,
-                            Some(&tools(warrant)),
+                            Some(&tools(endpoint, warrant)),
                             &text,
                         )
                         .await
@@ -470,30 +439,6 @@ mod tests {
             soon(asked).await.expect("the task"),
             Some(Response::Agents(Vec::new()))
         );
-
-        let calling = {
-            let asking = Arc::clone(&asking);
-            tokio::spawn(async move {
-                asking
-                    .call(
-                        stageman_core::Timestamp::UNIX_EPOCH,
-                        true,
-                        Some("not-a-real-credential".to_owned()),
-                        serde_json::json!({"method": "ping"}),
-                    )
-                    .await
-            })
-        };
-        let Some(Event::App(AppEvent::ToolCalled {
-            id, nearby, bearer, ..
-        })) = soon(events.recv()).await
-        else {
-            panic!("the call, as an event");
-        };
-        assert!(nearby);
-        assert_eq!(bearer.as_deref(), Some("not-a-real-credential"));
-        asking.answered(id, Answered::Tool(202, None));
-        assert_eq!(soon(calling).await.expect("the task"), Some((202, None)));
 
         let locating = {
             let asking = Arc::clone(&asking);

@@ -46,7 +46,9 @@ use std::time::Duration;
 use rand::Rng as _;
 use rand::rngs::StdRng;
 use stageman_agent::Command;
-use stageman_core::{Agent, InstanceId, JobId, Key, Kit, Progress, ProjectId, State, Thread, Uuid};
+use stageman_core::{
+    Agent, InstanceId, JobId, Key, Kit, Progress, ProjectId, State, Thread, Timestamp, Uuid,
+};
 use stageman_vocabulary::{Effect as Generic, EffectId, Environment, Finished};
 
 pub use boot::KeySource;
@@ -254,6 +256,22 @@ impl stageman_vocabulary::Deciding for Instance {
     }
 }
 
+/// What a tool call said about itself, while its body is being read.
+///
+/// Held between the head arriving and the body landing, which is the one
+/// place a request is in two halves: what may be decided from the head is
+/// decided when the body is there, so that a refusal for a credential
+/// nobody holds and one for a body that is not a call read the same.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct Called {
+    /// Whether it came from somewhere allowed to ask.
+    nearby: bool,
+    /// What it presented, if it presented anything.
+    bearer: Option<String>,
+    /// When it arrived.
+    at: Timestamp,
+}
+
 /// What the runtime was asked, and therefore what its answer means.
 ///
 /// The awake half of what booting's phases do: a command is a value with an
@@ -321,6 +339,10 @@ pub struct Facts {
     pub runtime: PathBuf,
     /// What every command that runtime is given gets for an environment.
     pub runtime_environment: Environment,
+    /// The port the tools are served on, which is what a container is told.
+    pub tools: u16,
+    /// The listener they arrive on, where one was taken.
+    pub tools_listener: Option<EffectId>,
     /// Where the dashboard is served, as a person would type it.
     pub address: String,
     /// The port it is served on.
@@ -350,6 +372,13 @@ pub struct Running {
     /// What every command it is given gets for an environment: this
     /// process's own, less this project's, decided once while booting.
     runtime_environment: Environment,
+    /// Where a container reaches the tools this instance serves, composed
+    /// from the port that was actually taken.
+    tools: String,
+    /// Which listener a tool call arrives on, where one was taken.
+    tools_listener: Option<EffectId>,
+    /// What each tool call said about itself before its body was read.
+    calls: BTreeMap<stageman_vocabulary::RequestId, Called>,
     /// What a listing being assembled has learned so far, by container.
     ///
     /// A listing is one question and then two more per container it names,
@@ -371,8 +400,9 @@ pub struct Running {
     warrants: BTreeMap<String, Warranted>,
     /// The foremen found mid-turn on waking, until each is picked up.
     interrupted: BTreeSet<ProjectId>,
-    /// Requests on the tools endpoint waiting on a post.
-    asking: BTreeMap<RequestId, Option<serde_json::Value>>,
+    /// Requests on the tools endpoint waiting on a post, by the identifier
+    /// the world holds each one open under.
+    asking: BTreeMap<stageman_vocabulary::RequestId, Option<serde_json::Value>>,
     /// Where each job's tunnel was last found.
     tunnels: BTreeMap<JobId, u16>,
     /// Tunnel requests waiting for the runtime to say where a job is.
@@ -409,6 +439,8 @@ impl Running {
             path,
             runtime,
             runtime_environment,
+            tools,
+            tools_listener,
             address,
             port,
         } = facts;
@@ -428,6 +460,9 @@ impl Running {
             address,
             runtime,
             runtime_environment,
+            tools: paths::tools_endpoint(tools),
+            tools_listener,
+            calls: BTreeMap::new(),
             asked: BTreeMap::new(),
             listing: BTreeMap::new(),
             rng,
@@ -673,10 +708,13 @@ impl Running {
             // Nothing here asks for a file or a listener while awake yet;
             // both arrive as families land, and until then an answer to
             // something nobody asked is said rather than acted on.
-            Event::Read { .. }
-            | Event::Bound { .. }
-            | Event::Arrived { .. }
-            | Event::Body { .. } => {
+            Event::Arrived {
+                listener,
+                id,
+                request,
+            } => self.arrived(listener, id, &request, &mut effects),
+            Event::Body { id, outcome } => self.read(id, outcome, &mut effects),
+            Event::Read { .. } | Event::Bound { .. } => {
                 tracing::warn!(
                     "answered something this instance did not ask for while awake; ignored"
                 );
@@ -714,13 +752,6 @@ impl Running {
                 }
             }
             AppEvent::Heard { channel, message } => self.heard(channel, &message, effects),
-            AppEvent::ToolCalled {
-                id,
-                at,
-                nearby,
-                bearer,
-                body,
-            } => self.tool_called(id, at, nearby, bearer.as_deref(), &body, effects),
             AppEvent::ThreadOpened { job, outcome } => self.thread_opened(job, outcome),
             AppEvent::Posted { request, outcome } => self.posted(request, outcome),
             AppEvent::Request { id, request } => self.requested(id, request, effects),
