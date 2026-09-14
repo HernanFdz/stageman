@@ -344,24 +344,32 @@ Intended next steps, in order, each with its reason. Written as intentions, not
 progress: "next X, because Y" — never "X is 60% done", which is both derivable
 and wrong within a day.
 
-- Next, empty the application hole, because
+- Next, empty the application hole of its mechanisms, because
   `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`
-  is finished when nothing application-specific is left for a world to
-  perform, and what remains is one family rather than a design question. It
-  is the same shape of work as the families already moved — the probe most
-  recently, which is now a port asked of the runtime and read once, with the
-  meaning of what the port did decided inside; the turn before it, which is
-  the commands it runs and a process kept open, with the conversation a
-  machine the scenarios drive: render the command or the frame inside the
-  instance, read the answer inside it, and delete what the app was doing.
+  is finished when nothing that is a mechanism is left in it, and what
+  remains is one family rather than a design question. It is the same shape
+  of work as the families already moved — the probe most recently, which is
+  now a port asked of the runtime and read once, with the meaning of what
+  the port did decided inside; the turn before it, which is the commands it
+  runs and a process kept open, with the conversation a machine the
+  scenarios drive: render the command or the frame inside the instance, read
+  the answer inside it, and delete what the app was doing. The request made
+  once and the socket spoken over are already in the vocabulary and
+  performed by the world; what is left is speaking and listening through
+  them.
 
   **A channel's lifecycle**, which is a websocket and a request: connect,
   acknowledge, refresh before the platform closes, retry, and measure the
   deaf window — all of which `docs/decisions/0044-a-listener-only-listens.md`
   could argue for and nothing could test.
 
-  Then the hole holds nothing, `AppEvent` and `AppEffect` are empty, and the
-  performer in the app crate goes with them.
+  Then the hole holds exactly what the record keeps there on purpose, and
+  nothing else: the presentation port's arrival, which is an application
+  fact the entry point tells rather than something asked for, and a server
+  function's typed request with its typed answer, which is the one thing
+  that still asks the instance directly. Neither is a mechanism a generic
+  world could perform, so the performer in the app crate stays, reduced to
+  matching an answer to whoever asked.
 
 - Then make the container tests a recorder, because what they check is what
   the pinned runtime and the pinned agent actually do, which is a recording
