@@ -45,9 +45,13 @@ first.
   silently paying the wrong way, and that is worth being able to test without
   spawning anything.
 - **agent** — the contract every coding agent is driven through, and the
-  adapters that implement it. Two shapes and one contract: a one-shot
-  structured query, and a session bound to a workspace. Nothing outside an
-  adapter may be specific to one agent.
+  adapters that implement it. One contract: a conversation over a session
+  bound to a workspace, and since
+  `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`
+  it is rendered and read here as pure functions — every command a turn
+  runs, every line said to the agent, what every answer means — which the
+  **instance** sequences and the world carries. Nothing outside an adapter
+  may be specific to one agent.
 - **foreman** — the deciding, for one project. Watches that project's
   channels and judges what each signal deserves. One per project rather than
   one per instance, because watching needs the project's own credentials and a

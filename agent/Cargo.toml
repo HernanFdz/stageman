@@ -19,8 +19,6 @@ serde = { version = "1.0.228", features = ["derive"] }
 # the conversation is a machine that renders and reads those lines here.
 serde_json = "1.0.151"
 agent-client-protocol = "2.0.0"
-futures = "0.3.34"
-parking_lot = "0.12.5"
 # One hash, over the recipe a build is given, so that an image can be named
 # by what is in it — see
 # `docs/decisions/0051-an-image-is-named-by-the-recipe-it-is-built-from.md`.
@@ -32,7 +30,6 @@ stageman-core.workspace = true
 mutants = "0.0.4"
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["process", "io-util", "sync"] }
-tokio-util = { version = "0.7.19", features = ["compat"] }
 
 [lints]
 workspace = true

@@ -1,10 +1,10 @@
 //! The contract every coding agent is driven through, and the adapters that
 //! implement it.
 //!
-//! Two shapes of use and one contract. A one-shot structured query is how the
-//! foreman thinks; a long-running session in a workspace is how a job
-//! works. Both reach a model only by running a configured agent, never through
-//! a vendor's own service API — see
+//! One contract: a conversation with an agent over a session in a workspace,
+//! which is how a foreman thinks and how a job works alike. Both reach a
+//! model only by running a configured agent, never through a vendor's own
+//! service API — see
 //! `docs/decisions/0007-model-work-goes-through-an-agent-cli.md` for why that
 //! is a hard rule rather than a preference.
 //!
@@ -22,11 +22,15 @@
 //! protocol is spoken over its standard input and output.** There is no other
 //! path, and no host-installed program to find — see
 //! `docs/decisions/0012-agents-run-in-containers.md`. The protocol's own
-//! vocabulary comes from its Rust library while the container process is
-//! started here, which is
-//! `docs/decisions/0014-the-protocols-own-sdk-and-our-own-spawning.md` and is
-//! the reason a container's arguments are a value this crate builds rather
-//! than a command line it hands to somebody else.
+//! vocabulary comes from its Rust library, which is
+//! `docs/decisions/0014-the-protocols-own-sdk-and-our-own-spawning.md`, and
+//! since
+//! `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`
+//! nothing here starts a process or speaks to one: every command a turn runs
+//! is a value rendered here and read back here, and the conversation is a
+//! machine — [`Conversation`] — that the instance steps one line at a time.
+//! What is left that drives a runtime is the probe's, and the container
+//! tests', which drive the same argument lists the instance renders.
 
 mod conversation;
 
@@ -34,51 +38,36 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
 
 pub use conversation::{Conversation, Exchange, Heard, Opening, Said};
 
 use agent_client_protocol::schema::v1::{
-    ContentBlock, HttpHeader, InitializeRequest, InitializeResponse, ListSessionsRequest,
-    LoadSessionRequest, McpServer, McpServerHttp, NewSessionRequest, PromptRequest,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionId,
-    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, TextContent,
+    HttpHeader, McpServer, McpServerHttp, SessionConfigKind, SessionConfigOption,
 };
-use agent_client_protocol::{ByteStreams, Client, ConnectionTo};
-use parking_lot::Mutex;
 use sha2::{Digest as _, Sha256};
 #[cfg(test)]
 use stageman_core::Channel;
 use stageman_core::{
     Agent, ClaudeEffort, ClaudeModel, Handout, InstanceId, Kit, Platform, Role, Secret, Uuid,
 };
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
-
-// The protocol library calls the far end of a connection `Agent` too, and it
-// means the role rather than the product. Importing it under another name is
-// not decoration: `ConnectionTo<Agent>` would compile against either type and
-// read correctly whichever one it resolved to, which is precisely the kind of
-// ambiguity `docs/conventions.md` §2 says to spend a word avoiding.
-use agent_client_protocol::Agent as AgentRole;
+use tokio::io::AsyncWriteExt as _;
 
 /// Re-exported because they appear in this crate's own signatures.
 ///
 /// `docs/decisions/0014-the-protocols-own-sdk-and-our-own-spawning.md` accepted
 /// that protocol types would surface here rather than being wrapped. Accepting
-/// that and then not re-exporting them would leave [`Greeting`] and [`Answer`]
-/// unreadable to anyone who has not also taken the protocol library as a direct
-/// dependency, which is the cost without the benefit.
+/// that and then not re-exporting them would leave [`Answer`] unreadable to
+/// anyone who has not also taken the protocol library as a direct dependency,
+/// which is the cost without the benefit.
 pub use agent_client_protocol::schema::ProtocolVersion;
 pub use agent_client_protocol::schema::v1::StopReason;
 
-/// How much of a failed container's standard error is kept.
+/// How much of a failed agent's standard error is kept in what is recorded.
 ///
-/// Bounded because the message travels into an error type an operator reads,
-/// and an agent that fails by printing megabytes would otherwise turn one
-/// unreadable failure into a second one. Kept is not the same as read: see
-/// [`printed`], which reads past this and discards the rest.
+/// Bounded because the message travels into a record an operator reads, and
+/// an agent that fails by printing megabytes would otherwise turn one
+/// unreadable failure into a second one. The world keeps more than this and
+/// reads past even that, so nothing here is what stops a flooded pipe.
 pub(crate) const STDERR_LIMIT: usize = 8 * 1024;
 
 /// Which platform this binary was made for, as far as anything here needs to
@@ -205,49 +194,6 @@ impl ContainerRuntime {
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.0
-    }
-
-    /// Proves the recorded runtime is there and answers.
-    ///
-    /// The startup check `docs/conventions.md` §3 asks for. A missing runtime
-    /// is the kind of failure that makes an instance unusable rather than one
-    /// job, so it belongs at startup: the worst moment to discover it is three
-    /// in the morning on the first signal that mattered.
-    ///
-    /// It asks for a version rather than merely testing that the file is
-    /// there, because on the runtimes this targets that reaches the daemon —
-    /// so a client installed without a daemon running, which looks perfectly
-    /// healthy to any check of the filesystem, fails here instead of on the
-    /// first job.
-    ///
-    /// # Errors
-    ///
-    /// Fails if the path cannot be run at all, or if it runs and reports
-    /// failure. The two are separate variants because one means the path is
-    /// wrong and the other means the runtime is not working, and an operator
-    /// does something different about each.
-    pub async fn verify(&self) -> Result<(), AgentError> {
-        let reported = tokio::process::Command::new(self.path())
-            .arg("version")
-            .kill_on_drop(true)
-            .output()
-            .await
-            .map_err(|source| AgentError::Runtime {
-                path: self.0.clone(),
-                source,
-            })?;
-
-        if reported.status.success() {
-            return Ok(());
-        }
-        Err(AgentError::Unusable {
-            path: self.0.clone(),
-            message: String::from_utf8_lossy(&reported.stderr)
-                .trim()
-                .chars()
-                .take(STDERR_LIMIT)
-                .collect(),
-        })
     }
 }
 
@@ -475,7 +421,9 @@ pub async fn build(
         })?;
 
     let Some(mut writing) = building.stdin.take() else {
-        return Err(AgentError::NoChannel);
+        return Err(AgentError::Build {
+            message: "the runtime offered no standard input for the recipe".to_owned(),
+        });
     };
     // Written whole and then closed, which is safe only because a recipe is a
     // few kilobytes and a pipe buffer is tens of them. A larger one would have
@@ -495,7 +443,10 @@ pub async fn build(
     let finished = building
         .wait_with_output()
         .await
-        .map_err(AgentError::Exit)?;
+        .map_err(|source| AgentError::Runtime {
+            path: runtime.path().to_owned(),
+            source,
+        })?;
 
     outcome(finished.status.success(), image, &finished.stderr)
 }
@@ -624,70 +575,6 @@ pub fn kept(keeping: &[Image], image: &str) -> bool {
     keeping.iter().any(|keep| keep.as_argument() == image)
 }
 
-/// The arguments that start a container just long enough to be greeted.
-///
-/// Pure, so what a container is started with can be asserted without starting
-/// one. No network and no workspace: nothing before the first prompt needs
-/// either, and a check that reaches the internet is a check that fails for
-/// reasons unrelated to what it tests.
-fn handshake_arguments(image: &Image) -> [&str; 7] {
-    [
-        "run",
-        // Leaves nothing behind once the container exits, which is half of the
-        // bar in `docs/conventions.md` §4 and the cheap half.
-        "--rm",
-        // The protocol channel *is* this stream. Without it the container gets
-        // no standard input and the agent sees end-of-file immediately.
-        "--interactive",
-        "--network",
-        "none",
-        image.as_argument(),
-        // Named, because the image no longer runs the agent by itself: it
-        // holds a container open so that one can be run inside it, and this is
-        // the path that still wants the container to *be* the agent.
-        AGENT_PROGRAM,
-    ]
-}
-
-/// What an agent's container said about itself when the connection opened.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Greeting {
-    /// The protocol version the two ends settled on.
-    pub protocol_version: ProtocolVersion,
-    /// What answered inside the image, when it said.
-    ///
-    /// Optional because the protocol still permits an agent to stay quiet
-    /// about its own identity. An adapter that does is usable and merely
-    /// harder to support, so this is not an error.
-    pub adapter: Option<Adapter>,
-}
-
-/// The program that answered the protocol inside an image.
-///
-/// Not the agent — the adapter in front of it, which is what versions
-/// independently and what
-/// `docs/decisions/0010-acp-is-the-agent-contract.md` warns can lag the agent
-/// it speaks for.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Adapter {
-    /// What the adapter calls itself.
-    pub name: String,
-    /// The version it reported.
-    pub version: String,
-}
-
-impl From<InitializeResponse> for Greeting {
-    fn from(response: InitializeResponse) -> Self {
-        Self {
-            protocol_version: response.protocol_version,
-            adapter: response.agent_info.map(|info| Adapter {
-                name: info.name,
-                version: info.version,
-            }),
-        }
-    }
-}
-
 /// An agent in a container could not be reached, or would not answer.
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
@@ -749,9 +636,6 @@ pub enum AgentError {
         /// The last of what the build said, which is where a build says why.
         message: String,
     },
-    /// The runtime started without giving the streams the protocol needs.
-    #[error("the container runtime offered no channel to speak the protocol over")]
-    NoChannel,
     /// The container itself failed, before or instead of speaking.
     ///
     /// Separate from a protocol failure on purpose. A missing image and a
@@ -846,143 +730,6 @@ pub enum AgentError {
         /// Why not.
         why: String,
     },
-    /// The container could not be waited on once the exchange was over.
-    #[error("the container could not be waited on")]
-    Exit(#[source] io::Error),
-}
-
-/// Starts a container for `agent` and completes the protocol handshake.
-///
-/// The cheapest proof that a runtime, an image, an adapter and the stdio
-/// channel are all intact, and it needs no credential and no network — the
-/// credential boundary sits at the first prompt rather than at the handshake,
-/// which `docs/decisions/0014-the-protocols-own-sdk-and-our-own-spawning.md`
-/// records as measured rather than assumed.
-///
-/// The container is started, greeted and shut down. Nothing survives the call.
-///
-/// # Errors
-///
-/// Fails if the runtime cannot be started, if the image cannot be built, if
-/// the container exits without speaking, or if the exchange itself does not
-/// complete. Each is a separate variant because an operator acts on them
-/// differently — and since
-/// `docs/decisions/0035-an-image-is-built-never-named.md` the second of those
-/// has taken over from what used to be the commonest cause of the third.
-pub async fn handshake(
-    runtime: &ContainerRuntime,
-    agent: Agent,
-    role: Role,
-) -> Result<Greeting, AgentError> {
-    let image = build(runtime, agent, role).await?;
-    greet(runtime, &handshake_arguments(&image)).await
-}
-
-/// Runs the runtime with `arguments` and greets whatever answers.
-///
-/// Split from [`handshake`] only so that the failure paths can be reached from
-/// a test: what a container is started with is the difference between one that
-/// greets and one that never starts, and taking the arguments here is what
-/// lets a test ask for the second without the agent set having to contain a
-/// deliberately broken member.
-async fn greet(runtime: &ContainerRuntime, arguments: &[&str]) -> Result<Greeting, AgentError> {
-    let mut container = tokio::process::Command::new(runtime.path())
-        .args(arguments)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        // So that a dropped future does not leave a container attached to a
-        // parent that has stopped reading it.
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|source| AgentError::Runtime {
-            path: runtime.path().to_owned(),
-            source,
-        })?;
-
-    let (Some(to_agent), Some(from_agent), Some(complaints)) = (
-        container.stdin.take(),
-        container.stdout.take(),
-        container.stderr.take(),
-    ) else {
-        return Err(AgentError::NoChannel);
-    };
-
-    // Jointly, and that is load-bearing rather than tidy. Standard error is a
-    // pipe with a small kernel buffer, so an agent chatty enough to fill it
-    // blocks on the write and never reaches its own exit — and a container that
-    // never exits is one this function would wait on forever. Draining while
-    // the exchange happens is what stops a talkative agent from becoming a
-    // hang. The exchange finishing drops the transport, which closes the
-    // agent's standard input, which is what ends both of these in turn.
-    let (spoken, printed) = futures::future::join(
-        Client.builder().connect_with(
-            ByteStreams::new(to_agent.compat_write(), from_agent.compat()),
-            async |connection: ConnectionTo<AgentRole>| {
-                connection
-                    .send_request(InitializeRequest::new(ProtocolVersion::V1))
-                    .block_task()
-                    .await
-                    .map(Greeting::from)
-            },
-        ),
-        printed(complaints),
-    )
-    .await;
-
-    // Reached in both outcomes: the reaping that makes "nothing survives the
-    // call" true rather than merely intended.
-    let status = container.wait().await.map_err(AgentError::Exit)?;
-
-    match spoken {
-        Ok(greeting) => Ok(greeting),
-        // A container that failed on its own terms explains itself better than
-        // the protocol error its silence produced, so it wins when both exist.
-        Err(_) if !status.success() => Err(AgentError::Container {
-            status: status.to_string(),
-            message: printed,
-        }),
-        Err(protocol) => Err(AgentError::Protocol(protocol)),
-    }
-}
-
-/// Whatever a container printed, bounded and prefixed for a message.
-///
-/// Runs on every path rather than only on failure, because its other job is to
-/// keep the pipe empty; the result is discarded when there is nothing to
-/// explain.
-///
-/// Deliberately infallible: where this is read from, there is already a failure
-/// to report, and losing it in order to report a second one about reading
-/// standard error would be a straight downgrade.
-async fn printed(mut stderr: tokio::process::ChildStderr) -> String {
-    let mut kept: Vec<u8> = Vec::new();
-    let mut chunk = [0_u8; 4096];
-
-    // Reads to end-of-file even once it has stopped keeping anything. Stopping
-    // at the limit instead would leave the pipe to fill, and a container
-    // blocked writing to a pipe nobody drains is exactly the hang the joined
-    // drain above exists to prevent — the bound would have quietly reinstated
-    // it for anything that printed more than this.
-    while let Ok(read) = stderr.read(&mut chunk).await {
-        if read == 0 {
-            break;
-        }
-        let Some(room) = STDERR_LIMIT.checked_sub(kept.len()) else {
-            continue;
-        };
-        if let Some(head) = chunk.get(..room.min(read)) {
-            kept.extend_from_slice(head);
-        }
-    }
-
-    let said = String::from_utf8_lossy(&kept);
-    let trimmed = said.trim();
-    if trimmed.is_empty() {
-        String::new()
-    } else {
-        format!(" — {trimmed}")
-    }
 }
 
 /// Where a job's agent works inside its container.
@@ -1210,120 +957,6 @@ pub(crate) fn refused(error: &agent_client_protocol::Error) -> String {
         .map_or_else(|| error.message.clone(), str::to_owned)
 }
 
-/// Sets every option a kit spells, in order, and reads each one back.
-///
-/// The door of every turn, per `docs/decisions/0048-a-job-runs-on-a-kit.md`,
-/// and every turn rather than the first because a loaded session was measured
-/// to forget its options: without this, a job put back to work after the
-/// daemon died would run on whatever the agent defaults to, and nothing in any
-/// reply would say so.
-///
-/// `advertised` is what the session currently reports, which is where the
-/// value *before* each set comes from. Each reply carries the whole list again,
-/// so it is updated in place and is current when this returns. What comes back
-/// is what the session reported after each set, in the adapter's own spelling,
-/// for the job's record.
-///
-/// Skipped by mutation testing, and the reason is worth stating rather than
-/// assumed: every path through this needs a container answering the protocol,
-/// so it is covered only by the container test that settles every kit the
-/// domain can spell through it. What it decides that *can* be checked cheaply
-/// is pure and has its own test — the spelling in [`wired`], whether a set
-/// took in [`took`], the reading in [`current`], and a refusal's words in
-/// [`refused`].
-///
-/// # Errors
-///
-/// Fails with [`AgentError::Refused`] when the adapter will not take a value,
-/// and with [`AgentError::Ignored`] when it takes one and reports nothing
-/// changed. Both stop the turn before its first prompt.
-#[mutants::skip]
-async fn settle(
-    connection: &ConnectionTo<AgentRole>,
-    session_id: &SessionId,
-    advertised: &mut Vec<SessionConfigOption>,
-    kit: &Kit,
-) -> Result<BTreeMap<String, String>, AgentError> {
-    let mut reported = BTreeMap::new();
-    for (option, value) in wired(kit) {
-        let before = current(advertised, option);
-        let reply = connection
-            .send_request(SetSessionConfigOptionRequest::new(
-                session_id.clone(),
-                option,
-                value,
-            ))
-            .block_task()
-            .await
-            .map_err(|refusal| AgentError::Refused {
-                option: option.to_owned(),
-                value: value.to_owned(),
-                message: refused(&refusal),
-            })?;
-        *advertised = reply.config_options;
-        let after = current(advertised, option);
-        if !took(value, before.as_deref(), after.as_deref()) {
-            return Err(AgentError::Ignored {
-                option: option.to_owned(),
-                value: value.to_owned(),
-            });
-        }
-        if let Some(after) = after {
-            reported.insert(option.to_owned(), after);
-        }
-    }
-    Ok(reported)
-}
-
-/// The arguments that start a container able to reach a model.
-///
-/// Pure, so what a container is started with can be asserted without starting
-/// one — and this is the argument list that carries credentials, so being able
-/// to assert it cheaply is the point rather than a convenience.
-///
-/// Each variable is named but not valued here. `--env NAME` tells the runtime
-/// to forward that variable from this process, so the secret travels through an
-/// environment rather than through a command line, and never appears in the
-/// process table where any user on the machine can read it.
-///
-/// It takes the list rather than deciding it, so the names forwarded and the
-/// values set are the same list by construction. Deciding it twice would let
-/// the two drift apart, and a runtime told to forward a variable that is not
-/// set says nothing at all — leaving a job that cannot authenticate and no line
-/// anywhere explaining why.
-fn session_arguments(image: &Image, delivering: &[(String, Secret)]) -> Vec<String> {
-    let mut arguments = vec![
-        "run".to_owned(),
-        "--rm".to_owned(),
-        "--interactive".to_owned(),
-    ];
-    arguments.extend(carrying(image, delivering));
-    // After the image, which is what makes it the command rather than another
-    // flag. The image holds a container open by default; this path wants the
-    // container to be one agent and end with it.
-    arguments.push(AGENT_PROGRAM.to_owned());
-    arguments
-}
-
-/// What every container is given, whichever subcommand makes it.
-///
-/// The tail both argument lists end with, shared rather than assembled twice
-/// — the previous shape built one list and edited it into the other by
-/// removing a flag and splicing at an index, which the gate is right to call a
-/// panic waiting for somebody to reorder the head.
-fn carrying(image: &Image, delivering: &[(String, Secret)]) -> Vec<String> {
-    let mut arguments = Vec::new();
-    for (name, _) in delivering {
-        arguments.push("--env".to_owned());
-        arguments.push(name.clone());
-    }
-    // Deliberately no `--network none` here, unlike the handshake: reaching a
-    // model needs the network, and so does cloning. Which hosts it *ought* to
-    // reach is the egress allowlist still open in `docs/open-questions.md`.
-    arguments.push(image.as_argument().to_owned());
-    arguments
-}
-
 /// What an agent said in reply to one question.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Answer {
@@ -1348,42 +981,6 @@ pub struct Answer {
     /// actually ran, where the kit is what was asked for. Recorded on the job
     /// by whoever ran the turn; see `docs/decisions/0048-a-job-runs-on-a-kit.md`.
     pub reported: BTreeMap<String, String>,
-}
-
-/// Puts one question to an agent and returns what it says.
-///
-/// The one-shot shape of the contract in `docs/architecture.md` §1 — how the
-/// foreman thinks, rather than how a job works. The container is started,
-/// asked and destroyed.
-///
-/// **It starts a container per question, and
-/// `docs/decisions/0012-agents-run-in-containers.md` says the foreman's
-/// agent should run in one long-lived one.** That is not an oversight and not
-/// yet a violation, since nothing calls this yet; reusing a container means a
-/// connection outliving a single call, which is machinery this does not build.
-/// Tracked in `docs/open-questions.md`.
-///
-/// # Errors
-///
-/// Fails if the runtime cannot be started, if the container exits without
-/// speaking — a missing image, most often — or if the exchange does not
-/// complete. An agent that authenticates badly fails here as a protocol error
-/// or as a turn that never ends, which is why choosing the right variable to
-/// deliver its credential in is this adapter's problem and not an operator's.
-pub async fn ask(
-    runtime: &ContainerRuntime,
-    handout: &Handout,
-    tools: Option<&Tools>,
-    question: &str,
-) -> Result<Answer, AgentError> {
-    let delivering = environment(handout)?;
-    let image = build(runtime, handout.agent(), handout.role()).await?;
-    let container = spawn(
-        runtime,
-        &session_arguments(&image, &delivering),
-        &delivering,
-    )?;
-    converse(container, Opening::Fresh, tools, handout.kit(), question).await
 }
 
 /// Where an agent reaches the tools this instance serves, and what it presents.
@@ -1639,6 +1236,7 @@ pub const TUNNEL_PORT: u16 = 47_201;
 /// and therefore its agent's session — intact. Both were measured, and
 /// `docs/decisions/0015-a-job-survives-the-daemon-dying.md` records which one
 /// this system needs and why.
+#[cfg(test)]
 fn retained_arguments(
     name: &str,
     image: &Image,
@@ -1656,117 +1254,6 @@ fn retained_arguments(
     .arguments()
 }
 
-/// Everything a container is started with, decided elsewhere and handed
-/// over as plain data.
-///
-/// What a handout decides, rendered: the environment is already the list of
-/// variables the container is given, and the role is what decides the
-/// image — see `docs/decisions/0036-a-foremans-image-is-not-a-jobs.md`.
-#[derive(Debug, Clone)]
-pub struct Launch {
-    /// Which agent runs in it.
-    pub agent: Agent,
-    /// What it runs as.
-    pub role: Role,
-    /// Exactly the environment it is given, in order, and nothing inherited.
-    pub environment: Vec<(String, Secret)>,
-    /// The repository checked out before the agent speaks, for a job.
-    pub repository: Option<String>,
-    /// The platform whose tool makes the checkout, if a credential for one
-    /// is held.
-    pub platform: Option<Platform>,
-    /// What the agent runs on.
-    pub kit: Kit,
-}
-
-impl Launch {
-    /// What a handout decides, rendered.
-    ///
-    /// # Errors
-    ///
-    /// Fails as [`environment`] does.
-    pub fn of(handout: &Handout) -> Result<Self, AgentError> {
-        Ok(Self {
-            agent: handout.agent(),
-            role: handout.role(),
-            environment: environment(handout)?,
-            repository: handout.repository().map(str::to_owned),
-            platform: handout.platform(Platform::GitHub).map(|_| Platform::GitHub),
-            kit: handout.kit().clone(),
-        })
-    }
-}
-
-/// Starts a retained container for an agent and puts the first question to it.
-///
-/// The container survives this process, under `name`. Nothing removes it —
-/// retention is deliberately unanswered in `docs/open-questions.md` until
-/// there is a finished job to retire.
-///
-/// # Errors
-///
-/// Fails as [`ask`] does, and additionally if a container of this name already
-/// exists. That refusal comes from the runtime rather than from here, and is
-/// worth leaving to it: names are unique per daemon and enforced against
-/// stopped containers too, so a clash is a loud message naming the container in
-/// the way rather than a silent reuse of somebody else's.
-#[mutants::skip]
-pub async fn begin(
-    runtime: &ContainerRuntime,
-    launch: &Launch,
-    name: &str,
-    instance: InstanceId,
-    tools: Option<&Tools>,
-    question: &str,
-) -> Result<Answer, AgentError> {
-    let delivering = &launch.environment;
-    let image = build(runtime, launch.agent, launch.role).await?;
-    // Created rather than run, so there is a moment between existing and
-    // starting in which the thread can be put in place. `run` would have
-    // started it immediately and left nowhere to do that.
-    let created = tokio::process::Command::new(runtime.path())
-        .args(retained_arguments(
-            name,
-            &image,
-            launch.agent,
-            instance,
-            delivering,
-        ))
-        .envs(
-            delivering
-                .iter()
-                .map(|(named, value)| (named.clone(), value.expose().to_owned())),
-        )
-        .kill_on_drop(true)
-        .output()
-        .await
-        .map_err(|source| AgentError::Container {
-            status: "creating the container".to_owned(),
-            message: source.to_string(),
-        })?;
-    if !created.status.success() {
-        return Err(AgentError::Container {
-            status: created.status.to_string(),
-            message: String::from_utf8_lossy(&created.stderr).trim().to_owned(),
-        });
-    }
-
-    hold(runtime, name).await?;
-    // The workspace is filled before the agent is run, and inside the
-    // container it will run in: a coding agent reads a project's instructions
-    // when its session starts, so a checkout made during the first turn is
-    // one the agent's own machinery never loads — see
-    // `docs/decisions/0050-the-repository-is-checked-out-before-the-first-turn.md`.
-    // A foreman's handout carries no repository, and its image has no tool to
-    // clone with, so the step is a job's alone. With one platform, holding
-    // its credential is what decides which tool makes the clone.
-    if let Some(repository) = &launch.repository {
-        check_out(runtime, name, repository, launch.platform).await?;
-    }
-    let container = spawn(runtime, &agent_arguments(name), &[])?;
-    converse(container, Opening::Fresh, tools, &launch.kit, question).await
-}
-
 /// What makes sure a container is up, without attaching to it.
 ///
 /// Nothing attaches to the container itself any more — the agent is run inside
@@ -1774,6 +1261,7 @@ pub async fn begin(
 /// running is success on both runtimes, which is what lets beginning and
 /// resuming share it without asking first: a container held open because its
 /// tunnel answers is already up, and one that was stopped is not.
+#[cfg(test)]
 fn holding_arguments(name: &str) -> Vec<String> {
     Command::Start {
         name: name.to_owned(),
@@ -1788,6 +1276,7 @@ fn holding_arguments(name: &str) -> Vec<String> {
 /// container carries on. Nothing is forwarded with `--env`, because the
 /// variables were named when the container was created and everything run
 /// inside it inherits them.
+#[cfg(test)]
 fn agent_arguments(name: &str) -> Vec<String> {
     Command::Exec {
         name: name.to_owned(),
@@ -1809,6 +1298,7 @@ const REPOSITORY_VARIABLE: &str = "STAGEMAN_REPOSITORY";
 /// Pure, so what runs in the container can be asserted without one. The
 /// repository travels in a variable rather than in the script, so it needs no
 /// quoting and the script is the same text for every job.
+#[cfg(test)]
 fn checkout_arguments(name: &str, repository: &str, platform: Option<Platform>) -> Vec<String> {
     Command::Checkout {
         name: name.to_owned(),
@@ -1853,6 +1343,7 @@ const fn checkout_script(platform: Option<Platform>) -> &'static str {
 /// workspace that already holds something — with what the tool printed,
 /// before any model turn is spent.
 #[mutants::skip]
+#[cfg(test)]
 async fn check_out(
     runtime: &ContainerRuntime,
     name: &str,
@@ -1884,6 +1375,7 @@ async fn check_out(
 /// Fails if the runtime cannot be run, or refuses — a container that does not
 /// exist being the ordinary refusal.
 #[mutants::skip]
+#[cfg(test)]
 async fn hold(runtime: &ContainerRuntime, name: &str) -> Result<(), AgentError> {
     let started = tokio::process::Command::new(runtime.path())
         .args(holding_arguments(name))
@@ -1902,55 +1394,6 @@ async fn hold(runtime: &ContainerRuntime, name: &str) -> Result<(), AgentError> 
         status: started.status.to_string(),
         message: String::from_utf8_lossy(&started.stderr).trim().to_owned(),
     })
-}
-
-/// Restarts a stopped container and continues the session inside it.
-///
-/// Takes no handout, and that is a property of the runtime rather than an
-/// oversight: variables named at creation belong to the container's own
-/// configuration, so a restart has the credential it was given without being
-/// handed it again. Worth stating for the reason it is uncomfortable — the
-/// credential now sits in the runtime's records for as long as the container is
-/// kept, where `--rm` used to take it away with everything else.
-///
-/// It does take the kit, and the asymmetry is measured rather than untidy: a
-/// loaded session comes back with every option at the agent's default, so what
-/// the container keeps is the credential and the conversation, and what it
-/// forgets is what it was set to. The kit is the job's own record of that, and
-/// settling it again is what keeps a resumed job the same job — see
-/// `docs/decisions/0048-a-job-runs-on-a-kit.md`.
-///
-/// `question` is what the resumed agent is told. The measurement in
-/// `docs/decisions/0015-a-job-survives-the-daemon-dying.md` says it works out
-/// that it was interrupted unaided; telling it is nearly free, and the
-/// alternative is depending on an inference.
-///
-/// # Errors
-///
-/// Fails as [`ask`] does, and with [`AgentError::NothingToResume`] if the
-/// container holds no session — which is what a container stopped before its
-/// agent said anything looks like.
-pub async fn resume(
-    runtime: &ContainerRuntime,
-    name: &str,
-    kit: &Kit,
-    tools: Option<&Tools>,
-    question: &str,
-) -> Result<Answer, AgentError> {
-    // Made sure of rather than settled. This used to stop the container first,
-    // against a race in which a container still shutting down could not be
-    // attached to — and there is nothing to attach to any more, because the
-    // agent runs inside a container rather than being it. Stopping first would
-    // now be actively wrong: a container held open because its tunnel answers
-    // is one somebody may be looking at.
-    //
-    // Nothing is written into the container before it starts. The thread this
-    // turn belongs in travels on `tools`, which is the whole of why a container
-    // can be told a different one every turn without its environment changing —
-    // see `docs/decisions/0034-tools-are-served-not-shipped.md`.
-    hold(runtime, name).await?;
-    let container = spawn(runtime, &agent_arguments(name), &[])?;
-    converse(container, Opening::Resumed, tools, kit, question).await
 }
 
 /// Stops a container, leaving it and everything in it where it is.
@@ -2565,241 +2008,6 @@ pub async fn discard(runtime: &ContainerRuntime, name: &str) -> Result<(), Agent
     })
 }
 
-/// Starts the runtime with `arguments`, with its three streams piped.
-fn spawn(
-    runtime: &ContainerRuntime,
-    arguments: &[String],
-    delivering: &[(String, Secret)],
-) -> Result<tokio::process::Child, AgentError> {
-    tokio::process::Command::new(runtime.path())
-        .args(arguments)
-        // Set here rather than inherited. Nothing else is forwarded, because
-        // the runtime forwards only what `--env` names — which is what makes
-        // `docs/conventions.md` §3's "constructed, never inherited" true by
-        // mechanism instead of by care.
-        .envs(
-            delivering
-                .iter()
-                .map(|(name, secret)| (name, secret.expose())),
-        )
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|source| AgentError::Runtime {
-            path: runtime.path().to_owned(),
-            source,
-        })
-}
-
-/// Makes a session, or picks up the one this container already holds.
-///
-/// Skipped by mutation testing, and the reason is worth stating rather than
-/// assumed: every path through this needs a container answering the protocol,
-/// so it is covered only by tests the gate cannot run. What it decides that
-/// *can* be checked cheaply — the declaration a session carries — is
-/// `declaration`, which is pure and has its own test.
-///
-/// `None` means there was nothing to pick up, which is a container stopped
-/// before its agent said anything: sessions are written when something is
-/// said, not when one is created.
-///
-/// Answers with what the session advertises it can be set to as well as its
-/// identifier, because that list is where [`settle`] reads each value *before*
-/// setting it — and a loaded session advertises its options afresh, at their
-/// defaults, which is the measurement that makes settling a per-turn affair.
-/// An agent that advertises nothing omits the list, and an empty one is the
-/// true reading of that rather than a substitute.
-#[mutants::skip]
-async fn open_session(
-    connection: &ConnectionTo<AgentRole>,
-    opening: Opening,
-    tools: Option<&Tools>,
-) -> Result<Option<(SessionId, Vec<SessionConfigOption>)>, agent_client_protocol::Error> {
-    match opening {
-        Opening::Fresh => {
-            let mut request = NewSessionRequest::new(PathBuf::from(WORKSPACE));
-            if let Some(tools) = tools {
-                request.mcp_servers.push(declaration(tools));
-            }
-            let made = connection.send_request(request).block_task().await?;
-            Ok(Some((
-                made.session_id,
-                made.config_options.unwrap_or_default(),
-            )))
-        }
-        Opening::Resumed => {
-            let known = connection
-                .send_request(ListSessionsRequest::new())
-                .block_task()
-                .await?;
-            // The first, because a job's container holds one. More than one
-            // would mean something else made a session here, which is not a
-            // case this system produces.
-            let Some(found) = known.sessions.into_iter().next() else {
-                return Ok(None);
-            };
-            // Declared again here, and this is the half that makes the
-            // endpoint file unnecessary: a resumed container is told where to
-            // reach the instance *now*, so a port that changed between turns
-            // is simply named again rather than baked in when the container
-            // was created.
-            let mut request =
-                LoadSessionRequest::new(found.session_id.clone(), PathBuf::from(WORKSPACE));
-            if let Some(tools) = tools {
-                request.mcp_servers.push(declaration(tools));
-            }
-            let loaded = connection.send_request(request).block_task().await?;
-            Ok(Some((
-                found.session_id,
-                loaded.config_options.unwrap_or_default(),
-            )))
-        }
-    }
-}
-
-/// How one conversation ended, seen from inside the connection.
-///
-/// Carried out of the protocol closure as a value rather than mapped into its
-/// error, because a refused setting is this crate's failure and not the
-/// protocol's, and the closure's error type is the protocol's.
-enum Spoken {
-    /// The turn ran: why it ended, and what the session reported it was set to.
-    Answered {
-        stop_reason: StopReason,
-        reported: BTreeMap<String, String>,
-    },
-    /// There was no session to pick up.
-    Nothing,
-    /// A setting was refused or ignored, before the first prompt.
-    Unsettled(AgentError),
-}
-
-/// Speaks the protocol to a started container and puts one question to it.
-///
-/// The kit is settled between opening the session and the prompt, on every
-/// turn — see [`settle`] for why every turn.
-async fn converse(
-    mut container: tokio::process::Child,
-    opening: Opening,
-    tools: Option<&Tools>,
-    kit: &Kit,
-    question: &str,
-) -> Result<Answer, AgentError> {
-    let (Some(to_agent), Some(from_agent), Some(complaints)) = (
-        container.stdin.take(),
-        container.stdout.take(),
-        container.stderr.take(),
-    ) else {
-        return Err(AgentError::NoChannel);
-    };
-
-    let heard = Arc::new(Mutex::new(String::new()));
-    let collecting = Arc::clone(&heard);
-
-    let (spoken, printed_out) = futures::future::join(
-        Client
-            .builder()
-            .on_receive_notification(
-                async move |notification: SessionNotification, _cx| {
-                    if let SessionUpdate::AgentMessageChunk(chunk) = notification.update
-                        && let ContentBlock::Text(said) = chunk.content
-                    {
-                        collecting.lock().push_str(&said.text);
-                    }
-                    Ok(())
-                },
-                agent_client_protocol::on_receive_notification!(),
-            )
-            .on_receive_request(
-                async move |request: RequestPermissionRequest, responder, _cx| {
-                    // Approved, and not because permission is meaningless. The
-                    // boundary this system relies on is the container, chosen
-                    // in `docs/decisions/0012-agents-run-in-containers.md`
-                    // precisely so that it enforces isolation rather than the
-                    // agent respecting it — and
-                    // `docs/decisions/0010-acp-is-the-agent-contract.md`
-                    // measured that agents decide and report rather than
-                    // genuinely asking. Refusing here would forbid an agent
-                    // from doing what it was started to do, inside a boundary
-                    // built to make that safe.
-                    let allow = request
-                        .options
-                        .iter()
-                        .find(|option| {
-                            format!("{:?}", option.kind)
-                                .to_lowercase()
-                                .contains("allow")
-                        })
-                        .or_else(|| request.options.first())
-                        .map(|option| option.option_id.clone());
-                    responder.respond(RequestPermissionResponse::new(
-                        allow.map_or(RequestPermissionOutcome::Cancelled, |id| {
-                            RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(id))
-                        }),
-                    ))
-                },
-                agent_client_protocol::on_receive_request!(),
-            )
-            .connect_with(
-                ByteStreams::new(to_agent.compat_write(), from_agent.compat()),
-                async |connection: ConnectionTo<AgentRole>| {
-                    connection
-                        .send_request(InitializeRequest::new(ProtocolVersion::V1))
-                        .block_task()
-                        .await?;
-
-                    let Some((session_id, mut advertised)) =
-                        open_session(&connection, opening, tools).await?
-                    else {
-                        return Ok(Spoken::Nothing);
-                    };
-                    let reported =
-                        match settle(&connection, &session_id, &mut advertised, kit).await {
-                            Ok(reported) => reported,
-                            Err(unsettled) => return Ok(Spoken::Unsettled(unsettled)),
-                        };
-                    let reply = connection
-                        .send_request(PromptRequest::new(
-                            session_id,
-                            vec![ContentBlock::Text(TextContent::new(question.to_owned()))],
-                        ))
-                        .block_task()
-                        .await?;
-                    Ok(Spoken::Answered {
-                        stop_reason: reply.stop_reason,
-                        reported,
-                    })
-                },
-            ),
-        printed(complaints),
-    )
-    .await;
-
-    let status = container.wait().await.map_err(AgentError::Exit)?;
-
-    match spoken {
-        Ok(Spoken::Answered {
-            stop_reason,
-            reported,
-        }) => Ok(Answer {
-            text: heard.lock().clone(),
-            stop_reason,
-            reported,
-        }),
-        Ok(Spoken::Nothing) => Err(AgentError::NothingToResume),
-        Ok(Spoken::Unsettled(why)) => Err(why),
-        // A container that failed on its own terms explains itself better than
-        // the protocol error its silence produced, so it wins when both exist.
-        Err(_) if !status.success() => Err(AgentError::Container {
-            status: status.to_string(),
-            message: printed_out,
-        }),
-        Err(protocol) => Err(AgentError::Protocol(protocol)),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3233,11 +2441,12 @@ mod tests {
     ///
     /// The test `docs/decisions/0048-a-job-runs-on-a-kit.md` promises: a pin
     /// bump that removes or renames a value fails here rather than in a job
-    /// at three in the morning. Every kit is settled on one session through
-    /// the same function every turn uses, so what is checked is what runs.
-    /// It needs no credential and no network — a session opens without
-    /// either, measured — which is why it sits with the handshake tests
-    /// rather than with the ones that cost a credential.
+    /// at three in the morning. Every kit is settled on one session, said
+    /// and read exactly as a conversation says and reads it, so what is
+    /// checked is what runs. It needs no credential and no network — a
+    /// session opens without either, measured — which is why it sits with
+    /// the tests that only need a runtime rather than with the ones that
+    /// cost a credential.
     ///
     /// The last assertion is about the domain's shape rather than a spelling:
     /// Haiku has no effort in the domain because the adapter offers none, and
@@ -3245,73 +2454,227 @@ mod tests {
     #[tokio::test]
     #[ignore = "needs a container runtime and the network; run `just image-handshake`"]
     async fn every_spelling_is_one_the_pinned_adapter_accepts() {
+        use agent_client_protocol::schema::v1::{
+            NewSessionResponse, SetSessionConfigOptionResponse,
+        };
+
         let runtime = located_runtime();
         let image = build(&runtime, Agent::Claude, Role::Foreman)
             .await
             .expect("the image builds");
-        let arguments: Vec<String> = handshake_arguments(&image)
-            .iter()
-            .map(|argument| (*argument).to_owned())
-            .collect();
-        let mut container = spawn(&runtime, &arguments, &[]).expect("the runtime starts");
-        let (Some(to_agent), Some(from_agent), Some(complaints)) = (
-            container.stdin.take(),
-            container.stdout.take(),
-            container.stderr.take(),
-        ) else {
-            panic!("the streams are piped");
-        };
+        let mut adapter = Pump::start(&runtime, &alone(&image));
 
-        let (checked, _printed) = futures::future::join(
-            Client.builder().connect_with(
-                ByteStreams::new(to_agent.compat_write(), from_agent.compat()),
-                async |connection: ConnectionTo<AgentRole>| {
-                    connection
-                        .send_request(InitializeRequest::new(ProtocolVersion::V1))
-                        .block_task()
-                        .await?;
-                    let Some((session_id, mut advertised)) =
-                        open_session(&connection, Opening::Fresh, None).await?
-                    else {
-                        panic!("a fresh session always opens");
-                    };
+        adapter.say(&Said::Initialize { id: 1 }).await;
+        adapter.answer(1).await.expect("the handshake completes");
+        adapter.say(&Said::NewSession { id: 2, tools: None }).await;
+        let made: NewSessionResponse = serde_json::from_value(
+            adapter
+                .answer(2)
+                .await
+                .expect("a fresh session always opens"),
+        )
+        .expect("a session");
+        let session = made.session_id.0.to_string();
+        let mut advertised = made.config_options.unwrap_or_default();
 
-                    for kit in every_claude_kit() {
-                        if let Err(why) = settle(&connection, &session_id, &mut advertised, &kit).await {
-                            panic!("{kit:?} is not accepted by the pinned adapter: {why}");
+        let mut id = 3;
+        for kit in every_claude_kit() {
+            for (option, value) in wired(&kit) {
+                id += 1;
+                let before = current(&advertised, option);
+                adapter
+                    .say(&Said::SetOption {
+                        id,
+                        session: session.clone(),
+                        option: option.to_owned(),
+                        value: value.to_owned(),
+                    })
+                    .await;
+                let result = adapter.answer(id).await.unwrap_or_else(|why| {
+                    panic!(
+                        "{kit:?} is not accepted by the pinned adapter: {option} = {value}: {why}"
+                    )
+                });
+                let reply: SetSessionConfigOptionResponse =
+                    serde_json::from_value(result).expect("a setting's reply");
+                advertised = reply.config_options;
+                let after = current(&advertised, option);
+                assert!(
+                    took(value, before.as_deref(), after.as_deref()),
+                    "{kit:?}: {option} = {value} was accepted and reported unchanged"
+                );
+            }
+        }
+
+        // Back on haiku, which has no effort in the domain because the
+        // adapter offers none there: asked for one anyway, it refuses.
+        adapter
+            .say(&Said::SetOption {
+                id: id + 1,
+                session: session.clone(),
+                option: "model".to_owned(),
+                value: claude_model(ClaudeModel::Haiku).to_owned(),
+            })
+            .await;
+        adapter.answer(id + 1).await.expect("haiku settles");
+        adapter
+            .say(&Said::SetOption {
+                id: id + 2,
+                session,
+                option: "effort".to_owned(),
+                value: "default".to_owned(),
+            })
+            .await;
+        assert!(
+            adapter.answer(id + 2).await.is_err(),
+            "the adapter offers no effort on haiku, which is why the domain cannot ask for one",
+        );
+    }
+
+    /// The arguments that start a container just long enough to be spoken
+    /// to, for the tests here: no network and no workspace, since nothing
+    /// before the first prompt needs either, and nothing left behind.
+    ///
+    /// Named, because the image holds a container open by default since
+    /// `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`,
+    /// so a run that names no command starts a container that sleeps and
+    /// never speaks.
+    fn alone(image: &Image) -> Vec<String> {
+        vec![
+            "run".to_owned(),
+            "--rm".to_owned(),
+            "--interactive".to_owned(),
+            "--network".to_owned(),
+            "none".to_owned(),
+            image.as_argument().to_owned(),
+            AGENT_PROGRAM.to_owned(),
+        ]
+    }
+
+    /// An agent process the tests speak to line by line, the way the world
+    /// does: what is said goes down its standard input, what it says comes
+    /// back up its standard output, and its standard error is drained so a
+    /// talkative agent cannot block.
+    struct Pump {
+        child: tokio::process::Child,
+        input: tokio::process::ChildStdin,
+        output: tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
+        complaints: Option<tokio::task::JoinHandle<Vec<u8>>>,
+    }
+
+    impl Pump {
+        /// Starts the runtime with `arguments` and pipes its three streams.
+        fn start(runtime: &ContainerRuntime, arguments: &[String]) -> Self {
+            use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _};
+            let mut child = tokio::process::Command::new(runtime.path())
+                .args(arguments)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .expect("the runtime starts");
+            let input = child.stdin.take().expect("piped");
+            let output = tokio::io::BufReader::new(child.stdout.take().expect("piped")).lines();
+            let mut stderr = child.stderr.take().expect("piped");
+            let complaints = tokio::spawn(async move {
+                let mut kept = Vec::new();
+                drop(stderr.read_to_end(&mut kept).await);
+                kept
+            });
+            Self {
+                child,
+                input,
+                output,
+                complaints: Some(complaints),
+            }
+        }
+
+        /// Writes one line down the agent's standard input.
+        async fn write(&mut self, line: &str) {
+            let mut line = line.to_owned();
+            line.push('\n');
+            self.input
+                .write_all(line.as_bytes())
+                .await
+                .expect("the agent is still reading");
+        }
+
+        /// Says one thing.
+        async fn say(&mut self, said: &Said) {
+            self.write(&said.line()).await;
+        }
+
+        /// What the agent printed, once it has stopped, with its status.
+        async fn stopped(&mut self) -> (Option<i32>, String) {
+            let status = self.child.wait().await.expect("it can be waited on");
+            let complaints = match self.complaints.take() {
+                Some(draining) => draining.await.unwrap_or_default(),
+                None => Vec::new(),
+            };
+            (
+                status.code(),
+                String::from_utf8_lossy(&complaints).into_owned(),
+            )
+        }
+
+        /// The agent's answer to one request, skipping whatever it says
+        /// unasked on the way — a session, once made, is announced with
+        /// what it can be told — and failing on a request of the agent's
+        /// own, which nothing here answers.
+        async fn answer(&mut self, id: i64) -> Result<serde_json::Value, AgentError> {
+            loop {
+                match self.hear().await {
+                    Heard::Answered { id: whose, result } if whose == id.into() => {
+                        return Ok(result);
+                    }
+                    Heard::Refused { id: whose, error } if whose == id.into() => {
+                        return Err(AgentError::Protocol(error));
+                    }
+                    Heard::Notified { .. } | Heard::Answered { .. } | Heard::Refused { .. } => {}
+                    Heard::Asked { method, .. } => panic!("the agent asked for {method}"),
+                }
+            }
+        }
+
+        /// Hears the next thing the agent says that is the protocol, or
+        /// fails with what it printed if it stopped speaking first.
+        async fn hear(&mut self) -> Heard {
+            loop {
+                let Ok(Some(line)) = self.output.next_line().await else {
+                    let (status, complaints) = self.stopped().await;
+                    panic!("the agent stopped speaking: {status:?}{complaints}");
+                };
+                if let Some(heard) = Heard::parse(&line) {
+                    return heard;
+                }
+            }
+        }
+
+        /// Drives a whole conversation to its end, as the instance does.
+        async fn talk(
+            &mut self,
+            mut conversation: Conversation,
+            first: Vec<String>,
+        ) -> Result<Answer, AgentError> {
+            for line in first {
+                self.write(&line).await;
+            }
+            loop {
+                let Ok(Some(line)) = self.output.next_line().await else {
+                    let (status, complaints) = self.stopped().await;
+                    return Err(conversation.stopped(status, &complaints));
+                };
+                match conversation.heard(&line) {
+                    Exchange::Continue(lines) => {
+                        for line in lines {
+                            self.write(&line).await;
                         }
                     }
-
-                    settle(
-                        &connection,
-                        &session_id,
-                        &mut advertised,
-                        &Kit::Claude {
-                            model: ClaudeModel::Haiku,
-                        },
-                    )
-                    .await
-                    .expect("haiku settles");
-                    let effort_on_haiku = connection
-                        .send_request(SetSessionConfigOptionRequest::new(
-                            session_id.clone(),
-                            "effort",
-                            "default",
-                        ))
-                        .block_task()
-                        .await;
-                    assert!(
-                        effort_on_haiku.is_err(),
-                        "the adapter offers no effort on haiku, which is why the domain cannot ask for one",
-                    );
-                    Ok(())
-                },
-            ),
-            printed(complaints),
-        )
-        .await;
-        checked.expect("the exchange completes");
-        drop(container.wait().await);
+                    Exchange::Over(outcome) => return outcome,
+                }
+            }
+        }
     }
 
     /// An identifier standing in for one a runtime would have answered with.
@@ -3596,36 +2959,6 @@ mod tests {
         assert_eq!(present_arguments(&image).last(), Some(&BUILT.to_owned()));
     }
 
-    #[test]
-    fn a_handshake_asks_for_no_network_and_leaves_nothing_behind() {
-        let image = built();
-        let arguments = handshake_arguments(&image);
-        assert_eq!(arguments[0], "run");
-        assert!(arguments.contains(&"--rm"));
-        assert!(arguments.contains(&"--interactive"));
-        assert_eq!(arguments[3..5], ["--network", "none"]);
-    }
-
-    /// The image comes after every flag, and the agent after the image.
-    ///
-    /// Order rather than presence, because both mistakes are silent. A flag
-    /// after the image is not a flag, it is an argument to whatever runs
-    /// inside — and since the image holds a container open by default rather
-    /// than running the agent, a list ending at the image starts a container
-    /// that sleeps and never speaks.
-    #[test]
-    fn a_handshake_runs_the_agent_in_the_image_that_was_built() {
-        let image = built();
-        let arguments = handshake_arguments(&image);
-
-        assert_eq!(arguments.last(), Some(&AGENT_PROGRAM));
-        assert_eq!(
-            arguments.iter().rev().nth(1),
-            Some(&BUILT),
-            "everything before the command has to be behind the image",
-        );
-    }
-
     /// A build that worked is the image it was told to build.
     ///
     /// Nothing is read back from the build to learn that. The name was decided
@@ -3675,32 +3008,6 @@ mod tests {
         assert_eq!(runtime.path(), Path::new("/usr/local/bin/docker"));
     }
 
-    /// The check that a filesystem test cannot make.
-    ///
-    /// This used to be an integration test driving the whole binary against a
-    /// deliberately broken runtime. Discovery took away the ability to point
-    /// the binary anywhere, so the check moves to the mechanism it was always
-    /// really about: `verify` asks for a version because that reaches the
-    /// daemon, and a client installed with nothing behind it looks perfectly
-    /// healthy to anything that merely looks for the file.
-    #[tokio::test]
-    async fn a_runtime_that_runs_and_refuses_is_not_usable() {
-        let refusing = ["/usr/bin/false", "/bin/false"]
-            .into_iter()
-            .map(PathBuf::from)
-            .find(|candidate| candidate.exists())
-            .expect("a standard utility that always refuses");
-
-        let failure = ContainerRuntime::new(refusing).verify().await;
-
-        assert!(
-            matches!(failure, Err(AgentError::Unusable { .. })),
-            "{failure:?}"
-        );
-    }
-
-    /// Every candidate is absolute, which is the property that makes this not
-    /// a `PATH` search.
     #[test]
     fn nothing_is_looked_for_relative_to_wherever_this_started() {
         // Every platform's list, on whichever machine this runs, which is
@@ -3726,13 +3033,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn a_runtime_that_is_not_there_fails_as_a_runtime_rather_than_a_protocol() {
-        let runtime = ContainerRuntime::new(PathBuf::from("/nonexistent/container/runtime"));
-        let failure = handshake(&runtime, Agent::Claude, Role::Foreman).await;
-        assert!(matches!(failure, Err(AgentError::Runtime { .. })));
-    }
-
     /// The container runtime, found rather than configured.
     ///
     /// Looking it up here is not a breach of the rule this crate states: that
@@ -3755,24 +3055,33 @@ mod tests {
     /// appears nowhere and the total still reads as complete. Run it with
     /// `just image-handshake`.
     ///
-    /// It no longer needs an image somebody built first: [`handshake`] builds
-    /// one, which means this now covers the build as well as the exchange.
-    /// **Both roles**, because two images is the thing 0036 claims and one
-    /// greeting proves nothing about the other — and because a foreman's is
-    /// the one whose stage could be edited into uselessness without any test
-    /// of a job's noticing.
+    /// It builds the image it greets, so it covers the build as well as the
+    /// exchange. **Both roles**, because two images is the thing 0036 claims
+    /// and one greeting proves nothing about the other — and because a
+    /// foreman's is the one whose stage could be edited into uselessness
+    /// without any test of a job's noticing. What is said and heard is what
+    /// a conversation says and hears, rendered and read the same way.
     #[tokio::test]
     #[ignore = "needs a container runtime and the network; run `just image-handshake`"]
     async fn a_container_answers_the_protocol() {
+        use agent_client_protocol::schema::v1::InitializeResponse;
+
         let runtime = located_runtime();
 
         for role in [Role::Foreman, Role::Job] {
-            let greeting = handshake(&runtime, Agent::Claude, role)
+            let image = build(&runtime, Agent::Claude, role)
+                .await
+                .unwrap_or_else(|why| panic!("{role:?} builds: {why}"));
+            let mut adapter = Pump::start(&runtime, &alone(&image));
+            adapter.say(&Said::Initialize { id: 1 }).await;
+            let result = adapter
+                .answer(1)
                 .await
                 .unwrap_or_else(|why| panic!("{role:?} answers the handshake: {why}"));
-
+            let greeting: InitializeResponse =
+                serde_json::from_value(result).expect("the protocol's own greeting");
             assert_eq!(greeting.protocol_version, ProtocolVersion::V1);
-            let adapter = greeting.adapter.expect("the adapter names itself");
+            let adapter = greeting.agent_info.expect("the adapter names itself");
             assert!(!adapter.name.is_empty());
             assert!(!adapter.version.is_empty());
         }
@@ -3819,93 +3128,6 @@ mod tests {
                 if expected { "" } else { " not" },
             );
         }
-    }
-
-    /// A container that fills its error pipe must not become a hang.
-    ///
-    /// The pipe's kernel buffer is around sixty-four kilobytes and the bound on
-    /// what is *kept* is eight, so a container printing two hundred would block
-    /// on the write under either of the two mistakes this guards: draining
-    /// after the exchange instead of during it, or stopping the drain at the
-    /// bound. It reuses the agent's own image with the entry point overridden,
-    /// so it asks for nothing the tests above do not already build.
-    #[tokio::test]
-    #[ignore = "needs a container runtime and the network; run `just image-handshake`"]
-    async fn a_container_that_floods_its_error_pipe_does_not_hang() {
-        let runtime = located_runtime();
-        // A foreman's, because this overrides the entry point and so needs the
-        // smaller of the two rather than either in particular.
-        let flooding = build(&runtime, Agent::Claude, Role::Foreman)
-            .await
-            .expect("the image builds");
-
-        let failure = greet(
-            &runtime,
-            &[
-                "run",
-                "--rm",
-                "--interactive",
-                "--network",
-                "none",
-                "--entrypoint",
-                "sh",
-                flooding.as_argument(),
-                "-c",
-                "yes noise | head -c 200000 >&2; exit 3",
-            ],
-        )
-        .await;
-
-        let Err(AgentError::Container { status, message }) = failure else {
-            panic!("expected a container failure, got {failure:?}");
-        };
-        assert!(status.contains('3'), "exit status was {status}");
-        assert!(
-            message.len() < STDERR_LIMIT * 2,
-            "kept {} bytes of a flood",
-            message.len()
-        );
-    }
-
-    /// A container that dies before speaking must not read as an agent that
-    /// cannot speak.
-    ///
-    /// Both fail as silence on the connection, and the error an operator gets
-    /// is the only thing that distinguishes "the container did not start" from
-    /// "the adapter is broken".
-    ///
-    /// It used to be named for its commonest cause — an image nobody had built
-    /// — and `docs/decisions/0035-an-image-is-built-never-named.md` retired
-    /// that cause rather than this test, which is why the name changed and the
-    /// assertion did not. What is left is every other way a container fails to
-    /// start, and the classification matters just as much for those: the
-    /// runtime out of space, an entry point that exits, a daemon that stops
-    /// between the build and the run.
-    ///
-    /// It still asks for an image that does not exist, because that is simply
-    /// the cheapest container that reliably dies before speaking.
-    #[tokio::test]
-    #[ignore = "needs a container runtime; run `just image-handshake`"]
-    async fn a_container_that_never_starts_fails_as_a_container_not_a_protocol() {
-        let runtime = located_runtime();
-
-        let failure = greet(
-            &runtime,
-            &[
-                "run",
-                "--rm",
-                "--interactive",
-                "--network",
-                "none",
-                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            ],
-        )
-        .await;
-
-        assert!(
-            matches!(failure, Err(AgentError::Container { .. })),
-            "expected a container failure, got {failure:?}"
-        );
     }
 
     use stageman_core::{AgentConfig, Handout, Job, Project, ProjectId, State, Uuid};
@@ -4250,8 +3472,11 @@ mod tests {
         let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project)
             .expect("a watched project");
 
-        let arguments = session_arguments(
+        let arguments = retained_arguments(
+            "stageman-job-abc",
             &built(),
+            Agent::Claude,
+            an_instance(),
             &environment(&handout).expect("a handout with no reserved name"),
         );
         let line = arguments.join(" ");
@@ -4269,26 +3494,25 @@ mod tests {
         assert!(!line.contains("STAGEMAN_SLACK"), "{line}");
     }
 
+    /// A container an agent works in reaches the network, and is not the
+    /// agent: it holds itself open, and the agent is run inside it.
     #[test]
-    fn a_session_container_is_not_cut_off_from_the_network() {
+    fn a_retained_container_is_not_cut_off_from_the_network_and_is_not_the_agent() {
         let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
         let handout = Handout::for_foreman(&state, project).expect("a watched project");
 
-        let arguments = session_arguments(
+        let arguments = retained_arguments(
+            "stageman-job-abc",
             &built(),
+            Agent::Claude,
+            an_instance(),
             &environment(&handout).expect("a handout with no reserved name"),
         );
 
         assert!(!arguments.iter().any(|a| a == "none"), "{arguments:?}");
-        assert_eq!(
-            arguments.last().map(String::as_str),
-            Some(AGENT_PROGRAM),
-            "a one-shot container is the agent, so it has to be asked for",
-        );
-        assert_eq!(
-            arguments.iter().rev().nth(1).map(String::as_str),
-            Some(BUILT),
-            "and everything before the command is behind the image",
+        assert!(
+            !arguments.iter().any(|a| a == AGENT_PROGRAM),
+            "the image holds the container open; the agent is run inside it: {arguments:?}",
         );
     }
 
@@ -5025,16 +4249,65 @@ mod tests {
             (state, handout)
         }
 
+        /// A container for a foreman's handout, made and started the way
+        /// the instance makes and starts one, with the credential forwarded.
+        async fn made(runtime: &ContainerRuntime, name: &str, handout: &Handout) {
+            discard(runtime, name).await.expect("a clean slate");
+            let delivering = environment(handout).expect("a handout with no reserved name");
+            let image = build(runtime, Agent::Claude, Role::Foreman)
+                .await
+                .expect("the image builds");
+            let created = tokio::process::Command::new(runtime.path())
+                .args(retained_arguments(
+                    name,
+                    &image,
+                    Agent::Claude,
+                    an_instance(),
+                    &delivering,
+                ))
+                .envs(
+                    delivering
+                        .iter()
+                        .map(|(named, value)| (named.clone(), value.expose().to_owned())),
+                )
+                .output()
+                .await
+                .expect("the runtime runs");
+            assert!(
+                created.status.success(),
+                "{}",
+                String::from_utf8_lossy(&created.stderr)
+            );
+            hold(runtime, name).await.expect("it starts");
+        }
+
+        /// One conversation with the agent in a container that is up, driven
+        /// as the instance drives one.
+        async fn talk(
+            runtime: &ContainerRuntime,
+            name: &str,
+            opening: Opening,
+            kit: &Kit,
+            question: &str,
+        ) -> Result<Answer, AgentError> {
+            let (conversation, first) = Conversation::begin(opening, None, kit.clone(), question);
+            let mut agent = Pump::start(runtime, &agent_arguments(name));
+            agent.talk(conversation, first).await
+        }
+
         #[tokio::test]
         #[ignore = "needs a container runtime, a built image and a credential; run `just image-session`"]
         async fn an_agent_answers_a_question() {
             let runtime = located_runtime();
             let (_state, handout) = handout_of();
+            let name = "stageman-job-question-probe";
+            made(&runtime, name, &handout).await;
 
-            let answer = ask(
+            let answer = talk(
                 &runtime,
-                &handout,
-                None,
+                name,
+                Opening::Fresh,
+                handout.kit(),
                 "Reply with exactly one word, lowercase, no punctuation: pong",
             )
             .await
@@ -5046,6 +4319,12 @@ mod tests {
                 "said {:?}",
                 answer.text
             );
+            assert!(
+                answer.reported.contains_key("model"),
+                "what the session reported it was set to: {:?}",
+                answer.reported
+            );
+            discard(&runtime, name).await.expect("it is removable");
         }
 
         /// The measurement `docs/decisions/0015-a-job-survives-the-daemon-dying.md`
@@ -5058,14 +4337,13 @@ mod tests {
             let runtime = located_runtime();
             let (_state, handout) = handout_of();
             let name = "stageman-job-resume-probe";
-            discard(&runtime, name).await.expect("a clean slate");
+            made(&runtime, name, &handout).await;
 
-            let first = begin(
+            let first = talk(
                 &runtime,
-                &Launch::of(&handout).expect("a handout with no reserved name"),
                 name,
-                an_instance(),
-                None,
+                Opening::Fresh,
+                handout.kit(),
                 "Remember this word and reply with it, alone: marmalade",
             )
             .await
@@ -5076,16 +4354,18 @@ mod tests {
                 first.text
             );
 
-            // The container has stopped by now — the conversation ending closes
-            // its standard input, which is the same thing a hard kill does.
+            // Stopped, as a container is when nothing answers on its tunnel,
+            // and started again, as a container is when a reply arrives.
+            halt(&runtime, name).await.expect("it stops");
             let left = abandoned(&runtime).await.expect("the runtime answers");
             assert!(left.iter().any(|c| c == name), "it should still be there");
+            hold(&runtime, name).await.expect("it starts again");
 
-            let second = resume(
+            let second = talk(
                 &runtime,
                 name,
+                Opening::Resumed,
                 handout.kit(),
-                None,
                 "What was the word I asked you to remember? Reply with it alone.",
             )
             .await
@@ -5100,7 +4380,7 @@ mod tests {
         }
 
         /// The harder half, and the one the design actually has to survive:
-        /// cut off mid-turn rather than between turns. Dropping the future
+        /// cut off mid-turn rather than between turns. Dropping the process
         /// kills the client exactly as a hard kill of the daemon would.
         #[tokio::test]
         #[ignore = "needs a container runtime, a built image and a credential; run `just image-session`"]
@@ -5108,27 +4388,26 @@ mod tests {
             let runtime = located_runtime();
             let (_state, handout) = handout_of();
             let name = "stageman-job-midturn-probe";
-            discard(&runtime, name).await.expect("a clean slate");
+            made(&runtime, name, &handout).await;
 
             let cut_short = tokio::time::timeout(
                 std::time::Duration::from_secs(6),
-                begin(
+                talk(
                     &runtime,
-                    &Launch::of(&handout).expect("a handout with no reserved name"),
                     name,
-                    an_instance(),
-                    None,
+                    Opening::Fresh,
+                    handout.kit(),
                     "Count from 1 to 40, one number per line, pausing two seconds between each.",
                 ),
             )
             .await;
             assert!(cut_short.is_err(), "it should not have finished in time");
 
-            let picked_up = resume(
+            let picked_up = talk(
                 &runtime,
                 name,
+                Opening::Resumed,
                 handout.kit(),
-                None,
                 "You were interrupted. In one short line, what were you doing?",
             )
             .await
