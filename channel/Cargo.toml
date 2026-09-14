@@ -1,0 +1,30 @@
+# The contract every channel is spoken on, and the adapters that implement
+# it: what is said to a platform and what its answers mean, as pure functions
+# the instance renders and reads. Beside `stageman-agent` for the reason that
+# crate exists — reaching a platform needs code, and code that knows one
+# platform's shape belongs in one place, on that platform's release cadence
+# rather than this project's. See
+# `docs/decisions/0058-a-channels-adapter-is-a-crate-beside-the-agents.md`.
+#
+# May name the domain and nothing that performs an effect: no async runtime,
+# nothing that opens a socket. What it renders is carried by the world, and
+# what it reads was carried back.
+
+[package]
+name = "stageman-channel"
+description = "What stageman says on a channel and what the channel says back, as pure functions. Internal to the workspace."
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.151"
+stageman-core.workspace = true
+thiserror = "2.0.20"
+
+[lints]
+workspace = true

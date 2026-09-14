@@ -89,6 +89,7 @@ pub fn of(running: &Running) -> Value {
             "tunnels": value(&running.tunnels.iter().collect::<Vec<_>>()),
             "routing": value(&running.routing.iter().collect::<Vec<_>>()),
             "probes": value(&running.probes.iter().collect::<Vec<_>>()),
+            "sent": value(&running.sent.iter().collect::<Vec<_>>()),
             "deferred": value(&running.deferred),
             "timers": value(&running.timers),
             "asked": value(&running.asked.iter().collect::<Vec<_>>()),

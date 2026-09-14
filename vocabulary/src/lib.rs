@@ -583,6 +583,10 @@ pub enum Effect<A: App> {
         headers: BTreeMap<String, String>,
         /// The body, if it has one.
         body: Option<Bytes>,
+        /// How long the whole exchange is given before it is taken to have
+        /// failed. The deciding half's to set, because how long an answer
+        /// is worth waiting for is a question about what is being asked.
+        within: Duration,
     },
     /// Open a socket to an address and keep it open: every text frame it
     /// receives is an [`Event::Frame`], every [`Effect::Transmit`] is a
@@ -713,12 +717,14 @@ impl<A: App> Clone for Effect<A> {
                 url,
                 headers,
                 body,
+                within,
             } => Self::Request {
                 id: *id,
                 method: method.clone(),
                 url: url.clone(),
                 headers: headers.clone(),
                 body: body.clone(),
+                within: *within,
             },
             Self::Connect { id, url } => Self::Connect {
                 id: *id,
@@ -1173,6 +1179,7 @@ mod tests {
                 url: "https://example.test/api/say".to_owned(),
                 headers: [("authorization".to_owned(), "Bearer x".to_owned())].into(),
                 body: Some(Bytes::new(b"{\"text\":\"hi\"}".to_vec())),
+                within: std::time::Duration::from_secs(30),
             },
             Effect::Connect {
                 id: EffectId(8),

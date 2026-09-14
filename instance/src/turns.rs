@@ -36,7 +36,7 @@ use stageman_core::{
 };
 use stageman_vocabulary::{Effect as Generic, EffectId, Ended, Finished};
 
-use crate::vocabulary::{AppEffect, Speaker};
+use crate::vocabulary::Speaker;
 use crate::{Asked, Effect, Running, complaint};
 
 /// Whether a turn begins a session or continues the one its container
@@ -738,11 +738,7 @@ impl Running {
         if turn.notify
             && let Some((speaking, thread)) = speaking_for(&self.state, job)
         {
-            self.defer(AppEffect::Say {
-                speaking: speaking.into(),
-                thread,
-                text: stageman_foreman::attention_notice().to_owned(),
-            });
+            self.say(&speaking, &thread, stageman_foreman::attention_notice());
         }
     }
 

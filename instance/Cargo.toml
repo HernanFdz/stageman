@@ -30,6 +30,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 # instance reads and writes it itself since 0056.
 serde_json = "1.0.151"
 stageman-agent.workspace = true
+stageman-channel.workspace = true
 stageman-core.workspace = true
 stageman-foreman.workspace = true
 stageman-job.workspace = true

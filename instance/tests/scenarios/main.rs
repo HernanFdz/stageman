@@ -12,6 +12,7 @@
 )]
 
 mod booting;
+mod channel;
 mod dashboard;
 mod foreman;
 mod replies;

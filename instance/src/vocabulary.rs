@@ -11,12 +11,13 @@
 //! `docs/decisions/0056-the-instance-decides-and-the-world-performs.md` and
 //! `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`.
 //!
-//! Every family here is a meaning rather than a mechanism — say something,
-//! listen — and each moves out of this hole into the generic vocabulary as
-//! the instance starts speaking the mechanism instead. A turn already has,
-//! and so has the probe: the first is the commands and the process in
-//! `crate::turns`, and the second is a port asked of the runtime and read
-//! once, in `crate::tunnel`.
+//! Every family here is a meaning rather than a mechanism — listen, hear —
+//! and each moves out of this hole into the generic vocabulary as the
+//! instance starts speaking the mechanism instead. A turn already has, and
+//! so have the probe and speaking on a channel: the turn is the commands
+//! and the process in `crate::turns`, the probe is a port asked of the
+//! runtime and read once in `crate::tunnel`, and a message is a request
+//! made and read in `crate::channel`.
 
 use serde::{Deserialize, Serialize};
 use stageman_core::{Agent, Channel, InstanceId, JobId, ProjectId, Speaking, Thread};
@@ -146,21 +147,6 @@ pub enum AppEvent {
         /// What was heard.
         message: Message,
     },
-    /// Answers [`AppEffect::OpenThread`]: where a job's conversation
-    /// happens, or why it could not be opened.
-    ThreadOpened {
-        /// Whose thread.
-        job: JobId,
-        /// The thread, or why not.
-        outcome: Result<Thread, String>,
-    },
-    /// Answers [`AppEffect::Post`]: whether the platform took the message.
-    Posted {
-        /// Which call on the tools endpoint was waiting on it.
-        request: stageman_vocabulary::RequestId,
-        /// Whether it was said, or why not.
-        outcome: Result<(), String>,
-    },
     /// A person asked something of the dashboard. Answered by
     /// [`AppEffect::Respond`], in this step or a later one.
     Request {
@@ -176,8 +162,6 @@ impl Named for AppEvent {
         match self {
             Self::Presenting { .. } => "Presenting",
             Self::Heard { .. } => "Heard",
-            Self::ThreadOpened { .. } => "ThreadOpened",
-            Self::Posted { .. } => "Posted",
             Self::Request { .. } => "Request",
         }
     }
@@ -189,47 +173,12 @@ impl Named for AppEvent {
 /// unanswered effect's failure is the world's to log.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AppEffect {
-    /// Post on a channel, in a thread, on the instance's own behalf.
-    /// Unanswered: this is a notice about an outcome, and the outcome does
-    /// not change because the notice of it did not arrive.
-    Say {
-        /// The channel and the credential that posts on it.
-        speaking: Posting,
-        /// Where in it.
-        thread: Thread,
-        /// What.
-        text: String,
-    },
     /// Answer a person's request. Unanswered.
     Respond {
         /// Which request.
         id: RequestId,
         /// The answer, typed for the screen that asked.
         response: crate::requests::Response,
-    },
-    /// Open the thread a job's conversation happens in, by posting its
-    /// announcement at the root of the channel. Answered by
-    /// [`AppEvent::ThreadOpened`].
-    OpenThread {
-        /// Whose thread.
-        job: JobId,
-        /// The channel and the credential that posts on it.
-        speaking: Posting,
-        /// What the thread hangs from.
-        announcement: String,
-    },
-    /// Post on a channel on an agent's behalf. Answered by
-    /// [`AppEvent::Posted`], because the agent is told whether it was heard.
-    Post {
-        /// Which call on the tools endpoint is waiting on it, as the world
-        /// holds it open.
-        request: stageman_vocabulary::RequestId,
-        /// The channel and the credential that posts on it.
-        speaking: Posting,
-        /// Where in it.
-        thread: Thread,
-        /// What.
-        text: String,
     },
     /// Listen on a project's channel for what people say. Unanswered: what
     /// is heard arrives as events of its own.
@@ -246,10 +195,7 @@ pub enum AppEffect {
 impl Named for AppEffect {
     fn kind(&self) -> &'static str {
         match self {
-            Self::Say { .. } => "Say",
             Self::Respond { .. } => "Respond",
-            Self::OpenThread { .. } => "OpenThread",
-            Self::Post { .. } => "Post",
             Self::Listen { .. } => "Listen",
         }
     }
@@ -258,18 +204,13 @@ impl Named for AppEffect {
 #[cfg(test)]
 mod tests {
     use super::{AppEffect, AppEvent, Posting, RequestId};
-    use stageman_core::{Channel, JobId, Thread, Uuid};
+    use stageman_core::{Channel, Uuid};
     use stageman_vocabulary::Named;
 
     /// Every event and effect of this application's names its kind, which
     /// is the one thing the world may say about one in a log line.
     #[test]
     fn every_kind_is_named() {
-        let job = JobId::from_uuid(Uuid::from_u128(1));
-        let thread = Thread {
-            channel: Channel::Slack,
-            id: "1788000000.000001".to_owned(),
-        };
         let posting = Posting {
             address: "C0123456789".to_owned(),
             credential: "xoxb-not-a-real-token".to_owned(),
@@ -287,45 +228,18 @@ mod tests {
                     from_us: false,
                 },
             },
-            AppEvent::ThreadOpened {
-                job,
-                outcome: Ok(thread.clone()),
-            },
-            AppEvent::Posted {
-                request: stageman_vocabulary::RequestId(1),
-                outcome: Ok(()),
-            },
             AppEvent::Request {
                 id: RequestId(1),
                 request: crate::requests::Request::Instance,
             },
         ];
         let kinds: Vec<&str> = events.iter().map(Named::kind).collect();
-        assert_eq!(
-            kinds,
-            ["Presenting", "Heard", "ThreadOpened", "Posted", "Request"]
-        );
+        assert_eq!(kinds, ["Presenting", "Heard", "Request"]);
 
         let effects = [
-            AppEffect::Say {
-                speaking: posting.clone(),
-                thread: thread.clone(),
-                text: "said".to_owned(),
-            },
             AppEffect::Respond {
                 id: RequestId(1),
                 response: crate::requests::Response::Agents(Vec::new()),
-            },
-            AppEffect::OpenThread {
-                job,
-                speaking: posting.clone(),
-                announcement: "a job".to_owned(),
-            },
-            AppEffect::Post {
-                request: stageman_vocabulary::RequestId(1),
-                speaking: posting.clone(),
-                thread,
-                text: "said".to_owned(),
             },
             AppEffect::Listen {
                 project: stageman_core::ProjectId::from_uuid(Uuid::from_u128(2)),
@@ -334,7 +248,7 @@ mod tests {
             },
         ];
         let kinds: Vec<&str> = effects.iter().map(Named::kind).collect();
-        assert_eq!(kinds, ["Say", "Respond", "OpenThread", "Post", "Listen"]);
+        assert_eq!(kinds, ["Respond", "Listen"]);
     }
 
     /// This application's own events and effects format no more than the

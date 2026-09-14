@@ -56,7 +56,7 @@ default: check
 # completely clean.
 check_matrix := '''
 host
---target wasm32-unknown-unknown --no-default-features --features web --exclude stageman-core --exclude stageman-agent --exclude stageman-foreman --exclude stageman-job --exclude stageman-instance --exclude stageman-world
+--target wasm32-unknown-unknown --no-default-features --features web --exclude stageman-core --exclude stageman-agent --exclude stageman-channel --exclude stageman-foreman --exclude stageman-job --exclude stageman-instance --exclude stageman-world
 '''
 
 # --------------------------------------------------------------------- check

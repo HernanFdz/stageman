@@ -2,23 +2,24 @@
 //! how whoever needs an answer waits for it.
 //!
 //! The loop, the channel and the generic mechanisms are the world crate's.
-//! What is here is what only stageman knows how to perform — a channel's
-//! posting and listening — and the one thing the generic world cannot do
-//! for it: match an answer to whoever asked. A server function sends an
-//! event carrying an identifier and waits for the effect that carries it
-//! back, and the map below is where it waits. See
+//! What is here is what only stageman knows how to perform — listening on
+//! a channel, until that moves too — and the one thing the generic world
+//! cannot do for it: match an answer to whoever asked. A server function
+//! sends an event carrying an identifier and waits for the effect that
+//! carries it back, and the map below is where it waits. See
 //! `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`.
 //!
-//! Everything here runs on a task of its own: a post waits on the network,
-//! and `docs/conventions.md` §3 keeps that off the loop that answers the
-//! dashboard. The disk, the agent's process and the probe of a job's tunnel
-//! are the world crate's; nothing here names a container runtime any more.
+//! The listener runs on a task of its own, and `docs/conventions.md` §3
+//! keeps it off the loop that answers the dashboard. The disk, the agent's
+//! process, the probe of a job's tunnel and every message posted are the
+//! world crate's; nothing here names a container runtime or a platform's
+//! endpoint any more.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use stageman_core::{Channel, Secret, Speaking};
+use stageman_core::Secret;
 use stageman_instance::{AppEffect, AppEvent, Event, Request, RequestId, Response, Stageman};
 use stageman_world::{Perform, World};
 
@@ -120,21 +121,6 @@ impl Performer {
     pub fn new(asking: Arc<Asking>) -> Self {
         Self(Arc::new(Inner { asking }))
     }
-
-    /// Performs an effect on a task of its own.
-    ///
-    /// Skipped by mutation testing, like the performer it serves: what it
-    /// does is spawn, and what the task does reaches a channel over the
-    /// network.
-    #[mutants::skip]
-    fn spawn_plain<F, Fut>(&self, effect: F)
-    where
-        F: FnOnce(Arc<Inner>) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = ()> + Send + 'static,
-    {
-        let inner = Arc::clone(&self.0);
-        drop(tokio::spawn(effect(inner)));
-    }
 }
 
 impl Perform<Stageman> for Performer {
@@ -146,39 +132,6 @@ impl Perform<Stageman> for Performer {
     #[mutants::skip]
     async fn perform(&self, effect: AppEffect) {
         match effect {
-            AppEffect::Say {
-                speaking,
-                thread,
-                text,
-            } => self.spawn_plain(move |_| async move {
-                let speaking: Speaking = speaking.into();
-                if let Err(why) = crate::channel::say_in(&speaking, &thread, &text).await {
-                    tracing::warn!(%why, "the thread could not be spoken to");
-                }
-            }),
-            AppEffect::OpenThread {
-                job,
-                speaking,
-                announcement,
-            } => self.spawn_plain(move |inner| async move {
-                let speaking: Speaking = speaking.into();
-                let outcome = crate::channel::open_thread(&speaking, Channel::Slack, &announcement)
-                    .await
-                    .map_err(|why| why.to_string());
-                inner.asking.send(AppEvent::ThreadOpened { job, outcome });
-            }),
-            AppEffect::Post {
-                request,
-                speaking,
-                thread,
-                text,
-            } => self.spawn_plain(move |inner| async move {
-                let speaking: Speaking = speaking.into();
-                let outcome = crate::channel::say_in(&speaking, &thread, &text)
-                    .await
-                    .map_err(|why| why.to_string());
-                inner.asking.send(AppEvent::Posted { request, outcome });
-            }),
             AppEffect::Listen {
                 project,
                 opening,

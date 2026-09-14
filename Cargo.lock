@@ -3843,6 +3843,7 @@ dependencies = [
  "serde",
  "serde_json",
  "stageman-agent",
+ "stageman-channel",
  "stageman-core",
  "stageman-foreman",
  "stageman-instance",
@@ -3872,6 +3873,16 @@ dependencies = [
  "stageman-core",
  "thiserror 2.0.20",
  "tokio",
+]
+
+[[package]]
+name = "stageman-channel"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "stageman-core",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -3908,6 +3919,7 @@ dependencies = [
  "serde",
  "serde_json",
  "stageman-agent",
+ "stageman-channel",
  "stageman-core",
  "stageman-foreman",
  "stageman-job",

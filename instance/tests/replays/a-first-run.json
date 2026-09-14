@@ -280,6 +280,7 @@
             "tunnels": [],
             "routing": [],
             "probes": [],
+            "sent": [],
             "deferred": [
               [
                 9,

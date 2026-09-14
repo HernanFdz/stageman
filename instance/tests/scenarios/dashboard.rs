@@ -509,7 +509,7 @@ fn a_job_started_by_hand_on_a_bound_project_opens_its_thread_first() {
         panic!("the project's screen");
     };
     assert_eq!(shown.jobs.len(), 1);
-    assert!(first(&sim, "-> OpenThread") < sim.first_turn().expect("a turn"));
+    assert!(first(&sim, "-> Request") < sim.first_turn().expect("a turn"));
     assert_eq!(sim.posts().len(), 1);
     let started = JobId::from_uuid(Uuid::parse_str(&shown.jobs[0].id).expect("an identifier"));
     assert!(

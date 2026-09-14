@@ -20,8 +20,8 @@ use crate::Running;
 use crate::foreman::kits_offered;
 use stageman_vocabulary::{Answer, Arrival, Bytes, RequestId};
 
-use crate::vocabulary::{AppEffect, Speaker, Warranted};
-use crate::{Called, Effect, Emit as _};
+use crate::vocabulary::{Speaker, Warranted};
+use crate::{Called, Effect};
 
 /// The protocol version answered when a caller names none.
 const PROTOCOL: &str = "2025-06-18";
@@ -685,7 +685,7 @@ impl Running {
     /// Fails, before anything is posted, when there is nothing to say or
     /// nowhere to say it.
     fn saying(
-        &self,
+        &mut self,
         request: RequestId,
         warranted: &Warranted,
         message: &str,
@@ -712,12 +712,7 @@ impl Running {
                 "no channel is bound to this project, so there is nobody to say this to".to_owned(),
             );
         };
-        effects.emit(AppEffect::Post {
-            request,
-            speaking: speaking.into(),
-            thread,
-            text: message.to_owned(),
-        });
+        self.post_for(request, &speaking, &thread, message, effects);
         Ok(())
     }
 

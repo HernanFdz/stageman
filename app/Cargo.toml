@@ -51,6 +51,7 @@ server = [
     "dep:tokio-tungstenite",
     "dep:serde_json",
     "dep:stageman-agent",
+    "dep:stageman-channel",
     "dep:stageman-core",
     "dep:stageman-job",
     "dep:stageman-foreman",
@@ -159,6 +160,10 @@ reqwest = { version = "0.12.28", default-features = false, features = [
 ], optional = true }
 serde_json = { version = "1.0.151", optional = true }
 stageman-agent = { workspace = true, optional = true }
+# For as long as the listener asks a platform anything from here, which is
+# until it moves into the instance: what an answer means is the channel
+# crate's.
+stageman-channel = { workspace = true, optional = true }
 stageman-core = { workspace = true, optional = true }
 stageman-job = { workspace = true, optional = true }
 stageman-foreman = { workspace = true, optional = true }

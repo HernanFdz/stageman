@@ -526,7 +526,10 @@ justify is usually obsolete.
   the world only carries them. If a change to that agent's interface would
   touch **core** or the instance, the abstraction is in the wrong place — the
   whole reason the crate boundary is there is that the agent is on somebody
-  else's release cadence.
+  else's release cadence. The same holds for a channel, for the same reason:
+  what is sent to a platform and what its answers mean are the **channel**
+  crate's, per
+  `docs/decisions/0058-a-channels-adapter-is-a-crate-beside-the-agents.md`.
 - **Packages carry a prefix; directories do not.** The directories are named
   for the concepts in `docs/architecture.md` §1, and the packages inside them
   are `stageman-core`, `stageman-foreman` and `stageman-job`, with the app

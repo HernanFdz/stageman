@@ -24,6 +24,7 @@
 //! written at all, and the address is announced only once it has landed.
 
 mod boot;
+mod channel;
 mod file;
 mod foreman;
 mod jobs;
@@ -459,6 +460,9 @@ pub struct Running {
     /// Tunnels being asked whether anything is behind them, by the
     /// identifier the answer carries: whose each probe is.
     probes: BTreeMap<EffectId, JobId>,
+    /// Requests made to a channel, by the identifier the answer carries:
+    /// what each was sent for.
+    sent: BTreeMap<EffectId, channel::Sent>,
     /// Effects waiting on a write, by the write they wait on, in order.
     deferred: VecDeque<(EffectId, Vec<Effect>)>,
     /// The wakes asked for that have not gone off, each one the settling
@@ -532,6 +536,7 @@ impl Running {
             tunnels: BTreeMap::new(),
             routing: BTreeMap::new(),
             probes: BTreeMap::new(),
+            sent: BTreeMap::new(),
             deferred: VecDeque::new(),
             timers: BTreeSet::new(),
             // Written once on waking, before anything can depend on this
@@ -825,9 +830,9 @@ impl Running {
             Event::Line { id, line } => self.line(id, &line, &mut effects),
             Event::Ended { id, ended } => self.process_ended(id, &ended, &mut effects),
             Event::Probed { id, probed } => self.probed(id, probed, &mut effects),
+            Event::Responded { id, responded } => self.responded(id, &responded),
             Event::Read { .. }
             | Event::Bound { .. }
-            | Event::Responded { .. }
             | Event::Frame { .. }
             | Event::Disconnected { .. } => {
                 tracing::warn!(
@@ -851,8 +856,6 @@ impl Running {
                 tracing::debug!("told again where the presentation server is; ignored");
             }
             AppEvent::Heard { channel, message } => self.heard(channel, &message, effects),
-            AppEvent::ThreadOpened { job, outcome } => self.thread_opened(job, outcome),
-            AppEvent::Posted { request, outcome } => self.posted(request, outcome),
             AppEvent::Request { id, request } => self.requested(id, request, effects),
         }
     }
@@ -934,26 +937,32 @@ impl Running {
 
     /// What becomes of effects that waited on a write that never landed.
     ///
-    /// Notices are simply not said. A command the runtime was to be given is
-    /// not given, and forgotten as asked, so its answer is not waited for. A
-    /// turn whose first step that was is not started, and the job it was for
-    /// is recorded as failed for that reason: the alternative is a job that
-    /// says working with nothing running in it, which a reply could never
-    /// reach. The record is a change of its own, so the next write carries
-    /// it — and if that one lands, the job can be given something again.
+    /// A command the runtime was to be given is not given, and forgotten as
+    /// asked, so its answer is not waited for. A turn whose first step that
+    /// was is not started, and the job it was for is recorded as failed for
+    /// that reason: the alternative is a job that says working with nothing
+    /// running in it, which a reply could never reach. The record is a
+    /// change of its own, so the next write carries it — and if that one
+    /// lands, the job can be given something again. A request to a channel
+    /// is not made, and whatever waited on its answer hears that instead:
+    /// a notice is simply not said, and a job whose thread was never opened
+    /// is failed the same way a turn never started is.
     fn dropped(&mut self, effects: Vec<Effect>) {
         tracing::warn!(
             dropped = effects.len(),
             "what waited on the write is dropped"
         );
         for effect in effects {
-            let Effect::Run { id, .. } = effect else {
-                continue;
-            };
-            if let Some(Asked::Present { speaker } | Asked::Started { speaker }) =
-                self.asked.remove(&id)
-            {
-                self.abandoned(speaker);
+            match effect {
+                Effect::Run { id, .. } => {
+                    if let Some(Asked::Present { speaker } | Asked::Started { speaker }) =
+                        self.asked.remove(&id)
+                    {
+                        self.abandoned(speaker);
+                    }
+                }
+                Effect::Request { id, .. } => self.unsent(id),
+                _ => {}
             }
         }
     }

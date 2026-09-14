@@ -18,7 +18,7 @@ use stageman_foreman::Starting;
 use crate::Effect;
 use crate::Running;
 use crate::turns::{Run, Turn};
-use crate::vocabulary::{AppEffect, Message, Speaker};
+use crate::vocabulary::{Message, Speaker};
 use crate::{Asked, Command};
 
 /// Every project whose foreman was working when this process last stopped.
@@ -317,11 +317,7 @@ impl Running {
         else {
             return;
         };
-        self.defer(AppEffect::Say {
-            speaking: speaking.into(),
-            thread: thread.clone(),
-            text: text.to_owned(),
-        });
+        self.say(&speaking, thread, text);
     }
 }
 

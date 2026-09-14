@@ -186,7 +186,7 @@ pub struct Simulation {
     talking: BTreeMap<EffectId, usize>,
     /// How many sessions have been made, so each is named apart.
     sessions_made: u32,
-    /// Why the next posts on an agent's behalf fail, front first.
+    /// Why the platform refuses the next posts, front first.
     post_failures: VecDeque<String>,
     /// What each request was answered with, by identifier.
     tool_answers: BTreeMap<Asked, (u16, Option<serde_json::Value>)>,
@@ -564,7 +564,8 @@ impl Simulation {
         self.write_failures.push_back(why.to_owned());
     }
 
-    /// Scripts the next post on an agent's behalf to fail.
+    /// Scripts the next post to be refused by the platform, with that
+    /// reason — as the platform refuses, which is with a successful status.
     pub fn next_post_fails(&mut self, why: &str) {
         self.post_failures.push_back(why.to_owned());
     }
@@ -852,12 +853,7 @@ impl Simulation {
                     | Event::Responded { .. }
                     | Event::Frame { .. }
                     | Event::Disconnected { .. }
-                    | Event::App(
-                        AppEvent::Presenting { .. }
-                            | AppEvent::ThreadOpened { .. }
-                            | AppEvent::Posted { .. }
-                            | AppEvent::Request { .. }
-                    )
+                    | Event::App(AppEvent::Presenting { .. } | AppEvent::Request { .. })
             )
         });
         self.landing.clear();
@@ -1490,37 +1486,8 @@ impl Simulation {
             return;
         };
         match effect {
-            AppEffect::Say { thread, text, .. } => self.posts.push((thread, text)),
             AppEffect::Respond { id, response } => {
                 self.responses.insert(id, response);
-            }
-            AppEffect::OpenThread {
-                job, announcement, ..
-            } => {
-                self.threads_opened += 1;
-                let opened = thread(self.threads_opened);
-                self.posts.push((opened.clone(), announcement));
-                self.schedule(
-                    self.now,
-                    AppEvent::ThreadOpened {
-                        job,
-                        outcome: Ok(opened),
-                    },
-                );
-            }
-            AppEffect::Post {
-                request,
-                thread,
-                text,
-                ..
-            } => {
-                let outcome = if let Some(why) = self.post_failures.pop_front() {
-                    Err(why)
-                } else {
-                    self.posts.push((thread, text));
-                    Ok(())
-                };
-                self.schedule(self.now, AppEvent::Posted { request, outcome });
             }
             AppEffect::Listen { project, .. } => {
                 self.listening.push(project);
@@ -1531,6 +1498,66 @@ impl Simulation {
                 ));
             }
         }
+    }
+
+    /// Answers a request to a platform as the real one was measured to,
+    /// recognising what it asks through the channel crate's own inverse.
+    ///
+    /// A post is taken and named, at the root or in a thread — unless the
+    /// next one was scripted to be refused, in which case the refusal
+    /// arrives as the platform sends it: a successful status with a body
+    /// that says no, which is the trap the reader exists for. A request this
+    /// crate did not render is not one the simulation can answer.
+    fn requested(
+        &mut self,
+        id: EffectId,
+        method: String,
+        url: String,
+        headers: BTreeMap<String, String>,
+        body: Option<Bytes>,
+    ) {
+        let request = stageman_channel::Request {
+            method,
+            url,
+            headers,
+            body: body.map(Bytes::into_inner),
+        };
+        let responded = match stageman_channel::Call::parse(&request) {
+            Some(stageman_channel::Call::Post {
+                channel,
+                text,
+                thread: in_thread,
+                ..
+            }) => {
+                let body = if let Some(error) = self.post_failures.pop_front() {
+                    format!(r#"{{"ok":false,"error":"{error}"}}"#)
+                } else {
+                    // Named as the platform names it: a post at the root is a
+                    // thread, and one in a thread is a message of its own.
+                    let named = match in_thread {
+                        None => {
+                            self.threads_opened += 1;
+                            thread(self.threads_opened)
+                        }
+                        Some(id) => Thread { channel, id },
+                    };
+                    let identifier = if named.id == thread(self.threads_opened).id {
+                        named.id.clone()
+                    } else {
+                        format!("1788000000.9{:05}", self.posts.len())
+                    };
+                    self.posts.push((named, text));
+                    format!(r#"{{"ok":true,"ts":"{identifier}"}}"#)
+                };
+                Responded::Answered {
+                    status: 200,
+                    headers: [("content-type".to_owned(), "application/json".to_owned())].into(),
+                    body: body.into(),
+                }
+            }
+            None => Responded::Failed("the simulation does not know this request".to_owned()),
+        };
+        self.schedule(self.now, Event::Responded { id, responded });
     }
 
     /// What a probe of a port finds, as the runtime's proxy was measured to
@@ -1604,16 +1631,15 @@ impl Simulation {
                 let probed = self.probed(port);
                 self.schedule(self.now, Event::Probed { id, probed });
             }
-            // Nothing asks for these yet: the channel is the next family.
-            Effect::Request { id, .. } => self.schedule(
-                self.now,
-                Event::Responded {
-                    id,
-                    responded: Responded::Failed(
-                        "the simulation does not answer requests yet".to_owned(),
-                    ),
-                },
-            ),
+            Effect::Request {
+                id,
+                method,
+                url,
+                headers,
+                body,
+                ..
+            } => self.requested(id, method, url, headers, body),
+            // Nothing listens yet: the socket is the next family.
             Effect::Connect { id, .. } => self.schedule(
                 self.now,
                 Event::Disconnected {

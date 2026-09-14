@@ -293,7 +293,7 @@ fn a_foreman_starts_a_job_whose_thread_is_opened_before_its_agent_speaks() {
         .expect("written");
     let opened = shape
         .iter()
-        .position(|line| line.starts_with("-> OpenThread"))
+        .position(|line| line.starts_with("-> Request"))
         .expect("opened");
     let talks = world.talks_in(&stageman_job::container(started));
     let [run] = talks.as_slice() else {
@@ -425,7 +425,11 @@ fn saying_posts_in_the_warrants_thread_and_reports_a_failure_to_the_agent() {
     world.run_until(&mut instance, 300);
     let failed = world.tool_answer(asked2).expect("answered");
     assert!(is_error(failed), "{failed:?}");
-    assert_eq!(text_of(failed), "it could not be said: channel_not_found");
+    assert_eq!(
+        text_of(failed),
+        "it could not be said: the channel refused it: channel_not_found",
+        "the platform's own reason reaches the agent, and so does what kind of failure it was"
+    );
     let empty = world.tool_answer(asked3).expect("answered");
     assert!(is_error(empty));
     assert_eq!(text_of(empty), "nothing was said, so nothing was posted");

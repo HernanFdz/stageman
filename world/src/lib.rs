@@ -312,7 +312,8 @@ async fn perform<A: App, P: Perform<A>>(
             url,
             headers,
             body,
-        } => requesting(world, id, method, url, headers, body),
+            within,
+        } => requesting(world, id, method, url, headers, body, within),
         Effect::Connect { id, url } => connect(world, id, url),
         Effect::Transmit { id, text } => world.transmit(id, text),
         Effect::Disconnect { id } => world.disconnect(id),
@@ -379,10 +380,11 @@ fn requesting<A: App>(
     url: String,
     headers: BTreeMap<String, String>,
     body: Option<Bytes>,
+    within: Duration,
 ) {
     let world = Arc::clone(world);
     drop(tokio::spawn(async move {
-        let responded = request(&world.client, &method, &url, &headers, body).await;
+        let responded = request(&world.client, &method, &url, &headers, body, within).await;
         world.send(Event::Responded { id, responded });
     }));
 }
@@ -391,18 +393,20 @@ fn requesting<A: App>(
 ///
 /// Nothing here decides: a status is handed back whatever it is, because a
 /// refusal is an answer and what one means is the deciding half's to know.
-/// What fails here is what never became an answer at all.
+/// What fails here is what never became an answer at all, including one
+/// that did not arrive within the budget it was given.
 async fn request(
     client: &reqwest::Client,
     method: &str,
     url: &str,
     headers: &BTreeMap<String, String>,
     body: Option<Bytes>,
+    within: Duration,
 ) -> Responded {
     let Ok(method) = reqwest::Method::from_bytes(method.as_bytes()) else {
         return Responded::Failed(format!("{method} is not a method"));
     };
-    let mut building = client.request(method, url);
+    let mut building = client.request(method, url).timeout(within);
     for (name, value) in headers {
         building = building.header(name.as_str(), value.as_str());
     }
@@ -1275,10 +1279,6 @@ mod tests {
         }
     }
 
-    /// How long a test waits before calling something hung.
-    ///
-    /// Bounded so that a mutation which stops answering fails in a second
-    /// rather than hanging: a hang is caught either way, and one that costs
     /// A port nothing accepts on, and nothing in this process can start to.
     ///
     /// One below the privileged boundary, found by asking: a connection to
@@ -1301,6 +1301,10 @@ mod tests {
         panic!("every privileged port answers, which is not a machine these tests are for");
     }
 
+    /// How long a test waits before calling something hung.
+    ///
+    /// Bounded so that a mutation which stops answering fails in a second
+    /// rather than hanging: a hang is caught either way, and one that costs
     /// a timeout makes every mutation run longer than it needs to be.
     const PATIENCE: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -1760,6 +1764,7 @@ mod tests {
                 ]
                 .into(),
                 body: Some(Bytes::new(b"{\"text\":\"hi\"}".to_vec())),
+                within: std::time::Duration::from_secs(5),
             },
         )
         .await;
@@ -1841,6 +1846,7 @@ mod tests {
                 url: format!("http://127.0.0.1:{empty}/"),
                 headers: std::collections::BTreeMap::new(),
                 body: None,
+                within: std::time::Duration::from_secs(5),
             },
         )
         .await;
@@ -1860,6 +1866,7 @@ mod tests {
                 url: format!("http://127.0.0.1:{empty}/"),
                 headers: std::collections::BTreeMap::new(),
                 body: None,
+                within: std::time::Duration::from_secs(5),
             },
         )
         .await;
