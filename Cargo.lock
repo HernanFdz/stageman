@@ -3445,9 +3445,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.43"
+version = "0.23.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
+checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
  "once_cell",
  "ring",
@@ -3832,14 +3832,10 @@ name = "stageman"
 version = "0.0.0"
 dependencies = [
  "dioxus",
- "futures-util",
- "hyper",
- "hyper-util",
  "lucide-dioxus",
  "mutants",
  "parking_lot",
  "rand 0.10.2",
- "reqwest",
  "serde",
  "serde_json",
  "stageman-agent",
@@ -3853,7 +3849,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
- "tokio-tungstenite 0.29.0",
  "tracing",
  "tracing-subscriber",
  "tw_merge",
@@ -3872,6 +3867,16 @@ dependencies = [
  "stageman-core",
  "thiserror 2.0.20",
  "tokio",
+]
+
+[[package]]
+name = "stageman-channel"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "stageman-core",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -3908,6 +3913,7 @@ dependencies = [
  "serde",
  "serde_json",
  "stageman-agent",
+ "stageman-channel",
  "stageman-core",
  "stageman-foreman",
  "stageman-job",
@@ -3922,7 +3928,6 @@ dependencies = [
 name = "stageman-job"
 version = "0.0.0"
 dependencies = [
- "mutants",
  "stageman-agent",
  "stageman-core",
  "thiserror 2.0.20",
@@ -3951,15 +3956,18 @@ name = "stageman-world"
 version = "0.0.0"
 dependencies = [
  "bytes",
+ "futures-util",
  "http-body-util",
  "hyper",
  "hyper-util",
  "mutants",
  "parking_lot",
+ "reqwest",
  "serde",
  "stageman-vocabulary",
  "tempfile",
  "tokio",
+ "tokio-tungstenite 0.29.0",
  "tracing",
 ]
 

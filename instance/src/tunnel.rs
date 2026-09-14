@@ -4,13 +4,87 @@
 //! All of it is pure. `docs/decisions/0042-a-job-shows-its-work-on-a-subdomain.md`
 //! gives every job's container one published port; the forwarding that turns
 //! a request into a connection is the world's, and this is the deciding half.
+//! So is whether anything is behind that port: the world connects and reads
+//! once and says what the port did, and what that means — measured in
+//! `docs/decisions/0047-a-tunnel-answers-only-when-something-behind-it-does.md`
+//! for the proxy a runtime puts in front of a published port — is read here.
+
+use std::time::Duration;
 
 use stageman_core::{JobId, Progress};
 
-use stageman_vocabulary::{Answer, Arrival, Bytes, RequestId};
+use stageman_vocabulary::{Answer, Arrival, Bytes, Effect as Generic, EffectId, Probed, RequestId};
 
 use crate::Effect;
 use crate::{Asked, Command};
+
+/// How long a probe gives a job's tunnel to say something, or to close,
+/// before it is taken to be showing something in silence.
+///
+/// **A budget for the runtime's proxy, not for the network.** The connection
+/// is to this machine's own loopback and resolves in microseconds; what takes
+/// time is the proxy in front of a published port admitting that there is
+/// nothing behind it, which it does by accepting first and closing afterwards
+/// — see
+/// `docs/decisions/0047-a-tunnel-answers-only-when-something-behind-it-does.md`,
+/// which measured both runtimes and chose this against the slower with room
+/// to spare.
+///
+/// Being impatient is the expensive direction: a window shorter than that
+/// close takes to arrive reads every empty container as one that is showing
+/// something, which is the bug this constant exists to avoid.
+pub const ANSWERING_WITHIN: Duration = Duration::from_millis(500);
+
+/// Whether anything is behind a probed port, rather than merely in front of
+/// it.
+///
+/// The meaning
+/// `docs/decisions/0047-a-tunnel-answers-only-when-something-behind-it-does.md`
+/// measured, and the reason a probe reads as well as connects. A published
+/// port is not a bare one: both runtimes put a proxy on the host side, and it
+/// accepts every connection to it for as long as the container runs, whether
+/// or not anything inside is listening. What the proxy cannot fake is what
+/// happens next, and only the first of the three things it can do means
+/// nothing is there:
+///
+/// - **closed at once** — the proxy accepted, found nothing inside to forward
+///   to, and hung up. This is every job that never showed anything.
+/// - **said something** — plainly serving.
+/// - **held open and silent** — also serving, and the case that decides the
+///   shape: an HTTP server says nothing at all until it is asked, so a probe
+///   that demanded bytes would stop exactly the containers this exists to
+///   keep. Treating silence as absence is the failure that looks most like
+///   rigour.
+///
+/// A connection refused outright is the fourth, and means what the first
+/// does. It is what an empty port does on a runtime that publishes without a
+/// proxy in front, which the record names as the case to revisit for: safe
+/// here already, and only the cost changes.
+#[must_use]
+pub const fn answering(probed: Probed) -> bool {
+    matches!(probed, Probed::Spoke | Probed::Silent)
+}
+
+/// Which container to stop, now it is known whether a job's tunnel answers.
+///
+/// Answering means the container is left running for whoever is looking;
+/// nothing behind it means the container is stopped, keeping it and the
+/// session in it for the next reply.
+///
+/// It answers with the container to stop rather than stopping one, so the
+/// deciding is a function anything can call and the asking stays with the
+/// instance, which is what mints an identifier for the answer.
+fn halting(job: JobId, answering: bool) -> Option<String> {
+    if answering {
+        tracing::info!(
+            %job,
+            "its container is left running, because something is still answering on its tunnel"
+        );
+        None
+    } else {
+        Some(stageman_job::container(job))
+    }
+}
 
 /// The domain assumed when nothing names one.
 ///
@@ -312,6 +386,73 @@ impl crate::Running {
         }
     }
 
+    /// Asks whether anything is behind a job's tunnel, at one of the three
+    /// moments
+    /// `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`
+    /// names.
+    ///
+    /// Two questions rather than one. The runtime is asked where the tunnel
+    /// is published — every time, and never from what was last found,
+    /// because the port can have moved under a container somebody else
+    /// restarted, and a probe of the old one would find nothing there and
+    /// stop a container that is showing something on the new. Then the port
+    /// is probed, and what it did is read for what it means.
+    pub fn probe(&mut self, job: JobId, effects: &mut Vec<Effect>) {
+        let looking = self.ask(
+            &Command::Port {
+                name: stageman_job::container(job),
+            },
+            Asked::Probing { job },
+        );
+        effects.push(looking);
+    }
+
+    /// The runtime said where a job's tunnel is, on the way to probing it.
+    ///
+    /// Nothing published is nothing to reach, and so is a container the
+    /// runtime will not answer about: both are a tunnel with nothing behind
+    /// it, and neither is probed.
+    pub fn probing(&mut self, job: JobId, port: Option<u16>, effects: &mut Vec<Effect>) {
+        let Some(port) = port else {
+            self.tunnel_answered(job, false, effects);
+            return;
+        };
+        let id = self.effect_id();
+        self.probes.insert(id, job);
+        effects.push(Generic::Probe {
+            id,
+            port,
+            within: ANSWERING_WITHIN,
+        });
+    }
+
+    /// The world said what a probed port did.
+    pub fn probed(&mut self, id: EffectId, probed: Probed, effects: &mut Vec<Effect>) {
+        let Some(job) = self.probes.remove(&id) else {
+            tracing::warn!("a port was probed that this instance did not ask about; ignored");
+            return;
+        };
+        self.tunnel_answered(job, answering(probed), effects);
+    }
+
+    /// What is done about a job's tunnel, now it is known whether anything
+    /// is behind it. Inward-facing, so it waits on no write.
+    fn tunnel_answered(&mut self, job: JobId, answering: bool, effects: &mut Vec<Effect>) {
+        if !answering {
+            // Halted, so the port it was on reaches nothing.
+            self.forget_tunnel(job);
+        }
+        if let Some(container) = halting(job, answering) {
+            let halt = self.ask(
+                &Command::Halt {
+                    name: container.clone(),
+                },
+                Asked::Halted { container },
+            );
+            effects.push(halt);
+        }
+    }
+
     /// Forgets where a job's tunnel was, so that a look afterwards asks the
     /// runtime rather than trusting a port that has moved.
     ///
@@ -330,11 +471,38 @@ impl crate::Running {
 
 #[cfg(test)]
 mod tests {
-    use super::{Domain, Routed, address, decode};
+    use super::{Domain, Probed, Routed, address, answering, decode, halting};
     use stageman_core::{JobId, Uuid};
 
     fn a_job() -> JobId {
         JobId::from_uuid(Uuid::from_u128(1))
+    }
+
+    /// What a port did is read for whether anything is behind it, and the
+    /// case that decides the shape is the one where it said nothing.
+    #[test]
+    fn a_port_that_refused_or_closed_has_nothing_behind_it_and_one_held_open_has() {
+        assert!(!answering(Probed::Refused), "nothing accepted");
+        assert!(!answering(Probed::Closed), "the proxy accepted for nobody");
+        assert!(answering(Probed::Spoke));
+        assert!(
+            answering(Probed::Silent),
+            "an HTTP server says nothing until it is asked"
+        );
+    }
+
+    /// The whole of what deciding a container's life looks like from here:
+    /// answering keeps it, silence stops it.
+    #[test]
+    fn a_tunnel_that_answers_keeps_its_container_and_silence_stops_it() {
+        let job = JobId::from_uuid(Uuid::from_u128(5));
+
+        assert_eq!(halting(job, true), None, "answering keeps the container");
+        assert_eq!(
+            halting(job, false),
+            Some(stageman_job::container(job)),
+            "silence stops it, and that container and no other"
+        );
     }
 
     /// The two things people actually type are taken rather than refused.

@@ -376,14 +376,19 @@ impl Boot {
                 });
                 self.maybe_awake(Vec::new())
             }
-            // Booting asks for no timer and no request, so an answer to
-            // either is somebody else's and is ignored rather than acted on.
+            // Booting asks for no timer, no request, no socket and no probe,
+            // so an answer to any of them is somebody else's and is ignored
+            // rather than acted on.
             Event::Woke { .. }
             | Event::Bound { .. }
             | Event::Arrived { .. }
             | Event::Body { .. }
             | Event::Line { .. }
-            | Event::Ended { .. } => Booting::Asking(Vec::new()),
+            | Event::Ended { .. }
+            | Event::Probed { .. }
+            | Event::Responded { .. }
+            | Event::Frame { .. }
+            | Event::Disconnected { .. } => Booting::Asking(Vec::new()),
         }
     }
 

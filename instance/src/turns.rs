@@ -32,12 +32,13 @@ use stageman_agent::{
     AgentError, Answer, Command, Conversation, Exchange, Opening, StopReason, Tools,
 };
 use stageman_core::{
-    Agent, JobId, Kit, Platform, Progress, Project, Role, Secret, Speaking, State, Thread, Waiting,
+    Agent, Channel, JobId, Kit, Platform, Progress, Project, Role, Secret, Speaking, State, Thread,
+    Waiting,
 };
 use stageman_vocabulary::{Effect as Generic, EffectId, Ended, Finished};
 
-use crate::vocabulary::{AppEffect, Speaker};
-use crate::{Asked, Effect, Emit as _, Running, complaint};
+use crate::vocabulary::Speaker;
+use crate::{Asked, Effect, Running, complaint};
 
 /// Whether a turn begins a session or continues the one its container
 /// holds, and everything the container is started with.
@@ -279,9 +280,10 @@ pub fn speaking_for(state: &State, job: JobId) -> Option<(Speaking, Thread)> {
 ///
 /// A binding with no credential to listen with is not listened to, and it is
 /// not an error: it looks exactly like a platform that has sent nothing.
-pub fn listening_on(project: &Project) -> Option<(Secret, Speaking)> {
-    let bound = project.channels.get(&stageman_core::Channel::Slack)?;
-    Some((bound.listen_credential.clone()?, bound.speaking()))
+pub fn listening_on(project: &Project) -> Option<(Channel, Secret, Speaking)> {
+    project.channels.iter().find_map(|(channel, bound)| {
+        Some((*channel, bound.listen_credential.clone()?, bound.speaking()))
+    })
 }
 
 /// A failure and everything underneath it, as one line of prose.
@@ -729,7 +731,7 @@ impl Running {
         // The container is asked whether it is still showing something, at
         // one of the three moments 0043 names. Inward-facing, so it need not
         // wait for the record to land.
-        effects.emit(AppEffect::Probe { job });
+        self.probe(job, effects);
 
         // Said whichever way it went: the agent has already reported for
         // itself if it could, and this says the one thing the agent cannot,
@@ -738,11 +740,7 @@ impl Running {
         if turn.notify
             && let Some((speaking, thread)) = speaking_for(&self.state, job)
         {
-            self.defer(AppEffect::Say {
-                speaking: speaking.into(),
-                thread,
-                text: stageman_foreman::attention_notice().to_owned(),
-            });
+            self.say(&speaking, &thread, stageman_foreman::attention_notice());
         }
     }
 

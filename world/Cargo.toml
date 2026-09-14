@@ -25,6 +25,24 @@ hyper = { version = "1.11.1", features = ["client", "http1", "server"] }
 hyper-util = { version = "0.1.20", features = ["tokio"] }
 mutants = "0.0.4"
 parking_lot = "0.12.5"
+# Making a request once, and holding a socket open with frames each way, are
+# mechanisms like serving a request is: what is asked of whom, and what an
+# answer means, are the deciding half's.
+#
+# `rustls` rather than the default backend, deliberately: the default links the
+# platform's TLS library, which is a build dependency this project does not
+# otherwise have and differs per machine — exactly the kind of thing that works
+# where it was written and fails in continuous integration. Roots are bundled
+# rather than taken from the platform for the same reason: a machine's
+# certificate store is a difference between where this was written and where
+# it runs.
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls"] }
+tokio-tungstenite = { version = "0.29.0", default-features = false, features = [
+    "connect",
+    "rustls-tls-webpki-roots",
+] }
+# Stream and sink extensions for the socket above, which offers neither.
+futures-util = { version = "0.3.31", default-features = false }
 stageman-vocabulary = { workspace = true }
 tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1.44"

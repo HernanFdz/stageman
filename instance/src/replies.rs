@@ -7,10 +7,12 @@
 
 use stageman_core::{Arriving, Channel, ChannelConfig, JobId, Progress, Recipient, State, Thread};
 
+use crate::Effect;
 use crate::Running;
 use crate::turns::{Run, Turn, speaking_for};
-use crate::vocabulary::{AppEffect, Message, Speaker};
-use crate::{Effect, Emit as _};
+use stageman_channel::Message;
+
+use crate::vocabulary::Speaker;
 
 /// What the gate decided when a reply arrived.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,14 +91,15 @@ impl Running {
                 else {
                     return;
                 };
-                effects.emit(AppEffect::Say {
-                    speaking: speaking.into(),
-                    thread: Thread {
+                self.say_now(
+                    &speaking,
+                    &Thread {
                         channel,
                         id: id.to_owned(),
                     },
-                    text: stageman_foreman::no_such_job_notice().to_owned(),
-                });
+                    stageman_foreman::no_such_job_notice(),
+                    effects,
+                );
             }
             // Ordinary — most of what is said in a project's channel is people
             // talking to each other.
@@ -145,15 +148,12 @@ impl Running {
         }
     }
 
-    /// Says something in a job's thread, if it has one, without waiting for
-    /// anything: a notice about a refusal changes no state.
+    /// Says something in a job's thread, if it has one, once whatever this
+    /// step changed is on the disk — which for a refusal is nothing, so it
+    /// goes at once.
     fn notice(&mut self, job: JobId, text: &str) {
         if let Some((speaking, thread)) = speaking_for(&self.state, job) {
-            self.defer(AppEffect::Say {
-                speaking: speaking.into(),
-                thread,
-                text: text.to_owned(),
-            });
+            self.say(&speaking, &thread, text);
         }
     }
 }

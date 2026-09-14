@@ -8,7 +8,7 @@ use stageman_foreman::Voice;
 
 use crate::Running;
 use crate::turns::{Run, Turn, speaking_for};
-use crate::vocabulary::{AppEffect, Speaker};
+use crate::vocabulary::Speaker;
 
 /// A job could not be recorded.
 #[derive(Debug, thiserror::Error)]
@@ -93,11 +93,10 @@ impl Running {
         // quietly false. It is also the cheapest moment to fail — no
         // container exists yet.
         match handout.channels().next() {
-            Some((_, speaking)) => self.defer(AppEffect::OpenThread {
-                job,
-                speaking: speaking.clone().into(),
-                announcement,
-            }),
+            Some((channel, speaking)) => {
+                let speaking = speaking.clone();
+                self.open_thread(job, channel, &speaking, &announcement);
+            }
             None => self.start(job),
         }
         Ok(job)

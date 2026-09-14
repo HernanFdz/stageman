@@ -24,9 +24,11 @@
 //! written at all, and the address is announced only once it has landed.
 
 mod boot;
+mod channel;
 mod file;
 mod foreman;
 mod jobs;
+mod listening;
 mod paths;
 pub mod release;
 mod replies;
@@ -63,10 +65,8 @@ pub use requests::{Request, Response};
 pub use stageman_agent::Target;
 pub use stageman_vocabulary::Seed;
 pub use sweep::Swept;
-pub use tunnel::{DEFAULT_DOMAIN, Domain, Routed, address, decode};
-pub use vocabulary::{
-    AppEffect, AppEvent, Container, Message, Posting, RequestId, Speaker, Warranted,
-};
+pub use tunnel::{ANSWERING_WITHIN, DEFAULT_DOMAIN, Domain, Routed, address, answering, decode};
+pub use vocabulary::{AppEffect, AppEvent, Container, RequestId, Speaker, Warranted};
 
 /// This application, as the vocabulary sees it: what fills its hole.
 pub struct Stageman;
@@ -91,19 +91,6 @@ impl From<AppEvent> for Event {
 impl From<AppEffect> for Effect {
     fn from(effect: AppEffect) -> Self {
         Self::App(effect)
-    }
-}
-
-/// Pushing an effect of this application's onto a step's effects, without
-/// wrapping it at every site.
-trait Emit {
-    /// Adds an effect.
-    fn emit(&mut self, effect: impl Into<Effect>);
-}
-
-impl Emit for Vec<Effect> {
-    fn emit(&mut self, effect: impl Into<Effect>) {
-        self.push(effect.into());
     }
 }
 
@@ -135,6 +122,18 @@ fn out_of_order(asked: EffectId, id: EffectId) {
     if asked != id {
         tracing::error!("writes were answered out of order; carrying on in the order asked");
     }
+}
+
+/// What a wake was asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum Timer {
+    /// The settling sweep: which containers still deserve to be up.
+    Settling,
+    /// A project's channel, tried again after something went wrong.
+    Reconnecting {
+        /// Whose.
+        project: ProjectId,
+    },
 }
 
 /// How often the instance asks which containers still deserve to be up.
@@ -289,8 +288,16 @@ enum Asked {
         /// The container.
         container: String,
     },
-    /// Where a job's tunnel is published on the host.
+    /// Where a job's tunnel is published on the host, for whoever is
+    /// waiting to be forwarded there.
     Port {
+        /// Whose.
+        job: JobId,
+    },
+    /// Where a job's tunnel is published on the host, on the way to probing
+    /// it. Apart from [`Asked::Port`] because the answers go different
+    /// ways: one is told to whoever is waiting, and this one is probed.
+    Probing {
         /// Whose.
         job: JobId,
     },
@@ -448,11 +455,25 @@ pub struct Running {
     /// Requests waiting for the runtime to say where a job's tunnel is, by
     /// the identifier the world holds each one open under.
     routing: BTreeMap<JobId, Vec<stageman_vocabulary::RequestId>>,
+    /// Tunnels being asked whether anything is behind them, by the
+    /// identifier the answer carries: whose each probe is.
+    probes: BTreeMap<EffectId, JobId>,
+    /// Requests made to a channel, by the identifier the answer carries:
+    /// what each was sent for.
+    sent: BTreeMap<EffectId, channel::Sent>,
     /// Effects waiting on a write, by the write they wait on, in order.
     deferred: VecDeque<(EffectId, Vec<Effect>)>,
-    /// The wakes asked for that have not gone off, each one the settling
-    /// timer; a second kind of timer is what would make this a map again.
-    timers: BTreeSet<EffectId>,
+    /// The wakes asked for that have not gone off, and what each was for.
+    timers: BTreeMap<EffectId, Timer>,
+    /// Every project whose channel is being listened to, and where its
+    /// connection has got to.
+    listeners: BTreeMap<ProjectId, listening::Listener>,
+    /// Every socket open, by the identifier the world knows it under: whose
+    /// channel each is, for as long as it is open.
+    sockets: BTreeMap<EffectId, ProjectId>,
+    /// Sockets the platform said it would close, read until they do while
+    /// their replacements are opened.
+    draining: BTreeSet<EffectId>,
     /// Whether this step changed what is kept.
     dirty: bool,
     /// Effects of this step held back until the write lands.
@@ -520,8 +541,13 @@ impl Running {
             asking: BTreeMap::new(),
             tunnels: BTreeMap::new(),
             routing: BTreeMap::new(),
+            probes: BTreeMap::new(),
+            sent: BTreeMap::new(),
             deferred: VecDeque::new(),
-            timers: BTreeSet::new(),
+            timers: BTreeMap::new(),
+            listeners: BTreeMap::new(),
+            sockets: BTreeMap::new(),
+            draining: BTreeSet::new(),
             // Written once on waking, before anything can depend on this
             // instance: a first run has a file at all, a file that had no
             // identity has one from the moment it is opened, and a path that
@@ -534,14 +560,9 @@ impl Running {
         }
     }
 
-    /// What waking asks for: the world told what booting found, the sweep,
-    /// and the first write.
+    /// What waking asks for: the sweep, and the first write.
     pub(crate) fn waking_up(&mut self, containers: &[Container]) -> Vec<Effect> {
-        let mut effects = vec![Effect::App(AppEffect::Booted {
-            runtime: self.runtime.clone(),
-        })];
-        let (swept, tally) = self.waking(containers);
-        effects.extend(swept);
+        let (mut effects, tally) = self.waking(containers);
         self.swept = Some(tally);
         self.flush(&mut effects);
         effects
@@ -672,6 +693,13 @@ impl Running {
                 // failed one mean the same thing here: nowhere to send them.
                 let port = stageman_agent::published(said(finished));
                 self.port_found(job, port, effects);
+            }
+            Asked::Probing { job } => {
+                if let Some(why) = complaint(finished) {
+                    tracing::debug!(%job, %why, "the runtime could not say where a job's tunnel is");
+                }
+                let port = stageman_agent::published(said(finished));
+                self.probing(job, port, effects);
             }
         }
     }
@@ -810,6 +838,16 @@ impl Running {
             Event::Body { id, outcome } => self.read(id, outcome, &mut effects),
             Event::Line { id, line } => self.line(id, &line, &mut effects),
             Event::Ended { id, ended } => self.process_ended(id, &ended, &mut effects),
+            Event::Probed { id, probed } => self.probed(id, probed, &mut effects),
+            Event::Responded { id, responded, at } => {
+                self.responded(id, &responded, at, &mut effects);
+            }
+            Event::Frame { id, text, at } => self.frame(id, &text, at, &mut effects),
+            Event::Disconnected {
+                id,
+                disconnected,
+                at,
+            } => self.disconnected(id, &disconnected, at, &mut effects),
             Event::Read { .. } | Event::Bound { .. } => {
                 tracing::warn!(
                     "answered something this instance did not ask for while awake; ignored"
@@ -831,37 +869,21 @@ impl Running {
             AppEvent::Presenting { .. } => {
                 tracing::debug!("told again where the presentation server is; ignored");
             }
-            AppEvent::Probed { job, answering } => {
-                if !answering {
-                    // Halted, so the port it was on reaches nothing.
-                    self.forget_tunnel(job);
-                }
-                if let Some(container) = probed(job, answering) {
-                    let halt = self.ask(
-                        &Command::Halt {
-                            name: container.clone(),
-                        },
-                        Asked::Halted { container },
-                    );
-                    effects.push(halt);
-                }
-            }
-            AppEvent::Heard { channel, message } => self.heard(channel, &message, effects),
-            AppEvent::ThreadOpened { job, outcome } => self.thread_opened(job, outcome),
-            AppEvent::Posted { request, outcome } => self.posted(request, outcome),
-            AppEvent::Request { id, request } => self.requested(id, request, effects),
+            AppEvent::Request { id, request } => self.requested(id, *request, effects),
         }
     }
 
     /// A timer went off.
     fn woke(&mut self, id: EffectId, effects: &mut Vec<Effect>) {
-        if self.timers.remove(&id) {
-            let listing = self.ask(&Command::Containers { running_only: true }, Asked::Listing);
-            effects.push(listing);
-            let settling = self.settle_later();
-            effects.push(settling);
-        } else {
-            tracing::warn!("woken for a timer this instance did not set; ignored");
+        match self.timers.remove(&id) {
+            Some(Timer::Settling) => {
+                let listing = self.ask(&Command::Containers { running_only: true }, Asked::Listing);
+                effects.push(listing);
+                let settling = self.settle_later();
+                effects.push(settling);
+            }
+            Some(Timer::Reconnecting { project }) => self.try_again(project, effects),
+            None => tracing::warn!("woken for a timer this instance did not set; ignored"),
         }
     }
 
@@ -894,7 +916,7 @@ impl Running {
             Err(why) => {
                 tracing::error!(%why, "the instance could not be written");
                 if self.announced {
-                    self.dropped(waiting);
+                    self.dropped(waiting, effects);
                 } else {
                     effects.push(Generic::Exit {
                         message: format!(
@@ -930,26 +952,32 @@ impl Running {
 
     /// What becomes of effects that waited on a write that never landed.
     ///
-    /// Notices are simply not said. A command the runtime was to be given is
-    /// not given, and forgotten as asked, so its answer is not waited for. A
-    /// turn whose first step that was is not started, and the job it was for
-    /// is recorded as failed for that reason: the alternative is a job that
-    /// says working with nothing running in it, which a reply could never
-    /// reach. The record is a change of its own, so the next write carries
-    /// it — and if that one lands, the job can be given something again.
-    fn dropped(&mut self, effects: Vec<Effect>) {
+    /// A command the runtime was to be given is not given, and forgotten as
+    /// asked, so its answer is not waited for. A turn whose first step that
+    /// was is not started, and the job it was for is recorded as failed for
+    /// that reason: the alternative is a job that says working with nothing
+    /// running in it, which a reply could never reach. The record is a
+    /// change of its own, so the next write carries it — and if that one
+    /// lands, the job can be given something again. A request to a channel
+    /// is not made, and whatever waited on its answer hears that instead:
+    /// a notice is simply not said, and a job whose thread was never opened
+    /// is failed the same way a turn never started is.
+    fn dropped(&mut self, dropped: Vec<Effect>, effects: &mut Vec<Effect>) {
         tracing::warn!(
-            dropped = effects.len(),
+            dropped = dropped.len(),
             "what waited on the write is dropped"
         );
-        for effect in effects {
-            let Effect::Run { id, .. } = effect else {
-                continue;
-            };
-            if let Some(Asked::Present { speaker } | Asked::Started { speaker }) =
-                self.asked.remove(&id)
-            {
-                self.abandoned(speaker);
+        for effect in dropped {
+            match effect {
+                Effect::Run { id, .. } => {
+                    if let Some(Asked::Present { speaker } | Asked::Started { speaker }) =
+                        self.asked.remove(&id)
+                    {
+                        self.abandoned(speaker);
+                    }
+                }
+                Effect::Request { id, .. } => self.unsent(id, effects),
+                _ => {}
             }
         }
     }
@@ -979,7 +1007,7 @@ impl Running {
             }
             Err(why) => {
                 tracing::error!(%why, "the instance could not be sealed, so nothing is written");
-                self.dropped(staged);
+                self.dropped(staged, effects);
             }
         }
     }
@@ -1066,46 +1094,5 @@ fn complaint(finished: &Finished) -> Option<String> {
         Finished::Exited { stderr, .. } => Some(stderr.as_text().unwrap_or("").trim().to_owned()),
         Finished::NotFound => Some("the runtime could not be run".to_owned()),
         Finished::Failed(why) => Some(why.clone()),
-    }
-}
-
-/// What to do about a job's tunnel, now the world has looked.
-///
-/// Answering means the container is left running for whoever is looking;
-/// nothing behind it means the container is stopped, keeping it and the
-/// session in it for the next reply.
-///
-/// It answers with the container to stop rather than stopping one, so the
-/// deciding is a function anything can call and the asking stays with the
-/// instance, which is what mints an identifier for the answer.
-fn probed(job: JobId, answering: bool) -> Option<String> {
-    if answering {
-        tracing::info!(
-            %job,
-            "its container is left running, because something is still answering on its tunnel"
-        );
-        None
-    } else {
-        Some(stageman_job::container(job))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::probed;
-    use stageman_core::{JobId, Uuid};
-
-    /// The whole of what deciding a container's life looks like from here:
-    /// answering keeps it, silence stops it.
-    #[test]
-    fn a_tunnel_that_answers_keeps_its_container_and_silence_stops_it() {
-        let job = JobId::from_uuid(Uuid::from_u128(5));
-
-        assert_eq!(probed(job, true), None, "answering keeps the container");
-        assert_eq!(
-            probed(job, false),
-            Some(stageman_job::container(job)),
-            "silence stops it, and that container and no other"
-        );
     }
 }

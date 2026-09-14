@@ -270,7 +270,17 @@ the hole and no behaviour changed; then boot and the file and process
 families; then the HTTP model — bind, route, print, the presentation server;
 then the conversation; then the channel's lifecycle; then the recorder, with
 the bar for pushing made in-memory. Each phase moves one family out of the
-hole, and the hole is empty when the last has landed.
+hole. What the last leaves in it is what the decision above keeps there
+deliberately, and it is not nothing: the presentation port's arrival,
+because that is an application fact the entry point tells and the
+environment map is rejected for it; and a server function's typed request
+with its typed answer, because raw HTTP into the instance is rejected and
+the identifier round trip that answers one is on the list, in the context
+above, of what stays in the world. Neither is a mechanism a generic world
+could perform. So the migration is finished when nothing that is a
+mechanism is left in the hole, and what the application supplies to perform
+its own effects then does one thing, which is to match an answer to whoever
+asked.
 
 They were meant to be one branch and one merge, and the first four landed
 that way before the branch got long enough that carrying it cost more than

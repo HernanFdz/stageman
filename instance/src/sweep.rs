@@ -6,12 +6,12 @@
 //! below pin them without a runtime. What they decide reaches the world as
 //! effects; nothing here is removed, stopped or resumed directly.
 
-use stageman_core::{InstanceId, JobId, Outcome, Progress, State};
+use stageman_core::{InstanceId, JobId, Outcome, Progress, ProjectId, State};
 
-use crate::turns::{Run, Turn, listening_on};
-use crate::vocabulary::{AppEffect, Container, Speaker};
+use crate::turns::{Run, Turn};
+use crate::vocabulary::{Container, Speaker};
 use crate::{Asked, Command};
-use crate::{Effect, Emit as _, Running, SETTLING_INTERVAL};
+use crate::{Effect, Running, SETTLING_INTERVAL};
 
 /// One container, placed as far as its name allows.
 ///
@@ -226,7 +226,7 @@ impl Running {
     /// to be up. A generic wake, remembered by its identifier as this one.
     pub fn settle_later(&mut self) -> Effect {
         let id = self.effect_id();
-        self.timers.insert(id);
+        self.timers.insert(id, crate::Timer::Settling);
         Effect::Wake {
             id,
             after: SETTLING_INTERVAL,
@@ -307,18 +307,17 @@ impl Running {
             .collect();
         let (placed, _) = resting(&up, &self.state);
         for job in placed {
-            effects.emit(AppEffect::Probe { job });
+            self.probe(job, &mut effects);
         }
 
         let reclaiming = self.ask(&Command::Images, Asked::Images);
         effects.push(reclaiming);
-        for (project, watched) in &self.state.projects {
-            if let Some((opening, speaking)) = listening_on(watched) {
-                effects.emit(AppEffect::Listen {
-                    project: *project,
-                    opening: opening.expose().to_owned(),
-                    speaking: speaking.into(),
-                });
+        // Every bound channel is listened to from now: a project that
+        // listens is one whose people can reach its jobs.
+        let watched: Vec<ProjectId> = self.state.projects.keys().copied().collect();
+        for project in watched {
+            if let Some(question) = self.listen(project) {
+                effects.push(question);
             }
         }
         let settling = self.settle_later();
@@ -401,14 +400,14 @@ impl Running {
     /// asked about only if its label says it is ours — another instance's
     /// container is very likely mid-turn, and one that cannot say is not worth
     /// guessing about when the cost of guessing wrong is somebody's work.
-    pub fn listed(&self, running: &[Container], effects: &mut Vec<Effect>) {
+    pub fn listed(&mut self, running: &[Container], effects: &mut Vec<Effect>) {
         let up: Vec<JobId> = running
             .iter()
             .filter_map(|container| stageman_job::job_of(&container.name))
             .collect();
         let (placed, unplaced) = resting(&up, &self.state);
         for job in placed {
-            effects.emit(AppEffect::Probe { job });
+            self.probe(job, effects);
         }
         for job in unplaced {
             let started = running
@@ -416,7 +415,7 @@ impl Running {
                 .find(|container| stageman_job::job_of(&container.name) == Some(job))
                 .and_then(|container| container.instance);
             if belonging(started, self.id) == Whose::Ours {
-                effects.emit(AppEffect::Probe { job });
+                self.probe(job, effects);
             } else {
                 tracing::debug!(
                     %job,

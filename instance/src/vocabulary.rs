@@ -1,25 +1,34 @@
 //! What this instance says to the world and hears from it, in the
-//! application hole of the vocabulary.
+//! application hole of the vocabulary — and the plain types it holds that
+//! more than one module names.
 //!
 //! Everything here is plain data. An [`AppEvent`] is what the world tells the
 //! instance and an [`AppEffect`] is what the instance asks of the world, and
-//! neither carries a call, a channel, a callback or a domain secret: a
-//! credential crosses as the string it is, so that a scenario's trace
-//! serialises in full and the instance can learn nothing from making an
-//! effect. Neither enumeration formats, for the reason
-//! `docs/conventions.md` §4 gives. See
+//! neither carries a call, a channel, a callback or a domain secret. Neither
+//! enumeration formats, for the reason `docs/conventions.md` §4 gives. See
 //! `docs/decisions/0056-the-instance-decides-and-the-world-performs.md` and
 //! `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`.
 //!
-//! Every family here is a meaning rather than a mechanism — probe a tunnel,
-//! say something — and each moves out of this hole into the generic
-//! vocabulary as the instance starts speaking the mechanism instead. A turn
-//! already has: it is the commands and the process in `crate::turns`.
-
-use std::path::PathBuf;
+//! **Three things are in the hole, and they are what 0057 keeps there
+//! deliberately.** The presentation port's arrival, which is an application
+//! fact the entry point tells rather than something asked for; and a
+//! person's request with its typed answer, which is the one thing that
+//! still asks the instance directly. Neither is a mechanism a generic world
+//! could perform. Everything else that was here was a meaning rather than a
+//! mechanism — a turn, a probe, a message posted, a channel listened to —
+//! and each left as the instance started speaking the mechanism instead: the
+//! turn is the commands and the process in `crate::turns`, the probe is a
+//! port asked of the runtime and read once in `crate::tunnel`, a message is
+//! a request made and read in `crate::channel`, and a channel is a socket
+//! driven in `crate::listening`.
+//!
+//! The other types here — a container as the runtime reports it, whose turn
+//! it is, what a credential entitles its bearer to — are not the hole's.
+//! They are what the instance holds, kept here because more than one module
+//! names each and none owns it.
 
 use serde::{Deserialize, Serialize};
-use stageman_core::{Agent, Channel, InstanceId, JobId, ProjectId, Speaking, Thread};
+use stageman_core::{Agent, InstanceId, JobId, ProjectId, Thread};
 use stageman_vocabulary::Named;
 
 /// What identifies one request the world is waiting to answer.
@@ -69,60 +78,6 @@ pub struct Warranted {
     pub thread: Option<Thread>,
 }
 
-/// One message heard on a channel, as the world decoded it.
-///
-/// What routing needs and nothing else: where it was said, what identifies
-/// it, the thread it was in if any, the words, and the two facts about the
-/// speaker the rule in
-/// `docs/decisions/0031-a-mention-is-what-makes-it-ours.md` turns on.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Message {
-    /// Where it was said.
-    pub address: String,
-    /// What identifies this message, which is the thread a foreman answers
-    /// in when the message is at the root.
-    pub id: String,
-    /// The thread it was in, if it was in one.
-    pub thread: Option<String>,
-    /// What was said, as the person wrote it.
-    pub text: String,
-    /// Whether it named this instance.
-    pub mentions: bool,
-    /// Whether this instance is what said it.
-    pub from_us: bool,
-}
-
-/// What posts on a channel, as plain data: where, and with what.
-///
-/// The domain's own type for this holds the credential as a secret, which
-/// deliberately does not serialise; this is that type as it crosses to the
-/// world, credential in the clear, for the reason the module says.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Posting {
-    /// Where on the channel.
-    pub address: String,
-    /// What reaches it.
-    pub credential: String,
-}
-
-impl From<Speaking> for Posting {
-    fn from(speaking: Speaking) -> Self {
-        Self {
-            address: speaking.address,
-            credential: speaking.credential.expose().to_owned(),
-        }
-    }
-}
-
-impl From<Posting> for Speaking {
-    fn from(posting: Posting) -> Self {
-        Self {
-            address: posting.address,
-            credential: stageman_core::Secret::new(posting.credential),
-        }
-    }
-}
-
 /// One thing the world tells the instance.
 ///
 /// Time appears only where a handler keeps it, which in this set is nowhere:
@@ -139,43 +94,15 @@ pub enum AppEvent {
         /// The loopback port it is on.
         port: u16,
     },
-    /// Answers [`AppEffect::Probe`]: whether something is behind a job's
-    /// tunnel.
-    Probed {
-        /// Which job's tunnel was probed.
-        job: JobId,
-        /// Whether anything answered behind it.
-        answering: bool,
-    },
-    /// Somebody said something on a channel this instance listens to.
-    Heard {
-        /// Which channel.
-        channel: Channel,
-        /// What was heard.
-        message: Message,
-    },
-    /// Answers [`AppEffect::OpenThread`]: where a job's conversation
-    /// happens, or why it could not be opened.
-    ThreadOpened {
-        /// Whose thread.
-        job: JobId,
-        /// The thread, or why not.
-        outcome: Result<Thread, String>,
-    },
-    /// Answers [`AppEffect::Post`]: whether the platform took the message.
-    Posted {
-        /// Which call on the tools endpoint was waiting on it.
-        request: stageman_vocabulary::RequestId,
-        /// Whether it was said, or why not.
-        outcome: Result<(), String>,
-    },
     /// A person asked something of the dashboard. Answered by
     /// [`AppEffect::Respond`], in this step or a later one.
     Request {
         /// What the world is waiting to answer.
         id: RequestId,
-        /// What was asked.
-        request: crate::requests::Request,
+        /// What was asked. Boxed because a request is as wide as the
+        /// widest screen a person can draft on, and the other event here
+        /// is a port.
+        request: Box<crate::requests::Request>,
     },
 }
 
@@ -183,10 +110,6 @@ impl Named for AppEvent {
     fn kind(&self) -> &'static str {
         match self {
             Self::Presenting { .. } => "Presenting",
-            Self::Probed { .. } => "Probed",
-            Self::Heard { .. } => "Heard",
-            Self::ThreadOpened { .. } => "ThreadOpened",
-            Self::Posted { .. } => "Posted",
             Self::Request { .. } => "Request",
         }
     }
@@ -198,30 +121,6 @@ impl Named for AppEvent {
 /// unanswered effect's failure is the world's to log.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AppEffect {
-    /// What booting found, for the world's own performer: which runtime
-    /// answers. Unanswered, and on its way out with the probe, which is the
-    /// one effect left that needs it.
-    Booted {
-        /// Where the container runtime this instance found is.
-        runtime: PathBuf,
-    },
-    /// Ask whether anything is behind a job's tunnel. Answered by
-    /// [`AppEvent::Probed`].
-    Probe {
-        /// Which job.
-        job: JobId,
-    },
-    /// Post on a channel, in a thread, on the instance's own behalf.
-    /// Unanswered: this is a notice about an outcome, and the outcome does
-    /// not change because the notice of it did not arrive.
-    Say {
-        /// The channel and the credential that posts on it.
-        speaking: Posting,
-        /// Where in it.
-        thread: Thread,
-        /// What.
-        text: String,
-    },
     /// Answer a person's request. Unanswered.
     Respond {
         /// Which request.
@@ -229,167 +128,47 @@ pub enum AppEffect {
         /// The answer, typed for the screen that asked.
         response: crate::requests::Response,
     },
-    /// Open the thread a job's conversation happens in, by posting its
-    /// announcement at the root of the channel. Answered by
-    /// [`AppEvent::ThreadOpened`].
-    OpenThread {
-        /// Whose thread.
-        job: JobId,
-        /// The channel and the credential that posts on it.
-        speaking: Posting,
-        /// What the thread hangs from.
-        announcement: String,
-    },
-    /// Post on a channel on an agent's behalf. Answered by
-    /// [`AppEvent::Posted`], because the agent is told whether it was heard.
-    Post {
-        /// Which call on the tools endpoint is waiting on it, as the world
-        /// holds it open.
-        request: stageman_vocabulary::RequestId,
-        /// The channel and the credential that posts on it.
-        speaking: Posting,
-        /// Where in it.
-        thread: Thread,
-        /// What.
-        text: String,
-    },
-    /// Listen on a project's channel for what people say. Unanswered: what
-    /// is heard arrives as events of its own.
-    Listen {
-        /// Whose channel.
-        project: ProjectId,
-        /// What opens the event stream. Never enters a container.
-        opening: String,
-        /// What posts, and what asks the platform who this instance is.
-        speaking: Posting,
-    },
 }
 
 impl Named for AppEffect {
     fn kind(&self) -> &'static str {
         match self {
-            Self::Booted { .. } => "Booted",
-            Self::Probe { .. } => "Probe",
-            Self::Say { .. } => "Say",
             Self::Respond { .. } => "Respond",
-            Self::OpenThread { .. } => "OpenThread",
-            Self::Post { .. } => "Post",
-            Self::Listen { .. } => "Listen",
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AppEffect, AppEvent, Posting, RequestId};
-    use stageman_core::{Channel, JobId, Thread, Uuid};
+    use super::{AppEffect, AppEvent, RequestId};
     use stageman_vocabulary::Named;
 
     /// Every event and effect of this application's names its kind, which
     /// is the one thing the world may say about one in a log line.
     #[test]
     fn every_kind_is_named() {
-        let job = JobId::from_uuid(Uuid::from_u128(1));
-        let thread = Thread {
-            channel: Channel::Slack,
-            id: "1788000000.000001".to_owned(),
-        };
-        let posting = Posting {
-            address: "C0123456789".to_owned(),
-            credential: "xoxb-not-a-real-token".to_owned(),
-        };
         let events = [
             AppEvent::Presenting { port: 9000 },
-            AppEvent::Probed {
-                job,
-                answering: true,
-            },
-            AppEvent::Heard {
-                channel: Channel::Slack,
-                message: super::Message {
-                    address: "C0123456789".to_owned(),
-                    id: "1788000000.000002".to_owned(),
-                    thread: None,
-                    text: "hello".to_owned(),
-                    mentions: true,
-                    from_us: false,
-                },
-            },
-            AppEvent::ThreadOpened {
-                job,
-                outcome: Ok(thread.clone()),
-            },
-            AppEvent::Posted {
-                request: stageman_vocabulary::RequestId(1),
-                outcome: Ok(()),
-            },
             AppEvent::Request {
                 id: RequestId(1),
-                request: crate::requests::Request::Instance,
+                request: Box::new(crate::requests::Request::Instance),
             },
         ];
         let kinds: Vec<&str> = events.iter().map(Named::kind).collect();
-        assert_eq!(
-            kinds,
-            [
-                "Presenting",
-                "Probed",
-                "Heard",
-                "ThreadOpened",
-                "Posted",
-                "Request"
-            ]
-        );
+        assert_eq!(kinds, ["Presenting", "Request"]);
 
-        let effects = [
-            AppEffect::Booted {
-                runtime: "/usr/bin/docker".into(),
-            },
-            AppEffect::Probe { job },
-            AppEffect::Say {
-                speaking: posting.clone(),
-                thread: thread.clone(),
-                text: "said".to_owned(),
-            },
-            AppEffect::Respond {
-                id: RequestId(1),
-                response: crate::requests::Response::Agents(Vec::new()),
-            },
-            AppEffect::OpenThread {
-                job,
-                speaking: posting.clone(),
-                announcement: "a job".to_owned(),
-            },
-            AppEffect::Post {
-                request: stageman_vocabulary::RequestId(1),
-                speaking: posting.clone(),
-                thread,
-                text: "said".to_owned(),
-            },
-            AppEffect::Listen {
-                project: stageman_core::ProjectId::from_uuid(Uuid::from_u128(2)),
-                opening: "xapp-not-a-real-token".to_owned(),
-                speaking: posting,
-            },
-        ];
+        let effects = [AppEffect::Respond {
+            id: RequestId(1),
+            response: crate::requests::Response::Agents(Vec::new()),
+        }];
         let kinds: Vec<&str> = effects.iter().map(Named::kind).collect();
-        assert_eq!(
-            kinds,
-            [
-                "Booted",
-                "Probe",
-                "Say",
-                "Respond",
-                "OpenThread",
-                "Post",
-                "Listen"
-            ]
-        );
+        assert_eq!(kinds, ["Respond"]);
     }
 
     /// This application's own events and effects format no more than the
-    /// vocabulary does, because a credential crosses them in the clear: the
-    /// probe answers through an inherent method only where `Debug` exists.
+    /// vocabulary does, and for the same reason the rule exists even now that
+    /// nothing in them carries a credential: the probe answers through an
+    /// inherent method only where `Debug` exists.
     #[test]
     fn the_applications_own_vocabulary_formats_not_at_all() {
         struct Probe<T>(std::marker::PhantomData<T>);

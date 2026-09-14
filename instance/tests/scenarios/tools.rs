@@ -1,9 +1,8 @@
 //! The tools endpoint, called by the agents this instance runs, against the
 //! simulated world.
 
-use crate::simulation::{
-    FARAWAY, NEARBY, Simulation, job, said_at_root, seed, thread, watching_a_channel,
-};
+use crate::simulation::{FARAWAY, NEARBY, Simulation, job, seed, thread, watching_a_channel};
+use stageman_channel::Call;
 use stageman_core::{Progress, Waiting};
 
 fn body(method: &str, params: serde_json::Value) -> serde_json::Value {
@@ -47,7 +46,7 @@ fn with_a_foreman_working() -> (Simulation, stageman_instance::Instance, String)
     let mut world = Simulation::new();
     world.holding(&watching_a_channel(&[]));
     let mut instance = world.wake(seed(1));
-    world.schedule(100, said_at_root(1, "look at the parser"));
+    world.says_at_root(100, 1, "look at the parser");
     world.run_until(&mut instance, 150);
     let warrant = world
         .warrants()
@@ -244,7 +243,7 @@ fn minting_a_warrant_forgets_only_that_speakers_previous_one() {
 
     // The foreman's next turn mints it a new one, and the old one stops.
     world.run_until(&mut instance, 2_000);
-    world.schedule(2_100, said_at_root(2, "and look at the tests"));
+    world.says_at_root(2_100, 2, "and look at the tests");
     world.run_until(&mut instance, 2_200);
     let second = world.warrants().last().cloned().expect("the new warrant");
     assert_ne!(second, first);
@@ -291,9 +290,10 @@ fn a_foreman_starts_a_job_whose_thread_is_opened_before_its_agent_speaks() {
         .iter()
         .position(|line| line.starts_with("<- Written"))
         .expect("written");
-    let opened = shape
-        .iter()
-        .position(|line| line.starts_with("-> OpenThread"))
+    // Read back through the channel crate's inverse: the thread is the one
+    // post at the root, and the listener's questions are requests too.
+    let opened = world
+        .first_call(|call| matches!(call, Call::Post { thread: None, .. }))
         .expect("opened");
     let talks = world.talks_in(&stageman_job::container(started));
     let [run] = talks.as_slice() else {
@@ -375,7 +375,7 @@ fn starting_is_refused_to_a_job_and_for_a_kit_the_project_does_not_offer() {
     let (name, held) = Simulation::ours(&stageman_job::container(idle));
     world.container(&name, held);
     let mut instance = world.wake(seed(1));
-    world.schedule(100, crate::simulation::said_in(1, "go on"));
+    world.says_in(100, 1, "go on");
     world.run_until(&mut instance, 150);
     let job_warrant = world.warrants().last().expect("the job's warrant").clone();
     let asked2 = world.calls(
@@ -425,7 +425,11 @@ fn saying_posts_in_the_warrants_thread_and_reports_a_failure_to_the_agent() {
     world.run_until(&mut instance, 300);
     let failed = world.tool_answer(asked2).expect("answered");
     assert!(is_error(failed), "{failed:?}");
-    assert_eq!(text_of(failed), "it could not be said: channel_not_found");
+    assert_eq!(
+        text_of(failed),
+        "it could not be said: the channel refused it: channel_not_found",
+        "the platform's own reason reaches the agent, and so does what kind of failure it was"
+    );
     let empty = world.tool_answer(asked3).expect("answered");
     assert!(is_error(empty));
     assert_eq!(text_of(empty), "nothing was said, so nothing was posted");
@@ -445,7 +449,7 @@ fn a_jobs_claim_is_recorded_when_its_turn_ends() {
     let (name, held) = Simulation::ours(&stageman_job::container(idle));
     world.container(&name, held);
     let mut instance = world.wake(seed(1));
-    world.schedule(100, crate::simulation::said_in(1, "go on"));
+    world.says_in(100, 1, "go on");
     world.run_until(&mut instance, 150);
     let warrant = world.warrants().last().expect("the job's warrant").clone();
 
