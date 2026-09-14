@@ -1279,6 +1279,28 @@ mod tests {
     ///
     /// Bounded so that a mutation which stops answering fails in a second
     /// rather than hanging: a hang is caught either way, and one that costs
+    /// A port nothing accepts on, and nothing in this process can start to.
+    ///
+    /// One below the privileged boundary, found by asking: a connection to
+    /// it is refused outright, and no test can bind it without root, so it
+    /// stays refused for as long as the test runs. Taking an ephemeral port
+    /// and letting it go instead worked until the tests ran threaded, when
+    /// another test binding a port of its own was handed the one just freed,
+    /// and what should have refused answered. A port bound and never
+    /// listened on is not the answer either: this platform drops a
+    /// connection to one rather than refusing it.
+    async fn refusing() -> u16 {
+        for port in 1..1024_u16 {
+            if let Err(why) =
+                tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).await
+                && why.kind() == std::io::ErrorKind::ConnectionRefused
+            {
+                return port;
+            }
+        }
+        panic!("every privileged port answers, which is not a machine these tests are for");
+    }
+
     /// a timeout makes every mutation run longer than it needs to be.
     const PATIENCE: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -1605,13 +1627,7 @@ mod tests {
     async fn a_forward_to_nothing_says_what_it_was_given_to_say() {
         let (world, mut events) = World::<Nothing>::new();
         let front = bound(&world, &mut events, EffectId(1)).await;
-        // Taken and let go of, so it is a port nothing is behind.
-        let empty = {
-            let taken = tokio::net::TcpListener::bind("127.0.0.1:0")
-                .await
-                .expect("it binds");
-            taken.local_addr().expect("it has an address").port()
-        };
+        let empty = refusing().await;
 
         let asking = tokio::spawn(saying(
             front,
@@ -1684,13 +1700,7 @@ mod tests {
 
         let (world, mut events) = World::<Nothing>::new();
 
-        // Taken and let go of, so nothing accepts on it.
-        let empty = {
-            let taken = tokio::net::TcpListener::bind("127.0.0.1:0")
-                .await
-                .expect("it binds");
-            taken.local_addr().expect("it has an address").port()
-        };
+        let empty = refusing().await;
         assert_eq!(probed(&world, &mut events, empty).await, Probed::Refused);
 
         let silent = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1821,12 +1831,7 @@ mod tests {
     #[tokio::test]
     async fn a_request_that_gets_no_answer_fails_and_says_why() {
         let (world, mut events) = World::<Nothing>::new();
-        let empty = {
-            let taken = tokio::net::TcpListener::bind("127.0.0.1:0")
-                .await
-                .expect("it binds");
-            taken.local_addr().expect("it has an address").port()
-        };
+        let empty = refusing().await;
 
         answering(
             &world,
@@ -2020,12 +2025,7 @@ mod tests {
         }
         far.await.expect("the far end finished");
 
-        let empty = {
-            let taken = tokio::net::TcpListener::bind("127.0.0.1:0")
-                .await
-                .expect("it binds");
-            taken.local_addr().expect("it has an address").port()
-        };
+        let empty = refusing().await;
         answering(
             &world,
             Effect::Connect {
