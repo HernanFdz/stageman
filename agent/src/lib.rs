@@ -28,11 +28,15 @@
 //! the reason a container's arguments are a value this crate builds rather
 //! than a command line it hands to somebody else.
 
+mod conversation;
+
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
+
+pub use conversation::{Conversation, Exchange, Heard, Opening, Said};
 
 use agent_client_protocol::schema::v1::{
     ContentBlock, HttpHeader, InitializeRequest, InitializeResponse, ListSessionsRequest,
@@ -75,7 +79,7 @@ pub use agent_client_protocol::schema::v1::StopReason;
 /// and an agent that fails by printing megabytes would otherwise turn one
 /// unreadable failure into a second one. Kept is not the same as read: see
 /// [`printed`], which reads past this and discards the rest.
-const STDERR_LIMIT: usize = 8 * 1024;
+pub(crate) const STDERR_LIMIT: usize = 8 * 1024;
 
 /// Which platform this binary was made for, as far as anything here needs to
 /// care.
@@ -811,6 +815,27 @@ pub enum AgentError {
     /// The container ran and spoke, but the exchange did not complete.
     #[error("the agent did not complete the protocol handshake")]
     Protocol(#[source] agent_client_protocol::Error),
+    /// The agent's process ended cleanly without answering what it had been
+    /// asked.
+    ///
+    /// Distinct from [`AgentError::Container`], which is a process that
+    /// failed and said why, and from [`AgentError::Protocol`], which is a
+    /// refusal: this one simply stopped talking, and the only thing to say
+    /// about it is what it was asked.
+    #[error("the agent stopped before answering {asked}")]
+    Unanswered {
+        /// What it was being asked, as the conversation names it.
+        asked: &'static str,
+    },
+    /// The agent answered, and the answer could not be read as what was
+    /// asked for.
+    #[error("the agent's {what} could not be read: {why}")]
+    Unreadable {
+        /// What was asked for, as the conversation names it.
+        what: &'static str,
+        /// Why not.
+        why: String,
+    },
     /// The container could not be waited on once the exchange was over.
     #[error("the container could not be waited on")]
     Exit(#[source] io::Error),
@@ -956,7 +981,7 @@ async fn printed(mut stderr: tokio::process::ChildStderr) -> String {
 /// agent that needs one clones it here — see
 /// `docs/decisions/0016-the-agent-clones-the-repository.md`. The image already
 /// makes this its working directory.
-const WORKSPACE: &str = "/workspace";
+pub(crate) const WORKSPACE: &str = "/workspace";
 
 /// The variables one agent's container is started with, and their values.
 ///
@@ -1095,7 +1120,7 @@ const MODE_OPTION: (&str, &str) = ("mode", "default");
 /// comes before the effort because the effort exists only on some models —
 /// measured, and the reason it lives inside the model's variant rather than
 /// beside it.
-fn wired(kit: &Kit) -> Vec<(&'static str, &'static str)> {
+pub(crate) fn wired(kit: &Kit) -> Vec<(&'static str, &'static str)> {
     let mut set = vec![MODE_OPTION];
     match kit {
         Kit::Claude { model } => {
@@ -1139,7 +1164,7 @@ const fn claude_effort(effort: ClaudeEffort) -> &'static str {
 /// version of the protocol library cannot read — an option that cannot be read
 /// back is one that did not demonstrably take, which is what the caller needs
 /// to know.
-fn current(options: &[SessionConfigOption], id: &str) -> Option<String> {
+pub(crate) fn current(options: &[SessionConfigOption], id: &str) -> Option<String> {
     let option = options.iter().find(|option| &*option.id.0 == id)?;
     match &option.kind {
         SessionConfigKind::Select(select) => Some(select.current_value.0.to_string()),
@@ -1157,7 +1182,7 @@ fn current(options: &[SessionConfigOption], id: &str) -> Option<String> {
 /// was asked for is what was already reported, in which case nothing had to.
 /// Not reported back at all is never having taken: the option just set has to
 /// be in the reply.
-fn took(asked: &str, before: Option<&str>, after: Option<&str>) -> bool {
+pub(crate) fn took(asked: &str, before: Option<&str>, after: Option<&str>) -> bool {
     after.is_some_and(|after| before == Some(asked) || Some(after) != before)
 }
 
@@ -1166,7 +1191,7 @@ fn took(asked: &str, before: Option<&str>, after: Option<&str>) -> bool {
 /// The detail travels in the error's data rather than its message — the
 /// message is the protocol's generic *internal error*, measured — so the data
 /// is read first and the message is the fallback.
-fn refused(error: &agent_client_protocol::Error) -> String {
+pub(crate) fn refused(error: &agent_client_protocol::Error) -> String {
     error
         .data
         .as_ref()
@@ -1406,7 +1431,7 @@ impl std::fmt::Debug for Tools {
 /// The transport is HTTP because that is what the adapters advertise: 0034
 /// measured the alternative — a server offered over the protocol connection
 /// itself — being accepted and silently dropped.
-fn declaration(tools: &Tools) -> McpServer {
+pub(crate) fn declaration(tools: &Tools) -> McpServer {
     McpServer::Http(
         McpServerHttp::new(TOOLS_SERVER, tools.endpoint.clone()).headers(vec![HttpHeader::new(
             "Authorization",
@@ -2324,15 +2349,6 @@ pub async fn discard(runtime: &ContainerRuntime, name: &str) -> Result<(), Agent
         path: runtime.path().to_owned(),
         message: String::from_utf8_lossy(&removed.stderr).trim().to_owned(),
     })
-}
-
-/// Whether a conversation starts a session or picks one up.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Opening {
-    /// Make a new session in a container that has none.
-    Fresh,
-    /// Find the session already in this container, and load it.
-    Resumed,
 }
 
 /// Starts the runtime with `arguments`, with its three streams piped.
