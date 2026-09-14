@@ -11,18 +11,15 @@
 //! `docs/decisions/0056-the-instance-decides-and-the-world-performs.md` and
 //! `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`.
 //!
-//! Every family here is a meaning rather than a mechanism — run a turn, probe
-//! a tunnel, say something — and each moves out of this hole into the generic
-//! vocabulary as the instance starts speaking the mechanism instead.
+//! Every family here is a meaning rather than a mechanism — probe a tunnel,
+//! say something — and each moves out of this hole into the generic
+//! vocabulary as the instance starts speaking the mechanism instead. A turn
+//! already has: it is the commands and the process in `crate::turns`.
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use stageman_agent::Answer;
-use stageman_core::{
-    Agent, Channel, InstanceId, JobId, Kit, Platform, ProjectId, Role, Speaking, Thread,
-};
+use stageman_core::{Agent, Channel, InstanceId, JobId, ProjectId, Speaking, Thread};
 use stageman_vocabulary::Named;
 
 /// What identifies one request the world is waiting to answer.
@@ -142,13 +139,6 @@ pub enum AppEvent {
         /// The loopback port it is on.
         port: u16,
     },
-    /// Answers [`AppEffect::RunTurn`]: the agent stopped, or could not be run.
-    TurnEnded {
-        /// Whose turn it was.
-        speaker: Speaker,
-        /// What the agent said and why it stopped, or why it could not.
-        outcome: Result<Answer, String>,
-    },
     /// Answers [`AppEffect::Probe`]: whether something is behind a job's
     /// tunnel.
     Probed {
@@ -193,7 +183,6 @@ impl Named for AppEvent {
     fn kind(&self) -> &'static str {
         match self {
             Self::Presenting { .. } => "Presenting",
-            Self::TurnEnded { .. } => "TurnEnded",
             Self::Probed { .. } => "Probed",
             Self::Heard { .. } => "Heard",
             Self::ThreadOpened { .. } => "ThreadOpened",
@@ -209,21 +198,12 @@ impl Named for AppEvent {
 /// unanswered effect's failure is the world's to log.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AppEffect {
-    /// What booting found, for the world's own performers: which runtime
-    /// answers, and which domain this instance answers on. Unanswered, and
-    /// on its way out: every effect that needs the runtime will carry its
-    /// path, and the domain is the instance's to decide on once it binds
-    /// its own listeners.
+    /// What booting found, for the world's own performer: which runtime
+    /// answers. Unanswered, and on its way out with the probe, which is the
+    /// one effect left that needs it.
     Booted {
         /// Where the container runtime this instance found is.
         runtime: PathBuf,
-    },
-    /// Run one turn of an agent. Answered by [`AppEvent::TurnEnded`].
-    RunTurn {
-        /// Whose turn.
-        speaker: Speaker,
-        /// Starting a session or continuing one.
-        run: Run,
     },
     /// Ask whether anything is behind a job's tunnel. Answered by
     /// [`AppEvent::Probed`].
@@ -248,13 +228,6 @@ pub enum AppEffect {
         id: RequestId,
         /// The answer, typed for the screen that asked.
         response: crate::requests::Response,
-    },
-    /// Stop the turn running for a speaker: the agent process is ended and
-    /// the container carries on. Answered by [`AppEvent::TurnEnded`], like
-    /// the turn it stops.
-    StopTurn {
-        /// Whose turn.
-        speaker: Speaker,
     },
     /// Open the thread a job's conversation happens in, by posting its
     /// announcement at the root of the channel. Answered by
@@ -296,11 +269,9 @@ impl Named for AppEffect {
     fn kind(&self) -> &'static str {
         match self {
             Self::Booted { .. } => "Booted",
-            Self::RunTurn { .. } => "RunTurn",
             Self::Probe { .. } => "Probe",
             Self::Say { .. } => "Say",
             Self::Respond { .. } => "Respond",
-            Self::StopTurn { .. } => "StopTurn",
             Self::OpenThread { .. } => "OpenThread",
             Self::Post { .. } => "Post",
             Self::Listen { .. } => "Listen",
@@ -308,62 +279,9 @@ impl Named for AppEffect {
     }
 }
 
-/// Whether a turn starts a session or continues the one its container holds.
-///
-/// Everything an agent process is about to be handed, decided here and
-/// carried as plain data: the environment it is given is rendered from the
-/// handout by the instance, so that what a container sees is decided in the
-/// one place that decides, and the world only sets it.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Run {
-    /// Make the container and the session, and put the first question.
-    Begin {
-        /// The container to make, named before it exists.
-        container: String,
-        /// Which instance made it, for the label.
-        instance: InstanceId,
-        /// Which agent runs in it.
-        agent: Agent,
-        /// What it runs as, which decides the image.
-        role: Role,
-        /// Exactly the environment the container is given, and nothing
-        /// inherited. Credentials in the clear, for the reason the module
-        /// says.
-        environment: BTreeMap<String, String>,
-        /// The repository checked out before the agent speaks, for a job.
-        repository: Option<String>,
-        /// The platform whose tool makes the checkout, if a credential for
-        /// one is held.
-        platform: Option<Platform>,
-        /// What the agent runs on.
-        kit: Kit,
-        /// What the agent presents to the tools endpoint.
-        warrant: String,
-        /// Where that endpoint is, as a container reaches it: the port
-        /// actually taken rather than the one asked for.
-        tools: String,
-        /// The instruction it begins from.
-        kickoff: String,
-    },
-    /// Continue the session the container holds, settling the kit again.
-    Resume {
-        /// The container.
-        container: String,
-        /// What the job runs on, settled again because a loaded session
-        /// forgets it.
-        kit: Kit,
-        /// What the agent presents to the tools endpoint, minted afresh.
-        warrant: String,
-        /// Where that endpoint is, as a container reaches it.
-        tools: String,
-        /// What the resumed agent is told.
-        text: String,
-    },
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{AppEffect, AppEvent, Run};
+    use super::{AppEffect, AppEvent};
 
     /// This application's own events and effects format no more than the
     /// vocabulary does, because a credential crosses them in the clear: the
@@ -389,7 +307,6 @@ mod tests {
 
         assert!(!Probe::<AppEvent>(std::marker::PhantomData).formats());
         assert!(!Probe::<AppEffect>(std::marker::PhantomData).formats());
-        assert!(!Probe::<Run>(std::marker::PhantomData).formats());
         assert!(
             Probe::<String>(std::marker::PhantomData).formats(),
             "the probe tells"

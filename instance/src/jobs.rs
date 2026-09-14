@@ -7,8 +7,8 @@ use stageman_core::{
 use stageman_foreman::Voice;
 
 use crate::Running;
-use crate::turns::{Turn, speaking_for};
-use crate::vocabulary::{AppEffect, Run, Speaker};
+use crate::turns::{Run, Turn, speaking_for};
+use crate::vocabulary::{AppEffect, Speaker};
 
 /// A job could not be recorded.
 #[derive(Debug, thiserror::Error)]
@@ -173,12 +173,10 @@ impl Running {
         };
         let speaker = Speaker::Job(job);
         let warrant = self.warrant(speaker, thread);
-        self.turns.insert(speaker, Turn::noticed());
-        self.defer(AppEffect::RunTurn {
+        let first = self.turn(
             speaker,
-            run: Run::Begin {
+            Turn::noticed(Run::Begin {
                 container: stageman_job::container(job),
-                instance: self.id,
                 agent: handout.agent(),
                 role: handout.role(),
                 environment,
@@ -190,8 +188,9 @@ impl Running {
                 warrant,
                 tools: self.tools.clone(),
                 kickoff,
-            },
-        });
+            }),
+        );
+        self.defer(first);
         debug_assert!(
             speaking_for(&self.state, job).is_some() || self.state.job(job).is_some(),
             "a job being started is on the record"

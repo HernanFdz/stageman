@@ -668,6 +668,30 @@ fn spelled(value: &SessionConfigOptionValue) -> Option<String> {
 }
 
 impl Said {
+    /// The credential the tools were declared with on a session request,
+    /// if this says one: the inverse of the declaration, for whoever answers
+    /// it in a simulation and wants to know what an agent was handed.
+    #[must_use]
+    pub fn presented(&self) -> Option<String> {
+        let (Self::NewSession {
+            tools: Some(McpServer::Http(declared)),
+            ..
+        }
+        | Self::LoadSession {
+            tools: Some(McpServer::Http(declared)),
+            ..
+        }) = self
+        else {
+            return None;
+        };
+        declared
+            .headers
+            .iter()
+            .find(|header| header.name == "Authorization")
+            .and_then(|header| header.value.strip_prefix("Bearer "))
+            .map(str::to_owned)
+    }
+
     /// The line that crosses the pipe.
     #[must_use]
     pub fn line(&self) -> String {
@@ -1581,14 +1605,28 @@ mod tests {
         assert!(Said::parse("garbage").is_none());
 
         // The credential crosses in the declaration, which is the point of
-        // declaring the tools at all, and nothing here formats it.
-        let line = Said::NewSession {
+        // declaring the tools at all, and nothing here formats it — and it
+        // reads back off the declaration for whoever answers.
+        let declared = Said::NewSession {
             id: 2,
             tools: Some(declaration(&tools())),
-        }
-        .line();
+        };
+        let line = declared.line();
         assert!(line.contains("Bearer a-warrant"), "{line}");
         assert!(line.contains(r#""cwd":"/workspace""#), "{line}");
+        assert_eq!(declared.presented().as_deref(), Some("a-warrant"));
+        assert_eq!(
+            Said::LoadSession {
+                id: 4,
+                session: "sess-9".to_owned(),
+                tools: Some(declaration(&tools())),
+            }
+            .presented()
+            .as_deref(),
+            Some("a-warrant")
+        );
+        assert_eq!(Said::NewSession { id: 2, tools: None }.presented(), None);
+        assert_eq!(Said::Initialize { id: 1 }.presented(), None);
     }
 
     /// Every line an agent says reads back as itself, and the constructors

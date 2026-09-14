@@ -301,7 +301,12 @@ const fn installing(agent: Agent) -> &'static str {
 /// Nothing separates the pieces, so each fragment ends in a newline and a test
 /// says so. Gluing two instructions into one line is the failure that would
 /// otherwise be silent until a build fails somewhere unrelated.
-fn recipe(agent: Agent, role: Role) -> String {
+///
+/// Public because the instance builds: since
+/// `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`
+/// a build is a command rendered there with this on its standard input.
+#[must_use]
+pub fn recipe(agent: Agent, role: Role) -> String {
     let mut composed = String::from(BASE);
     composed.push_str(installing(agent));
     composed.push_str(HOLDING);
@@ -352,7 +357,8 @@ impl Image {
 /// happen, or a table whose only failure is an index that cannot be out of
 /// range, and both are the shape `.quality/gate-reference.md` warns about —
 /// code pretending to handle something impossible.
-fn named(recipe: &str) -> Image {
+#[must_use]
+pub fn named(recipe: &str) -> Image {
     Image(format!(
         "{REPOSITORY}:{:x}",
         Sha256::digest(recipe.as_bytes())
@@ -376,19 +382,19 @@ const BUILD_TAIL: usize = 12;
 /// Quiet, because the name is already known here and the identifier a build
 /// prints is of no further use. What a build has to say about itself still
 /// arrives on standard error, which is where the failure message comes from.
-fn build_arguments(image: &Image) -> [&str; 5] {
-    ["build", "--quiet", "--tag", image.as_argument(), "-"]
+fn build_arguments(image: &Image) -> Vec<String> {
+    Command::Build {
+        image: image.as_argument().to_owned(),
+    }
+    .arguments()
 }
 
 /// The arguments that ask whether an image is already here.
-fn present_arguments(image: &Image) -> [&str; 5] {
-    [
-        "image",
-        "inspect",
-        "--format",
-        "{{.Id}}",
-        image.as_argument(),
-    ]
+fn present_arguments(image: &Image) -> Vec<String> {
+    Command::Present {
+        image: image.as_argument().to_owned(),
+    }
+    .arguments()
 }
 
 /// Whether the runtime already holds this image.
@@ -522,7 +528,11 @@ fn outcome(succeeded: bool, image: Image, complained: &[u8]) -> Result<Image, Ag
 /// index nothing guarantees is a character boundary, and the escape from that
 /// is exactly the kind `.quality/gate-reference.md` forbids. Lines are already
 /// whole.
-fn last_words(said: &[u8]) -> String {
+///
+/// Public because the instance reads a build's outcome, and this is what a
+/// failed one says.
+#[must_use]
+pub fn last_words(said: &[u8]) -> String {
     let text = String::from_utf8_lossy(said);
     let mut kept: Vec<&str> = text
         .lines()
@@ -1636,56 +1646,14 @@ fn retained_arguments(
     instance: InstanceId,
     delivering: &[(String, Secret)],
 ) -> Vec<String> {
-    // Created rather than run, and never removed: the thread has to be put in
-    // place before anything starts, and the container outlives this process.
-    let mut arguments = vec![
-        "create".to_owned(),
-        "--interactive".to_owned(),
-        // The runtime's own init as process one, which does two things this
-        // needs. It reaps what an agent orphans — and since
-        // `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`
-        // a container outlives the agent that filled it, so there is now time
-        // to accumulate them. And it passes on the signal that stops a
-        // container, which process one otherwise ignores, so stopping takes an
-        // instant rather than a timeout.
-        "--init".to_owned(),
-        // So that one hostname reaches this instance whichever runtime is in
-        // use. Measured on both: Docker and Podman each honour it, and
-        // without it a container on Linux can reach the host by no name at
-        // all.
-        "--add-host".to_owned(),
-        "host.docker.internal:host-gateway".to_owned(),
-        // The tunnel, published here because there is nowhere later: the
-        // mapping is fixed when the container is created and no runtime can
-        // add one afterwards.
-        //
-        // Loopback on the host, and an empty host port so the runtime picks a
-        // free one atomically — choosing one here by binding and releasing it
-        // is a race, and this project has already lost a port that way. What
-        // it picked is asked for rather than recorded, because Docker assigns
-        // a new one on every start and Podman does not.
-        "--publish".to_owned(),
-        format!("127.0.0.1::{TUNNEL_PORT}"),
-        "--name".to_owned(),
-        name.to_owned(),
-        "--label".to_owned(),
-        format!("{OWNER_LABEL}={name}"),
-        // Which agent this container was made for, so that a turn boundary
-        // can ask. A foreman's container is long-lived and its project's kit
-        // can change underneath it; the same agent on other settings keeps
-        // the container, because settings are settled again every turn, and a
-        // different agent is a different image — see
-        // `docs/decisions/0048-a-job-runs-on-a-kit.md`. The image's identity
-        // cannot answer this, since nothing is tagged.
-        "--label".to_owned(),
-        format!("{AGENT_LABEL}={}", agent_label(agent)),
-        // Which instance this belongs to, so that a sweep on a shared daemon
-        // can tell its own abandoned work from somebody else's containers.
-        "--label".to_owned(),
-        format!("{INSTANCE_LABEL}={instance}"),
-    ];
-    arguments.extend(carrying(image, delivering));
-    arguments
+    Command::Create {
+        name: name.to_owned(),
+        image: image.as_argument().to_owned(),
+        agent,
+        instance,
+        variables: delivering.iter().map(|(named, _)| named.clone()).collect(),
+    }
+    .arguments()
 }
 
 /// Everything a container is started with, decided elsewhere and handed
@@ -1807,7 +1775,10 @@ pub async fn begin(
 /// resuming share it without asking first: a container held open because its
 /// tunnel answers is already up, and one that was stopped is not.
 fn holding_arguments(name: &str) -> Vec<String> {
-    vec!["start".to_owned(), name.to_owned()]
+    Command::Start {
+        name: name.to_owned(),
+    }
+    .arguments()
 }
 
 /// What runs the agent inside a container that is already up.
@@ -1818,12 +1789,10 @@ fn holding_arguments(name: &str) -> Vec<String> {
 /// variables were named when the container was created and everything run
 /// inside it inherits them.
 fn agent_arguments(name: &str) -> Vec<String> {
-    vec![
-        "exec".to_owned(),
-        "--interactive".to_owned(),
-        name.to_owned(),
-        AGENT_PROGRAM.to_owned(),
-    ]
+    Command::Exec {
+        name: name.to_owned(),
+    }
+    .arguments()
 }
 
 /// The variable the checkout step reads the repository from.
@@ -1841,15 +1810,12 @@ const REPOSITORY_VARIABLE: &str = "STAGEMAN_REPOSITORY";
 /// repository travels in a variable rather than in the script, so it needs no
 /// quoting and the script is the same text for every job.
 fn checkout_arguments(name: &str, repository: &str, platform: Option<Platform>) -> Vec<String> {
-    vec![
-        "exec".to_owned(),
-        "--env".to_owned(),
-        format!("{REPOSITORY_VARIABLE}={repository}"),
-        name.to_owned(),
-        "sh".to_owned(),
-        "-c".to_owned(),
-        checkout_script(platform).to_owned(),
-    ]
+    Command::Checkout {
+        name: name.to_owned(),
+        repository: repository.to_owned(),
+        platform,
+    }
+    .arguments()
 }
 
 /// The checkout itself, as the shell inside the container runs it.
@@ -2073,6 +2039,72 @@ pub enum Command {
         /// Its name and tag.
         image: String,
     },
+    /// Whether an image is already here, which is how a build is skipped.
+    Present {
+        /// Its name and tag.
+        image: String,
+    },
+    /// Build an image under the name its recipe hashes to, from a recipe on
+    /// standard input and no other context: nothing this project writes
+    /// goes in an image, per
+    /// `docs/decisions/0034-tools-are-served-not-shipped.md`, so there is
+    /// nothing a context could carry. Quiet, because the name is already
+    /// known; what a build has to say still arrives on standard error.
+    Build {
+        /// Its name and tag.
+        image: String,
+    },
+    /// Create a container meant to outlive this process, from an image,
+    /// with its tunnel published and the variables named forwarded from
+    /// the environment the runtime is given.
+    ///
+    /// Created rather than run, so there is a moment between existing and
+    /// starting in which a thread can be put in place; and never `--rm`,
+    /// so that hard-killing the daemon leaves the container and its session
+    /// intact — see
+    /// `docs/decisions/0015-a-job-survives-the-daemon-dying.md`.
+    Create {
+        /// The container, named before it exists.
+        name: String,
+        /// The image it is made from.
+        image: String,
+        /// Which agent it is made for, on its label.
+        agent: Agent,
+        /// Which instance made it, on its label.
+        instance: InstanceId,
+        /// The variables forwarded into it, by name. Never valued here:
+        /// `--env NAME` tells the runtime to take the value from the
+        /// environment the command is given, so a secret never appears in
+        /// the process table.
+        variables: Vec<String>,
+    },
+    /// Start a container, or leave one already running as it is: success
+    /// on both runtimes either way, which is what lets beginning and
+    /// resuming share it.
+    Start {
+        /// The container.
+        name: String,
+    },
+    /// Check the repository out into a container's workspace, with the
+    /// platform's own tool where a credential for one is held and plain git
+    /// otherwise — see
+    /// `docs/decisions/0050-the-repository-is-checked-out-before-the-first-turn.md`.
+    Checkout {
+        /// The container.
+        name: String,
+        /// What is checked out, travelling in a variable rather than the
+        /// script so that it needs no quoting.
+        repository: String,
+        /// Whose tool makes the clone, if any's.
+        platform: Option<Platform>,
+    },
+    /// Run the agent inside a container that is up, with its standard
+    /// streams piped to this process: the pipes are what a turn holds, and
+    /// closing them ends the agent while the container carries on.
+    Exec {
+        /// The container.
+        name: String,
+    },
 }
 
 /// The labels a container of this project's carries.
@@ -2133,6 +2165,110 @@ impl Command {
             Self::Port { name } => vec!["port".to_owned(), name.clone(), TUNNEL_PORT.to_string()],
             Self::Images => ours_arguments(),
             Self::RemoveImage { image } => vec!["rmi".to_owned(), image.clone()],
+            Self::Present { image } => vec![
+                "image".to_owned(),
+                "inspect".to_owned(),
+                "--format".to_owned(),
+                "{{.Id}}".to_owned(),
+                image.clone(),
+            ],
+            Self::Build { image } => vec![
+                "build".to_owned(),
+                "--quiet".to_owned(),
+                "--tag".to_owned(),
+                image.clone(),
+                "-".to_owned(),
+            ],
+            Self::Create {
+                name,
+                image,
+                agent,
+                instance,
+                variables,
+            } => {
+                let mut arguments = vec![
+                    "create".to_owned(),
+                    "--interactive".to_owned(),
+                    // The runtime's own init as process one, which does two
+                    // things this needs. It reaps what an agent orphans — and
+                    // since
+                    // `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`
+                    // a container outlives the agent that filled it, so there
+                    // is now time to accumulate them. And it passes on the
+                    // signal that stops a container, which process one
+                    // otherwise ignores, so stopping takes an instant rather
+                    // than a timeout.
+                    "--init".to_owned(),
+                    // So that one hostname reaches this instance whichever
+                    // runtime is in use. Measured on both: Docker and Podman
+                    // each honour it, and without it a container on Linux can
+                    // reach the host by no name at all.
+                    "--add-host".to_owned(),
+                    "host.docker.internal:host-gateway".to_owned(),
+                    // The tunnel, published here because there is nowhere
+                    // later: the mapping is fixed when the container is
+                    // created and no runtime can add one afterwards.
+                    //
+                    // Loopback on the host, and an empty host port so the
+                    // runtime picks a free one atomically — choosing one here
+                    // by binding and releasing it is a race, and this project
+                    // has already lost a port that way. What it picked is
+                    // asked for rather than recorded, because Docker assigns a
+                    // new one on every start and Podman does not.
+                    "--publish".to_owned(),
+                    format!("127.0.0.1::{TUNNEL_PORT}"),
+                    "--name".to_owned(),
+                    name.clone(),
+                    "--label".to_owned(),
+                    format!("{OWNER_LABEL}={name}"),
+                    // Which agent this container was made for, so that a turn
+                    // boundary can ask. A foreman's container is long-lived
+                    // and its project's kit can change underneath it; the
+                    // same agent on other settings keeps the container,
+                    // because settings are settled again every turn, and a
+                    // different agent is a different image — see
+                    // `docs/decisions/0048-a-job-runs-on-a-kit.md`. The
+                    // image's identity cannot answer this, since nothing is
+                    // tagged.
+                    "--label".to_owned(),
+                    format!("{AGENT_LABEL}={}", agent_label(*agent)),
+                    // Which instance this belongs to, so that a sweep on a
+                    // shared daemon can tell its own abandoned work from
+                    // somebody else's containers.
+                    "--label".to_owned(),
+                    format!("{INSTANCE_LABEL}={instance}"),
+                ];
+                for variable in variables {
+                    arguments.push("--env".to_owned());
+                    arguments.push(variable.clone());
+                }
+                // Deliberately no `--network none` here, unlike the
+                // handshake: reaching a model needs the network, and so does
+                // cloning. Which hosts it *ought* to reach is the egress
+                // allowlist still open in `docs/open-questions.md`.
+                arguments.push(image.clone());
+                arguments
+            }
+            Self::Start { name } => vec!["start".to_owned(), name.clone()],
+            Self::Checkout {
+                name,
+                repository,
+                platform,
+            } => vec![
+                "exec".to_owned(),
+                "--env".to_owned(),
+                format!("{REPOSITORY_VARIABLE}={repository}"),
+                name.clone(),
+                "sh".to_owned(),
+                "-c".to_owned(),
+                checkout_script(*platform).to_owned(),
+            ],
+            Self::Exec { name } => vec![
+                "exec".to_owned(),
+                "--interactive".to_owned(),
+                name.clone(),
+                AGENT_PROGRAM.to_owned(),
+            ],
         }
     }
 
@@ -2184,6 +2320,84 @@ impl Command {
             ["rmi", image] => Some(Self::RemoveImage {
                 image: (*image).to_owned(),
             }),
+            _ => Self::parse_turn(&words),
+        }
+    }
+
+    /// The question these arguments ask, among the ones a turn asks.
+    ///
+    /// Split from [`Command::parse`] by the line budget and nothing else:
+    /// a turn is six commands, and every one has an argument list worth
+    /// reading back exactly.
+    fn parse_turn(words: &[&str]) -> Option<Self> {
+        match words {
+            ["image", "inspect", "--format", "{{.Id}}", image] => Some(Self::Present {
+                image: (*image).to_owned(),
+            }),
+            ["build", "--quiet", "--tag", image, "-"] => Some(Self::Build {
+                image: (*image).to_owned(),
+            }),
+            [
+                "create",
+                "--interactive",
+                "--init",
+                "--add-host",
+                "host.docker.internal:host-gateway",
+                "--publish",
+                published,
+                "--name",
+                name,
+                "--label",
+                owner,
+                "--label",
+                agent,
+                "--label",
+                instance,
+                rest @ ..,
+            ] if *published == format!("127.0.0.1::{TUNNEL_PORT}")
+                && *owner == format!("{OWNER_LABEL}={name}") =>
+            {
+                let agent = labelled(agent.strip_prefix(&format!("{AGENT_LABEL}="))?)?;
+                let instance = minted(instance.strip_prefix(&format!("{INSTANCE_LABEL}="))?)?;
+                let (image, forwarded) = rest.split_last()?;
+                let mut variables = Vec::new();
+                for pair in forwarded.chunks(2) {
+                    let ["--env", variable] = pair else {
+                        return None;
+                    };
+                    variables.push((*variable).to_owned());
+                }
+                Some(Self::Create {
+                    name: (*name).to_owned(),
+                    image: (*image).to_owned(),
+                    agent,
+                    instance,
+                    variables,
+                })
+            }
+            ["start", name] => Some(Self::Start {
+                name: (*name).to_owned(),
+            }),
+            ["exec", "--env", repository, name, "sh", "-c", script] => {
+                let repository = repository.strip_prefix(&format!("{REPOSITORY_VARIABLE}="))?;
+                let platform = if *script == checkout_script(Some(Platform::GitHub)) {
+                    Some(Platform::GitHub)
+                } else if *script == checkout_script(None) {
+                    None
+                } else {
+                    return None;
+                };
+                Some(Self::Checkout {
+                    name: (*name).to_owned(),
+                    repository: repository.to_owned(),
+                    platform,
+                })
+            }
+            ["exec", "--interactive", name, program] if *program == AGENT_PROGRAM => {
+                Some(Self::Exec {
+                    name: (*name).to_owned(),
+                })
+            }
             _ => None,
         }
     }
@@ -2779,6 +2993,112 @@ mod tests {
         assert_eq!(names(" a \n\nb\n"), vec!["a".to_owned(), "b".to_owned()]);
     }
 
+    /// Every command a turn runs renders to arguments and reads back as
+    /// itself, with and without what varies: the variables forwarded, and
+    /// whose tool makes the checkout.
+    #[test]
+    fn every_command_a_turn_runs_reads_back_from_its_own_arguments() {
+        let every = [
+            Command::Present {
+                image: "stageman:0123".to_owned(),
+            },
+            Command::Build {
+                image: "stageman:0123".to_owned(),
+            },
+            Command::Create {
+                name: "stageman-job-1".to_owned(),
+                image: "stageman:0123".to_owned(),
+                agent: Agent::Claude,
+                instance: an_instance(),
+                variables: vec!["ANTHROPIC_API_KEY".to_owned(), "GH_TOKEN".to_owned()],
+            },
+            Command::Create {
+                name: "stageman-foreman-2".to_owned(),
+                image: "stageman:0123".to_owned(),
+                agent: Agent::Claude,
+                instance: an_instance(),
+                variables: Vec::new(),
+            },
+            Command::Start {
+                name: "stageman-job-1".to_owned(),
+            },
+            Command::Checkout {
+                name: "stageman-job-1".to_owned(),
+                repository: "https://example.invalid/repo".to_owned(),
+                platform: Some(Platform::GitHub),
+            },
+            Command::Checkout {
+                name: "stageman-job-1".to_owned(),
+                repository: "https://example.invalid/repo".to_owned(),
+                platform: None,
+            },
+            Command::Exec {
+                name: "stageman-job-1".to_owned(),
+            },
+        ];
+        for command in every {
+            assert_eq!(
+                Command::parse(&command.arguments()),
+                Some(command.clone()),
+                "{command:?}"
+            );
+        }
+    }
+
+    /// The turn's commands, asked another way, are not this build's
+    /// questions: a script that is not the checkout, a program that is not
+    /// the agent, a label naming an agent this build does not know, a
+    /// variable not introduced by `--env`.
+    #[test]
+    fn a_turns_commands_asked_another_way_are_not_this_builds_questions() {
+        let mut other_script = Command::Checkout {
+            name: "stageman-job-1".to_owned(),
+            repository: "https://example.invalid/repo".to_owned(),
+            platform: None,
+        }
+        .arguments();
+        other_script.pop();
+        other_script.push("rm -rf /".to_owned());
+        assert_eq!(Command::parse(&other_script), None);
+        assert_eq!(
+            Command::parse(&[
+                "exec".to_owned(),
+                "--interactive".to_owned(),
+                "stageman-job-1".to_owned(),
+                "sh".to_owned()
+            ]),
+            None
+        );
+        let mut other_agent = Command::Create {
+            name: "stageman-job-1".to_owned(),
+            image: "stageman:0123".to_owned(),
+            agent: Agent::Claude,
+            instance: an_instance(),
+            variables: Vec::new(),
+        }
+        .arguments();
+        let labelled_agent = other_agent
+            .iter()
+            .position(|argument| argument == "stageman.agent=claude")
+            .expect("the agent's label");
+        other_agent[labelled_agent] = "stageman.agent=gpt".to_owned();
+        assert_eq!(Command::parse(&other_agent), None);
+        let mut odd_variables = Command::Create {
+            name: "stageman-job-1".to_owned(),
+            image: "stageman:0123".to_owned(),
+            agent: Agent::Claude,
+            instance: an_instance(),
+            variables: vec!["ONE".to_owned()],
+        }
+        .arguments();
+        odd_variables.insert(odd_variables.len() - 1, "TWO".to_owned());
+        assert_eq!(
+            Command::parse(&odd_variables),
+            None,
+            "a variable not introduced by --env is not a variable"
+        );
+    }
+
     #[test]
     fn an_agents_label_reads_back_as_that_agent() {
         for agent in Agent::ALL {
@@ -3257,7 +3577,7 @@ mod tests {
         assert_eq!(arguments[0], "build");
         assert_eq!(
             arguments.last(),
-            Some(&"-"),
+            Some(&"-".to_owned()),
             "the trailing dash is the recipe arriving on standard input",
         );
     }
@@ -3271,9 +3591,9 @@ mod tests {
     #[test]
     fn a_build_and_the_question_before_it_name_one_image() {
         let image = built();
-        assert!(build_arguments(&image).contains(&"--tag"));
-        assert!(build_arguments(&image).contains(&BUILT));
-        assert_eq!(present_arguments(&image).last(), Some(&BUILT));
+        assert!(build_arguments(&image).iter().any(|word| word == "--tag"));
+        assert!(build_arguments(&image).iter().any(|word| word == BUILT));
+        assert_eq!(present_arguments(&image).last(), Some(&BUILT.to_owned()));
     }
 
     #[test]

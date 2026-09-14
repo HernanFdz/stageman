@@ -519,11 +519,14 @@ justify is usually obsolete.
   as it likes internally, but the others are libraries whose errors cross a
   boundary, and a boxed error at that boundary makes the caller's handling
   untestable.
-- **The agent is third-party, and its quirks stop at the job boundary.** How the
-  agent process is launched, spoken to and cleaned up is entirely the **job**
-  crate's problem. If a change to that agent's interface would touch **core**,
-  the abstraction is in the wrong place — the whole reason the crate boundary is
-  there is that the agent is on somebody else's release cadence.
+- **The agent is third-party, and its quirks stop at the agent crate's
+  boundary.** What a container is started with, what is said to the agent and
+  what its answers mean are entirely the **agent** crate's business, rendered
+  and read there as pure functions; the **instance** only sequences them, and
+  the world only carries them. If a change to that agent's interface would
+  touch **core** or the instance, the abstraction is in the wrong place — the
+  whole reason the crate boundary is there is that the agent is on somebody
+  else's release cadence.
 - **Packages carry a prefix; directories do not.** The directories are named
   for the concepts in `docs/architecture.md` §1, and the packages inside them
   are `stageman-core`, `stageman-foreman` and `stageman-job`, with the app

@@ -212,8 +212,7 @@
         {
           "App": {
             "Booted": {
-              "runtime": "/usr/bin/docker",
-              "domain": "localhost"
+              "runtime": "/usr/bin/docker"
             }
           }
         },
@@ -280,6 +279,8 @@
             },
             "next": 10,
             "turns": [],
+            "talking": [],
+            "building": {},
             "warrants": {},
             "interrupted": [],
             "asking": [],

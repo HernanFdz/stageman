@@ -8,8 +8,8 @@
 use stageman_core::{Arriving, Channel, ChannelConfig, JobId, Progress, Recipient, State, Thread};
 
 use crate::Running;
-use crate::turns::{Turn, speaking_for};
-use crate::vocabulary::{AppEffect, Message, Run, Speaker};
+use crate::turns::{Run, Turn, speaking_for};
+use crate::vocabulary::{AppEffect, Message, Speaker};
 use crate::{Effect, Emit as _};
 
 /// What the gate decided when a reply arrived.
@@ -122,20 +122,20 @@ impl Running {
                 };
                 let speaker = Speaker::Job(job);
                 let warrant = self.warrant(speaker, thread);
-                self.turns.insert(speaker, Turn::noticed());
                 // Resuming starts the container, which publishes its tunnel
                 // on a fresh port.
                 self.forget_tunnel(job);
-                self.defer(AppEffect::RunTurn {
+                let first = self.turn(
                     speaker,
-                    run: Run::Resume {
+                    Turn::noticed(Run::Resume {
                         container: stageman_job::container(job),
                         kit,
                         warrant,
                         tools: self.tools.clone(),
                         text: stageman_foreman::reply(said),
-                    },
-                });
+                    }),
+                );
+                self.defer(first);
             }
             Accepted::Busy => self.notice(job, stageman_foreman::busy_notice()),
             Accepted::Over => self.notice(job, stageman_foreman::over_notice()),

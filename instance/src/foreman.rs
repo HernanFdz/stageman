@@ -15,11 +15,11 @@ use stageman_core::{
 };
 use stageman_foreman::Starting;
 
+use crate::Effect;
 use crate::Running;
-use crate::turns::Turn;
-use crate::vocabulary::{AppEffect, Message, Run, Speaker};
+use crate::turns::{Run, Turn};
+use crate::vocabulary::{AppEffect, Message, Speaker};
 use crate::{Asked, Command};
-use crate::{Effect, Emit as _};
 
 /// Every project whose foreman was working when this process last stopped.
 ///
@@ -199,7 +199,6 @@ impl Running {
             &kits,
         );
         let warrant = self.warrant(speaker, Some(errand.thread.clone()));
-        self.turns.insert(speaker, Turn::quiet());
 
         let run = if present && keeps(agent, handout.agent()) {
             // The kit goes with every turn, not only the first: a loaded
@@ -239,7 +238,6 @@ impl Running {
             // a turn saying hello.
             Run::Begin {
                 container: container.to_owned(),
-                instance: self.id,
                 agent: handout.agent(),
                 role: handout.role(),
                 environment,
@@ -253,7 +251,8 @@ impl Running {
                 kickoff: format!("{}\n\n{asked}", stageman_foreman::opening(&repository)),
             }
         };
-        effects.emit(AppEffect::RunTurn { speaker, run });
+        let first = self.turn(speaker, Turn::quiet(run));
+        effects.push(first);
     }
 
     /// A foreman's turn ended: put the message down, pick up the next.

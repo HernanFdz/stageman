@@ -295,20 +295,19 @@ fn a_foreman_starts_a_job_whose_thread_is_opened_before_its_agent_speaks() {
         .iter()
         .position(|line| line.starts_with("-> OpenThread"))
         .expect("opened");
-    let begun = shape
-        .iter()
-        .position(|line| line.starts_with("-> RunTurn") && line.contains("\"Job\""))
-        .expect("begun");
+    let talks = world.talks_in(&stageman_job::container(started));
+    let [run] = talks.as_slice() else {
+        panic!("the job's agent was spoken to once: {talks:?}");
+    };
     assert!(
-        persisted < opened && opened < begun,
+        persisted < opened && opened < run.opened_at,
         "record, then thread, then agent: {shape:?}"
     );
-    let run = &shape[begun];
-    assert!(run.contains("Begin"), "{run}");
-    assert!(run.contains("Fix the flaky test in the parser."), "{run}");
+    assert!(run.began(), "{run:?}");
+    assert!(run.was_told("Fix the flaky test in the parser."), "{run:?}");
     assert!(
-        run.contains("the `say` tool"),
-        "a job with a channel is told how to speak: {run}"
+        run.was_told("the `say` tool"),
+        "a job with a channel is told how to speak: {run:?}"
     );
 
     let recorded = instance
