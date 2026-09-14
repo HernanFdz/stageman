@@ -16,6 +16,12 @@
 //! so it is performed where the loop can await it and answered in the order
 //! it was asked for; everything that takes time runs on a task of its own,
 //! and the loop is free to answer the next event.
+//!
+//! **A process kept open is three tasks and a handle.** One task writes it
+//! every line it is sent, one turns every line it writes into an event, and
+//! one waits for it to end — after the last line, so that its end is never
+//! announced before what it said. What the loop holds is where the lines go
+//! and what kills it, which is all closing one needs.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -25,7 +31,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use stageman_vocabulary::{
-    Answer, App, Arrival, Bytes, Deciding, Effect, Environment, Event, Finished, Named, RequestId,
+    Answer, App, Arrival, Bytes, Deciding, Effect, EffectId, Ended, Environment, Event, Finished,
+    Named, RequestId,
 };
 
 /// The way in: events go to the loop, and nothing comes back this way.
@@ -43,6 +50,22 @@ pub struct World<A: App> {
     /// the connection open; every other identifier is minted by the
     /// deciding half, for the same reason inverted.
     next: AtomicU64,
+    /// Processes kept open, by the identifier each was opened under. One is
+    /// in here from being started until it ends or is closed, whichever
+    /// comes first.
+    open: parking_lot::Mutex<BTreeMap<EffectId, Opened>>,
+}
+
+/// A process kept open, as far as the loop needs to reach it.
+///
+/// The process itself is owned by the task waiting on it; what is held here
+/// is the two ways of reaching it: lines on their way to its standard input,
+/// and the signal that kills it.
+struct Opened {
+    /// Where a line sent to it goes. Dropping this is what closes its input.
+    lines: tokio::sync::mpsc::UnboundedSender<String>,
+    /// What kills it, once.
+    closing: tokio::sync::oneshot::Sender<()>,
 }
 
 impl<A: App> World<A> {
@@ -55,9 +78,42 @@ impl<A: App> World<A> {
                 events,
                 held: parking_lot::Mutex::new(BTreeMap::new()),
                 next: AtomicU64::new(1),
+                open: parking_lot::Mutex::new(BTreeMap::new()),
             }),
             receiving,
         )
+    }
+
+    /// Sends a line to a process kept open, if it still is.
+    ///
+    /// One that has ended is not written to, and that is not an error: its
+    /// end is on its way as an event, and whoever sent the line will hear
+    /// it.
+    fn tell(&self, id: EffectId, line: String) {
+        let sent = self
+            .open
+            .lock()
+            .get(&id)
+            .is_some_and(|opened| opened.lines.send(line).is_ok());
+        if !sent {
+            tracing::debug!("a line was sent to a process that is not open; dropped");
+        }
+    }
+
+    /// Ends a process kept open: its input is closed and it is killed.
+    ///
+    /// Closing one that has already ended is nothing, because its end was
+    /// already said.
+    fn close(&self, id: EffectId) {
+        let Some(Opened { lines, closing }) = self.open.lock().remove(&id) else {
+            tracing::debug!("asked to close a process that is not open; nothing to do");
+            return;
+        };
+        // In this order: end of file first, so that a process reading its
+        // input learns it is over before it is made to be.
+        drop(lines);
+        // Nobody at the other end means it already ended, which is fine.
+        let _ = closing.send(());
     }
 
     /// Holds a request open, and says what identifies it.
@@ -178,6 +234,14 @@ async fn perform<A: App, P: Perform<A>>(
                 world.send(Event::Ran { id, finished });
             }));
         }
+        Effect::Open {
+            id,
+            program,
+            arguments,
+            environment,
+        } => open(world, id, &program, &arguments, &environment),
+        Effect::Send { id, line } => world.tell(id, line),
+        Effect::Close { id } => world.close(id),
         Effect::Wake { id, after } => {
             let world = Arc::clone(world);
             drop(tokio::spawn(async move {
@@ -338,6 +402,147 @@ async fn run_once(
         },
         Err(why) => Finished::Failed(why.to_string()),
     }
+}
+
+/// How much of what a process kept open writes to its standard error is
+/// kept for its end.
+///
+/// From the beginning, because a process that fails says so at once, and
+/// bounded because one that runs for an hour says a great deal that is not
+/// that. Everything past the bound is still read and discarded: a pipe
+/// nobody drains fills, and a process blocked writing to it never ends.
+const COMPLAINT_LIMIT: usize = 64 * 1024;
+
+/// Starts a program and keeps it open, with exactly the environment given.
+///
+/// A program that cannot be started ends at once, so that whoever asked
+/// hears one thing either way. Skipped by mutation testing: it starts a
+/// process and wires three tasks to it, and everything decided is in what
+/// those tasks do, which the tests below drive over real processes.
+#[mutants::skip]
+fn open<A: App>(
+    world: &Arc<World<A>>,
+    id: EffectId,
+    program: &Path,
+    arguments: &[String],
+    environment: &Environment,
+) {
+    let mut command = tokio::process::Command::new(program);
+    command
+        .args(arguments)
+        .env_clear()
+        .envs(environment)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(why) => {
+            let ended = if why.kind() == io::ErrorKind::NotFound {
+                Ended::NotFound
+            } else {
+                Ended::Failed(why.to_string())
+            };
+            world.send(Event::Ended { id, ended });
+            return;
+        }
+    };
+    let (Some(input), Some(output), Some(complaints)) =
+        (child.stdin.take(), child.stdout.take(), child.stderr.take())
+    else {
+        world.send(Event::Ended {
+            id,
+            ended: Ended::Failed("it was started without its streams".to_owned()),
+        });
+        return;
+    };
+
+    let (lines, mut queued) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (closing, mut closed) = tokio::sync::oneshot::channel::<()>();
+    drop(world.open.lock().insert(id, Opened { lines, closing }));
+
+    // Its input: every line sent, until the sender is dropped — which is
+    // what closing it means, and which the process sees as end of file once
+    // the handle goes with this task.
+    let writing = tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt as _;
+        let mut input = input;
+        while let Some(mut line) = queued.recv().await {
+            line.push('\n');
+            if input.write_all(line.as_bytes()).await.is_err() {
+                // The far end is gone, and its end will say so.
+                break;
+            }
+        }
+    });
+    // Its output: one event per line, in order, on a task of its own so
+    // that a process saying a great deal never holds up what it is sent.
+    let reading = {
+        let world = Arc::clone(world);
+        tokio::spawn(async move {
+            use tokio::io::AsyncBufReadExt as _;
+            let mut lines = tokio::io::BufReader::new(output).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                world.send(Event::Line { id, line });
+            }
+        })
+    };
+    let complaining = tokio::spawn(drained(complaints));
+
+    // Its life: waited on, or killed when it is closed, and then its end —
+    // after its last line, which is what makes the order a promise.
+    let world = Arc::clone(world);
+    drop(tokio::spawn(async move {
+        let status = tokio::select! {
+            status = child.wait() => status,
+            _ = &mut closed => {
+                // Killing one that has just exited on its own is not a
+                // failure, and not worth a line.
+                drop(child.start_kill());
+                child.wait().await
+            }
+        };
+        drop(reading.await);
+        let stderr = complaining.await.unwrap_or_default();
+        // Gone from the map, so a line sent now is dropped rather than
+        // queued for nobody; the sender going with it ends the writer.
+        drop(world.open.lock().remove(&id));
+        drop(writing);
+        let ended = match status {
+            Ok(status) => Ended::Exited {
+                status: status.code(),
+                stderr: Bytes::new(stderr),
+            },
+            Err(why) => Ended::Failed(why.to_string()),
+        };
+        world.send(Event::Ended { id, ended });
+    }));
+}
+
+/// Reads a process's standard error to its end, keeping the beginning.
+///
+/// Reads past the bound and discards, rather than stopping at it: stopping
+/// would leave the pipe to fill, and a process blocked on a pipe nobody
+/// drains is a process that never ends — the hang the bound would otherwise
+/// reinstate for anything that printed more than it.
+async fn drained(mut complaints: tokio::process::ChildStderr) -> Vec<u8> {
+    use tokio::io::AsyncReadExt as _;
+    let mut kept = Vec::new();
+    let mut chunk = [0_u8; 4096];
+    loop {
+        let read = match complaints.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(read) => read,
+        };
+        let Some(room) = COMPLAINT_LIMIT.checked_sub(kept.len()) else {
+            continue;
+        };
+        if let Some(head) = chunk.get(..room.min(read)) {
+            kept.extend_from_slice(head);
+        }
+    }
+    kept
 }
 
 /// Accepts on a bound address for as long as anything is stepping.
@@ -622,9 +827,12 @@ mod tests {
     use std::sync::Arc;
 
     use serde::{Deserialize, Serialize};
-    use stageman_vocabulary::{App, EffectId, Named};
+    use stageman_vocabulary::{App, EffectId, Ended, Environment, Named};
 
-    use super::{Answer, Bytes, Effect, Event, Perform, World, read, write, write_atomically};
+    use super::{
+        Answer, Bytes, COMPLAINT_LIMIT, Effect, Event, Perform, World, read, write,
+        write_atomically,
+    };
 
     /// An application that adds nothing, so what is tested here is the
     /// mechanisms and nothing of anybody's domain.
@@ -1127,5 +1335,264 @@ mod tests {
 
         let heard = events.try_recv().expect("it arrived");
         assert!(heard == Event::Woke { id: EffectId(7) });
+    }
+
+    /// Keeps a shell open on a script, with exactly the environment given.
+    async fn shell(
+        world: &Arc<World<Nothing>>,
+        id: EffectId,
+        script: &str,
+        environment: Environment,
+    ) {
+        answering(
+            world,
+            Effect::Open {
+                id,
+                program: "/bin/sh".into(),
+                arguments: vec!["-c".to_owned(), script.to_owned()],
+                environment,
+            },
+        )
+        .await;
+    }
+
+    /// Nothing arrives for a while, which is the only way to say nothing
+    /// arrives at all.
+    async fn nothing(events: &mut tokio::sync::mpsc::UnboundedReceiver<Event<Nothing>>) {
+        let waited =
+            tokio::time::timeout(std::time::Duration::from_millis(200), events.recv()).await;
+        assert!(waited.is_err(), "something arrived that should not have");
+    }
+
+    /// A process kept open hears every line it is sent, answers line by
+    /// line, and ends when it is closed — killed, since this one would not
+    /// go on its own. What is sent after that goes nowhere, and closing it
+    /// again is nothing.
+    #[tokio::test]
+    async fn a_process_kept_open_is_spoken_to_line_by_line_and_ended_when_closed() {
+        let (world, mut events) = World::<Nothing>::new();
+        let id = EffectId(3);
+        // It reads until its input closes and then refuses to go, so that
+        // what ends it is the kill and not the end of file — which is the
+        // half of closing a test could not otherwise tell was there.
+        shell(
+            &world,
+            id,
+            "while read line; do echo \"heard $line\"; done; exec sleep 30",
+            Environment::new(),
+        )
+        .await;
+
+        for said in ["one", "two"] {
+            answering(
+                &world,
+                Effect::Send {
+                    id,
+                    line: said.to_owned(),
+                },
+            )
+            .await;
+            let heard = next(&mut events).await;
+            assert!(
+                heard
+                    == Event::Line {
+                        id,
+                        line: format!("heard {said}"),
+                    },
+                "{}",
+                heard.kind()
+            );
+        }
+
+        answering(&world, Effect::Close { id }).await;
+        let ended = next(&mut events).await;
+        assert!(
+            ended
+                == Event::Ended {
+                    id,
+                    ended: Ended::Exited {
+                        status: None,
+                        stderr: Bytes::new(Vec::new()),
+                    },
+                },
+            "killed, so no status: {}",
+            ended.kind()
+        );
+
+        answering(
+            &world,
+            Effect::Send {
+                id,
+                line: "three".to_owned(),
+            },
+        )
+        .await;
+        answering(&world, Effect::Close { id }).await;
+        nothing(&mut events).await;
+    }
+
+    /// A process that ends on its own says so, and says so after its last
+    /// line: the order is a promise, and this is what keeps it one.
+    #[tokio::test]
+    async fn a_process_that_ends_on_its_own_says_so_after_its_last_line() {
+        let (world, mut events) = World::<Nothing>::new();
+        let id = EffectId(4);
+        shell(
+            &world,
+            id,
+            "echo first; echo second; echo complaint >&2; exit 3",
+            Environment::new(),
+        )
+        .await;
+
+        for said in ["first", "second"] {
+            let heard = next(&mut events).await;
+            assert!(
+                heard
+                    == Event::Line {
+                        id,
+                        line: said.to_owned(),
+                    },
+                "{}",
+                heard.kind()
+            );
+        }
+        let ended = next(&mut events).await;
+        assert!(
+            ended
+                == Event::Ended {
+                    id,
+                    ended: Ended::Exited {
+                        status: Some(3),
+                        stderr: Bytes::new(b"complaint\n".to_vec()),
+                    },
+                },
+            "{}",
+            ended.kind()
+        );
+    }
+
+    /// A program that is not there ends at once as not found, and one that
+    /// cannot be started for any other reason ends at once saying why.
+    #[tokio::test]
+    async fn a_program_that_cannot_be_started_ends_at_once_and_says_why() {
+        let (world, mut events) = World::<Nothing>::new();
+        answering(
+            &world,
+            Effect::Open {
+                id: EffectId(5),
+                program: "/nowhere/such/program".into(),
+                arguments: Vec::new(),
+                environment: Environment::new(),
+            },
+        )
+        .await;
+        let ended = next(&mut events).await;
+        assert!(
+            ended
+                == Event::Ended {
+                    id: EffectId(5),
+                    ended: Ended::NotFound,
+                },
+            "{}",
+            ended.kind()
+        );
+
+        // A directory is there and is not a program.
+        answering(
+            &world,
+            Effect::Open {
+                id: EffectId(6),
+                program: "/".into(),
+                arguments: Vec::new(),
+                environment: Environment::new(),
+            },
+        )
+        .await;
+        match next(&mut events).await {
+            Event::Ended {
+                id: EffectId(6),
+                ended: Ended::Failed(why),
+            } => assert!(!why.is_empty()),
+            other => panic!("expected a failure to start: {}", other.kind()),
+        }
+    }
+
+    /// A process is given exactly the environment it was opened with, and
+    /// nothing of this process's own.
+    ///
+    /// The mechanism half of `docs/conventions.md` §3's rule that what a
+    /// child is handed is constructed and never inherited: an agent that
+    /// found a credential in an inherited variable would bill somebody
+    /// else, and this is where inheriting would happen.
+    #[tokio::test]
+    async fn a_process_is_given_exactly_the_environment_it_was_opened_with() {
+        let (world, mut events) = World::<Nothing>::new();
+        let id = EffectId(7);
+        shell(
+            &world,
+            id,
+            // A home rather than a path, because a shell that finds no path
+            // supplies one of its own, and what this asks is whether the
+            // world supplied anything.
+            "echo \"[$ONLY][$HOME]\"",
+            [("ONLY".to_owned(), "this".to_owned())].into(),
+        )
+        .await;
+        let heard = next(&mut events).await;
+        assert!(
+            heard
+                == Event::Line {
+                    id,
+                    line: "[this][]".to_owned(),
+                },
+            "{}",
+            heard.kind()
+        );
+    }
+
+    /// A process that floods its error pipe neither hangs nor is kept whole.
+    ///
+    /// The pipe has a small buffer, and a process blocked writing to one
+    /// nobody drains never reaches its own exit. So the flood is read to its
+    /// end and only its beginning is kept — and the process still says its
+    /// last word afterwards, which is what proves it was never blocked.
+    #[tokio::test]
+    async fn a_process_that_floods_its_error_pipe_neither_hangs_nor_is_kept_whole() {
+        let (world, mut events) = World::<Nothing>::new();
+        let id = EffectId(8);
+        shell(
+            &world,
+            id,
+            "yes | head -c 300000 >&2; echo done",
+            Environment::new(),
+        )
+        .await;
+
+        let heard = next(&mut events).await;
+        assert!(
+            heard
+                == Event::Line {
+                    id,
+                    line: "done".to_owned(),
+                },
+            "{}",
+            heard.kind()
+        );
+        match next(&mut events).await {
+            Event::Ended {
+                ended: Ended::Exited { status, stderr },
+                ..
+            } => {
+                assert_eq!(status, Some(0));
+                assert_eq!(stderr.len(), COMPLAINT_LIMIT, "the beginning, and no more");
+                assert!(
+                    stderr
+                        .as_text()
+                        .is_some_and(|text| text.starts_with("y\ny\n"))
+                );
+            }
+            other => panic!("expected its end: {}", other.kind()),
+        }
     }
 }

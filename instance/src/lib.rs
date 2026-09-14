@@ -756,7 +756,9 @@ impl Running {
                 request,
             } => self.arrived(listener, id, &request, &mut effects),
             Event::Body { id, outcome } => self.read(id, outcome, &mut effects),
-            Event::Read { .. } | Event::Bound { .. } => {
+            // A process kept open is the turn's family, and the turn is not
+            // spoken that way yet: a line from one is nobody's until it is.
+            Event::Read { .. } | Event::Bound { .. } | Event::Line { .. } | Event::Ended { .. } => {
                 tracing::warn!(
                     "answered something this instance did not ask for while awake; ignored"
                 );

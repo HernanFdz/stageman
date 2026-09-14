@@ -674,6 +674,8 @@ impl Simulation {
                     | Event::Written { .. }
                     | Event::Ran { .. }
                     | Event::Woke { .. }
+                    | Event::Line { .. }
+                    | Event::Ended { .. }
                     | Event::App(
                         AppEvent::Presenting { .. }
                             | AppEvent::TurnEnded { .. }
@@ -1061,6 +1063,11 @@ impl Simulation {
             Effect::Answer { id, answer } => self.answered(id, answer),
             Effect::Print { text } => self.printed.push(text),
             Effect::Exit { message } => self.exited = Some(message),
+            // Nothing is kept open yet: the turn is the next family, and a
+            // world that pretended otherwise would hide that it had not landed.
+            Effect::Open { .. } | Effect::Send { .. } | Effect::Close { .. } => {
+                panic!("the simulation does not keep a process open yet")
+            }
             Effect::App(effect) => return Some(effect),
         }
         None
