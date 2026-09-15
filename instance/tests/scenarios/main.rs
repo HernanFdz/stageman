@@ -17,6 +17,7 @@ mod dashboard;
 mod foreman;
 mod listening;
 mod replies;
+mod signals;
 mod simulation;
 mod tools;
 mod tunnel;

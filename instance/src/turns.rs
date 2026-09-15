@@ -929,6 +929,8 @@ mod tests {
                 )]),
                 variables: BTreeMap::new(),
                 attending: stageman_core::Attending::default(),
+                brief: String::new(),
+                watched: std::collections::BTreeSet::new(),
             },
         );
 

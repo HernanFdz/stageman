@@ -25,7 +25,7 @@
 //! crates that are allowed effects do that; this one stays a set of values a
 //! test can build exactly.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use aes_gcm::aead::{Aead, KeyInit};
@@ -624,8 +624,10 @@ pub struct ChannelConfig {
 /// `docs/conventions.md` §2 rather than the platform's word, because
 /// [`Channel`] is the platform.
 ///
-/// The identifier is opaque here and stays text, like a thread's.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// The identifier is opaque here and stays text, like a thread's. Ordered
+/// so that a project can hold a set of them — the rooms it watches — and
+/// the snapshot does not reshuffle it between writes.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Room {
     /// The channel it is a room on.
     pub channel: Channel,
@@ -1064,6 +1066,14 @@ pub struct Errand {
     /// defaulted; such a message is simply not reacted to.
     #[serde(default)]
     pub message: Option<String>,
+    /// The app that posted it, by the name the platform gives the app, when
+    /// it was another app's message in a watched room rather than a
+    /// person's — see
+    /// `docs/decisions/0063-another-app-is-heard-in-a-watched-room.md`. What
+    /// the foreman's turn is framed with. None for a person's, and for every
+    /// errand the last release wrote, which is why it is defaulted.
+    #[serde(default)]
+    pub app: Option<String>,
 }
 
 /// What a project's foreman is doing, and what is waiting behind it.
@@ -1200,6 +1210,15 @@ pub struct Project {
     /// does, and the operator's judgement about what this project wants each
     /// one *for* is the description the foreman reasons over when it chooses.
     pub kits: BTreeMap<KitName, KitConfig>,
+    /// What the operator wrote for its foreman: standing instructions, said
+    /// on every turn beside the kits and for the same reason — a session
+    /// outlives every edit to it. Where policy lives, per
+    /// `docs/decisions/0064-a-project-has-a-brief.md`, and empty for a
+    /// project nobody has written one for, which says nothing.
+    ///
+    /// Not a secret, deliberately: it is written to be read, like a kit's
+    /// description, and travels in the clear on the same terms.
+    pub brief: String,
     /// What its jobs are handed, one credential per platform.
     ///
     /// A map rather than a list so that two credentials for one platform is
@@ -1220,6 +1239,14 @@ pub struct Project {
     /// door it locks. Such a project is named at startup and can start no
     /// job until one is bound.
     pub channels: BTreeMap<Channel, ChannelConfig>,
+    /// The rooms its foreman watches: where another app's message is a
+    /// signal rather than nothing, per
+    /// `docs/decisions/0063-another-app-is-heard-in-a-watched-room.md`.
+    ///
+    /// A set rather than a list, because watching a room twice is not a
+    /// thing; ordered, so the snapshot does not reshuffle it. Empty for
+    /// most projects, and for every project the last release wrote.
+    pub watched: BTreeSet<Room>,
     /// What its jobs are given that this project never reads.
     ///
     /// A third map beside the two above rather than a wider version of either,
@@ -1438,6 +1465,9 @@ impl State {
     /// the message arrived on. What is left to decide is whether the room it
     /// was said in is one of that project's jobs' — then it is that job's —
     /// and otherwise it is the foreman's, at the root or in a thread alike.
+    /// Another app's message is the foreman's when the room is one the
+    /// project watches, and nobody's otherwise — see
+    /// `docs/decisions/0063-another-app-is-heard-in-a-watched-room.md`.
     ///
     /// That a person's message mentions this instance is not consulted,
     /// because it is what made the message arrive: the reader hands over a
@@ -1473,6 +1503,20 @@ impl State {
         let Some(watched) = self.projects.get(&project) else {
             return Recipient::Nobody;
         };
+        // Another app's message is the foreman's exactly when the room is
+        // watched, whatever room it is, and nobody's otherwise: an app
+        // mentions nobody, so the room is the whole of the rule for it.
+        if arriving.from_app {
+            let heard = watched
+                .watched
+                .iter()
+                .any(|room| room.channel == channel && room.id == arriving.room);
+            return if heard {
+                Recipient::Foreman(project)
+            } else {
+                Recipient::Nobody
+            };
+        }
         watched
             .jobs
             .iter()
@@ -1570,6 +1614,8 @@ impl State {
                         credentials,
                         channels,
                         variables,
+                        brief: project.brief.clone(),
+                        watched: project.watched.clone(),
                         jobs: project.jobs.clone(),
                         attending: project.attending.clone(),
                     },
@@ -1848,6 +1894,13 @@ pub struct SealedProject {
     /// instead — the open path reads one from the other.
     #[serde(default)]
     pub kits: BTreeMap<String, KitConfig>,
+    /// The operator's brief for its foreman, in the clear: written to be
+    /// read, like a kit's description.
+    ///
+    /// Defaulted, because it was added after snapshots existed, and empty
+    /// is the true answer for a file from before: nobody had written one.
+    #[serde(default)]
+    pub brief: String,
     /// Its sealed credentials.
     pub credentials: BTreeMap<Platform, SealedSecret>,
     /// Its channel bindings, each with its credential sealed.
@@ -1865,6 +1918,12 @@ pub struct SealedProject {
     /// valid.
     #[serde(default)]
     pub channels: BTreeMap<Channel, SealedChannelConfig>,
+    /// The rooms its foreman watches, which hold nothing needing sealing.
+    ///
+    /// Defaulted, because it was added after snapshots existed, and empty
+    /// is the true answer for a file from before: nothing was watched.
+    #[serde(default)]
+    pub watched: BTreeSet<Room>,
     /// Its variables, each with its value sealed and its name in the clear.
     ///
     /// Keyed by plain text rather than by the validated name, deliberately:
@@ -2014,6 +2073,8 @@ impl Snapshot {
                         credentials,
                         channels,
                         variables,
+                        brief: project.brief,
+                        watched: project.watched,
                         jobs: project.jobs,
                         attending: project.attending,
                     },
@@ -2087,6 +2148,12 @@ pub struct Arriving<'a> {
     /// that agent it answers, producing another. The loop costs a model call
     /// per lap and would be found on an invoice.
     pub from_us: bool,
+    /// Whether another app is what said it.
+    ///
+    /// An app's message is read by a different rule from a person's: the
+    /// room decides, not a mention — see
+    /// `docs/decisions/0063-another-app-is-heard-in-a-watched-room.md`.
+    pub from_app: bool,
 }
 
 /// Who an arriving message is for.
@@ -2460,7 +2527,7 @@ mod tests {
     };
     use base64::Engine as _;
     use jiff::Timestamp;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use uuid::Uuid;
 
     const TOKEN: &str = "ghp-not-a-real-token";
@@ -2539,6 +2606,8 @@ mod tests {
             )]),
             jobs,
             attending: Attending::default(),
+            brief: String::new(),
+            watched: BTreeSet::new(),
         }
     }
 
@@ -2779,7 +2848,66 @@ mod tests {
             id: "1788000000.000000",
             thread,
             from_us: false,
+            from_app: false,
         }
+    }
+
+    /// Another app's message, as much of it as routing sees.
+    fn posted_by_an_app<'a>(room: &'a str, thread: Option<&'a str>) -> Arriving<'a> {
+        Arriving {
+            from_app: true,
+            ..arriving(room, thread)
+        }
+    }
+
+    /// Another app's message is the foreman's in a room the project watches,
+    /// at the root and in a thread — a follow-up under an earlier message —
+    /// and nobody's in a room it does not, even the room people talk in.
+    #[test]
+    fn another_apps_message_is_the_foremans_exactly_in_a_watched_room() {
+        let (mut state, project, _) = listening();
+        for thread in [None, Some("1728312345.678901")] {
+            assert_eq!(
+                state.recipient(
+                    project,
+                    Channel::Slack,
+                    &posted_by_an_app(CHANNEL_ADDRESS, thread)
+                ),
+                Recipient::Nobody,
+                "not watched, so not read: {thread:?}"
+            );
+        }
+
+        state
+            .projects
+            .get_mut(&project)
+            .expect("the project")
+            .watched
+            .insert(Room {
+                channel: Channel::Slack,
+                id: CHANNEL_ADDRESS.to_owned(),
+            });
+        for thread in [None, Some("1728312345.678901")] {
+            assert_eq!(
+                state.recipient(
+                    project,
+                    Channel::Slack,
+                    &posted_by_an_app(CHANNEL_ADDRESS, thread)
+                ),
+                Recipient::Foreman(project),
+                "watched, so the foreman's: {thread:?}"
+            );
+        }
+        assert_eq!(
+            state.recipient(project, Channel::Slack, &posted_by_an_app(JOB_ROOM, None)),
+            Recipient::Nobody,
+            "a job's room is not watched, and an app's message there is not a reply"
+        );
+        assert_eq!(
+            state.recipient(project, Channel::Slack, &arriving(CHANNEL_ADDRESS, None)),
+            Recipient::Foreman(project),
+            "a person's mention in a watched room is read as anywhere else"
+        );
     }
 
     /// A mention in a job's room is that job's, at the root and in a thread.
@@ -2837,6 +2965,7 @@ mod tests {
                         id: "1788000000.000000",
                         thread,
                         from_us: true,
+                        from_app: false,
                     }
                 ),
                 Recipient::Nobody,
@@ -3399,6 +3528,54 @@ mod tests {
             "a thread, which is what the last release wrote, is not a room"
         );
         assert_eq!(job.asked_by, None);
+        assert_eq!(project.brief, "", "nobody had written one");
+        assert!(project.watched.is_empty(), "nothing was watched");
+    }
+
+    /// A brief and the watched rooms travel through the file whole, in the
+    /// clear, and an errand from an app keeps saying which app.
+    #[test]
+    fn a_brief_and_the_watched_rooms_survive_the_file() {
+        let mut state = populated();
+        let (id, project) = state.projects.iter_mut().next().expect("a project");
+        let id = *id;
+        project.brief = "Ignore alerts below error.".to_owned();
+        project.watched.insert(Room {
+            channel: Channel::Slack,
+            id: "C0BT53FM079".to_owned(),
+        });
+        project.attending.take(Errand {
+            app: Some("GitHub".to_owned()),
+            from: None,
+            ..errand("an issue was opened")
+        });
+
+        let mut nonces = counting_nonces();
+        let sealed = state.seal(&key(), &mut nonces).expect("seals");
+        let written = serde_json::to_string(&sealed).expect("encodes");
+        assert!(
+            written.contains("Ignore alerts below error."),
+            "in the clear"
+        );
+        let reopened: Snapshot = serde_json::from_str(&written).expect("parses");
+        let opened = reopened.open(&key()).expect("opens");
+        let project = opened.projects.get(&id).expect("the project");
+        assert_eq!(project.brief, "Ignore alerts below error.");
+        assert_eq!(
+            project
+                .watched
+                .iter()
+                .map(|room| room.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["C0BT53FM079"]
+        );
+        assert_eq!(
+            project
+                .attending
+                .on()
+                .and_then(|errand| errand.app.as_deref()),
+            Some("GitHub")
+        );
     }
 
     /// A binding the last release wrote with both credentials comes through
@@ -4048,6 +4225,7 @@ mod tests {
             },
             from: Some("U0HUMAN".to_owned()),
             message: Some(format!("{said}.thread")),
+            app: None,
         }
     }
 

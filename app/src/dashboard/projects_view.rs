@@ -311,6 +311,7 @@ pub fn ProjectsView() -> Element {
                                                                     value: String::new(),
                                                                 })
                                                                 .collect(),
+                                                            brief: project.brief.clone(),
                                                         });
                                                     failure.set(None);
                                                     filling.set(Some(Filling::Amending(project.id.clone())));
@@ -445,6 +446,10 @@ fn WatchedProject(project: Project, available: Vec<Agent>, onedit: EventHandler<
         .map(|kit| kit.name.as_str())
         .collect::<Vec<_>>()
         .join(", ");
+    // The platform's identifiers, because a name costs a scope the manifest
+    // does not grant; shown at all because a watched room is where a signal
+    // comes from, which is worth seeing at a glance.
+    let watching = project.watched.join(", ");
     rsx! {
         // Roomier than the rows on the agents screen, and deliberately: an
         // agent is one line and a project is three, so the same padding reads
@@ -522,6 +527,9 @@ fn WatchedProject(project: Project, available: Vec<Agent>, onedit: EventHandler<
                 // the row is already three facts long.
                 if !project.variables.is_empty() {
                     " · {project.variables.len()} variable(s)"
+                }
+                if !project.watched.is_empty() {
+                    " · watching {watching}"
                 }
             }
         }
@@ -664,6 +672,21 @@ fn ProjectForm(
                 "A kit is an agent set a particular way. The foreman picks one per job by what \
                  you say it is for, so say what each is for — a cheap one for small fixes and \
                  questions, a strong one for work that touches many files."
+            }
+            Field { label: "Brief (optional)",
+                textarea {
+                    class: "{FIELD} min-h-24",
+                    placeholder: "standing instructions for the foreman: which alerts to ignore, \
+                                  what a filed issue deserves, which account its jobs act as…",
+                    value: "{draft().brief}",
+                    oninput: move |event| draft.with_mut(|draft| draft.brief = event.value()),
+                }
+            }
+            p { class: "text-xs text-faint-foreground",
+                "Said to the foreman every time it is asked anything or a watched room hears \
+                 another app, in your words, so this is where policy lives. It is followed by \
+                 judgement rather than enforced, and every line costs tokens on every turn. \
+                 Ask the foreman in a channel to watch it; what it watches is listed on the row."
             }
             Field { label: if creating { "GitHub credential" } else { "GitHub credential (optional)" },
                 input {

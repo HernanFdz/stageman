@@ -8,7 +8,10 @@ record decided — Socket Mode, one app per project, a reply routed by its threa
 `docs/decisions/0060-a-binding-is-a-workspace.md`: a mention in a thread
 belonging to no job now reaches the foreman and is answered there, rather
 than being answered with a fixed sentence. The mention itself, and its being
-required inside a job's thread, stand.
+required inside a job's thread, stand — for people. Since
+`docs/decisions/0063-another-app-is-heard-in-a-watched-room.md` another
+app's message in a watched room is read with no mention at all, which is
+the one reading this record's rule does not govern.
 
 ## Context
 

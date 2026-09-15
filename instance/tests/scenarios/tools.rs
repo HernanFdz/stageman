@@ -192,7 +192,7 @@ fn a_foreman_is_greeted_and_offered_the_tools_that_start_jobs() {
         .iter()
         .filter_map(|tool| tool["name"].as_str())
         .collect();
-    assert_eq!(names, ["say", "start_job"]);
+    assert_eq!(names, ["say", "start_job", "watch_room", "stop_watching"]);
     assert_eq!(
         listing.1.as_ref().expect("a body")["result"]["tools"][1]["inputSchema"]["properties"]["kit"]
             ["enum"],

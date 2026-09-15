@@ -44,6 +44,20 @@ pub fn waiting_on(state: &State, project: ProjectId) -> Option<Errand> {
         .and_then(|watched| watched.attending.on().cloned())
 }
 
+/// What the operator wrote for this project's foreman.
+///
+/// Said in the turn's prompt every turn, for the reason the kits are: it is
+/// edited from the dashboard, and a session outlives those edits. Empty for
+/// a project with none, which says nothing — see
+/// `docs/decisions/0064-a-project-has-a-brief.md`.
+pub fn brief_of(state: &State, project: ProjectId) -> String {
+    state
+        .projects
+        .get(&project)
+        .map(|watched| watched.brief.clone())
+        .unwrap_or_default()
+}
+
 /// What this project's jobs may run on: each kit's name and what it is for.
 ///
 /// Said in the turn's prompt every turn, because a project's kits are edited
@@ -79,7 +93,10 @@ fn keeps(made_for: Option<Agent>, wanted: Agent) -> bool {
 }
 
 impl Running {
-    /// A message for a project's foreman, from any room the app is in.
+    /// A message for a project's foreman, from any room the app is in: a
+    /// person's mention, or another app's post in a room the project
+    /// watches, which the errand records as that app's so that the turn is
+    /// framed as a signal.
     ///
     /// Taken or queued in this step, in the order messages arrive — which is
     /// the whole of what an inbox promises — and acknowledged with a reaction
@@ -102,6 +119,7 @@ impl Running {
             thread,
             from: message.user.clone(),
             message: Some(message.id.clone()),
+            app: message.app.clone(),
         });
         self.dirty = true;
         // Received: a reaction on the message rather than a line under it.
@@ -190,18 +208,7 @@ impl Running {
         } else {
             Starting::Fresh
         };
-        let kits = kits_offered(&self.state, project);
-        let kits: Vec<(&str, &str)> = kits
-            .iter()
-            .map(|(name, description)| (name.as_str(), description.as_str()))
-            .collect();
-        let asked = stageman_foreman::asked(
-            stageman_foreman::Turn {
-                said: &errand.said,
-                starting,
-            },
-            &kits,
-        );
+        let asked = self.asked_of(project, &errand, starting);
         let warrant = self.warrant(
             speaker,
             Some(errand.thread.clone().into()),
@@ -265,6 +272,27 @@ impl Running {
         };
         let first = self.turn(speaker, Turn::quiet(run));
         effects.push(first);
+    }
+
+    /// What a foreman's turn on an errand is told: the message or the
+    /// signal, framed as whose it is; the brief; and the kits — the last two
+    /// said every turn, because a session outlives the edits to them.
+    fn asked_of(&self, project: ProjectId, errand: &Errand, starting: Starting) -> String {
+        let kits = kits_offered(&self.state, project);
+        let kits: Vec<(&str, &str)> = kits
+            .iter()
+            .map(|(name, description)| (name.as_str(), description.as_str()))
+            .collect();
+        let brief = brief_of(&self.state, project);
+        stageman_foreman::asked(
+            stageman_foreman::Turn {
+                said: &errand.said,
+                starting,
+                app: errand.app.as_deref(),
+            },
+            &kits,
+            &brief,
+        )
     }
 
     /// A foreman's turn ended: put the message down, pick up the next.
@@ -380,7 +408,7 @@ impl Running {
 
 #[cfg(test)]
 mod tests {
-    use super::{interrupted, keeps, kits_offered, waiting_on};
+    use super::{brief_of, interrupted, keeps, kits_offered, waiting_on};
     use stageman_core::{
         Agent, AgentConfig, Attending, Channel, Errand, Kit, KitConfig, KitName, Project,
         ProjectId, Secret, State, Taken, Thread, Uuid,
@@ -422,6 +450,8 @@ mod tests {
                 jobs: BTreeMap::new(),
                 variables: BTreeMap::new(),
                 attending: Attending::default(),
+                brief: String::new(),
+                watched: std::collections::BTreeSet::new(),
             },
         );
         (state, project)
@@ -437,6 +467,7 @@ mod tests {
             },
             from: Some("U0HUMAN".to_owned()),
             message: Some("1700000000.000100".to_owned()),
+            app: None,
         }
     }
 
@@ -489,6 +520,21 @@ mod tests {
         assert_eq!(offered.len(), 2);
         assert!(offered.contains(&("Narrow".to_owned(), "For small things.".to_owned())));
         assert!(kits_offered(&state, ProjectId::from_uuid(Uuid::from_u128(404))).is_empty());
+    }
+
+    /// The brief is the project's, and a project this instance does not
+    /// watch has none — which says nothing, rather than failing.
+    #[test]
+    fn the_brief_is_the_projects_own() {
+        let (mut state, project) = watching();
+        assert_eq!(brief_of(&state, project), "");
+        state.projects.get_mut(&project).expect("the project").brief =
+            "Ignore alerts below error.".to_owned();
+        assert_eq!(brief_of(&state, project), "Ignore alerts below error.");
+        assert_eq!(
+            brief_of(&state, ProjectId::from_uuid(Uuid::from_u128(404))),
+            ""
+        );
     }
 
     /// A foreman's container is kept unless it was made for another agent.

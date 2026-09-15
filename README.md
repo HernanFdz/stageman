@@ -116,11 +116,11 @@ one of an app's open connections, so two projects sharing an app would each
 hear half of what is said, and nothing would say so.
 
 Then `/invite @stageman` into any channel where people should be able to talk
-to it, and mention it: **stageman reads nothing that does not mention it.** A
-mention anywhere reaches the project's foreman, which answers in a thread
-under your message, and you can go on talking to it there. An eyes reaction
-on your message means it has been received, and a check mark that the
-foreman is done with it. Everything stageman and its agents write is
+to it, and mention it: **stageman reads nothing from a person that does not
+mention it.** A mention anywhere reaches the project's foreman, which answers
+in a thread under your message, and you can go on talking to it there. An
+eyes reaction on your message means it has been received, and a check mark
+that the foreman is done with it. Everything stageman and its agents write is
 Markdown, rendered by Slack.
 
 **Every job gets a channel of its own**, named after the project, the job's
@@ -128,9 +128,24 @@ title and a short identifier, and described with why the job exists and where
 it is showing its work. It is created when the job is, whoever asked for the
 job is invited into it, and a mention there reaches that job. Retiring the
 job archives the channel, so a finished conversation leaves the sidebar and
-stays searchable. Every message still needs the mention, so that people can
-talk to each other in a job's channel, or under a foreman's answer, without
-waking either.
+stays searchable. A person's message still needs the mention everywhere, so
+that people can talk to each other in a job's channel, or under a foreman's
+answer, without waking either.
+
+**Hearing other apps.** Where an app posts what you want acted on — the
+GitHub app announcing issues and pull requests, an alerting tool — invite
+stageman there and ask it, in that channel, to watch it:
+`@stageman watch this channel`. From then on everything another app posts
+there reaches the project's foreman as a signal, to judge as the project's
+brief says; people are still read only through a mention. Asking
+`@stageman stop watching this channel` undoes it, and the dashboard lists
+what each project watches.
+
+**The brief is where you say what a signal deserves.** It is free text on the
+project form, and the foreman is told it every time it is asked anything —
+which alerts to ignore, what to do about a filed issue, which account its
+jobs act as. It is followed by judgement rather than enforced, and a
+correction said in a channel is a message like any other.
 
 ## Installing it
 

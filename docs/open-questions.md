@@ -382,43 +382,6 @@ and wrong within a day.
   written against the program would be written twice. Worth doing after that
   lands rather than before.
 
-- Next, hear other apps in watched rooms, because the loop this project
-  exists to close — an issue filed, an alert fired — begins with a bot that
-  mentions nobody. The design is decided and the platform facts are measured;
-  only the code is missing. Names below that this project does not yet
-  define are unbackticked deliberately, since `just drift` resolves a
-  backticked identifier against the source.
-
-  A room is *watched* when a person tells the foreman so in it — a
-  watch_room tool and a stop_watching one, state on the project, shown
-  read-only on the dashboard — and in a watched room every message from
-  another app is a signal for the foreman, framed as such ("GitHub posted
-  this in a watched room") rather than as a person speaking. People are
-  still read only through a mention, everywhere. Chosen over an allowlist of
-  apps per project, which is finer and needs names that are not identifiers,
-  and over hearing every bot wherever the app is invited, which is silent
-  spend; the allowlist is the layer to add if one room ever mixes an app to
-  hear with one to ignore, and that is the revisit trigger to record.
-
-  Measured on 2026-09-15: the GitHub app's issue notification carries an
-  empty text and everything in its first attachment — fallback, pretext, a
-  title with a link, text, footer — and its follow-ups (closed, reopened)
-  arrive as messages with the thread_broadcast subtype under the original,
-  carrying a root; the app's messages carry a user, a bot identifier and a
-  bot profile with a name. So reading a signal means reading attachments and
-  blocks into text, in the channel crate, tested against frames captured by
-  hand — the recorder above is deliberately not a prerequisite — and the
-  reader must take a thread_broadcast from another app as a signal in a
-  thread, where today it is acknowledged and dropped.
-
-  Two things go with it. A **brief** per project: free text the operator
-  writes for the foreman, said every turn the way the kits are, which is
-  where policy lives — "our jobs act as the machine user X", "review every
-  pull request a person opens", "ignore alerts below error" — rather than in
-  prompt lines this project hard-codes. And the foreman is told, for a
-  signal, to speak only if it acted or a person must know something; the
-  reaction says that it looked.
-
 - Then the smaller things the room design made cheap, in no particular
   order: a direct message with the app as a room where no mention is needed;
   an inbox per job, so that a message to a working job waits rather than

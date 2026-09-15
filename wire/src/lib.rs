@@ -81,6 +81,12 @@ pub struct Project {
     pub channels: Vec<String>,
     /// The variables its jobs are given, by name. Names and never values.
     pub variables: Vec<String>,
+    /// What its operator wrote for its foreman, as the form edits it.
+    pub brief: String,
+    /// The rooms its foreman watches, by the platform's identifier: shown
+    /// and never edited here, since a room is watched by asking the foreman
+    /// in it.
+    pub watched: Vec<String>,
     /// How many of its jobs are still running.
     pub working: usize,
     /// How many jobs it has had, running or finished.
@@ -289,6 +295,9 @@ pub struct Draft {
     pub channel: ChannelDraft,
     /// What its jobs are given that this project never reads.
     pub variables: Vec<VariableDraft>,
+    /// What its foreman is told every turn, in the operator's words. Empty
+    /// is none, and says nothing.
+    pub brief: String,
 }
 
 impl fmt::Debug for Draft {
@@ -302,6 +311,7 @@ impl fmt::Debug for Draft {
             .field("credential", &"<redacted>")
             .field("channel", &self.channel)
             .field("variables", &self.variables)
+            .field("brief", &self.brief)
             .finish()
     }
 }
@@ -688,6 +698,7 @@ mod tests {
                 credential: "xoxb-not-a-real-token".to_owned(),
                 listen_credential: "xapp-not-a-real-token".to_owned(),
             },
+            brief: String::new(),
             variables: vec![VariableDraft {
                 name: "STRIPE_API_KEY".to_owned(),
                 value: "sk-test-not-a-real-key".to_owned(),
@@ -962,6 +973,8 @@ mod tests {
             platforms: Vec::new(),
             channels: Vec::new(),
             variables: Vec::new(),
+            brief: String::new(),
+            watched: Vec::new(),
             working: 0,
             jobs: 3,
         };

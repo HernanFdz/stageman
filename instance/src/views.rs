@@ -273,6 +273,8 @@ pub fn projected(id: ProjectId, project: &Project) -> stageman_wire::Project {
             .keys()
             .map(std::string::ToString::to_string)
             .collect(),
+        brief: project.brief.clone(),
+        watched: project.watched.iter().map(|room| room.id.clone()).collect(),
         working: project
             .jobs
             .values()
@@ -576,6 +578,8 @@ mod tests {
                     jobs: BTreeMap::new(),
                     variables: BTreeMap::new(),
                     attending: stageman_core::Attending::default(),
+                    brief: String::new(),
+                    watched: std::collections::BTreeSet::new(),
                 },
             )]),
         }
@@ -656,6 +660,26 @@ mod tests {
         assert_eq!(shown.working, 1);
         assert_eq!(shown.jobs, 3);
         assert_eq!(shown.name, "aviary");
+    }
+
+    /// The brief crosses as written, and the watched rooms cross as the
+    /// platform's identifiers, which is all a screen can show of them.
+    #[test]
+    fn the_brief_and_the_watched_rooms_cross_as_text() {
+        let mut state = watching("aviary");
+        let watched = state
+            .projects
+            .get_mut(&ProjectId::from_uuid(Uuid::nil()))
+            .expect("it");
+        watched.brief = "Ignore alerts below error.".to_owned();
+        watched.watched.insert(stageman_core::Room {
+            channel: stageman_core::Channel::Slack,
+            id: "C0BT53FM079".to_owned(),
+        });
+
+        let shown = super::projected(ProjectId::from_uuid(Uuid::nil()), watched);
+        assert_eq!(shown.brief, "Ignore alerts below error.");
+        assert_eq!(shown.watched, vec!["C0BT53FM079".to_owned()]);
     }
 
     /// The query the whole removal guard rests on.
