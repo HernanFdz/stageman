@@ -3241,7 +3241,6 @@ mod tests {
             .insert(
                 Channel::Slack,
                 stageman_core::ChannelConfig {
-                    address: "C0123456789".to_owned(),
                     credential: Secret::new("xoxb-not-a-real-token".to_owned()),
                     listen_credential: Secret::new("xapp-not-a-real-token".to_owned()),
                 },
@@ -3274,11 +3273,11 @@ mod tests {
         let (state, project) = instance_with_a_channel("sk-ant-oat01-xyz");
         let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project)
             .expect("a watched project")
-            .speaking_in(stageman_core::Thread {
+            .speaking_in(stageman_core::Place::from(stageman_core::Thread {
                 channel: Channel::Slack,
                 room: "C0123456789".to_owned(),
                 id: "1728312345.678901".to_owned(),
-            });
+            }));
 
         let delivering = environment(&handout).expect("a handout with no reserved name");
         let named = names_of(&handout);

@@ -1,11 +1,11 @@
-//! Speaking on a project's channel, run against the simulated platform: a
-//! job's thread opened by a post at the root, a platform that refuses, and
-//! a record that never lands.
+//! A job's room, run against the simulated platform: made before the job
+//! starts, described and opened, a platform that refuses, and a record that
+//! never lands.
 
 use stageman_core::{JobId, Progress, Timestamp, Uuid, Waiting};
 use stageman_instance::{Instance, Request, Response};
 
-use crate::simulation::{Simulation, project, request, seed, thread, watching_a_channel};
+use crate::simulation::{Simulation, in_room, project, request, room, seed, watching_a_channel};
 
 /// Asks for a job by hand and performs what asking caused.
 fn asking(sim: &mut Simulation, instance: &mut Instance, id: u64, work: &str) {
@@ -39,40 +39,66 @@ fn progress_of(instance: &Instance, id: JobId) -> Progress {
     instance.state().job(id).expect("the job").progress.clone()
 }
 
-/// A job on a project with a channel begins by posting its announcement at
-/// the root, and starts only once the platform has named the thread — which
-/// is recorded on the job, so that a reply can find it.
+/// A job begins by having a room made for it, named after the project, its
+/// title and its identifier, and starts only once the platform has named
+/// the room — which is recorded on the job, so that a reply can find it.
+/// The room is described, and its opening says what the room is for.
 #[test]
-fn a_jobs_thread_is_opened_by_a_post_at_the_root_before_it_starts() {
+fn a_jobs_room_is_made_before_it_starts() {
     let mut sim = Simulation::new();
     sim.holding(&watching_a_channel(&[]));
     let mut instance = sim.wake(seed(1));
 
-    asking(&mut sim, &mut instance, 1, "fix the build");
+    asking(
+        &mut sim,
+        &mut instance,
+        1,
+        "fix the build before the release",
+    );
     sim.run_until(&mut instance, 5_000);
-    let job = which(&sim, 1, "fix the build");
+    let job = which(&sim, 1, "fix the build before the release");
 
-    let opened = thread(101);
-    let (posted_in, announcement) = sim.posts().first().expect("the announcement");
+    let made = room(1);
+    let (id, name) = sim.rooms().first().expect("the room was made");
+    assert_eq!(id, &made.id);
+    assert!(
+        name.starts_with("example--fix-the-build-before-the-release--"),
+        "named after the project and the title: {name}"
+    );
+    let identifier: String = job.as_uuid().simple().to_string().chars().take(8).collect();
+    assert!(
+        name.ends_with(&identifier),
+        "and the job's identifier: {name}"
+    );
     assert_eq!(
-        posted_in, &opened,
-        "posted at the root, so it is a thread of its own"
+        instance.state().job(job).expect("the job").room,
+        Some(made),
+        "the room the platform named is where the job speaks"
     );
     assert!(
-        announcement.contains(&format!("Job {job}")),
-        "the announcement names the job it is for: {announcement}"
+        sim.described()
+            .iter()
+            .any(|(room, text)| room == &id.clone() && text == "started by hand from the dashboard"),
+        "its purpose is the reason: {:?}",
+        sim.described()
     );
-    assert_eq!(
-        instance.state().job(job).expect("the job").thread,
-        Some(opened),
-        "the thread the platform named is where the job speaks"
+    assert!(
+        sim.described()
+            .iter()
+            .any(|(room, text)| room == &id.clone() && text.contains("Showing at")),
+        "its topic is where to look: {:?}",
+        sim.described()
     );
+    assert!(sim.invited().is_empty(), "started by hand, so nobody asked");
+    let (opened_at, opening) = sim.posts().first().expect("the opening");
+    assert_eq!(opened_at, &in_room(1));
+    assert!(opening.starts_with("A job on"), "{opening}");
 
     let shape = sim.shape();
     let asked = shape
         .iter()
         .position(|line| line.starts_with("-> Request"))
-        .expect("the post was asked for");
+        .expect("the room was asked for");
     let answered = shape
         .iter()
         .position(|line| line.starts_with("<- Responded"))
@@ -80,31 +106,32 @@ fn a_jobs_thread_is_opened_by_a_post_at_the_root_before_it_starts() {
     let started = sim.first_turn().expect("the job was started");
     assert!(
         asked < answered && answered < started,
-        "the turn waits for the thread: {shape:?}"
+        "the turn waits for the room: {shape:?}"
     );
     assert_eq!(progress_of(&instance, job), Progress::Idle(Waiting::Silent));
 }
 
-/// A platform that refuses the announcement fails the job before any
+/// A platform that refuses to make the room fails the job before any
 /// container exists, saying what the platform said — and a refusal arrives
 /// with a successful status, which is the trap the reader exists for.
 #[test]
-fn a_channel_that_refuses_the_announcement_fails_the_job_before_any_container() {
+fn a_platform_that_refuses_the_room_fails_the_job_before_any_container() {
     let mut sim = Simulation::new();
     sim.holding(&watching_a_channel(&[]));
     let mut instance = sim.wake(seed(1));
-    sim.next_post_fails("not_in_channel");
+    sim.next_room_fails("name_taken");
 
     asking(&mut sim, &mut instance, 1, "fix the build");
     sim.run_until(&mut instance, 5_000);
     let job = which(&sim, 1, "fix the build");
 
     let Progress::Idle(Waiting::Failed(why)) = progress_of(&instance, job) else {
-        panic!("a job whose thread could not be opened has failed");
+        panic!("a job whose room could not be made has failed");
     };
-    assert!(why.contains("its channel could not be reached"), "{why}");
-    assert!(why.contains("not_in_channel"), "{why}");
+    assert!(why.contains("its room could not be made"), "{why}");
+    assert!(why.contains("name_taken"), "{why}");
     assert!(sim.talks().is_empty(), "no agent was spoken to");
+    assert!(sim.posts().is_empty(), "nothing was said anywhere");
     assert!(
         !sim.exists(&stageman_job::container(job)),
         "no container was made for a job that cannot speak"
@@ -122,8 +149,8 @@ fn a_channel_that_refuses_the_announcement_fails_the_job_before_any_container() 
 }
 
 /// A job whose record never lands is not left working with nowhere to
-/// speak: the post that waited on the write is never made, and the job is
-/// failed for that reason, the same way a turn never started is.
+/// speak: the room that waited on the write is never asked for, and the
+/// job is failed for that reason, the same way a turn never started is.
 #[test]
 fn a_job_whose_record_never_landed_is_failed_rather_than_left_working() {
     let mut sim = Simulation::new();
@@ -135,9 +162,10 @@ fn a_job_whose_record_never_landed_is_failed_rather_than_left_working() {
     sim.run_until(&mut instance, 5_000);
 
     assert!(
-        sim.posts().is_empty(),
-        "nothing was posted for a record nobody has"
+        sim.rooms().is_empty(),
+        "no room was made for a record nobody has"
     );
+    assert!(sim.posts().is_empty(), "and nothing was said");
     let failed: Vec<Progress> = instance
         .state()
         .projects

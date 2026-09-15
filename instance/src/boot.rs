@@ -848,7 +848,6 @@ mod tests {
             BTreeMap::from([(
                 Channel::Slack,
                 ChannelConfig {
-                    address: format!("C-{name}"),
                     credential: Secret::new("xoxb-token".to_owned()),
                     listen_credential: Secret::new("xapp-token".to_owned()),
                 },

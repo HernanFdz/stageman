@@ -26,7 +26,7 @@
 //! and the identifier it comes back with is what a reply names — see
 //! `docs/decisions/0029-a-reply-is-routed-by-its-thread.md`.
 
-use stageman_core::{Channel, Secret, Speaking};
+use stageman_core::{Channel, JobId, Secret, Speaking};
 
 use crate::{Call, ChannelError, Identity, Incoming, Message, Request};
 
@@ -38,6 +38,39 @@ const WHO_AM_I: &str = "https://slack.com/api/auth.test";
 
 /// Where Slack says where to connect for the event stream.
 const OPEN_SOCKET: &str = "https://slack.com/api/apps.connections.open";
+
+/// Where Slack makes a room.
+const CREATE_ROOM: &str = "https://slack.com/api/conversations.create";
+
+/// Where Slack takes a room's purpose.
+const SET_PURPOSE: &str = "https://slack.com/api/conversations.setPurpose";
+
+/// Where Slack takes a room's topic.
+const SET_TOPIC: &str = "https://slack.com/api/conversations.setTopic";
+
+/// Where Slack takes an invitation into a room.
+const INVITE: &str = "https://slack.com/api/conversations.invite";
+
+/// Where Slack archives a room.
+const ARCHIVE: &str = "https://slack.com/api/conversations.archive";
+
+/// The most a room's name may be, in characters.
+const NAME_AT_MOST: usize = 80;
+
+/// What separates the parts of a room's name: two hyphens, because titles
+/// contain single ones.
+const SEPARATOR: &str = "--";
+
+/// The most a room's purpose or topic may be, in characters: the platform
+/// refuses anything longer outright, so what is sent is cut to fit.
+const DESCRIPTION_AT_MOST: usize = 250;
+
+/// How much of a project's name a room's name carries, at most.
+const PROJECT_AT_MOST: usize = 24;
+
+/// How much of a job's identifier a room's name carries: enough that two
+/// jobs of one project never collide in practice, short enough to read.
+const IDENTIFIER_CHARS: usize = 8;
 
 /// A question with one credential and no arguments, which is the shape of
 /// both calls a listener makes before it can read anything.
@@ -52,6 +85,170 @@ fn asking(url: &str, credential: &Secret) -> Request {
         .into(),
         body: None,
     }
+}
+
+/// A request with a JSON body, made with the credential that speaks: the
+/// shape of everything that changes something on the platform.
+fn telling(
+    url: &str,
+    speaking: &Speaking,
+    body: serde_json::Map<String, serde_json::Value>,
+) -> Request {
+    Request {
+        method: "POST".to_owned(),
+        url: url.to_owned(),
+        headers: [
+            (
+                "authorization".to_owned(),
+                format!("Bearer {}", speaking.credential.expose()),
+            ),
+            (
+                "content-type".to_owned(),
+                "application/json; charset=utf-8".to_owned(),
+            ),
+        ]
+        .into(),
+        body: Some(serde_json::Value::Object(body).to_string().into_bytes()),
+    }
+}
+
+/// Renders making a room under a name.
+pub fn create_room(speaking: &Speaking, name: &str) -> Request {
+    let mut body = serde_json::Map::new();
+    body.insert("name".to_owned(), name.into());
+    telling(CREATE_ROOM, speaking, body)
+}
+
+/// The room made, from the answer to [`create_room`].
+pub fn room_created(status: u16, body: &[u8]) -> Result<String, ChannelError> {
+    let told = accepted(status, body)?;
+    told.get("channel")
+        .and_then(|room| room.get("id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .ok_or(ChannelError::NoAnswer)
+}
+
+/// Renders setting a room's purpose, cut to what the platform takes.
+pub fn set_purpose(speaking: &Speaking, room: &str, purpose: &str) -> Request {
+    let mut body = serde_json::Map::new();
+    body.insert("channel".to_owned(), room.into());
+    body.insert("purpose".to_owned(), fitting(purpose).into());
+    telling(SET_PURPOSE, speaking, body)
+}
+
+/// Renders setting a room's topic, cut to what the platform takes.
+pub fn set_topic(speaking: &Speaking, room: &str, topic: &str) -> Request {
+    let mut body = serde_json::Map::new();
+    body.insert("channel".to_owned(), room.into());
+    body.insert("topic".to_owned(), fitting(topic).into());
+    telling(SET_TOPIC, speaking, body)
+}
+
+/// A description cut to what the platform takes, by character rather than
+/// by byte, so that a reason ending in a multi-byte character is cut
+/// between characters and not inside one.
+fn fitting(text: &str) -> String {
+    text.chars().take(DESCRIPTION_AT_MOST).collect()
+}
+
+/// Renders inviting one person into a room.
+pub fn invite(speaking: &Speaking, room: &str, user: &str) -> Request {
+    let mut body = serde_json::Map::new();
+    body.insert("channel".to_owned(), room.into());
+    body.insert("users".to_owned(), user.into());
+    telling(INVITE, speaking, body)
+}
+
+/// Renders archiving a room.
+pub fn archive(speaking: &Speaking, room: &str) -> Request {
+    let mut body = serde_json::Map::new();
+    body.insert("channel".to_owned(), room.into());
+    telling(ARCHIVE, speaking, body)
+}
+
+/// Whether a request that returns nothing was done.
+pub fn done(status: u16, body: &[u8]) -> Result<(), ChannelError> {
+    accepted(status, body).map(|_| ())
+}
+
+/// The name a job's room is given: `<project>--<title>--<identifier>`, in
+/// what Slack allows — lowercase letters, digits, hyphens and underscores,
+/// eighty characters at most.
+///
+/// Double hyphens separate the parts because titles contain single ones.
+/// A part with nothing left in it is left out rather than left empty, and a
+/// name with neither still says what it is. Measured: consecutive hyphens
+/// survive creation, and an archived room's name is still taken, which is
+/// why the identifier is the one part always present.
+pub fn room_name(project: &str, title: &str, job: JobId) -> String {
+    let identifier: String = job
+        .as_uuid()
+        .simple()
+        .to_string()
+        .chars()
+        .take(IDENTIFIER_CHARS)
+        .collect();
+    let project = slug(project, PROJECT_AT_MOST);
+    // What is left for the title once the other parts and their separators
+    // are counted, so that the whole is never over the limit. Summed rather
+    // than added because the gate is right that an addition can overflow,
+    // and these cannot: every term is a small constant or bounded by one.
+    let spent: usize = [
+        project.len(),
+        IDENTIFIER_CHARS,
+        SEPARATOR.len(),
+        if project.is_empty() {
+            0
+        } else {
+            SEPARATOR.len()
+        },
+    ]
+    .into_iter()
+    .sum();
+    // The subtrahend is bounded by construction, far below the limit, so
+    // the subtraction never clamps; saturating is only the type saying what
+    // would happen if it did.
+    let title = slug(title, NAME_AT_MOST.saturating_sub(spent)); // CLAMP-OK: bounded, never reached.
+    let mut parts: Vec<&str> = [project.as_str(), title.as_str()]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect();
+    if parts.is_empty() {
+        parts.push("job");
+    }
+    parts.push(&identifier);
+    parts.join(SEPARATOR)
+}
+
+/// Folds text to a piece of a room's name: lowercase, with every run of
+/// anything else as one hyphen, no hyphen at either end, and no longer than
+/// `at_most`.
+fn slug(text: &str, at_most: usize) -> String {
+    let mut folded = String::new();
+    for character in text.chars() {
+        if folded.len() >= at_most {
+            break;
+        }
+        let lowered = character.to_ascii_lowercase();
+        if lowered.is_ascii_alphanumeric() {
+            folded.push(lowered);
+        } else if !folded.is_empty() && !folded.ends_with('-') {
+            folded.push('-');
+        }
+    }
+    folded.trim_end_matches('-').to_owned()
+}
+
+/// A reference to a room, which the platform renders as its name.
+pub fn room_link(room: &str) -> String {
+    format!("<#{room}>")
+}
+
+/// A mention of somebody, which the platform renders as their name and
+/// notifies them of.
+pub fn mention(user: &str) -> String {
+    format!("<@{user}>")
 }
 
 /// Renders asking who this instance is, with the credential that speaks.
@@ -191,6 +388,7 @@ pub fn decode(frame: &str, us: &Identity) -> Incoming {
             text: said.text,
             room,
             thread: said.thread_ts,
+            user: said.user,
         },
     }
 }
@@ -243,22 +441,7 @@ pub fn post(speaking: &Speaking, room: &str, text: &str, thread: Option<&str>) -
     if let Some(thread) = thread {
         posting.insert("thread_ts".to_owned(), thread.into());
     }
-    Request {
-        method: "POST".to_owned(),
-        url: POST_MESSAGE.to_owned(),
-        headers: [
-            (
-                "authorization".to_owned(),
-                format!("Bearer {}", speaking.credential.expose()),
-            ),
-            (
-                "content-type".to_owned(),
-                "application/json; charset=utf-8".to_owned(),
-            ),
-        ]
-        .into(),
-        body: Some(serde_json::Value::Object(posting).to_string().into_bytes()),
-    }
+    telling(POST_MESSAGE, speaking, posting)
 }
 
 /// What a request asks, if it is one this module rendered.
@@ -277,15 +460,41 @@ pub fn call(request: &Request) -> Option<Call> {
                 channel: Channel::Slack,
             });
         }
-        POST_MESSAGE => {}
+        POST_MESSAGE | CREATE_ROOM | SET_PURPOSE | SET_TOPIC | INVITE | ARCHIVE => {}
         _ => return None,
     }
-    let posted: Posted = serde_json::from_slice(request.body.as_deref()?).ok()?;
-    Some(Call::Post {
-        channel: Channel::Slack,
-        room: posted.channel,
-        text: posted.text,
-        thread: posted.thread_ts,
+    let told: Told = serde_json::from_slice(request.body.as_deref()?).ok()?;
+    let channel = Channel::Slack;
+    Some(match request.url.as_str() {
+        CREATE_ROOM => Call::CreateRoom {
+            channel,
+            name: told.name?,
+        },
+        SET_PURPOSE => Call::SetPurpose {
+            channel,
+            room: told.channel?,
+            purpose: told.purpose?,
+        },
+        SET_TOPIC => Call::SetTopic {
+            channel,
+            room: told.channel?,
+            topic: told.topic?,
+        },
+        INVITE => Call::Invite {
+            channel,
+            room: told.channel?,
+            user: told.users?,
+        },
+        ARCHIVE => Call::Archive {
+            channel,
+            room: told.channel?,
+        },
+        _ => Call::Post {
+            channel,
+            room: told.channel?,
+            text: told.text?,
+            thread: told.thread_ts,
+        },
     })
 }
 
@@ -324,12 +533,17 @@ pub fn posted(status: u16, body: &[u8]) -> Result<String, ChannelError> {
     answered.ts.ok_or(ChannelError::NoIdentifier)
 }
 
-/// One message, as it was sent, read back.
+/// What one request told the platform, read back: every field any of them
+/// carries, each present only where its request sends it.
 #[derive(serde::Deserialize)]
-struct Posted {
-    channel: String,
-    text: String,
+struct Told {
+    channel: Option<String>,
+    text: Option<String>,
     thread_ts: Option<String>,
+    name: Option<String>,
+    purpose: Option<String>,
+    topic: Option<String>,
+    users: Option<String>,
 }
 
 /// What Slack says back.
@@ -344,8 +558,9 @@ struct Answered {
 
 #[cfg(test)]
 mod tests {
-    use super::{accepted, decode, identity, posted};
+    use super::{accepted, decode, fitting, identity, posted, room_name, slug};
     use crate::{ChannelError, Identity, Incoming};
+    use stageman_core::{JobId, Uuid};
 
     fn us() -> Identity {
         Identity {
@@ -534,6 +749,38 @@ mod tests {
         for frame in ["not json at all", "{}", r#"{"type":"something_new"}"#] {
             assert_eq!(said(frame), Incoming::Ignore, "{frame}");
         }
+    }
+
+    /// A description longer than the platform takes is cut to fit, by
+    /// character, and one that fits is left alone.
+    #[test]
+    fn a_description_is_cut_to_what_the_platform_takes() {
+        assert_eq!(fitting("why"), "why");
+        let long: String = "é".repeat(300);
+        let cut = fitting(&long);
+        assert_eq!(cut.chars().count(), 250);
+        assert!(cut.chars().all(|c| c == 'é'), "cut between characters");
+    }
+
+    /// A room's name is folded to the platform's alphabet, part by part,
+    /// and the whole never exceeds its limit.
+    #[test]
+    fn a_rooms_name_is_folded_to_what_the_platform_allows() {
+        assert_eq!(slug("Closed Loop!", 80), "closed-loop");
+        assert_eq!(slug("  --x--  ", 80), "x");
+        assert_eq!(
+            slug("ÀB", 80),
+            "b",
+            "what is not the platform's alphabet folds to a hyphen"
+        );
+        assert_eq!(slug("abcdef", 3), "abc");
+        assert_eq!(slug("ab-cdef", 3), "ab", "a cut never ends in a hyphen");
+
+        let job = JobId::from_uuid(Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef));
+        let name = room_name(&"long".repeat(20), &"title ".repeat(30), job);
+        assert!(name.len() <= 80, "{name}");
+        assert!(name.ends_with("--01234567"), "{name}");
+        assert!(!name.contains("---"), "{name}");
     }
 
     /// Who this instance is needs a bot token, because only a bot's posts

@@ -49,7 +49,7 @@ use rand::Rng as _;
 use rand::rngs::StdRng;
 use stageman_agent::Command;
 use stageman_core::{
-    Agent, InstanceId, JobId, Key, Kit, Progress, ProjectId, State, Thread, Timestamp, Uuid,
+    Agent, InstanceId, JobId, Key, Kit, Place, Progress, ProjectId, Room, State, Timestamp, Uuid,
 };
 use stageman_vocabulary::{Effect as Generic, EffectId, Environment, Finished};
 
@@ -1033,12 +1033,12 @@ impl Running {
         }
     }
 
-    /// What a job resuming needs from its record: where it speaks, and what
-    /// it runs on.
-    fn recorded(&self, job: JobId) -> Option<(Option<Thread>, Kit)> {
+    /// What a job resuming needs from its record: the room it speaks in, and
+    /// what it runs on.
+    fn recorded(&self, job: JobId) -> Option<(Option<Room>, Kit)> {
         self.state
             .job(job)
-            .map(|recorded| (recorded.thread.clone(), recorded.kit().clone()))
+            .map(|recorded| (recorded.room.clone(), recorded.kit().clone()))
     }
 
     /// Mints the credential a turn presents to the tools endpoint, forgetting
@@ -1047,15 +1047,21 @@ impl Running {
     /// Unguessable from the instance's own generator, so there is one answer
     /// to where an unguessable value comes from. Bounded by construction: one
     /// entry per turn in flight rather than one per turn ever taken.
-    fn warrant(&mut self, speaker: Speaker, thread: Option<Thread>) -> String {
+    fn warrant(&mut self, speaker: Speaker, place: Option<Place>, from: Option<String>) -> String {
         let credential = format!(
             "{}{}",
             mint(&mut self.rng).simple(),
             mint(&mut self.rng).simple()
         );
         self.warrants.retain(|_, known| known.speaker != speaker);
-        self.warrants
-            .insert(credential.clone(), Warranted { speaker, thread });
+        self.warrants.insert(
+            credential.clone(),
+            Warranted {
+                speaker,
+                place,
+                from,
+            },
+        );
         credential
     }
 }

@@ -82,8 +82,7 @@ commentary on things going right.
 Every project is bound to a Slack app of its own, installed in the workspace
 its people talk in, and the app hears every channel it is invited to. Create
 the app at api.slack.com from this manifest, install it, and give the project
-the bot token, the app-level token with the `connections:write` scope, and the
-identifier of the channel a job's thread should open in:
+the bot token and the app-level token with the `connections:write` scope:
 
 ```yaml
 display_information:
@@ -99,6 +98,7 @@ oauth_config:
       - channels:history
       - groups:history
       - app_mentions:read
+      - channels:manage      # a channel per job, archived when the job is retired
 settings:
   event_subscriptions:
     bot_events:
@@ -116,11 +116,17 @@ hear half of what is said, and nothing would say so.
 
 Then `/invite @stageman` into any channel where people should be able to talk
 to it, and mention it: **stageman reads nothing that does not mention it.** A
-mention in a job's thread reaches that job. A mention anywhere else reaches
-the project's foreman, which answers in a thread under your message, and
-you can go on talking to it there — every message still needs the mention,
-so that people can talk to each other under a job or a foreman without waking
-either.
+mention anywhere reaches the project's foreman, which answers in a thread
+under your message, and you can go on talking to it there.
+
+**Every job gets a channel of its own**, named after the project, the job's
+title and a short identifier, and described with why the job exists and where
+it is showing its work. It is created when the job is, whoever asked for the
+job is invited into it, and a mention there reaches that job. Retiring the
+job archives the channel, so a finished conversation leaves the sidebar and
+stays searchable. Every message still needs the mention, so that people can
+talk to each other in a job's channel, or under a foreman's answer, without
+waking either.
 
 ## Installing it
 

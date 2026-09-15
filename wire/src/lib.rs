@@ -200,13 +200,11 @@ pub struct Choice {
 
 /// The boxes that bind a channel, travelling together.
 ///
-/// All three filled binds a channel, and creating a project needs one:
-/// anything less is refused, and that rule is written in one place, on the
-/// instance. Amending never offers them.
+/// Both filled binds a channel, and creating a project needs one: anything
+/// less is refused, and that rule is written in one place, on the instance.
+/// Amending never offers them.
 #[derive(Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ChannelDraft {
-    /// The home room: where on the channel a job's thread opens.
-    pub address: String,
     /// What speaks on that channel.
     pub credential: String,
     /// What listens on it.
@@ -214,12 +212,11 @@ pub struct ChannelDraft {
 }
 
 impl fmt::Debug for ChannelDraft {
-    /// Names what was given and never the credential. The credential is a
-    /// bare `String` on the way in from a browser, so nothing under it
-    /// redacts, and a derive would print it whole.
+    /// Names what was given and never the credentials. They are bare
+    /// `String`s on the way in from a browser, so nothing under them
+    /// redacts, and a derive would print them whole.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ChannelDraft")
-            .field("address", &self.address)
             .field("credential", &"<redacted>")
             .field("listen_credential", &"<redacted>")
             .finish()
@@ -339,7 +336,6 @@ impl Draft {
                     && named
                     && valued
                     && !self.credential.trim().is_empty()
-                    && !self.channel.address.trim().is_empty()
                     && !self.channel.credential.trim().is_empty()
                     && !self.channel.listen_credential.trim().is_empty()
             }
@@ -527,14 +523,8 @@ pub enum Refusal {
     /// A project would have no kit its jobs could run on.
     #[error("a project needs at least one kit its jobs can run on")]
     KitsMissing,
-    /// Another project already listens where this one would.
-    #[error("{project} is already bound to that channel")]
-    ChannelAlreadyBound {
-        /// The project that has it, as the screen names it.
-        project: String,
-    },
     /// A project was drafted without a whole channel binding.
-    #[error("a project needs a Slack channel, a bot token and an app-level token")]
+    #[error("a project needs a Slack bot token and an app-level token")]
     ChannelIncomplete,
     /// A job was asked for on a project that has no channel bound, which only
     /// a project the last release wrote can lack.
@@ -658,7 +648,6 @@ impl Refusal {
             Self::AgentInUse { .. }
             | Self::ProjectBusy { .. }
             | Self::JobWorking
-            | Self::ChannelAlreadyBound { .. }
             | Self::ChannelMissing { .. } => 409,
         }
     }
@@ -696,7 +685,6 @@ mod tests {
             kits: vec![default_kit()],
             credential: "ghp-not-a-real-token".to_owned(),
             channel: ChannelDraft {
-                address: "C0123456789".to_owned(),
                 credential: "xoxb-not-a-real-token".to_owned(),
                 listen_credential: "xapp-not-a-real-token".to_owned(),
             },
@@ -801,7 +789,8 @@ mod tests {
     #[test]
     fn amending_ignores_the_channel_boxes_entirely() {
         assert!(
-            without(|draft| draft.channel.address.clear()).is_complete(&amending(), NOTHING_HELD)
+            without(|draft| draft.channel.listen_credential.clear())
+                .is_complete(&amending(), NOTHING_HELD)
         );
         assert!(
             without(|draft| draft.channel.credential.clear())
@@ -816,10 +805,6 @@ mod tests {
     fn a_channel_is_required_whole() {
         assert!(
             !without(|draft| draft.channel = ChannelDraft::default())
-                .is_complete(&Filling::Creating, NOTHING_HELD)
-        );
-        assert!(
-            !without(|draft| draft.channel.address.clear())
                 .is_complete(&Filling::Creating, NOTHING_HELD)
         );
         assert!(
@@ -843,7 +828,7 @@ mod tests {
         assert!(!draft.is_complete(&Filling::Creating, NOTHING_HELD));
 
         let mut draft = filled();
-        draft.channel.address = "  ".to_owned();
+        draft.channel.listen_credential = "  ".to_owned();
         assert!(!draft.is_complete(&Filling::Creating, NOTHING_HELD));
     }
 
@@ -861,12 +846,12 @@ mod tests {
             "it should still say what it holds"
         );
         assert!(
-            shown.contains("C0123456789"),
-            "an address is not a credential"
-        );
-        assert!(
             shown.contains("STRIPE_API_KEY"),
             "a name is not a credential"
+        );
+        assert!(
+            shown.contains("ChannelDraft") && shown.contains("<redacted>"),
+            "the binding is named, with its credentials redacted rather than dropped: {shown}"
         );
     }
 

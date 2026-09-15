@@ -1,13 +1,32 @@
-//! Starting a job: the record before the thread, the thread before the
+//! Starting a job: the record before the room, the room before the
 //! container, and the container before the agent speaks.
 
 use stageman_core::{
-    Handout, HandoutError, Job, JobId, Kit, Progress, ProjectId, Thread, Timestamp, Waiting,
+    Handout, HandoutError, Job, JobId, Kit, Place, Progress, ProjectId, Room, Timestamp, Waiting,
 };
 
 use crate::Running;
+use crate::channel::Origin;
 use crate::turns::{Run, Turn, speaking_for};
 use crate::vocabulary::Speaker;
+
+/// What a job is commissioned with: the kit it runs on, and the three texts
+/// about it.
+///
+/// One value rather than four arguments, so that a caller cannot hand over
+/// a reason from one request and the work from another, and so that the
+/// texts travel under the names a person reads them by on the dashboard.
+#[derive(Debug, Clone)]
+pub struct Commission<'a> {
+    /// What it runs on, decided by whoever asked for it.
+    pub kit: Kit,
+    /// Why it exists, in prose for the dashboard.
+    pub reason: &'a str,
+    /// What its agent is to do.
+    pub work: &'a str,
+    /// A few words naming it, which its room is named after.
+    pub title: &'a str,
+}
 
 /// A job could not be recorded.
 #[derive(Debug, thiserror::Error)]
@@ -37,11 +56,14 @@ impl Running {
     /// container exists, this leaves a job believed to be working with
     /// nothing to run in — which waking recognises and records as lost. The
     /// other order would leave a container naming a job the instance has no
-    /// record of, which is the case that needs a person. So the thread is
-    /// opened, and the turn started, only once the record is on the disk.
+    /// record of, which is the case that needs a person. So the room is
+    /// made, and the turn started, only once the record is on the disk.
     ///
     /// The instruction the agent begins from is composed here, from the work,
-    /// by the foreman crate. Nothing else composes one.
+    /// by the foreman crate. Nothing else composes one. The room's name is
+    /// composed by the channel crate, from the project, the title and the
+    /// job's identifier — see
+    /// `docs/decisions/0061-a-job-has-a-room-of-its-own.md`.
     ///
     /// # Errors
     ///
@@ -50,29 +72,33 @@ impl Running {
     pub fn begin(
         &mut self,
         project: ProjectId,
-        kit: Kit,
-        reason: &str,
-        work: &str,
+        commission: Commission<'_>,
+        origin: Option<Origin>,
         at: Timestamp,
     ) -> Result<JobId, BeginError> {
-        let repository = self
+        let Commission {
+            kit,
+            reason,
+            work,
+            title,
+        } = commission;
+        let (called, repository) = self
             .state
             .projects
             .get(&project)
-            .map(|watched| watched.repository.clone())
+            .map(|watched| (watched.name.clone(), watched.repository.clone()))
             .ok_or(BeginError::UnknownProject(project))?;
         // The kit arrives decided — by a foreman naming one of the project's,
         // or by a person picking one — and is never composed here.
         let handout = Handout::for_job(&self.state, kit, project).map_err(BeginError::Handout)?;
-        // Where the job's thread will be opened: the project's home room.
-        // Refused before anything is recorded when there is none, which only
-        // a project the last release wrote can lack.
-        let (channel, room) = self
+        // The channel the job's room is made on. Refused before anything is
+        // recorded when there is none, which only a project the last
+        // release wrote can lack.
+        let channel = self
             .state
             .projects
             .get(&project)
-            .and_then(|watched| watched.channels.iter().next())
-            .map(|(channel, bound)| (*channel, bound.address.clone()))
+            .and_then(|watched| watched.channels.keys().next().copied())
             .ok_or(BeginError::NoChannel(project))?;
         let speaking = handout
             .channel(channel)
@@ -80,7 +106,7 @@ impl Running {
             .ok_or(BeginError::NoChannel(project))?;
         // Minted before the instruction, because the instruction names where
         // this job can be reached and that address is built from the
-        // identifier.
+        // identifier — and before the room's name, for the same reason.
         let job = JobId::from_uuid(crate::mint(&mut self.rng));
         let variables: Vec<_> = handout.variable_names().cloned().collect();
         let kickoff = stageman_foreman::kickoff(
@@ -89,58 +115,126 @@ impl Running {
             &crate::tunnel::address(&self.domain, job, self.serving),
             &variables,
         );
-        let announcement = stageman_foreman::announcement(&repository, reason, job);
+        let name = stageman_channel::room_name(channel, &called, title, job);
 
         if let Some(watched) = self.state.projects.get_mut(&project) {
-            watched.jobs.insert(
-                job,
-                Job::new(handout.kit().clone(), reason.to_owned(), kickoff, at),
-            );
+            let mut recorded = Job::new(handout.kit().clone(), reason.to_owned(), kickoff, at);
+            recorded.asked_by = origin.as_ref().and_then(|origin| origin.user.clone());
+            watched.jobs.insert(job, recorded);
             self.dirty = true;
         }
 
-        // A channel that will not take a message fails the job rather than
-        // letting it run speaking at the root: the kickoff has told this
-        // agent it can reach a person, and running it anyway would make that
-        // quietly false. It is also the cheapest moment to fail — no
+        // A platform that will not make the room fails the job rather than
+        // letting it run with nowhere to speak: the kickoff has told this
+        // agent it can reach a person, and running it anyway would make
+        // that quietly false. It is also the cheapest moment to fail — no
         // container exists yet.
-        self.open_thread(job, channel, &speaking, &room, &announcement);
+        self.create_room(job, channel, &speaking, &name, origin);
         Ok(job)
     }
 
-    /// Where a job's conversation will happen, or why it could not be opened.
-    pub fn thread_opened(&mut self, job: JobId, outcome: Result<Thread, String>) {
-        match outcome {
-            Ok(thread) => {
-                if let Some(recorded) = self.state.job_mut(job) {
-                    recorded.thread = Some(thread);
-                    self.dirty = true;
-                }
-                self.start(job);
-            }
+    /// The room a job's conversation will happen in, or why it could not be
+    /// made.
+    ///
+    /// Recorded first, because a reply can only find the job through it.
+    /// Then, once that record has landed, the room is described, the person
+    /// who asked is invited, its opening is said, the message the job came
+    /// from is told where the job is — and the job's first turn begins.
+    /// None of the keeping is waited on: what it answers changes nothing
+    /// here.
+    pub fn room_created(
+        &mut self,
+        job: JobId,
+        origin: Option<Origin>,
+        outcome: Result<String, String>,
+    ) {
+        let id = match outcome {
+            Ok(id) => id,
             Err(why) => {
-                tracing::warn!(%job, %why, "the job's thread could not be opened");
+                tracing::warn!(%job, %why, "the job's room could not be made");
                 self.record(
                     job,
                     Progress::Idle(Waiting::Failed(format!(
-                        "its channel could not be reached: {why}"
+                        "its room could not be made: {why}"
                     ))),
                 );
+                return;
             }
+        };
+        let Some(project) = self.state.project_of(job) else {
+            return;
+        };
+        let Some((channel, speaking, repository, reason)) =
+            self.state.projects.get(&project).and_then(|watched| {
+                let (channel, bound) = watched.channels.iter().next()?;
+                let recorded = watched.jobs.get(&job)?;
+                Some((
+                    *channel,
+                    bound.speaking(),
+                    watched.repository.clone(),
+                    recorded.reason.clone(),
+                ))
+            })
+        else {
+            return;
+        };
+        let room = Room { channel, id };
+        if let Some(recorded) = self.state.job_mut(job) {
+            recorded.room = Some(room.clone());
+            self.dirty = true;
         }
+
+        let tunnel = crate::tunnel::address(&self.domain, job, self.serving);
+        let dashboard = crate::tunnel::dashboard(&self.domain, self.serving);
+        self.describe_room(
+            job,
+            channel,
+            &speaking,
+            &room.id,
+            &reason,
+            &format!("Showing at {tunnel} · dashboard at {dashboard}"),
+        );
+        if let Some(user) = origin.as_ref().and_then(|origin| origin.user.as_deref()) {
+            self.invite_into(job, channel, &speaking, &room.id, user);
+        }
+        // The mention the opening teaches is this instance's own identity
+        // on the channel, known once its listener has been told who it is;
+        // before that, the name the app is given in the setup instructions.
+        let mention = self
+            .listeners
+            .get(&project)
+            .and_then(|listener| listener.us.as_ref())
+            .map_or_else(
+                || "@stageman".to_owned(),
+                |us| stageman_channel::mention(channel, &us.user),
+            );
+        self.say(
+            &speaking,
+            &Place::root(room.clone()),
+            &stageman_foreman::room_opening(&repository, &reason, &mention),
+        );
+        if let Some(origin) = origin {
+            let link = stageman_channel::room_link(channel, &room.id);
+            self.say(
+                &speaking,
+                &Place::from(origin.thread),
+                &stageman_foreman::started_notice(&link),
+            );
+        }
+        self.start(job);
     }
 
     /// Starts a recorded job's first turn, once its record is on the disk.
     ///
     /// The handout is decided again from the record rather than carried
-    /// across the thread being opened: the record holds the kit and the
+    /// across the room being made: the record holds the kit and the
     /// kickoff, and a handout is what a process is about to be handed, never
     /// state.
     fn start(&mut self, job: JobId) {
         let Some(project) = self.state.project_of(job) else {
             return;
         };
-        let Some((thread, kit)) = self.recorded(job) else {
+        let Some((room, kit)) = self.recorded(job) else {
             return;
         };
         let handout = match Handout::for_job(&self.state, kit, project) {
@@ -156,8 +250,8 @@ impl Running {
                 return;
             }
         };
-        let handout = match thread.clone() {
-            Some(thread) => handout.speaking_in(thread),
+        let handout = match room.clone() {
+            Some(room) => handout.speaking_in(Place::root(room)),
             None => handout,
         };
         let Some(kickoff) = self.state.job(job).map(|recorded| recorded.kickoff.clone()) else {
@@ -177,24 +271,23 @@ impl Running {
             }
         };
         let speaker = Speaker::Job(job);
-        let warrant = self.warrant(speaker, thread);
-        let first = self.turn(
-            speaker,
-            Turn::noticed(Run::Begin {
-                container: stageman_job::container(job),
-                agent: handout.agent(),
-                role: handout.role(),
-                environment,
-                repository: handout.repository().map(str::to_owned),
-                platform: handout
-                    .platform(stageman_core::Platform::GitHub)
-                    .map(|_| stageman_core::Platform::GitHub),
-                kit: handout.kit().clone(),
-                warrant,
-                tools: self.tools.clone(),
-                kickoff,
-            }),
-        );
+        let warrant = self.warrant(speaker, room.map(Place::root), None);
+        let run = Run::Begin {
+            container: stageman_job::container(job),
+            agent: handout.agent(),
+            role: handout.role(),
+            environment,
+            repository: handout.repository().map(str::to_owned),
+            platform: handout
+                .platform(stageman_core::Platform::GitHub)
+                .map(|_| stageman_core::Platform::GitHub),
+            kit: handout.kit().clone(),
+            warrant,
+            tools: self.tools.clone(),
+            kickoff,
+        };
+        // Told at the root of its room when it ends, if it has one.
+        let first = self.turn(speaker, Turn::noticed(run));
         self.defer(first);
         debug_assert!(
             speaking_for(&self.state, job).is_some() || self.state.job(job).is_some(),

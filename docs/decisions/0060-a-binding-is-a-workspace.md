@@ -11,6 +11,9 @@ place a project is listened to. Keeps
 and hardens it from a preference into a must. Depends on
 `docs/decisions/0059-a-project-speaks-and-listens-on-slack-always.md`.
 
+The home room this record kept for one step left with
+`docs/decisions/0061-a-job-has-a-room-of-its-own.md`.
+
 Every claim below about what the platform does was measured on 2026-09-15
 against a real workspace, with the app installed and a person typing.
 

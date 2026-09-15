@@ -23,7 +23,7 @@
 //! the credential invariant and `docs/conventions.md` §4 for why prompts are
 //! held to a test.
 
-use stageman_core::{JobId, ProjectId, VariableName};
+use stageman_core::{ProjectId, VariableName};
 
 /// What every foreman's container is named for.
 ///
@@ -98,28 +98,39 @@ pub const fn resumption_notice() -> &'static str {
     RESUMPTION
 }
 
-/// What a project's channel is told when a job starts.
+/// The first message in a job's room, for whoever finds the room.
 ///
-/// The message a job's thread hangs from, so it is written for whoever is
-/// reading the channel rather than for the agent. Composed here because this
-/// crate authors the text this system emits — `docs/architecture.md` §1 — and
-/// held to the same snapshot test as the rest, since it is read by a person
-/// and nothing else would notice it changing.
+/// Written for a person reading the channel rather than for the agent, and
+/// composed here because this crate authors the text this system emits —
+/// `docs/architecture.md` §1 — and held to the same snapshot test as the
+/// rest, since nothing else would notice it changing.
 ///
-/// **It does not promise a reply reaches anybody.** Saying so would be the
-/// natural sentence to write and is not true yet: a job speaks and stops, and
-/// nothing carries an answer back until inbound is built. A channel message
-/// making a promise the system does not keep is worse than a terse one.
+/// It teaches the one rule a person has to know in the room, because the
+/// room is the first place a newcomer meets it: the job reads nothing that
+/// does not mention it, so that people can talk to each other here without
+/// waking it. The mention is rendered by the channel, since how one is
+/// spelled is the platform's business.
 #[must_use]
-pub fn announcement(repository: &str, reason: &str, job: JobId) -> String {
+pub fn room_opening(repository: &str, reason: &str, mention: &str) -> String {
     format!(
         "\
-Starting a job on {repository}.
+A job on {repository}.
 
 {reason}
 
-Whatever it has to say appears in this thread. Job {job}."
+Everything it has to say appears here. Mention {mention} to talk to it; \
+anything else said here is between people."
     )
+}
+
+/// What the message a job came from is told, in its thread: where the job
+/// is.
+///
+/// The link is rendered by the channel, because a reference to a room is
+/// the platform's to spell.
+#[must_use]
+pub fn started_notice(link: &str) -> String {
+    format!("Started a job for this: {link}.")
 }
 
 /// The first thing a project's foreman is ever told.
@@ -154,7 +165,8 @@ doing, **call the `start_job` tool**.
 
 A job is one agent in a container of its own, holding this project's \
 credentials, which can clone the repository, change it and open a pull \
-request. It reports in a thread of its own. Its `reason` is prose a person \
+request. It reports in a room of its own, named after the `title` you give \
+it, and whoever asked for it is invited there. Its `reason` is prose a person \
 reads on the dashboard; its `instructions` are the whole instruction that \
 job's agent is given — it cannot see this conversation, so say everything it \
 needs.
@@ -318,12 +330,14 @@ to check it."
 /// wrong often enough to be worse than one that does not try.
 ///
 /// What it does carry is the fact worth having: the agent has stopped, so a
-/// reply now reaches it. While
+/// mention now reaches it. While
 /// `docs/open-questions.md` has messaging a *running* job unsupported, that is
-/// the difference between a thread somebody can act on and one they cannot.
+/// the difference between a room somebody can act on and one they cannot.
+/// Said at the root of the job's room, whatever thread the exchange was in,
+/// because it is about the job and the root is the job's timeline.
 #[must_use]
 pub const fn attention_notice() -> &'static str {
-    "⚠️ Check this out. The agent has stopped; a reply in this thread will reach it."
+    "⚠️ Check this out. The agent has stopped; a mention here will reach it."
 }
 
 /// What a thread is told when a reply arrives for a job that is still working.
@@ -537,7 +551,7 @@ reasons nobody knows."
 
 #[cfg(test)]
 mod tests {
-    use super::{JobId, ProjectId, VariableName, resumption_notice};
+    use super::{ProjectId, VariableName, resumption_notice};
 
     /// Where a job of this project would be reachable.
     ///
@@ -757,39 +771,34 @@ having stopped for reasons nobody knows."
     /// than an agent, which is exactly why nothing else would notice it
     /// changing.
     #[test]
-    fn an_announcement_reads_exactly_as_written() {
+    fn a_rooms_opening_reads_exactly_as_written() {
         assert_eq!(
-            super::announcement(
+            super::room_opening(
                 "https://example.invalid/repo",
                 "an issue was opened",
-                JobId::from_uuid(stageman_core::Uuid::from_u128(9))
+                "<@U0BOT>"
             ),
-            "Starting a job on https://example.invalid/repo.
+            "A job on https://example.invalid/repo.
 
 an issue was opened
 
-Whatever it has to say appears in this thread. Job \
-00000000-0000-0000-0000-000000000009."
+Everything it has to say appears here. Mention <@U0BOT> to talk to it; anything else said \
+here is between people."
+        );
+        assert_eq!(
+            super::started_notice("<#C0C1VNX9AA2>"),
+            "Started a job for this: <#C0C1VNX9AA2>."
         );
     }
 
-    /// It must not promise something the system does not do yet.
-    ///
-    /// The natural sentence to write here is that replying reaches the agent,
-    /// and nothing carries a reply back until inbound is built —
-    /// `docs/decisions/0029-a-reply-is-routed-by-its-thread.md`. A channel
-    /// message making a promise the system does not keep is worse than a terse
-    /// one, and this is what stops somebody adding it back.
+    /// The opening teaches the mention, because the room is where a
+    /// newcomer meets the rule and nothing else in the room ever says it.
     #[test]
-    fn an_announcement_does_not_promise_a_reply() {
-        let said = super::announcement(
-            "https://example.invalid/repo",
-            "an issue was opened",
-            JobId::from_uuid(stageman_core::Uuid::from_u128(9)),
-        );
+    fn a_rooms_opening_teaches_the_mention() {
+        let said = super::room_opening("https://example.invalid/repo", "why", "<@U0BOT>");
 
-        assert!(!said.contains("repl"), "{said}");
-        assert!(!said.contains("answer"), "{said}");
+        assert!(said.contains("Mention <@U0BOT>"), "{said}");
+        assert!(said.contains("between people"), "{said}");
     }
 
     /// Reporting is the ending, not the exception — and this is why.
@@ -830,7 +839,7 @@ Whatever it has to say appears in this thread. Job \
     fn the_notices_read_exactly_as_written() {
         assert_eq!(
             super::attention_notice(),
-            "⚠️ Check this out. The agent has stopped; a reply in this thread will reach it."
+            "⚠️ Check this out. The agent has stopped; a mention here will reach it."
         );
         assert_eq!(
             super::stuck_notice(),
@@ -1042,9 +1051,10 @@ reach it, and that is deliberate rather than something missing: reaching a repos
 business, not yours. When something needs doing, **call the `start_job` tool**.
 
 A job is one agent in a container of its own, holding this project's credentials, which can \
-clone the repository, change it and open a pull request. It reports in a thread of its own. Its \
-`reason` is prose a person reads on the dashboard; its `instructions` are the whole instruction \
-that job's agent is given — it cannot see this conversation, so say everything it needs.
+clone the repository, change it and open a pull request. It reports in a room of its own, named \
+after the `title` you give it, and whoever asked for it is invited there. Its `reason` is prose \
+a person reads on the dashboard; its `instructions` are the whole instruction that job's agent \
+is given — it cannot see this conversation, so say everything it needs.
 
 **Decide rather than ask.** You may say anything you like, but nothing you say comes back to you \
 in this turn, and a person answering you starts a *new* turn that may be behind several others. \

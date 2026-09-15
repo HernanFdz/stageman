@@ -207,6 +207,17 @@ pub fn address(domain: &Domain, job: JobId, serving: u16) -> String {
     }
 }
 
+/// Where a person is told to look for the dashboard: the apex of the same
+/// domain, on the same terms as a job's address.
+#[must_use]
+pub fn dashboard(domain: &Domain, serving: u16) -> String {
+    if domain.is_local() {
+        format!("http://{domain}:{serving}")
+    } else {
+        format!("https://{domain}")
+    }
+}
+
 /// What a person sees when the address they used names no job of this
 /// instance's, or one that is over.
 const NOBODY: &str = "No job answers on this address.";
@@ -471,7 +482,7 @@ impl crate::Running {
 
 #[cfg(test)]
 mod tests {
-    use super::{Domain, Probed, Routed, address, answering, decode, halting};
+    use super::{Domain, Probed, Routed, address, answering, dashboard, decode, halting};
     use stageman_core::{JobId, Uuid};
 
     fn a_job() -> JobId {
@@ -503,6 +514,16 @@ mod tests {
             Some(stageman_job::container(job)),
             "silence stops it, and that container and no other"
         );
+    }
+
+    /// The dashboard is told the way a job's address is: on the port for a
+    /// local domain, where this process is what a browser reaches, and on
+    /// the domain alone otherwise, where whatever forwards it listens.
+    #[test]
+    fn the_dashboard_is_told_on_the_same_terms_as_a_jobs_address() {
+        assert_eq!(dashboard(&Domain::local(), 8080), "http://localhost:8080");
+        let forwarded = Domain::parse("stageman.example.com").expect("a domain");
+        assert_eq!(dashboard(&forwarded, 8080), "https://stageman.example.com");
     }
 
     /// The two things people actually type are taken rather than refused.

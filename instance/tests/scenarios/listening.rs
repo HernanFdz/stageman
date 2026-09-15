@@ -279,7 +279,6 @@ fn a_channel_bound_under_a_failed_write_is_listened_to_after_the_wait() {
 
     let mut draft = a_draft("burrow");
     draft.channel = ChannelDraft {
-        address: "C0000000042".to_owned(),
         credential: "xoxb-not-a-real-token".to_owned(),
         listen_credential: "xapp-not-a-real-token".to_owned(),
     };

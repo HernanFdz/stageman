@@ -48,7 +48,6 @@ pub fn exposed(state: &State) -> Value {
                 })),
                 "channels": keyed(project.channels.iter().map(|(channel, bound)| {
                     (format!("{channel:?}"), json!({
-                        "address": bound.address,
                         "credential": bound.credential.expose(),
                         "listen_credential": bound.listen_credential.expose(),
                     }))

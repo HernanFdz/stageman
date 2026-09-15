@@ -117,12 +117,15 @@ Record the near-miss too: the term you rejected, and what it would have implied.
 - **room** — one Slack channel, as a person sees it in the sidebar. The word
   this project uses because *channel* is taken: `Channel::Slack` names the
   platform, and Slack's own word would make "a job's channel" mean two
-  things in one sentence. A project's **home room** is the one its binding
-  names, where a job's thread is opened; the foreman has no room of its own
-  and is heard in every room the app is in — see
+  things in one sentence. A job has a room of its own, made with the job
+  and archived with it, and a mention anywhere in it is that job's — see
+  `docs/decisions/0061-a-job-has-a-room-of-its-own.md`. The foreman has no
+  room of its own and is heard in every room the app is in — see
   `docs/decisions/0060-a-binding-is-a-workspace.md`. Not *conversation*,
-  refused under **thread** for the same reason, and not *address*, which is
-  what the binding's field is still called and names the home room alone.
+  refused under **thread** for the same reason. Not *address*, which is
+  what a binding used to carry when a project was listened to in one room,
+  and which nothing carries now; and not *channel* for a job's room, for
+  the reason above.
 - **signal** — one observation on a channel: an issue opened, an alert fired, a
   message posted. Signals are read and judged, not stored or addressed. They
   are deliberately not entities; see **reason** below.
@@ -189,17 +192,18 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   a coding agent reads a project's instructions when it starts, and no job
   without a repository ever came. The foreman's agent has no workspace, for the
   plainest reason — a workspace belongs to a job, and triage is not one.
-- **thread** — where one job's conversation happens on a channel. A channel
-  belongs to a project and everything it runs shares it, so a thread is what
-  narrows a conversation down to one job — which is also what makes a reply
-  routable, since a message arriving names its thread and nothing else. Not a
-  *conversation*, which is the thing that happens in one rather than the place
-  it happens in, and would leave nothing to call the identifier. The
-  foreman has none of its own to be addressed in: a mention anywhere that is
-  not a job's thread is for it, and it answers in a thread under the message,
-  or in the one the message was already in. See
-  `docs/decisions/0029-a-reply-is-routed-by-its-thread.md` and
-  `docs/decisions/0060-a-binding-is-a-workspace.md`.
+- **thread** — a reply chain under one message in a room: where the foreman
+  answers, and where a job answers when it was asked in one. It was where a
+  job's whole conversation happened, under an announcement in the project's
+  one room, until `docs/decisions/0061-a-job-has-a-room-of-its-own.md` gave
+  a job a room instead; what routes a reply now is the room, and a thread
+  only says where in it to answer. Not a *conversation*, which is the thing
+  that happens in one rather than the place it happens in, and would leave
+  nothing to call the identifier. The foreman has none of its own to be
+  addressed in: a mention anywhere that is not a job's room is for it, and
+  it answers in a thread under the message, or in the one the message was
+  already in. See `docs/decisions/0029-a-reply-is-routed-by-its-thread.md`
+  and `docs/decisions/0060-a-binding-is-a-workspace.md`.
 
   Its identifier is opaque to this project and **must stay text**. For Slack it
   is the parent message's timestamp, which looks like a number and is not one:
@@ -209,6 +213,11 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   more than one. Since `docs/decisions/0060-a-binding-is-a-workspace.md` a
   person can go on talking to the foreman in the thread it answered in,
   because each message there is its own turn and the session remembers.
+
+  A job's room is named `<project>--<title>--<8 hex of the job id>`, and
+  only the last part is load-bearing: an archived room keeps its name for
+  ever on the platform, so the name has to be unique for ever too, and the
+  identifier is what makes it so. The rest is for a sidebar.
 
 - **tunnel** — the way in to what a job has put up for somebody to look at:
   one port published from its container when that container is created, and

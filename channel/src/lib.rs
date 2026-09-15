@@ -21,7 +21,7 @@ mod slack;
 
 use std::collections::BTreeMap;
 
-use stageman_core::{Channel, Secret, Speaking};
+use stageman_core::{Channel, JobId, Secret, Speaking};
 
 /// Who this instance is on a channel, so it can recognise itself.
 ///
@@ -62,6 +62,8 @@ pub struct Message {
     pub thread: Option<String>,
     /// What was said, as the person wrote it.
     pub text: String,
+    /// Who said it, as the platform names them, when the platform said.
+    pub user: Option<String>,
     /// Whether this instance is what said it.
     pub from_us: bool,
 }
@@ -159,6 +161,109 @@ pub fn posted(channel: Channel, status: u16, body: &[u8]) -> Result<String, Chan
     }
 }
 
+/// Renders creating a room on a channel, under a name the channel allows.
+///
+/// The room a job's conversation happens in — see
+/// `docs/decisions/0061-a-job-has-a-room-of-its-own.md`. Made with the
+/// credential that speaks, which is the one that then posts there.
+#[must_use]
+pub fn create_room(channel: Channel, speaking: &Speaking, name: &str) -> Request {
+    match channel {
+        Channel::Slack => slack::create_room(speaking, name),
+    }
+}
+
+/// What the platform's answer to [`create_room`] means: the identifier of
+/// the room made, as text.
+///
+/// # Errors
+///
+/// Fails if the status was not a success, if the body cannot be read, if
+/// the channel refused — a name already taken is the ordinary refusal — or
+/// if it accepted and named no room.
+pub fn room_created(channel: Channel, status: u16, body: &[u8]) -> Result<String, ChannelError> {
+    match channel {
+        Channel::Slack => slack::room_created(status, body),
+    }
+}
+
+/// Renders setting what a room is for, as the channel shows it beside the
+/// room's name.
+#[must_use]
+pub fn set_purpose(channel: Channel, speaking: &Speaking, room: &str, purpose: &str) -> Request {
+    match channel {
+        Channel::Slack => slack::set_purpose(speaking, room, purpose),
+    }
+}
+
+/// Renders setting a room's topic, as the channel shows it at the top of
+/// the room.
+#[must_use]
+pub fn set_topic(channel: Channel, speaking: &Speaking, room: &str, topic: &str) -> Request {
+    match channel {
+        Channel::Slack => slack::set_topic(speaking, room, topic),
+    }
+}
+
+/// Renders inviting one person into a room.
+#[must_use]
+pub fn invite(channel: Channel, speaking: &Speaking, room: &str, user: &str) -> Request {
+    match channel {
+        Channel::Slack => slack::invite(speaking, room, user),
+    }
+}
+
+/// Renders archiving a room: it leaves the sidebar, stays readable, and
+/// takes no more posts.
+#[must_use]
+pub fn archive(channel: Channel, speaking: &Speaking, room: &str) -> Request {
+    match channel {
+        Channel::Slack => slack::archive(speaking, room),
+    }
+}
+
+/// What the platform's answer to a request that returns nothing means:
+/// that it was done, or why not.
+///
+/// # Errors
+///
+/// Fails if the status was not a success, if the body cannot be read, or if
+/// the channel refused.
+pub fn done(channel: Channel, status: u16, body: &[u8]) -> Result<(), ChannelError> {
+    match channel {
+        Channel::Slack => slack::done(status, body),
+    }
+}
+
+/// The name a job's room is given on a channel: the project, a title, and
+/// the identifier's prefix, folded to what the channel allows.
+///
+/// Only the identifier is load-bearing. An archived room keeps its name for
+/// ever, so the name has to be unique for ever too, and the identifier is
+/// what makes it so; the rest is for a sidebar.
+#[must_use]
+pub fn room_name(channel: Channel, project: &str, title: &str, job: JobId) -> String {
+    match channel {
+        Channel::Slack => slack::room_name(project, title, job),
+    }
+}
+
+/// A reference to a room, as the channel renders one inside a message.
+#[must_use]
+pub fn room_link(channel: Channel, room: &str) -> String {
+    match channel {
+        Channel::Slack => slack::room_link(room),
+    }
+}
+
+/// A mention of somebody, as the channel renders one inside a message.
+#[must_use]
+pub fn mention(channel: Channel, user: &str) -> String {
+    match channel {
+        Channel::Slack => slack::mention(user),
+    }
+}
+
 /// Renders asking a channel who this instance is on it.
 ///
 /// Once per connection rather than once per message, and with the
@@ -224,9 +329,9 @@ pub fn acknowledgement(channel: Channel, envelope: &str) -> String {
 
 /// What a request asks of a platform, read back from what would be sent.
 ///
-/// The inverse of [`post`], [`who_am_i`] and [`open_socket`], for a
-/// simulated platform to recognise what it is asked and answer as the real
-/// one was measured to, without matching on strings.
+/// The inverse of everything this crate renders, for a simulated platform
+/// to recognise what it is asked and answer as the real one was measured
+/// to, without matching on strings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Call {
     /// Who this instance is on the channel.
@@ -249,6 +354,47 @@ pub enum Call {
         text: String,
         /// In which thread, if any.
         thread: Option<String>,
+    },
+    /// A room created.
+    CreateRoom {
+        /// Which channel.
+        channel: Channel,
+        /// Under what name.
+        name: String,
+    },
+    /// A room's purpose set.
+    SetPurpose {
+        /// Which channel.
+        channel: Channel,
+        /// Which room.
+        room: String,
+        /// To what.
+        purpose: String,
+    },
+    /// A room's topic set.
+    SetTopic {
+        /// Which channel.
+        channel: Channel,
+        /// Which room.
+        room: String,
+        /// To what.
+        topic: String,
+    },
+    /// Somebody invited into a room.
+    Invite {
+        /// Which channel.
+        channel: Channel,
+        /// Which room.
+        room: String,
+        /// Who.
+        user: String,
+    },
+    /// A room archived.
+    Archive {
+        /// Which channel.
+        channel: Channel,
+        /// Which room.
+        room: String,
     },
 }
 
@@ -291,10 +437,11 @@ pub enum ChannelError {
 #[cfg(test)]
 mod tests {
     use super::{
-        Call, ChannelError, Identity, Incoming, acknowledgement, decode, identity, open_socket,
-        post, posted, socket_url, who_am_i,
+        Call, ChannelError, Identity, Incoming, acknowledgement, archive, create_room, decode,
+        done, identity, invite, mention, open_socket, post, posted, room_created, room_link,
+        room_name, set_purpose, set_topic, socket_url, who_am_i,
     };
-    use stageman_core::{Channel, Secret, Speaking};
+    use stageman_core::{Channel, JobId, Secret, Speaking, Uuid};
 
     fn speaking() -> Speaking {
         Speaking {
@@ -451,6 +598,110 @@ mod tests {
             decode(Channel::Slack, r#"{"type":"hello"}"#, &us),
             Incoming::Ready
         );
+    }
+
+    /// Every request that makes or keeps a room reads back as what it
+    /// asked, through the channel it was rendered for, and its answer is
+    /// read the same way.
+    #[test]
+    fn a_rooms_requests_read_back_and_their_answers_are_read() {
+        let made = create_room(
+            Channel::Slack,
+            &speaking(),
+            "aviary--fix-the-build--3fa85f64",
+        );
+        assert_eq!(
+            Call::parse(&made),
+            Some(Call::CreateRoom {
+                channel: Channel::Slack,
+                name: "aviary--fix-the-build--3fa85f64".to_owned(),
+            })
+        );
+        assert_eq!(
+            room_created(
+                Channel::Slack,
+                200,
+                br#"{"ok":true,"channel":{"id":"C0C1VNX9AA2","name":"aviary--fix-the-build--3fa85f64"}}"#
+            )
+            .expect("made"),
+            "C0C1VNX9AA2"
+        );
+        assert!(matches!(
+            room_created(Channel::Slack, 200, br#"{"ok":false,"error":"name_taken"}"#),
+            Err(ChannelError::Refused(ref why)) if why == "name_taken"
+        ));
+        assert!(matches!(
+            room_created(Channel::Slack, 200, br#"{"ok":true}"#),
+            Err(ChannelError::NoAnswer)
+        ));
+
+        assert_eq!(
+            Call::parse(&set_purpose(Channel::Slack, &speaking(), ROOM, "why")),
+            Some(Call::SetPurpose {
+                channel: Channel::Slack,
+                room: ROOM.to_owned(),
+                purpose: "why".to_owned(),
+            })
+        );
+        assert_eq!(
+            Call::parse(&set_topic(Channel::Slack, &speaking(), ROOM, "where")),
+            Some(Call::SetTopic {
+                channel: Channel::Slack,
+                room: ROOM.to_owned(),
+                topic: "where".to_owned(),
+            })
+        );
+        assert_eq!(
+            Call::parse(&invite(Channel::Slack, &speaking(), ROOM, "U0HUMAN")),
+            Some(Call::Invite {
+                channel: Channel::Slack,
+                room: ROOM.to_owned(),
+                user: "U0HUMAN".to_owned(),
+            })
+        );
+        assert_eq!(
+            Call::parse(&archive(Channel::Slack, &speaking(), ROOM)),
+            Some(Call::Archive {
+                channel: Channel::Slack,
+                room: ROOM.to_owned(),
+            })
+        );
+        assert!(done(Channel::Slack, 200, br#"{"ok":true}"#).is_ok());
+        assert!(matches!(
+            done(Channel::Slack, 200, br#"{"ok":false,"error":"already_archived"}"#),
+            Err(ChannelError::Refused(ref why)) if why == "already_archived"
+        ));
+    }
+
+    /// A room's name is folded to what the channel allows, and its
+    /// identifier is the part that is always there.
+    #[test]
+    fn a_rooms_name_is_the_project_the_title_and_the_identifier() {
+        let job = JobId::from_uuid(Uuid::from_u128(0x3fa8_5f64_5717_4562_b3fc_2c96_3f66_afa6));
+        assert_eq!(
+            room_name(
+                Channel::Slack,
+                "Closed Loop",
+                "Fix the flaky parser test!",
+                job
+            ),
+            "closed-loop--fix-the-flaky-parser-test--3fa85f64"
+        );
+        assert_eq!(
+            room_name(Channel::Slack, "aviary", "", job),
+            "aviary--3fa85f64",
+            "no title is no middle part rather than an empty one"
+        );
+        assert_eq!(
+            room_name(Channel::Slack, "", "", job),
+            "job--3fa85f64",
+            "a name with nothing to say still says what it is"
+        );
+        let long = room_name(Channel::Slack, &"p".repeat(60), &"t".repeat(120), job);
+        assert!(long.len() <= 80, "{long}");
+        assert!(long.ends_with("--3fa85f64"), "{long}");
+        assert_eq!(room_link(Channel::Slack, "C0C1VNX9AA2"), "<#C0C1VNX9AA2>");
+        assert_eq!(mention(Channel::Slack, "U0HUMAN"), "<@U0HUMAN>");
     }
 
     /// A request this crate did not render is not a call.
