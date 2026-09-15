@@ -43,14 +43,16 @@ pub struct Identity {
 /// One message heard on a channel, as decoded.
 ///
 /// What routing needs and nothing else: the room it was said in, what
-/// identifies it, the thread it was in if any, the words, and whether this
-/// instance said it. That a person's message mentions this instance is not
-/// carried, because since
+/// identifies it, the thread it was in if any, the words, whether this
+/// instance said it, and which app did if one did. That a person's message
+/// mentions this instance is not carried, because since
 /// `docs/decisions/0060-a-binding-is-a-workspace.md` it is what made the
 /// message arrive: a person is read from the platform's own mention event,
-/// and nothing a person says without one is decoded at all. Which job or
-/// foreman it is for is not decided here: that is the domain's routing
-/// rule, asked by the instance.
+/// and nothing a person says without one is decoded at all. Another app's
+/// message is decoded whole — its attachments and blocks read into the
+/// words — and whether it is read at all is the room's to decide, in the
+/// domain's routing rule, asked by the instance. Which job or foreman it is
+/// for is not decided here either.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Message {
     /// The room it was said in, as the platform names it.
@@ -66,6 +68,12 @@ pub struct Message {
     pub user: Option<String>,
     /// Whether this instance is what said it.
     pub from_us: bool,
+    /// The app that posted it, by the name the platform gives the app, when
+    /// another app did. None for a person's message and for this instance's
+    /// own. What a signal is framed with, and what says that the room rather
+    /// than a mention decides whether it is read — see
+    /// `docs/decisions/0063-another-app-is-heard-in-a-watched-room.md`.
+    pub app: Option<String>,
 }
 
 /// What one frame from a channel's event stream means.
@@ -630,6 +638,7 @@ mod tests {
         assert_eq!(envelope, "e-1");
         assert_eq!(message.room, "C0123");
         assert!(!message.from_us);
+        assert_eq!(message.app, None, "a person, not an app");
         assert_eq!(
             acknowledgement(Channel::Slack, &envelope),
             r#"{"envelope_id":"e-1"}"#

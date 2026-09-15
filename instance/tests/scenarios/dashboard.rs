@@ -48,6 +48,7 @@ pub fn a_draft(name: &str) -> Draft {
             credential: "xoxb-not-a-real-token".to_owned(),
             listen_credential: "xapp-not-a-real-token".to_owned(),
         },
+        brief: String::new(),
         variables: Vec::new(),
     }
 }

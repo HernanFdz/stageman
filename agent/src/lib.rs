@@ -3220,6 +3220,8 @@ mod tests {
                 variables: BTreeMap::new(),
                 jobs: BTreeMap::<_, Job>::new(),
                 attending: stageman_core::Attending::default(),
+                brief: String::new(),
+                watched: std::collections::BTreeSet::new(),
             },
         );
         (state, id)
@@ -4286,6 +4288,8 @@ mod tests {
                     variables: BTreeMap::new(),
                     jobs: BTreeMap::new(),
                     attending: stageman_core::Attending::default(),
+                    brief: String::new(),
+                    watched: std::collections::BTreeSet::new(),
                 },
             );
             let handout = Handout::for_foreman(&state, project).expect("a watched project");

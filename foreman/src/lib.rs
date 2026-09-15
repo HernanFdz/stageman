@@ -172,6 +172,13 @@ reads on the dashboard; its `instructions` are the whole instruction that \
 job's agent is given — it cannot see this conversation, so say everything it \
 needs.
 
+You can also be asked to watch a room. When a person asks you, in a room, to \
+watch it, **call the `watch_room` tool** there: from then on everything another \
+app posts in that room — an issue filed, an alert fired, a pull request opened \
+— reaches you as a signal to judge, framed as that app's. `stop_watching`, \
+asked in the same room, undoes it. People are only ever heard through a \
+mention, whether a room is watched or not.
+
 **Decide rather than ask.** You may say anything you like, but nothing you say \
 comes back to you in this turn, and a person answering you starts a *new* turn \
 that may be behind several others. So never end a turn waiting for a reply: if \
@@ -215,10 +222,16 @@ pub enum Starting {
 /// this is the description of.
 #[derive(Debug, Clone, Copy)]
 pub struct Turn<'a> {
-    /// What the person said, as they wrote it.
+    /// What was said, as the person wrote it or as the app's message reads.
     pub said: &'a str,
     /// Whether a turn on it was already begun and cut short.
     pub starting: Starting,
+    /// The app that posted it, by name, when it is a signal from a watched
+    /// room rather than a person's message — see
+    /// `docs/decisions/0063-another-app-is-heard-in-a-watched-room.md`.
+    /// What the framing says, because a foreman has no other way to tell a
+    /// notification from a request.
+    pub app: Option<&'a str>,
 }
 
 /// The project a foreman is thinking about, as it needs to know it.
@@ -266,11 +279,17 @@ pub const fn resumed_notice() -> &'static str {
     "stageman restarted while working on this, and is picking it up again."
 }
 
-/// What a foreman is told when a person sends it a message.
+/// What a foreman is told when a person sends it a message, or when another
+/// app posts in a room it watches.
 ///
 /// Framed rather than passed through, for the reason a job's reply is: what
 /// arrives is somebody's words, and a session that has been running for days
-/// has no other way to tell those from an instruction it wrote itself.
+/// has no other way to tell those from an instruction it wrote itself. A
+/// signal is framed as the app's, and differently: nobody asked anything,
+/// so the foreman is told to judge rather than to answer, and to speak only
+/// if it acted or a person needs to know — the reaction on the message
+/// already says it looked. See
+/// `docs/decisions/0063-another-app-is-heard-in-a-watched-room.md`.
 ///
 /// **The kits are named here rather than in the opening**, and that is the
 /// point of saying them every turn: a project's kits are edited from the
@@ -278,10 +297,17 @@ pub const fn resumed_notice() -> &'static str {
 /// list would be right until somebody changed it and wrong thereafter, with
 /// nothing to notice. Each comes with the description its operator wrote,
 /// which is what the choice is made on — see
-/// `docs/decisions/0048-a-job-runs-on-a-kit.md`.
+/// `docs/decisions/0048-a-job-runs-on-a-kit.md`. **The brief is said here
+/// for the same reason**, and an empty one says nothing, so a project with
+/// none gets the prompt it always got — see
+/// `docs/decisions/0064-a-project-has-a-brief.md`.
 #[must_use]
-pub fn asked(turn: Turn<'_>, kits: &[(&str, &str)]) -> String {
-    let Turn { said, starting } = turn;
+pub fn asked(turn: Turn<'_>, kits: &[(&str, &str)], brief: &str) -> String {
+    let Turn {
+        said,
+        starting,
+        app,
+    } = turn;
     let choices = kits
         .iter()
         .map(|(named, described)| format!("  {named} — {described}"))
@@ -296,15 +322,50 @@ pub fn asked(turn: Turn<'_>, kits: &[(&str, &str)]) -> String {
         Starting::Interrupted => format!("{INTERRUPTION}\n\n"),
     };
 
-    format!(
-        "\
-{interruption}A person said this to you on the channel:
+    let framed = app.map_or_else(
+        || {
+            format!(
+                "\
+A person said this to you on the channel:
 
 {said}
 
 Answer it, or start a job for it with the `start_job` tool, or both. Then \
 call `say` before you finish: a turn that ends without calling it has told \
-nobody anything, however much you wrote.
+nobody anything, however much you wrote."
+            )
+        },
+        |app| {
+            format!(
+                "\
+{app} posted this in a room you watch:
+
+{said}
+
+Nobody asked you anything: this is a signal, and yours to judge. Decide what it \
+deserves — nothing, a job started with the `start_job` tool, or a word to the \
+people in that room — and do that. Call `say` only if you acted on it or a \
+person needs to know something; the reaction on the message already says you \
+looked, so a turn that ends in silence is a decision, not a failure."
+            )
+        },
+    );
+
+    // Inside this value rather than in the template, so that a project with
+    // no brief gets a prompt byte-for-byte what it was before briefs existed.
+    let briefed = if brief.trim().is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\nThe operator's brief for this project — standing instructions, in their own \
+words, that apply to every message and every signal:\n\n{}",
+            brief.trim()
+        )
+    };
+
+    format!(
+        "\
+{interruption}{framed}{briefed}
 
 The kits this project's jobs may run on — each an agent, set a particular way — \
 and what each is for:
@@ -895,8 +956,10 @@ here."
             super::Turn {
                 said: "look at the parser",
                 starting: super::Starting::Interrupted,
+                app: None,
             },
             &[("claude", "General-purpose.")],
+            "",
         );
 
         assert!(picked.starts_with(super::INTERRUPTION), "{picked}");
@@ -911,13 +974,15 @@ here."
     #[test]
     fn an_interrupted_turn_is_the_fresh_one_with_a_paragraph_in_front() {
         let agents = [("claude", "General-purpose.")];
-        let first = super::asked(fresh("look at the parser"), &agents);
+        let first = super::asked(fresh("look at the parser"), &agents, "");
         let again = super::asked(
             super::Turn {
                 said: "look at the parser",
                 starting: super::Starting::Interrupted,
+                app: None,
             },
             &agents,
+            "",
         );
 
         assert_eq!(again, format!("{}\n\n{first}", super::INTERRUPTION));
@@ -1064,6 +1129,12 @@ after the `title` you give it, and whoever asked for it is invited there. Its `r
 a person reads on the dashboard; its `instructions` are the whole instruction that job's agent \
 is given — it cannot see this conversation, so say everything it needs.
 
+You can also be asked to watch a room. When a person asks you, in a room, to watch it, **call \
+the `watch_room` tool** there: from then on everything another app posts in that room — an \
+issue filed, an alert fired, a pull request opened — reaches you as a signal to judge, framed \
+as that app's. `stop_watching`, asked in the same room, undoes it. People are only ever heard \
+through a mention, whether a room is watched or not.
+
 **Decide rather than ask.** You may say anything you like, but nothing you say comes back to you \
 in this turn, and a person answering you starts a *new* turn that may be behind several others. \
 So never end a turn waiting for a reply: if you need a judgement nobody has given you, make the \
@@ -1080,6 +1151,16 @@ told."
         super::Turn {
             said,
             starting: super::Starting::Fresh,
+            app: None,
+        }
+    }
+
+    /// A signal: what another app posted in a watched room.
+    fn signalled<'a>(said: &'a str, app: &'a str) -> super::Turn<'a> {
+        super::Turn {
+            said,
+            starting: super::Starting::Fresh,
+            app: Some(app),
         }
     }
 
@@ -1089,7 +1170,8 @@ told."
         assert_eq!(
             super::asked(
                 fresh("look at the parser"),
-                &[("claude", "General-purpose.")]
+                &[("claude", "General-purpose.")],
+                ""
             ),
             "A person said this to you on the channel:
 
@@ -1110,6 +1192,125 @@ start of this session because it can change while you are still running.
 If a command fails, say what it printed rather than what you think it meant. An explanation you \
 inferred is one a person will act on, and you have no way to check it."
         );
+    }
+
+    /// Asserted whole, per `docs/conventions.md` §4: a signal is framed as
+    /// the app's, and the foreman is told to judge rather than to answer.
+    #[test]
+    fn a_signal_to_a_foreman_reads_exactly_as_written() {
+        assert_eq!(
+            super::asked(
+                signalled(
+                    "Issue created by somebody\n#9 The parser is flaky",
+                    "GitHub"
+                ),
+                &[("claude", "General-purpose.")],
+                ""
+            ),
+            "GitHub posted this in a room you watch:
+
+Issue created by somebody
+#9 The parser is flaky
+
+Nobody asked you anything: this is a signal, and yours to judge. Decide what it deserves — \
+nothing, a job started with the `start_job` tool, or a word to the people in that room — and do \
+that. Call `say` only if you acted on it or a person needs to know something; the reaction on \
+the message already says you looked, so a turn that ends in silence is a decision, not a failure.
+
+The kits this project's jobs may run on — each an agent, set a particular way — and what each \
+is for:
+
+  claude — General-purpose.
+
+Choose one deliberately and name it first. It is your judgement to make — \
+`docs/decisions/0048-a-job-runs-on-a-kit.md` — and the list is said here rather than at the \
+start of this session because it can change while you are still running.
+
+If a command fails, say what it printed rather than what you think it meant. An explanation you \
+inferred is one a person will act on, and you have no way to check it."
+        );
+    }
+
+    /// A signal is told it need not speak, and a person's message is told
+    /// it must: the two framings differ in exactly the sentence that
+    /// decides whether a room fills with acknowledgements.
+    #[test]
+    fn a_signal_is_told_to_speak_only_if_it_acted_and_a_message_is_told_to_answer() {
+        let kits = [("claude", "General-purpose.")];
+        let signal = super::asked(signalled("an alert", "Alerts"), &kits, "");
+        let message = super::asked(fresh("an alert"), &kits, "");
+
+        assert!(
+            signal.starts_with("Alerts posted this in a room you watch"),
+            "{signal}"
+        );
+        assert!(signal.contains("only if you acted"), "{signal}");
+        assert!(signal.contains("reaction on the message"), "{signal}");
+        assert!(!signal.contains("Answer it"), "{signal}");
+        assert!(
+            message.contains("Then call `say` before you finish"),
+            "{message}"
+        );
+        assert!(!message.contains("only if you acted"), "{message}");
+    }
+
+    /// The brief is said every turn, after the message and before the kits,
+    /// and an empty one leaves the prompt byte-for-byte what it was.
+    #[test]
+    fn the_brief_is_said_every_turn_and_an_empty_one_says_nothing() {
+        let kits = [("claude", "General-purpose.")];
+        let without = super::asked(fresh("look at the parser"), &kits, "");
+        let blank = super::asked(fresh("look at the parser"), &kits, "  \n ");
+        assert_eq!(without, blank, "whitespace is no brief");
+        assert!(!without.contains("brief"), "{without}");
+
+        let with = super::asked(
+            fresh("look at the parser"),
+            &kits,
+            "Ignore alerts below error. Our jobs act as the machine user stageman-bot.\n",
+        );
+        assert_eq!(
+            with,
+            "A person said this to you on the channel:
+
+look at the parser
+
+Answer it, or start a job for it with the `start_job` tool, or both. Then call `say` before you \
+finish: a turn that ends without calling it has told nobody anything, however much you wrote.
+
+The operator's brief for this project — standing instructions, in their own words, that apply \
+to every message and every signal:
+
+Ignore alerts below error. Our jobs act as the machine user stageman-bot.
+
+The kits this project's jobs may run on — each an agent, set a particular way — and what each \
+is for:
+
+  claude — General-purpose.
+
+Choose one deliberately and name it first. It is your judgement to make — \
+`docs/decisions/0048-a-job-runs-on-a-kit.md` — and the list is said here rather than at the \
+start of this session because it can change while you are still running.
+
+If a command fails, say what it printed rather than what you think it meant. An explanation you \
+inferred is one a person will act on, and you have no way to check it."
+        );
+        // And never in the opening, which is said once and cannot be revised.
+        assert!(
+            !super::opening("https://example.invalid/repo").contains("brief"),
+            "a brief said once goes stale the first time it is edited"
+        );
+    }
+
+    /// The opening teaches the tool that watches a room, and that people
+    /// are still heard only through a mention.
+    #[test]
+    fn a_foreman_is_told_how_a_room_comes_to_be_watched() {
+        let told = super::opening("https://example.invalid/repo");
+
+        assert!(told.contains("call the `watch_room` tool"), "{told}");
+        assert!(told.contains("`stop_watching`"), "{told}");
+        assert!(told.contains("only ever heard through a mention"), "{told}");
     }
 
     /// The instruction has to name the tool, and say ordinary output is lost.
@@ -1152,7 +1353,7 @@ inferred is one a person will act on, and you have no way to check it."
     /// explanation, because it stops the person looking.
     #[test]
     fn a_foreman_is_told_to_report_a_failure_rather_than_explain_it() {
-        let every = super::asked(fresh("do the thing"), &[("claude", "General-purpose.")]);
+        let every = super::asked(fresh("do the thing"), &[("claude", "General-purpose.")], "");
 
         assert!(every.contains("say what it printed"), "{every}");
         assert!(every.contains("no way to check it"), "{every}");
@@ -1170,6 +1371,7 @@ inferred is one a person will act on, and you have no way to check it."
         let each = super::asked(
             fresh("do the thing"),
             &[("claude", "General-purpose."), ("other", "Narrow.")],
+            "",
         );
 
         assert!(each.contains("claude — General-purpose."), "{each}");

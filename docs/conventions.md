@@ -102,7 +102,11 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   mention event is what is read, in every room the app has been invited to,
   so a mention is also what makes a person's message *arrive* at all. Worth a
   word of its own because it is the only rule an operator has to hold in
-  their head, and the only one whose failure is silence.
+  their head, and the only one whose failure is silence. It is the rule for
+  people and not for apps: since
+  `docs/decisions/0063-another-app-is-heard-in-a-watched-room.md` another
+  app's message in a watched room is read with no mention at all, because an
+  app mentions nobody.
 
 - **channel** — somewhere the foreman watches and a job can speak into.
   Two-directional by definition, which is why it is not called a *source* or a
@@ -126,9 +130,28 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   what a binding used to carry when a project was listened to in one room,
   and which nothing carries now; and not *channel* for a job's room, for
   the reason above.
+- **watched room** — a room a person has told the foreman to watch, by
+  asking it there. In one, every message another app posts is a signal for
+  the foreman; a person's message is read exactly as anywhere else, through
+  a mention. Recorded on the project, so a restart watches what it watched,
+  and shown on the dashboard by the platform's identifier, because a name
+  costs a scope the manifest does not grant — see
+  `docs/decisions/0063-another-app-is-heard-in-a-watched-room.md`. Not a
+  *subscription*, which is the platform's word for what an app receives and
+  would suggest this project asks the platform for something: it asks
+  nothing, and watching only decides what is read of what arrives anyway.
+  Not a *source*, refused under **channel** for describing plumbing. Not an
+  *allowlist*, which names the finer design that record rejects and would
+  make a room sound like a list of apps.
 - **signal** — one observation on a channel: an issue opened, an alert fired, a
   message posted. Signals are read and judged, not stored or addressed. They
-  are deliberately not entities; see **reason** below.
+  are deliberately not entities; see **reason** below. Since
+  `docs/decisions/0063-another-app-is-heard-in-a-watched-room.md` the one
+  kind there is has a shape: a message another app posted in a watched room,
+  read into text by the channel crate and handed to the foreman as a turn,
+  framed as the app's rather than as a person's. It waits in the inbox like
+  any message and is gone once the turn ends; nothing keeps a signal after
+  it has been judged, which is the sense in which it is still not an entity.
 - **job** — one agent, in one isolated workspace, on one project, from kickoff
   to completion. A job happens once, and there is no retry: a second attempt is
   a new job with its own workspace. It may, however, outlive the process
@@ -283,6 +306,19 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   not apply, which is exactly the difference between the two concepts: a kit is
   read, by the adapter, on every turn. What rules those words out is that they
   name a bag of values, and a kit is a decision about one job.
+
+- **brief** — free text an operator writes for a project's foreman, said to
+  it on every turn beside the kits: the operator's standing instructions,
+  and the one place policy lives — which alerts to ignore, what a filed
+  issue deserves, which account a job acts as. Nothing here enforces one;
+  the foreman reads it. See `docs/decisions/0064-a-project-has-a-brief.md`.
+  Not *instructions*, which is a job's word for the one thing it is told to
+  do, where a brief is standing and about no task in particular. Not a
+  *system prompt*, which names a mechanism this is not: it is said with each
+  message rather than fixed at the session's start, because a session
+  outlives every edit to it. Not *policy* either, which reads as enforced,
+  and the near-miss worth recording: a brief is followed by judgement, and
+  a person correcting the foreman in a room is still a message.
 
 - **variable** — one name and one value an operator gives a project, set in the
   environment of every container that project's jobs run in. What makes it a

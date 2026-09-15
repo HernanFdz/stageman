@@ -42,6 +42,14 @@ const SERVER: &str = "stageman";
 /// instance reads when the turn actually ends.
 const STOPPING: &str = "stopping";
 
+/// What the tools that watch and stop watching a room are called.
+///
+/// Neither takes an argument: the room is the one the turn was asked in,
+/// which comes from the credential and never from the caller — see
+/// `docs/decisions/0063-another-app-is-heard-in-a-watched-room.md`.
+const WATCH_ROOM: &str = "watch_room";
+const STOP_WATCHING: &str = "stop_watching";
+
 /// One tool, as an agent is told about it.
 ///
 /// The schema is a value rather than a type because it is a wire document
@@ -111,6 +119,28 @@ pub fn tools(warranted: &Warranted, kits: &[(String, String)]) -> Vec<Tool> {
         fields.insert("enum".to_owned(), serde_json::json!(names));
     }
 
+    // Both act on the room the turn was asked in, so neither takes a room:
+    // a foreman that could name one could be talked into watching a room it
+    // was never asked in.
+    let watch = Tool {
+        name: WATCH_ROOM,
+        description: "Watch the room this message was said in. From then on everything \
+                      another app posts there — an issue filed, an alert fired, a pull \
+                      request opened — reaches you as a signal to judge; people are still \
+                      heard only through a mention. Call it when a person asks you, in a \
+                      room, to watch that room."
+            .to_owned(),
+        schema: serde_json::json!({"type": "object", "properties": {}}),
+    };
+    let stop_watching = Tool {
+        name: STOP_WATCHING,
+        description: "Stop watching the room this message was said in: nothing another app \
+                      posts there reaches you afterwards. Call it when a person asks you, \
+                      in a room, to stop watching that room."
+            .to_owned(),
+        schema: serde_json::json!({"type": "object", "properties": {}}),
+    };
+
     vec![
         say,
         Tool {
@@ -146,6 +176,8 @@ pub fn tools(warranted: &Warranted, kits: &[(String, String)]) -> Vec<Tool> {
                 "required": ["reason", "instructions", "kit", "title"],
             }),
         },
+        watch,
+        stop_watching,
     ]
 }
 
@@ -200,12 +232,33 @@ pub enum Call {
     Saying(String),
     /// Saying why this turn is about to end, spelled as it arrived.
     Stopping(String),
+    /// Asking to watch, or to stop watching, the room this turn was asked in.
+    Watching(Watching),
     /// A tool this instance does not serve, by name.
     NoSuchTool(String),
     /// Something needing no answer at all.
     Notification,
     /// Something this instance does not implement and need not.
     Ignored,
+}
+
+/// Which way a room's watching is being changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Watching {
+    /// From now on, another app's message there is a signal.
+    Start,
+    /// From now on, it is nothing.
+    Stop,
+}
+
+impl Watching {
+    /// What the tool asking for this is called.
+    const fn tool(self) -> &'static str {
+        match self {
+            Self::Start => WATCH_ROOM,
+            Self::Stop => STOP_WATCHING,
+        }
+    }
 }
 
 /// What a job says about why it is about to stop.
@@ -325,6 +378,12 @@ fn calling(params: &serde_json::Value) -> Call {
     }
     if name == STOPPING {
         return Call::Stopping(field("because"));
+    }
+    if name == WATCH_ROOM {
+        return Call::Watching(Watching::Start);
+    }
+    if name == STOP_WATCHING {
+        return Call::Watching(Watching::Stop);
     }
     if name != "start_job" {
         return Call::NoSuchTool(name.to_owned());
@@ -501,6 +560,17 @@ impl Running {
             }
             Call::Stopping(because) => {
                 let result = self.stopping_because(&warranted, &because);
+                self.answer(
+                    id,
+                    OK,
+                    Some(result.map_or_else(
+                        |why| failed(incoming.id.clone(), &why),
+                        |said| succeeded(incoming.id.clone(), said),
+                    )),
+                );
+            }
+            Call::Watching(which) => {
+                let result = self.watching(&warranted, which);
                 self.answer(
                     id,
                     OK,
@@ -751,6 +821,59 @@ impl Running {
         Ok(())
     }
 
+    /// Watches, or stops watching, the room the caller's turn was asked in.
+    ///
+    /// **The room comes from the credential, never from the caller**, for
+    /// the reason a post's place does. Recorded on the project, so it is on
+    /// the disk with the next write and survives a restart. Idempotent in
+    /// both directions and said so, because an interrupted foreman is told
+    /// to check how things stand rather than to assume, and "already
+    /// watching" is that answer.
+    ///
+    /// # Errors
+    ///
+    /// Fails for a job, which is offered neither tool and may not watch
+    /// anything; and for a turn with no place, which has no room to watch.
+    fn watching(&mut self, warranted: &Warranted, which: Watching) -> Result<&'static str, String> {
+        let Speaker::Foreman(project) = warranted.speaker else {
+            tracing::warn!("a job asked to watch a room");
+            return Err(format!(
+                "this instance serves no tool called {:?}",
+                which.tool()
+            ));
+        };
+        let Some(place) = warranted.place.as_ref() else {
+            tracing::warn!(%project, "a foreman asked to watch a room with no room to watch");
+            return Err(
+                "this turn was not asked in a room, so there is nothing to watch".to_owned(),
+            );
+        };
+        let Some(watched) = self.state.projects.get_mut(&project) else {
+            return Err(format!("no project {project} in this instance"));
+        };
+        let room = place.room.clone();
+        let said = match which {
+            Watching::Start => {
+                if watched.watched.insert(room) {
+                    self.dirty = true;
+                    "watching this room: from now on everything another app posts here reaches \
+                     you as a signal"
+                } else {
+                    "already watching this room"
+                }
+            }
+            Watching::Stop => {
+                if watched.watched.remove(&room) {
+                    self.dirty = true;
+                    "no longer watching this room"
+                } else {
+                    "this room was not being watched"
+                }
+            }
+        };
+        Ok(said)
+    }
+
     /// Records what a job says about why it is about to stop.
     ///
     /// **Recording a claim is not a state change.** A job stays working until
@@ -944,7 +1067,7 @@ mod tests {
         );
     }
 
-    use super::{Call, Claim, Starting, Tool, calling, decode, named_kit, tools};
+    use super::{Call, Claim, Starting, Tool, Watching, calling, decode, named_kit, tools};
     use crate::vocabulary::{Speaker, Warranted};
     use stageman_core::{
         Agent, AgentConfig, Kit, KitConfig, KitName, Project, ProjectId, Secret, State, Thread,
@@ -1041,6 +1164,14 @@ mod tests {
             Call::Stopping("ready_for_review".to_owned())
         );
         assert_eq!(
+            calling(&serde_json::json!({"name": "watch_room"})),
+            Call::Watching(Watching::Start)
+        );
+        assert_eq!(
+            calling(&serde_json::json!({"name": "stop_watching", "arguments": {}})),
+            Call::Watching(Watching::Stop)
+        );
+        assert_eq!(
             calling(&serde_json::json!({"name": "delete_everything"})),
             Call::NoSuchTool("delete_everything".to_owned())
         );
@@ -1056,15 +1187,32 @@ mod tests {
         );
     }
 
-    /// A foreman is offered the tool that starts jobs and a job is not; a
-    /// job is offered the tool that says why it stopped and a foreman is not.
+    /// A foreman is offered the tools that start jobs and watch rooms and a
+    /// job is not; a job is offered the tool that says why it stopped and a
+    /// foreman is not.
     #[test]
     fn what_each_speaker_is_offered() {
         assert_eq!(
             names(&tools(&a_foreman(), &one_kit())),
-            ["say", "start_job"]
+            ["say", "start_job", "watch_room", "stop_watching"]
         );
         assert_eq!(names(&tools(&a_job(), &one_kit())), ["say", "stopping"]);
+    }
+
+    /// Neither tool that watches takes a room, because the room is the
+    /// credential's to say.
+    #[test]
+    fn the_tools_that_watch_take_no_room() {
+        for tool in tools(&a_foreman(), &one_kit()) {
+            if tool.name == "watch_room" || tool.name == "stop_watching" {
+                assert_eq!(
+                    tool.schema["properties"],
+                    serde_json::json!({}),
+                    "{}",
+                    tool.name
+                );
+            }
+        }
     }
 
     /// The kits a foreman may choose are enumerated in the schema, and an
@@ -1130,6 +1278,8 @@ mod tests {
                 jobs: BTreeMap::new(),
                 variables: BTreeMap::new(),
                 attending: stageman_core::Attending::default(),
+                brief: String::new(),
+                watched: std::collections::BTreeSet::new(),
             },
         );
 

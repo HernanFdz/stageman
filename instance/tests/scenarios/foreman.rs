@@ -190,8 +190,10 @@ fn a_foreman_interrupted_mid_turn_is_picked_up_on_waking() {
         stageman_foreman::Turn {
             said: "look at the parser",
             starting: Starting::Interrupted,
+            app: None,
         },
         &[],
+        "",
     );
     let told_first = interruption
         .lines()

@@ -256,6 +256,7 @@ impl Running {
         let kits = kits_of(&draft.kits)?;
         let channels = binding(&draft.channel)?;
         let variables = resolved(&BTreeMap::new(), &draft.variables)?;
+        let brief = draft.brief.trim().to_owned();
 
         let mut candidate = self.state.clone();
         let created = ProjectId::from_uuid(crate::mint(&mut self.rng));
@@ -271,6 +272,8 @@ impl Running {
                 variables,
                 jobs: BTreeMap::new(),
                 attending: stageman_core::Attending::default(),
+                brief,
+                watched: std::collections::BTreeSet::new(),
             },
         );
         candidate
@@ -314,6 +317,7 @@ impl Running {
             foreman_kit,
             kits,
             draft.credential.trim(),
+            draft.brief.trim().to_owned(),
         );
         candidate
             .check()
@@ -560,7 +564,9 @@ pub fn resolved(
 /// Applies what the form came back with to the project it names.
 ///
 /// Blank means the credential already held, never none. A project that had
-/// none and is amended with a blank box still has none.
+/// none and is amended with a blank box still has none. The brief is the
+/// one text where blank means blank: it is shown in full and resubmitted,
+/// so an empty box is an operator taking it away.
 pub fn amended(
     watched: &mut Project,
     name: String,
@@ -568,6 +574,7 @@ pub fn amended(
     foreman_kit: Kit,
     kits: BTreeMap<KitName, KitConfig>,
     credential: &str,
+    brief: String,
 ) {
     watched.name = name;
     watched.repository = repository;
@@ -575,6 +582,7 @@ pub fn amended(
     // the whole of each; a change to the foreman's lands at its next turn.
     watched.foreman_kit = foreman_kit;
     watched.kits = kits;
+    watched.brief = brief;
     if !credential.is_empty() {
         watched
             .credentials
@@ -718,6 +726,8 @@ mod tests {
             channels: BTreeMap::new(),
             variables: BTreeMap::new(),
             attending: stageman_core::Attending::default(),
+            brief: String::new(),
+            watched: std::collections::BTreeSet::new(),
             jobs: jobs
                 .iter()
                 .zip(1_u128..)
@@ -797,8 +807,10 @@ mod tests {
             },
             BTreeMap::from([(KitName::new("deep").expect("a name"), deep.clone())]),
             "",
+            "Ignore alerts below error.".to_owned(),
         );
         assert_eq!(project.name, "renamed");
+        assert_eq!(project.brief, "Ignore alerts below error.");
         assert_eq!(
             project.foreman_kit,
             Kit::Claude {
@@ -827,6 +839,7 @@ mod tests {
             Kit::defaults(Agent::Claude),
             one_kit(),
             "ghp-the-new-one",
+            String::new(),
         );
         assert_eq!(
             project
@@ -836,6 +849,7 @@ mod tests {
             Some("ghp-the-new-one"),
             "typed replaces"
         );
+        assert_eq!(project.brief, "", "a blank brief is taken away, not kept");
 
         let mut none = holding(&[]);
         amended(
@@ -845,6 +859,7 @@ mod tests {
             Kit::defaults(Agent::Claude),
             one_kit(),
             "",
+            String::new(),
         );
         assert!(none.credentials.is_empty(), "blank leaves none as none");
     }

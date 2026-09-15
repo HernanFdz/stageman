@@ -363,6 +363,8 @@ fn a_project(jobs: BTreeMap<JobId, Job>, bound: bool) -> Project {
         jobs,
         variables: BTreeMap::new(),
         attending: stageman_core::Attending::default(),
+        brief: String::new(),
+        watched: std::collections::BTreeSet::new(),
     }
 }
 
@@ -413,7 +415,33 @@ pub fn holding_a_message(state: &mut State, n: u32, text: &str) {
             thread: thread(n),
             from: Some("U0HUMAN".to_owned()),
             message: Some(thread(n).id),
+            app: None,
         });
+}
+
+/// Marks a room as one the project's foreman watches, as a person asking
+/// it there would have.
+pub fn watching_a_room(state: &mut State, room: &str) {
+    state
+        .projects
+        .get_mut(&project())
+        .expect("the project")
+        .watched
+        .insert(Room {
+            channel: Channel::Slack,
+            id: room.to_owned(),
+        });
+}
+
+/// Gives the project a brief, as its operator would on the form.
+pub fn briefed(state: &mut State, brief: &str) {
+    brief.clone_into(
+        &mut state
+            .projects
+            .get_mut(&project())
+            .expect("the project")
+            .brief,
+    );
 }
 
 /// The name a job's tunnel answers on, under the domain every scenario uses.
@@ -1796,6 +1824,88 @@ impl Simulation {
             ),
             at,
         }
+    }
+
+    /// Another app posting in a room, as the GitHub app was measured to: an
+    /// empty text, everything in one attachment, and a profile naming the
+    /// app. At the root when `under` is none; a follow-up under an earlier
+    /// message otherwise, which arrives as a broadcast carrying the app's
+    /// profile on its root and not on itself.
+    fn app_frame(
+        &mut self,
+        at: Now,
+        room: &str,
+        id: &str,
+        under: Option<&str>,
+        headline: &str,
+        body: &str,
+    ) -> Event {
+        let socket = self.live_socket();
+        self.envelopes += 1;
+        let envelope = format!("e-{}", self.envelopes);
+        let profile = serde_json::json!({"id": "B0OTHER", "name": "GitHub"});
+        let mut card = serde_json::Map::new();
+        card.insert(
+            "fallback".to_owned(),
+            format!("[example/repo] {headline}").into(),
+        );
+        card.insert("pretext".to_owned(), headline.into());
+        card.insert(
+            "title".to_owned(),
+            "<https://example.invalid/repo/issues/1|#1 The parser is flaky>".into(),
+        );
+        card.insert(
+            "footer".to_owned(),
+            "<https://example.invalid/repo|example/repo>".into(),
+        );
+        let mut event = serde_json::Map::new();
+        event.insert("type".to_owned(), "message".into());
+        event.insert("channel".to_owned(), room.into());
+        event.insert("user".to_owned(), "U0GITHUB".into());
+        event.insert("bot_id".to_owned(), "B0OTHER".into());
+        event.insert("text".to_owned(), "".into());
+        event.insert("ts".to_owned(), id.into());
+        match under {
+            None => {
+                event.insert("bot_profile".to_owned(), profile);
+                card.insert("text".to_owned(), body.into());
+            }
+            Some(parent) => {
+                event.insert("subtype".to_owned(), "thread_broadcast".into());
+                event.insert("thread_ts".to_owned(), parent.into());
+                event.insert(
+                    "root".to_owned(),
+                    serde_json::json!({"bot_profile": profile}),
+                );
+            }
+        }
+        event.insert(
+            "attachments".to_owned(),
+            serde_json::Value::Array(vec![serde_json::Value::Object(card)]),
+        );
+        Event::Frame {
+            id: socket,
+            text: serde_json::json!({
+                "envelope_id": envelope,
+                "type": "events_api",
+                "payload": {"event": serde_json::Value::Object(event)},
+            })
+            .to_string(),
+            at,
+        }
+    }
+
+    /// Another app posting at the root of a room, at an instant.
+    pub fn app_posts(&mut self, at: Now, room: &str, id: &str, headline: &str, body: &str) {
+        let event = self.app_frame(at, room, id, None, headline, body);
+        self.schedule(at, event);
+    }
+
+    /// Another app following up under an earlier message of its own, at an
+    /// instant.
+    pub fn app_follows_up(&mut self, at: Now, room: &str, id: &str, under: &str, headline: &str) {
+        let event = self.app_frame(at, room, id, Some(under), headline, "");
+        self.schedule(at, event);
     }
 
     /// Somebody mentioning this instance in a thread, said at an instant.

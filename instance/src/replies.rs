@@ -62,6 +62,7 @@ impl Running {
             id: &message.id,
             thread: message.thread.as_deref(),
             from_us: message.from_us,
+            from_app: message.app.is_some(),
         };
         match self.state.recipient(project, channel, &arriving) {
             Recipient::Job(job) => {
@@ -78,10 +79,15 @@ impl Running {
                 self.replied(job, &message.text, place);
             }
             Recipient::Foreman(project) => {
-                tracing::info!(%project, "a message for the foreman");
+                if let Some(app) = &message.app {
+                    tracing::info!(%project, %app, "a signal for the foreman");
+                } else {
+                    tracing::info!(%project, "a message for the foreman");
+                }
                 self.for_foreman(project, channel, message);
             }
-            // Ordinary: what this instance said itself, heard back.
+            // Ordinary: what this instance said itself, heard back, or
+            // another app posting in a room nobody watches.
             Recipient::Nobody => tracing::debug!("nobody that message was for"),
         }
     }
@@ -182,6 +188,8 @@ mod tests {
                 )]),
                 variables: BTreeMap::new(),
                 attending: stageman_core::Attending::default(),
+                brief: String::new(),
+                watched: std::collections::BTreeSet::new(),
             },
         );
         (state, job)
