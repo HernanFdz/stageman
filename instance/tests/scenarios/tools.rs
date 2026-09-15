@@ -1,7 +1,9 @@
 //! The tools endpoint, called by the agents this instance runs, against the
 //! simulated world.
 
-use crate::simulation::{FARAWAY, NEARBY, Simulation, job, seed, thread, watching_a_channel};
+use crate::simulation::{
+    FARAWAY, NEARBY, Simulation, in_room, in_thread, job, room, seed, watching_a_channel,
+};
 use stageman_channel::Call;
 use stageman_core::{Progress, Waiting};
 
@@ -254,11 +256,13 @@ fn minting_a_warrant_forgets_only_that_speakers_previous_one() {
     assert_eq!(world.tool_answer(asked4).map(|a| a.0), Some(200));
 }
 
-/// A foreman starts a job: the job is recorded, its thread is opened once
-/// the record has landed, the agent is told once the thread is on the record,
-/// and the foreman is answered with the job's identifier.
+/// A foreman starts a job: the job is recorded, its room is made once the
+/// record has landed, the agent is told once the room is on the record, and
+/// the foreman is answered with the job's identifier. The person whose
+/// message the foreman was answering is invited into the room and recorded
+/// as having asked, and their thread is told where the job is.
 #[test]
-fn a_foreman_starts_a_job_whose_thread_is_opened_before_its_agent_speaks() {
+fn a_foreman_starts_a_job_whose_room_is_made_before_its_agent_speaks() {
     let (mut world, mut instance, warrant) = with_a_foreman_working();
 
     let asked1 = world.calls(
@@ -270,6 +274,7 @@ fn a_foreman_starts_a_job_whose_thread_is_opened_before_its_agent_speaks() {
                 "reason": "the parser is flaky",
                 "instructions": "Fix the flaky test in the parser.",
                 "kit": "Claude",
+                "title": "Flaky parser test",
             }),
         ),
     );
@@ -290,18 +295,18 @@ fn a_foreman_starts_a_job_whose_thread_is_opened_before_its_agent_speaks() {
         .iter()
         .position(|line| line.starts_with("<- Written"))
         .expect("written");
-    // Read back through the channel crate's inverse: the thread is the one
-    // post at the root, and the listener's questions are requests too.
+    // Read back through the channel crate's inverse: the room is a request
+    // like the listener's questions, and is told apart the same way.
     let opened = world
-        .first_call(|call| matches!(call, Call::Post { thread: None, .. }))
-        .expect("opened");
+        .first_call(|call| matches!(call, Call::CreateRoom { .. }))
+        .expect("made");
     let talks = world.talks_in(&stageman_job::container(started));
     let [run] = talks.as_slice() else {
         panic!("the job's agent was spoken to once: {talks:?}");
     };
     assert!(
         persisted < opened && opened < run.opened_at,
-        "record, then thread, then agent: {shape:?}"
+        "record, then room, then agent: {shape:?}"
     );
     assert!(run.began(), "{run:?}");
     assert!(run.was_told("Fix the flaky test in the parser."), "{run:?}");
@@ -315,10 +320,40 @@ fn a_foreman_starts_a_job_whose_thread_is_opened_before_its_agent_speaks() {
         .job(started)
         .expect("the job is on the record");
     assert_eq!(recorded.reason, "the parser is flaky");
+    assert_eq!(recorded.room, Some(room(1)), "in the room that was made");
     assert_eq!(
-        recorded.thread,
-        Some(thread(101)),
-        "in the thread that was opened"
+        recorded.asked_by.as_deref(),
+        Some("U0HUMAN"),
+        "the person the foreman was answering asked for it"
+    );
+    assert!(
+        world
+            .rooms()
+            .first()
+            .is_some_and(|(_, name)| name.starts_with("example--flaky-parser-test--")),
+        "named after the project and the title the foreman gave: {:?}",
+        world.rooms()
+    );
+    assert_eq!(
+        world.invited(),
+        [(room(1).id, "U0HUMAN".to_owned())],
+        "and they are invited into it"
+    );
+    assert!(
+        world.posts().contains(&(
+            in_thread(1),
+            stageman_foreman::started_notice("<#C-job-001>")
+        )),
+        "their thread is told where the job is: {:?}",
+        world.posts()
+    );
+    assert!(
+        world
+            .posts()
+            .iter()
+            .any(|(at, text)| *at == in_room(1) && text.contains("Mention <@U0BOT>")),
+        "the room opens by teaching the mention: {:?}",
+        world.posts()
     );
     assert_eq!(
         recorded.progress,
@@ -329,8 +364,8 @@ fn a_foreman_starts_a_job_whose_thread_is_opened_before_its_agent_speaks() {
         world
             .posts()
             .iter()
-            .any(|(t, text)| *t == thread(101) && text == stageman_foreman::attention_notice()),
-        "its thread was told when the turn ended: {:?}",
+            .any(|(at, text)| *at == in_room(1) && text == stageman_foreman::attention_notice()),
+        "its room was told when the turn ended: {:?}",
         world.posts()
     );
 }
@@ -375,7 +410,7 @@ fn starting_is_refused_to_a_job_and_for_a_kit_the_project_does_not_offer() {
     let (name, held) = Simulation::ours(&stageman_job::container(idle));
     world.container(&name, held);
     let mut instance = world.wake(seed(1));
-    world.says_in(100, 1, "go on");
+    world.says_in_room(100, 1, "go on");
     world.run_until(&mut instance, 150);
     let job_warrant = world.warrants().last().expect("the job's warrant").clone();
     let asked2 = world.calls(
@@ -409,7 +444,7 @@ fn saying_posts_in_the_warrants_thread_and_reports_a_failure_to_the_agent() {
     let answer = world.tool_answer(asked1).expect("answered");
     assert!(!is_error(answer));
     assert_eq!(text_of(answer), "said");
-    assert!(world.posts().contains(&(thread(1), "On it.".to_owned())));
+    assert!(world.posts().contains(&(in_thread(1), "On it.".to_owned())));
 
     world.next_post_fails("channel_not_found");
     let asked2 = world.calls(
@@ -449,7 +484,7 @@ fn a_jobs_claim_is_recorded_when_its_turn_ends() {
     let (name, held) = Simulation::ours(&stageman_job::container(idle));
     world.container(&name, held);
     let mut instance = world.wake(seed(1));
-    world.says_in(100, 1, "go on");
+    world.says_in_room(100, 1, "go on");
     world.run_until(&mut instance, 150);
     let warrant = world.warrants().last().expect("the job's warrant").clone();
 

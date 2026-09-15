@@ -38,7 +38,7 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   examined has been checked for it.
 
   Settled by finding out what an agent does with a second prompt mid-turn.
-  Until then the daemon refuses such a message and says so on the thread, which
+  Until then the daemon refuses such a message and says so in its room, which
   is the honest version of not supporting it. Note what that refusal is worth
   keeping even afterwards: it is also what stops two replies resuming one
   container at once.
@@ -365,8 +365,8 @@ and wrong within a day.
 
 - Then cover Slack against regression, because it works and nothing in the
   repository would notice if it stopped. Both directions have been driven end
-  to end against a real workspace — a job speaks on its project's channel, and
-  a reply reaches it through the thread it was said in. So the open item is
+  to end against a real workspace — a job speaks in a room of its own, and
+  a reply reaches it in the room it was given. So the open item is
   not whether it works. It is that the only evidence lives outside the
   repository, and a clone cannot re-run it.
 
@@ -382,7 +382,7 @@ and wrong within a day.
   written against the program would be written twice. Worth doing after that
   lands rather than before.
 
-- Then have the daemon post into a job's thread when the **agent or its
+- Then have the daemon post into a job's room when the **agent or its
   container fails**, which is the one case the agent cannot report on: a
   crashed agent says nothing, so a job that dies is silent everywhere except
   the dashboard.

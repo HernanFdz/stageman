@@ -579,28 +579,19 @@ pub enum Channel {
 
 /// What an operator supplies in order to bind one channel to a project.
 ///
-/// Two values rather than one, which is the second half of why channels do not
-/// share the platform map: an address has nowhere to live in a map of bare
-/// credentials.
+/// Two credentials, held by different processes, which is why channels do
+/// not share the platform map: a platform's entry is one secret a job is
+/// handed, and a binding is one a job is handed and one it never sees. It
+/// used to carry an address as well — the one room a project was listened
+/// to in, and then the room a job's thread opened in — and carries none since
+/// `docs/decisions/0061-a-job-has-a-room-of-its-own.md`: the app hears every
+/// room it is invited to, and a job has a room of its own.
 ///
-/// Deriving `Debug` is safe and deliberate. The credential redacts itself and
-/// the address is not one — it is a public identifier a person could read off
-/// the chat client — so there is nothing here for a hand-written formatter to
-/// hide that the field types do not already.
+/// Deriving `Debug` is safe and deliberate. Both credentials redact
+/// themselves, so there is nothing here for a hand-written formatter to hide
+/// that the field types do not already.
 #[derive(Debug, Clone)]
 pub struct ChannelConfig {
-    /// The home room: where on that channel a job's thread is opened.
-    ///
-    /// For Slack, the identifier of one channel. It used to be the whole of
-    /// where a project was listened to, and since
-    /// `docs/decisions/0060-a-binding-is-a-workspace.md` it is not: the app
-    /// hears every room it has been invited to, and this names only the room
-    /// a job's thread hangs from, until a job has a room of its own.
-    ///
-    /// Called an address rather than a *destination* because
-    /// `docs/conventions.md` §2 rejects one-directional words for this concept:
-    /// a job posts here, and a person answers here.
-    pub address: String,
     /// What the channel is reached with.
     ///
     /// Belongs to the project rather than the instance, for the reason
@@ -625,13 +616,65 @@ pub struct ChannelConfig {
     pub listen_credential: Secret,
 }
 
-/// Where one job's conversation happens.
+/// One room on a channel: for Slack, one Slack channel.
 ///
-/// A channel is bound to a project and shared by everything it runs, so a
-/// thread is what scopes a conversation down to one job —
-/// `docs/open-questions.md` chose a thread per job over a channel per job,
-/// because a channel per job is a workspace nobody can garbage-collect and
-/// needs a token that can create channels.
+/// A job has one of its own, made with the job and archived with it — see
+/// `docs/decisions/0061-a-job-has-a-room-of-its-own.md` — and a message
+/// arriving in it is that job's. Named for the concept in
+/// `docs/conventions.md` §2 rather than the platform's word, because
+/// [`Channel`] is the platform.
+///
+/// The identifier is opaque here and stays text, like a thread's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Room {
+    /// The channel it is a room on.
+    pub channel: Channel,
+    /// What identifies it there.
+    pub id: String,
+}
+
+/// Where one turn speaks: a room, and a thread in it when the message being
+/// answered was in one.
+///
+/// A job's conversation happens in its room, and a person may ask it
+/// something in a thread there, which is where the answer then belongs; a
+/// foreman always answers in a thread. So a turn is narrowed to a room and
+/// perhaps a thread, and a [`Thread`] is the case where there is one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Place {
+    /// The room.
+    pub room: Room,
+    /// The thread in it, if the conversation is in one.
+    pub thread: Option<String>,
+}
+
+impl Place {
+    /// The root of a room.
+    #[must_use]
+    pub const fn root(room: Room) -> Self {
+        Self { room, thread: None }
+    }
+}
+
+impl From<Thread> for Place {
+    fn from(thread: Thread) -> Self {
+        Self {
+            room: Room {
+                channel: thread.channel,
+                id: thread.room,
+            },
+            thread: Some(thread.id),
+        }
+    }
+}
+
+/// A thread: a reply chain under one message in a room.
+///
+/// Where the foreman answers, and where a job answers when it was asked in
+/// one. It was where a job's whole conversation happened, hanging from an
+/// announcement in the project's one room, until
+/// `docs/decisions/0061-a-job-has-a-room-of-its-own.md` gave a job a room
+/// instead; what routes a reply now is the room.
 ///
 /// The identifier is opaque here and **must stay text**. For Slack it is the
 /// parent message's timestamp, which looks like a number and is not one:
@@ -712,26 +755,30 @@ pub struct Job {
     /// as what this one does.
     #[serde(deserialize_with = "progress_or_older")]
     pub progress: Progress,
-    /// Where its conversation happens, once there is one.
+    /// The room its conversation happens in, once there is one.
     ///
-    /// **Not what makes a resumed job speak in the right place.** A container
-    /// keeps what it was created with, so a job put back to work is already
-    /// holding its thread — see
-    /// `docs/decisions/0015-a-job-survives-the-daemon-dying.md`, where resuming
-    /// restarts the same container rather than building a new one. This is
-    /// recorded for the other direction: a reply arrives naming a thread and
-    /// nothing else, so the instance needs to know which job that is, and that
-    /// lookup has to survive the process dying.
+    /// Recorded for the lookup in the other direction: a reply arrives naming
+    /// a room and nothing else, so the instance needs to know which job that
+    /// is, and that lookup has to survive the process dying — see
+    /// `docs/decisions/0061-a-job-has-a-room-of-its-own.md`.
     ///
-    /// Absent for a job whose thread could not be opened, and for every job
-    /// that existed before there were threads at all — which is why it is
-    /// defaulted, per `docs/conventions.md` §4. Read through a bridge as
-    /// well: a thread the last release wrote names no room, and opens as
-    /// none rather than as a guess about where it was. The job keeps its
-    /// record and loses its place to be answered in, which is the loss §4
-    /// permits.
-    #[serde(default, deserialize_with = "thread_or_older")]
-    pub thread: Option<Thread>,
+    /// Absent for a job whose room could not be created, and for every job
+    /// the last release wrote — which is why it is defaulted, per
+    /// `docs/conventions.md` §4. What the last release wrote instead was a
+    /// `thread`, which is read past and dropped: a thread is not somewhere
+    /// this rule can answer, so the job keeps its record and loses its place
+    /// to be answered in, which is the loss §4 permits.
+    #[serde(default)]
+    pub room: Option<Room>,
+    /// Who asked for it, as the platform names them, when a person's message
+    /// is what started it.
+    ///
+    /// Carried so that the person is invited into the job's room and can be
+    /// named when it needs them. None for a job started from the dashboard,
+    /// and for every job the last release wrote, which is why it is
+    /// defaulted.
+    #[serde(default)]
+    pub asked_by: Option<String>,
     /// What the agent's session reported it was set to, after being set.
     ///
     /// Beside the kit rather than derived from it, because the two are
@@ -766,7 +813,8 @@ impl Job {
             kickoff,
             created_at,
             progress: Progress::Working,
-            thread: None,
+            room: None,
+            asked_by: None,
             reported: BTreeMap::new(),
         }
     }
@@ -967,36 +1015,6 @@ where
     })
 }
 
-/// Reads a job's thread, in this shape or in the one before it.
-///
-/// The bridge `docs/conventions.md` §4 requires. What the last release wrote
-/// named a channel and an identifier and no room, because the one room a
-/// project had was the whole of where it listened. That thread opens as none
-/// rather than as a thread in a room this cannot name: the job keeps its
-/// record, and a reply cannot reach it, which is the loss §4 allows.
-fn thread_or_older<'de, D>(deserializer: D) -> Result<Option<Thread>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    struct Written {
-        channel: Channel,
-        #[serde(default)]
-        room: Option<String>,
-        id: String,
-    }
-
-    Ok(
-        Option::<Written>::deserialize(deserializer)?.and_then(|written| {
-            written.room.map(|room| Thread {
-                channel: written.channel,
-                room,
-                id: written.id,
-            })
-        }),
-    )
-}
-
 /// Reads a foreman's inbox, in this shape or in any other.
 ///
 /// The bridge `docs/conventions.md` §4 requires. An inbox the last release
@@ -1035,6 +1053,11 @@ pub struct Errand {
     pub said: String,
     /// Where an answer belongs.
     pub thread: Thread,
+    /// Who said it, as the platform names them, so that a job started for
+    /// it can invite them. None when the platform did not say, and for every
+    /// errand the last release wrote, which is why it is defaulted.
+    #[serde(default)]
+    pub from: Option<String>,
 }
 
 /// What a project's foreman is doing, and what is waiting behind it.
@@ -1183,12 +1206,13 @@ pub struct Project {
     /// `docs/decisions/0027-a-channel-is-not-a-platform.md`, which is mostly an
     /// argument about the two lines this splits into.
     ///
-    /// **May be empty, and that is a working project rather than a broken
-    /// one.** [`State::check`] deliberately does not require a binding:
-    /// `docs/decisions/0005-conversation-happens-on-channels.md` says a project
-    /// with no conversational channel can still run work that never needs to
-    /// ask, and refusing to start one would make the escalation path a
-    /// prerequisite for work that never escalates.
+    /// **Empty only for a project the last release wrote without one.**
+    /// Every project is created with a binding since
+    /// `docs/decisions/0059-a-project-speaks-and-listens-on-slack-always.md`,
+    /// and [`State::check`] deliberately does not require it: refusing to
+    /// open a file over a missing binding would put the repair behind the
+    /// door it locks. Such a project is named at startup and can start no
+    /// job until one is bound.
     pub channels: BTreeMap<Channel, ChannelConfig>,
     /// What its jobs are given that this project never reads.
     ///
@@ -1402,12 +1426,12 @@ impl State {
     /// Who a message arriving on a channel is for.
     ///
     /// The rule in `docs/decisions/0031-a-mention-is-what-makes-it-ours.md`,
-    /// as `docs/decisions/0060-a-binding-is-a-workspace.md` narrows it. The
+    /// as `docs/decisions/0060-a-binding-is-a-workspace.md` and
+    /// `docs/decisions/0061-a-job-has-a-room-of-its-own.md` narrow it. The
     /// project is given rather than found: it is whichever project's socket
-    /// the message arrived on, and the room it was said in decides nothing.
-    /// What is left to decide is whether the thread it was in belongs to one
-    /// of that project's jobs — then it is that job's — and otherwise it is
-    /// the foreman's, at the root or in a thread alike.
+    /// the message arrived on. What is left to decide is whether the room it
+    /// was said in is one of that project's jobs' — then it is that job's —
+    /// and otherwise it is the foreman's, at the root or in a thread alike.
     ///
     /// That a person's message mentions this instance is not consulted,
     /// because it is what made the message arrive: the reader hands over a
@@ -1418,12 +1442,14 @@ impl State {
     /// it, before anything else can match, so that a job's own thread is no
     /// exception.
     ///
-    /// A thread is matched on its room as well as its identifier, because an
-    /// identifier is only unique within one room.
+    /// A room is matched on its channel as well as its identifier, because
+    /// an identifier is only unique within one channel. Whether the message
+    /// was in a thread decides nothing here: a job's room is that job's
+    /// throughout, and where in it to answer is the deliverer's to carry.
     ///
     /// Note what is *not* consulted: whether the job is still running. A
-    /// finished job's thread still routes to it, and that is deliberate — the
-    /// thread is that job's conversation, and a person replying in it a day
+    /// finished job's room still routes to it, and that is deliberate — the
+    /// room is that job's conversation, and a person speaking in it a day
     /// later means the job. What happens when a job cannot take the message is
     /// a question for whoever delivers it, not for this.
     #[must_use]
@@ -1434,25 +1460,20 @@ impl State {
         arriving: &Arriving<'_>,
     ) -> Recipient {
         // Nothing this instance said, before anything else can match, so that
-        // a job's own thread is no exception.
+        // a job's own room is no exception.
         if arriving.from_us {
             return Recipient::Nobody;
         }
         let Some(watched) = self.projects.get(&project) else {
             return Recipient::Nobody;
         };
-        let Some(thread) = arriving.thread else {
-            return Recipient::Foreman(project);
-        };
         watched
             .jobs
             .iter()
             .find(|(_, job)| {
-                job.thread.as_ref().is_some_and(|speaking| {
-                    speaking.channel == channel
-                        && speaking.room == arriving.room
-                        && speaking.id == thread
-                })
+                job.room
+                    .as_ref()
+                    .is_some_and(|room| room.channel == channel && room.id == arriving.room)
             })
             .map_or(Recipient::Foreman(project), |(job, _)| Recipient::Job(*job))
     }
@@ -1509,7 +1530,6 @@ impl State {
                         Ok((
                             *channel,
                             SealedChannelConfig {
-                                address: config.address.clone(),
                                 credential: config.credential.seal(key, nonces())?,
                                 listen_credential: Some(
                                     config.listen_credential.seal(key, nonces())?,
@@ -1772,13 +1792,12 @@ pub struct SealedAgentConfig {
 
 /// A channel binding as it appears on disk.
 ///
-/// The address travels in the clear beside its sealed credential, because it is
-/// not a secret and sealing it would cost a nonce per write to hide a value the
-/// chat client shows anybody in the room.
+/// The last release wrote an `address` beside these, the one room a project
+/// was listened to in; it is read past and dropped, because nothing names a
+/// room for a project any more — see
+/// `docs/decisions/0061-a-job-has-a-room-of-its-own.md`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SealedChannelConfig {
-    /// Where on that channel this project's conversation happens.
-    pub address: String,
     /// The sealed credential.
     pub credential: SealedSecret,
     /// The sealed credential for listening.
@@ -1947,13 +1966,12 @@ impl Snapshot {
                     .into_iter()
                     .filter_map(|(channel, sealed)| {
                         let listening = sealed.listen_credential?;
-                        Some((channel, sealed.address, sealed.credential, listening))
+                        Some((channel, sealed.credential, listening))
                     })
-                    .map(|(channel, address, credential, listening)| {
+                    .map(|(channel, credential, listening)| {
                         Ok((
                             channel,
                             ChannelConfig {
-                                address,
                                 credential: credential.open(key)?,
                                 listen_credential: listening.open(key)?,
                             },
@@ -2068,10 +2086,10 @@ pub struct Arriving<'a> {
 /// Who an arriving message is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Recipient {
-    /// The job whose thread it arrived in.
+    /// The job whose room it arrived in.
     Job(JobId),
-    /// The foreman of the project whose socket it arrived on: a mention at
-    /// the root of any room, or in a thread belonging to no job — which is
+    /// The foreman of the project whose socket it arrived on: a mention in
+    /// any room that is no job's, at the root or in a thread — which is
     /// where a person lands by replying to something the foreman said, and
     /// which used to be answered with a fixed sentence.
     Foreman(ProjectId),
@@ -2157,7 +2175,7 @@ pub struct Handout {
     platforms: BTreeMap<Platform, Secret>,
     variables: BTreeMap<VariableName, Secret>,
     channels: BTreeMap<Channel, Speaking>,
-    thread: Option<Thread>,
+    place: Option<Place>,
 }
 
 impl Handout {
@@ -2221,7 +2239,7 @@ impl Handout {
             channels: speaking(watching),
             // Narrowed by [`Handout::speaking_in`] to the thread of the
             // message being answered, every turn; nothing is fixed here.
-            thread: None,
+            place: None,
         })
     }
 
@@ -2257,9 +2275,8 @@ impl Handout {
             platforms: project.credentials.clone(),
             variables: project.variables.clone(),
             channels: speaking(project),
-            // Never for a job. A job that could create jobs would have a
-            // Narrowed by [`Handout::speaking_in`] once the job has a thread.
-            thread: None,
+            // Narrowed by [`Handout::speaking_in`] once the job has a room.
+            place: None,
         })
     }
 
@@ -2352,28 +2369,28 @@ impl Handout {
         self.channels.iter().map(|(c, speaking)| (*c, speaking))
     }
 
-    /// Narrows this to one thread, so the process speaks there rather than at
-    /// the root of the channel.
+    /// Narrows this to one place, so the process speaks there: a job's room,
+    /// or the thread a foreman is answering in.
     ///
     /// Taken separately from the rest, and the asymmetry is honest rather than
     /// awkward: everything else here is decided from configuration and can be
-    /// computed before anything happens, while a thread is minted at the moment
+    /// computed before anything happens, while a room is made at the moment
     /// a job starts and cannot exist earlier. So the description is built in
     /// two steps, and this is the second.
     ///
-    /// Its absence is meaningful and not a default: a handout with no thread
-    /// speaks at the root of the channel, which is where the foreman
-    /// belongs and where a job does not.
+    /// Its absence is meaningful and not a default: a handout with no place
+    /// has nowhere to speak, and a process handed one is offered nothing to
+    /// speak with.
     #[must_use]
-    pub fn speaking_in(mut self, thread: Thread) -> Self {
-        self.thread = Some(thread);
+    pub fn speaking_in(mut self, place: Place) -> Self {
+        self.place = Some(place);
         self
     }
 
-    /// The thread this process speaks in, if it was narrowed to one.
+    /// The place this process speaks in, if it was narrowed to one.
     #[must_use]
-    pub const fn thread(&self) -> Option<&Thread> {
-        self.thread.as_ref()
+    pub const fn place(&self) -> Option<&Place> {
+        self.place.as_ref()
     }
 }
 
@@ -2398,7 +2415,7 @@ impl fmt::Debug for Handout {
             // is the whole use of a `Debug` on this type.
             .field("variables", &self.variables.keys().collect::<Vec<_>>())
             .field("channels", &self.channels.keys().collect::<Vec<_>>())
-            .field("thread", &self.thread)
+            .field("place", &self.place)
             .finish()
     }
 }
@@ -2431,8 +2448,8 @@ mod tests {
     use super::{
         Agent, AgentConfig, Arriving, Attending, BASE64, Channel, ChannelConfig, ClaudeEffort,
         ClaudeModel, Errand, Handout, HandoutError, Inconsistent, Job, JobId, Key, Kit, KitConfig,
-        KitName, KitNameError, NONCE_LEN, Nonce, OpenError, Outcome, Platform, Progress, Project,
-        ProjectId, Recipient, Secret, Snapshot, State, Taken, Thread, VariableName,
+        KitName, KitNameError, NONCE_LEN, Nonce, OpenError, Outcome, Place, Platform, Progress,
+        Project, ProjectId, Recipient, Room, Secret, Snapshot, State, Taken, Thread, VariableName,
         VariableNameError, Waiting,
     };
     use base64::Engine as _;
@@ -2445,7 +2462,10 @@ mod tests {
     /// not can say which map it escaped from.
     const CHANNEL_TOKEN: &str = "xoxb-not-a-real-token";
     /// Not a secret, and asserted to travel in the clear.
+    /// A room people talk in, which no job owns.
     const CHANNEL_ADDRESS: &str = "C0123456789";
+    /// The room the fixture's job owns.
+    const JOB_ROOM: &str = "C0JOBROOM01";
     /// A second project's channel credential, so that a handout carrying the
     /// wrong one is detectable rather than merely non-empty.
     const ALIEN_CHANNEL_TOKEN: &str = "xoxb-belongs-to-somebody-else";
@@ -2518,9 +2538,16 @@ mod tests {
 
     fn a_slack_binding() -> ChannelConfig {
         ChannelConfig {
-            address: CHANNEL_ADDRESS.to_owned(),
             credential: Secret::new(CHANNEL_TOKEN.to_owned()),
             listen_credential: Secret::new(LISTEN_TOKEN.to_owned()),
+        }
+    }
+
+    /// The room a job of the fixture speaks in.
+    fn a_room() -> Room {
+        Room {
+            channel: Channel::Slack,
+            id: JOB_ROOM.to_owned(),
         }
     }
 
@@ -2721,9 +2748,9 @@ mod tests {
         assert!(still_recorded);
     }
 
-    /// An instance with one project, one job, and that job speaking in a
-    /// thread — the smallest state a message can be routed against.
-    fn listening() -> (State, ProjectId, JobId, String) {
+    /// An instance with one project and one job in a room of its own — the
+    /// smallest state a message can be routed against.
+    fn listening() -> (State, ProjectId, JobId) {
         let mut state = configured();
         let project = ProjectId::from_uuid(Uuid::from_u128(3));
         state.projects.insert(project, a_project_with_a_job());
@@ -2735,13 +2762,8 @@ mod tests {
             .keys()
             .next()
             .expect("a job");
-        let thread = "1728312345.678901".to_owned();
-        state.job_mut(job).expect("the job").thread = Some(Thread {
-            channel: Channel::Slack,
-            room: CHANNEL_ADDRESS.to_owned(),
-            id: thread.clone(),
-        });
-        (state, project, job, thread)
+        state.job_mut(job).expect("the job").room = Some(a_room());
+        (state, project, job)
     }
 
     /// A person's message, as much of it as routing sees.
@@ -2754,74 +2776,58 @@ mod tests {
         }
     }
 
-    /// A mention in a job's thread is that job's.
+    /// A mention in a job's room is that job's, at the root and in a thread.
     #[test]
-    fn a_mention_in_a_jobs_thread_is_for_that_job() {
-        let (state, project, job, thread) = listening();
+    fn a_mention_anywhere_in_a_jobs_room_is_for_that_job() {
+        let (state, project, job) = listening();
 
-        assert_eq!(
-            state.recipient(
-                project,
-                Channel::Slack,
-                &arriving(CHANNEL_ADDRESS, Some(&thread))
-            ),
-            Recipient::Job(job)
-        );
-    }
-
-    /// A mention at the root is the foreman's, in the home room and in any
-    /// other: the project is the socket's, and the room decides nothing.
-    #[test]
-    fn a_mention_at_the_root_of_any_room_is_for_the_foreman() {
-        let (state, project, _, _) = listening();
-
-        for room in [CHANNEL_ADDRESS, "C-somewhere-else"] {
+        for thread in [None, Some("1728312345.678901")] {
             assert_eq!(
-                state.recipient(project, Channel::Slack, &arriving(room, None)),
-                Recipient::Foreman(project),
-                "{room}"
+                state.recipient(project, Channel::Slack, &arriving(JOB_ROOM, thread)),
+                Recipient::Job(job),
+                "{thread:?}"
             );
         }
     }
 
-    /// A mention in a thread owning no job is the foreman's as well.
+    /// A mention in a room that is no job's is the foreman's, at the root
+    /// and in a thread alike.
     ///
-    /// This is where a person lands by replying to something a foreman said,
-    /// which is the most natural move available.
+    /// The thread case is where a person lands by replying to something a
+    /// foreman said, which is the most natural move available.
     /// `docs/decisions/0031-a-mention-is-what-makes-it-ours.md` answered it
     /// with a fixed sentence, and
     /// `docs/decisions/0060-a-binding-is-a-workspace.md` makes it work: the
     /// errand carries its thread, so the answer lands where the person is.
     #[test]
-    fn a_mention_in_a_thread_belonging_to_no_job_is_for_the_foreman() {
-        let (state, project, _, _) = listening();
+    fn a_mention_in_a_room_that_is_no_jobs_is_for_the_foreman() {
+        let (state, project, _) = listening();
 
-        assert_eq!(
-            state.recipient(
-                project,
-                Channel::Slack,
-                &arriving(CHANNEL_ADDRESS, Some("1111111111.000000"))
-            ),
-            Recipient::Foreman(project)
-        );
+        for thread in [None, Some("1111111111.000000")] {
+            assert_eq!(
+                state.recipient(project, Channel::Slack, &arriving(CHANNEL_ADDRESS, thread)),
+                Recipient::Foreman(project),
+                "{thread:?}"
+            );
+        }
     }
 
     /// Nothing this instance said is ever routed anywhere.
     ///
     /// The loop guard, asserted at the point it is decided. Every other rule
-    /// would otherwise match: this is a reply in a job's thread, which is the
+    /// would otherwise match: this is a message in a job's room, which is the
     /// strongest match there is.
     #[test]
     fn nothing_this_instance_said_is_routed_back_to_it() {
-        let (state, project, _, thread) = listening();
+        let (state, project, _) = listening();
 
-        for thread in [Some(thread.as_str()), None] {
+        for thread in [Some("1728312345.678901"), None] {
             assert_eq!(
                 state.recipient(
                     project,
                     Channel::Slack,
                     &Arriving {
-                        room: CHANNEL_ADDRESS,
+                        room: JOB_ROOM,
                         id: "1788000000.000000",
                         thread,
                         from_us: true,
@@ -2833,22 +2839,6 @@ mod tests {
         }
     }
 
-    /// A thread identifier is only unique within its room, so the same
-    /// identifier in another room is a thread belonging to no job.
-    #[test]
-    fn a_thread_in_another_room_is_not_this_jobs_thread() {
-        let (state, project, _, thread) = listening();
-
-        assert_eq!(
-            state.recipient(
-                project,
-                Channel::Slack,
-                &arriving("C-somewhere-else", Some(&thread))
-            ),
-            Recipient::Foreman(project)
-        );
-    }
-
     /// A message for a project this instance does not watch is nobody's.
     ///
     /// Not a case a socket can produce, since every socket is a project's;
@@ -2856,7 +2846,7 @@ mod tests {
     /// rather than a foreman that does not exist.
     #[test]
     fn a_message_for_a_project_this_instance_does_not_watch_is_nobodys() {
-        let (state, _, _, _) = listening();
+        let (state, _, _) = listening();
 
         assert_eq!(
             state.recipient(
@@ -2871,41 +2861,33 @@ mod tests {
     /// Only the socket's own project's jobs are looked at.
     ///
     /// Two projects' apps can share a room, and each hears its own copy of a
-    /// mention there. A thread belonging to the other project's job is, for
-    /// this one, a thread belonging to no job — and so its foreman's, not
-    /// silence and not the other project's job.
+    /// mention there. Another project's job's room is, for this one, a room
+    /// belonging to no job — and so its foreman's, not silence and not the
+    /// other project's job.
     #[test]
-    fn another_projects_jobs_thread_is_this_projects_foremans() {
-        let (mut state, _, _, thread) = listening();
+    fn another_projects_jobs_room_is_this_projects_foremans() {
+        let (mut state, _, _) = listening();
         let other = ProjectId::from_uuid(Uuid::from_u128(4));
         state.projects.insert(other, a_project_with_a_job());
 
         assert_eq!(
-            state.recipient(
-                other,
-                Channel::Slack,
-                &arriving(CHANNEL_ADDRESS, Some(&thread))
-            ),
+            state.recipient(other, Channel::Slack, &arriving(JOB_ROOM, None)),
             Recipient::Foreman(other)
         );
     }
 
-    /// An idle job's thread still routes to it.
+    /// An idle job's room still routes to it.
     ///
-    /// Deliberate: the thread is that job's conversation, and somebody
-    /// replying in it a day later means that job. Whether it can still take
+    /// Deliberate: the room is that job's conversation, and somebody
+    /// speaking in it a day later means that job. Whether it can still take
     /// the message is the deliverer's problem, not this one's.
     #[test]
-    fn an_idle_jobs_thread_still_routes_to_it() {
-        let (mut state, project, job, thread) = listening();
+    fn an_idle_jobs_room_still_routes_to_it() {
+        let (mut state, project, job) = listening();
         state.job_mut(job).expect("the job").progress = Progress::Idle(Waiting::Silent);
 
         assert_eq!(
-            state.recipient(
-                project,
-                Channel::Slack,
-                &arriving(CHANNEL_ADDRESS, Some(&thread))
-            ),
+            state.recipient(project, Channel::Slack, &arriving(JOB_ROOM, None)),
             Recipient::Job(job)
         );
     }
@@ -2959,19 +2941,6 @@ mod tests {
         );
     }
 
-    /// The other half of the sealing decision, asserted rather than assumed.
-    ///
-    /// A channel's address is not a credential — it is an identifier the chat
-    /// client shows everybody in the room — so it is written in the clear, and
-    /// sealing it would spend a nonce per write to hide nothing. Worth a test
-    /// because the cautious-looking change is to seal it, and nothing else
-    /// would object.
-    #[test]
-    fn a_channels_address_is_not_sealed() {
-        let json = serde_json::to_string(&sealed()).expect("a snapshot serialises");
-        assert!(json.contains(CHANNEL_ADDRESS), "{json}");
-    }
-
     /// A snapshot says nothing about the machine it was written on.
     ///
     /// This replaces a test asserting the opposite — that a snapshot remembered
@@ -3013,7 +2982,6 @@ mod tests {
             .channels
             .get(&Channel::Slack)
             .expect("the binding survived");
-        assert_eq!(bound.address, CHANNEL_ADDRESS);
         assert_eq!(bound.credential.expose(), CHANNEL_TOKEN);
         assert_eq!(
             bound.listen_credential.expose(),
@@ -3069,11 +3037,7 @@ mod tests {
             .keys()
             .next()
             .expect("a job");
-        state.job_mut(job).expect("the job").thread = Some(Thread {
-            channel: Channel::Slack,
-            room: CHANNEL_ADDRESS.to_owned(),
-            id: "1728312345.678901".to_owned(),
-        });
+        state.job_mut(job).expect("the job").room = Some(a_room());
 
         let json = serde_json::to_string(
             &state
@@ -3084,16 +3048,14 @@ mod tests {
         let reopened: Snapshot = serde_json::from_str(&json).expect("and parses back");
         let reopened = reopened.open(&key()).expect("and opens");
 
-        let thread = reopened
+        let room = reopened
             .job(job)
             .expect("the job survived")
-            .thread
+            .room
             .clone()
-            .expect("and so did its thread");
-        assert_eq!(thread.channel, Channel::Slack);
-        // Text, not a number. Through an `f64` this comes back as
-        // 1728312345.6789012 or similar and addresses no message.
-        assert_eq!(thread.id, "1728312345.678901");
+            .expect("and so did its room");
+        assert_eq!(room.channel, Channel::Slack);
+        assert_eq!(room.id, JOB_ROOM);
     }
 
     /// A job as the last release wrote it still opens, in every state it
@@ -3427,9 +3389,10 @@ mod tests {
             "a state that could not say why becomes the reading that says so",
         );
         assert_eq!(
-            job.thread, None,
-            "a thread that names no room is nowhere to answer"
+            job.room, None,
+            "a thread, which is what the last release wrote, is not a room"
         );
+        assert_eq!(job.asked_by, None);
     }
 
     /// A binding the last release wrote with both credentials comes through
@@ -3448,7 +3411,6 @@ mod tests {
             .channels
             .get(&Channel::Slack)
             .expect("a binding with both credentials comes through whole");
-        assert_eq!(bound.address, "C0123456789");
         assert_eq!(bound.credential.expose(), "agent-token");
         assert_eq!(bound.listen_credential.expose(), "agent-token");
     }
@@ -3581,7 +3543,6 @@ mod tests {
         other.channels.insert(
             Channel::Slack,
             ChannelConfig {
-                address: "C9999999999".to_owned(),
                 credential: Secret::new(ALIEN_CHANNEL_TOKEN.to_owned()),
                 listen_credential: Secret::new("xapp-not-yours-either".to_owned()),
             },
@@ -3785,33 +3746,34 @@ mod tests {
         assert!(shown.contains(VARIABLE), "{shown}");
     }
 
-    /// A handout speaks at the root until it is narrowed to a thread.
+    /// A handout has nowhere to speak until it is narrowed to a place.
     ///
-    /// The absence is what makes the foreman's handout mean "the root of
-    /// the channel", so it is asserted rather than assumed.
+    /// The absence is what makes a handout before narrowing mean "offered
+    /// nothing to speak with", so it is asserted rather than assumed.
     #[test]
-    fn a_handout_speaks_at_the_root_until_it_is_given_a_thread() {
+    fn a_handout_has_nowhere_to_speak_until_it_is_given_a_place() {
         let (state, mine, _) = two_projects();
 
         let job = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine)
             .expect("a watched project");
-        assert!(job.thread().is_none());
+        assert!(job.place().is_none());
         assert!(
             Handout::for_foreman(&state, mine)
                 .expect("a watched project")
-                .thread()
+                .place()
                 .is_none(),
-            "a foreman speaks at the root, which is what a reply there addresses"
+            "a foreman is narrowed to the thread it answers in, every turn"
         );
 
-        let narrowed = job.speaking_in(Thread {
-            channel: Channel::Slack,
-            room: CHANNEL_ADDRESS.to_owned(),
-            id: "1728312345.678901".to_owned(),
-        });
+        let narrowed = job.speaking_in(Place::root(a_room()));
         assert_eq!(
-            narrowed.thread().map(|t| t.id.as_str()),
-            Some("1728312345.678901")
+            narrowed.place().map(|place| place.room.id.as_str()),
+            Some(JOB_ROOM)
+        );
+        assert_eq!(
+            narrowed.place().and_then(|place| place.thread.as_deref()),
+            None,
+            "a job speaks at the root of its room until asked in a thread"
         );
         // Narrowing changes where it speaks and nothing about what it holds.
         assert_eq!(narrowed.channels().count(), 1);
@@ -4078,6 +4040,7 @@ mod tests {
                 room: CHANNEL_ADDRESS.to_owned(),
                 id: format!("{said}.thread"),
             },
+            from: Some("U0HUMAN".to_owned()),
         }
     }
 
@@ -4184,7 +4147,7 @@ mod tests {
     /// A job's project is findable from the job alone.
     #[test]
     fn a_job_names_the_project_it_belongs_to() {
-        let (state, project, job, _) = listening();
+        let (state, project, job) = listening();
 
         assert_eq!(state.project_of(job), Some(project));
         assert_eq!(

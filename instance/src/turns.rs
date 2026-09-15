@@ -32,7 +32,7 @@ use stageman_agent::{
     AgentError, Answer, Command, Conversation, Exchange, Opening, StopReason, Tools,
 };
 use stageman_core::{
-    Agent, Channel, JobId, Kit, Platform, Progress, Project, Role, Secret, Speaking, State, Thread,
+    Agent, Channel, JobId, Kit, Place, Platform, Progress, Project, Role, Secret, Speaking, State,
     Waiting,
 };
 use stageman_vocabulary::{Effect as Generic, EffectId, Ended, Finished};
@@ -177,10 +177,14 @@ pub struct Turn {
     pub stopping: bool,
     /// What the agent said about why it is stopping, if it has said.
     pub claimed: Option<Waiting>,
-    /// Whether the job's thread is told when this turn ends.
+    /// Whether the root of the job's room is told when this turn ends.
     ///
     /// A turn a person caused is; one waking put back to work is not, since
-    /// nothing changed that the person could act on.
+    /// nothing changed that the person could act on. The root rather than
+    /// wherever the person asked, because the notice is about the job and
+    /// not part of the exchange: the root is the room's timeline, which is
+    /// what somebody glancing at the room reads, and a thread would fold
+    /// the state change away.
     pub notify: bool,
     /// What the turn was asked to do, kept until its conversation opens: the
     /// steps before it each need a piece of it.
@@ -201,7 +205,7 @@ impl Turn {
         }
     }
 
-    /// A turn whose ending is said on the job's thread.
+    /// A turn whose ending is said at the root of the job's room.
     pub const fn noticed(run: Run) -> Self {
         Self {
             stopping: false,
@@ -260,20 +264,21 @@ pub fn outcome(answer: &Answer, claimed: Option<Waiting>) -> Progress {
     }
 }
 
-/// Where to speak on a job's behalf, if it has anywhere.
+/// Where to speak on a job's behalf, if it has anywhere: the root of its
+/// room.
 ///
-/// The several ways of having nowhere — no project, no thread, a thread on a
+/// The several ways of having nowhere — no project, no room, a room on a
 /// channel the project no longer binds — all answer nothing.
-pub fn speaking_for(state: &State, job: JobId) -> Option<(Speaking, Thread)> {
+pub fn speaking_for(state: &State, job: JobId) -> Option<(Speaking, Place)> {
     let project = state.project_of(job)?;
-    let thread = state.job(job)?.thread.clone()?;
+    let room = state.job(job)?.room.clone()?;
     let bound = state
         .projects
         .get(&project)?
         .channels
-        .get(&thread.channel)?
+        .get(&room.channel)?
         .speaking();
-    Some((bound, thread))
+    Some((bound, Place::root(room)))
 }
 
 /// What to listen to on one project, if it has a binding.
@@ -738,12 +743,14 @@ impl Running {
 
         // Said whichever way it went: the agent has already reported for
         // itself if it could, and this says the one thing the agent cannot,
-        // which is that it has stopped and a reply now reaches it. Outward,
-        // so it waits for the record.
+        // which is that it has stopped and a mention now reaches it. Outward,
+        // so it waits for the record. At the root of the room, whatever
+        // thread the exchange was in: it is about the job, and the root is
+        // the job's timeline.
         if turn.notify
-            && let Some((speaking, thread)) = speaking_for(&self.state, job)
+            && let Some((speaking, root)) = speaking_for(&self.state, job)
         {
-            self.say(&speaking, &thread, stageman_foreman::attention_notice());
+            self.say(&speaking, &root, stageman_foreman::attention_notice());
         }
     }
 
@@ -793,7 +800,7 @@ mod tests {
     use stageman_agent::{Answer, StopReason};
     use stageman_core::{
         Agent, AgentConfig, Channel, ChannelConfig, Job, JobId, Kit, KitConfig, KitName, Progress,
-        Project, ProjectId, Role, Secret, State, Thread, Timestamp, Uuid, Waiting,
+        Project, ProjectId, Role, Room, Secret, State, Timestamp, Uuid, Waiting,
     };
     use stageman_vocabulary::{Bytes, Finished};
     use std::collections::BTreeMap;
@@ -907,12 +914,11 @@ mod tests {
             },
         );
 
-        assert!(speaking_for(&state, job).is_none(), "no thread");
+        assert!(speaking_for(&state, job).is_none(), "no room");
 
-        state.job_mut(job).expect("the job").thread = Some(Thread {
+        state.job_mut(job).expect("the job").room = Some(Room {
             channel: Channel::Slack,
-            room: "C0123456789".to_owned(),
-            id: "1728312345.678901".to_owned(),
+            id: "C0JOBROOM01".to_owned(),
         });
         state
             .projects
@@ -922,15 +928,14 @@ mod tests {
             .insert(
                 Channel::Slack,
                 ChannelConfig {
-                    address: "C0123456789".to_owned(),
                     credential: Secret::new("xoxb-not-a-real-token".to_owned()),
                     listen_credential: Secret::new("xapp-not-a-real-token".to_owned()),
                 },
             );
-        let (bound, thread) = speaking_for(&state, job).expect("somewhere to speak");
+        let (bound, place) = speaking_for(&state, job).expect("somewhere to speak");
         assert_eq!(bound.credential.expose(), "xoxb-not-a-real-token");
-        assert_eq!(thread.room, "C0123456789");
-        assert_eq!(thread.id, "1728312345.678901");
+        assert_eq!(place.room.id, "C0JOBROOM01");
+        assert_eq!(place.thread, None, "at the root of its room");
 
         state
             .projects

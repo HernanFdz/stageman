@@ -14,7 +14,10 @@
 //! `docs/decisions/0032-a-foreman-asks-the-instance-by-warrant.md`'s property
 //! surviving the move to a per-turn credential.
 
-use stageman_core::{ChannelConfig, Kit, ProjectId, State, Timestamp, Waiting};
+use stageman_core::{ChannelConfig, Kit, ProjectId, State, Thread, Timestamp, Waiting};
+
+use crate::channel::Origin;
+use crate::jobs::Commission;
 
 use crate::Running;
 use crate::foreman::kits_offered;
@@ -132,8 +135,14 @@ pub fn tools(warranted: &Warranted, kits: &[(String, String)]) -> Vec<Tool> {
                                         could act on it.",
                     },
                     "kit": kit,
+                    "title": {
+                        "type": "string",
+                        "description": "A few words naming the job, as a person would read \
+                                        them in a sidebar: the room it reports in is named \
+                                        after them.",
+                    },
                 },
-                "required": ["reason", "instructions", "kit"],
+                "required": ["reason", "instructions", "kit", "title"],
             }),
         },
     ]
@@ -254,6 +263,8 @@ pub struct Starting {
     pub instructions: String,
     /// Which kit runs it, by the name its project gives it.
     pub kit: String,
+    /// A few words naming it, which its room is named after.
+    pub title: String,
 }
 
 /// One request, as it arrives.
@@ -321,6 +332,7 @@ fn calling(params: &serde_json::Value) -> Call {
         reason: field("reason"),
         instructions: field("instructions"),
         kit: field("kit"),
+        title: field("title"),
     })
 }
 
@@ -663,7 +675,27 @@ impl Running {
                 starting.kit
             ));
         };
-        match self.begin(project, kit, &starting.reason, &starting.instructions, at) {
+        // Where the job comes from: the thread the foreman is answering in,
+        // and who it is answering. A foreman always answers in a thread, so
+        // a place without one has nowhere to say where the job is.
+        let origin = warranted.place.clone().and_then(|place| {
+            let thread = place.thread?;
+            Some(Origin {
+                thread: Thread {
+                    channel: place.room.channel,
+                    room: place.room.id,
+                    id: thread,
+                },
+                user: warranted.from.clone(),
+            })
+        });
+        let commission = Commission {
+            kit,
+            reason: &starting.reason,
+            work: &starting.instructions,
+            title: &starting.title,
+        };
+        match self.begin(project, commission, origin, at) {
             Ok(job) => Ok(format!("started job {job}")),
             Err(why) => {
                 tracing::warn!(%project, %why, "the job could not be started");
@@ -674,13 +706,13 @@ impl Running {
         }
     }
 
-    /// Says something on the channel, in whichever thread the caller belongs
+    /// Says something on the channel, at whichever place the caller belongs
     /// to.
     ///
-    /// **The thread comes from the credential, never from the caller.** A
-    /// job's thread is fixed for its life and a foreman's is different every
-    /// turn, and an agent choosing its own would be an agent able to speak
-    /// into somebody else's conversation.
+    /// **The place comes from the credential, never from the caller.** A
+    /// job's is its room, or the thread in it it was asked in, and a
+    /// foreman's is different every turn; an agent choosing its own would be
+    /// an agent able to speak into somebody else's conversation.
     ///
     /// # Errors
     ///
@@ -696,17 +728,17 @@ impl Running {
         if message.trim().is_empty() {
             return Err("nothing was said, so nothing was posted".to_owned());
         }
-        let Some(thread) = warranted.thread.clone() else {
+        let Some(place) = warranted.place.clone() else {
             // Not a refusal of the agent so much as of this instance: a
             // session declared with nowhere to speak should not have been
             // offered a tool that speaks.
-            tracing::warn!("something spoke with no thread to speak in");
+            tracing::warn!("something spoke with nowhere to speak");
             return Err("there is no conversation to say this in".to_owned());
         };
         let speaking = self
             .project_of(warranted)
             .and_then(|project| self.state.projects.get(&project))
-            .and_then(|watched| watched.channels.get(&thread.channel))
+            .and_then(|watched| watched.channels.get(&place.room.channel))
             .map(ChannelConfig::speaking);
         let Some(speaking) = speaking else {
             tracing::warn!("no channel is bound to say this on");
@@ -714,7 +746,7 @@ impl Running {
                 "no channel is bound to this project, so there is nobody to say this to".to_owned(),
             );
         };
-        self.post_for(request, &speaking, &thread, message, effects);
+        self.post_for(request, &speaking, &place, message, effects);
         Ok(())
     }
 
@@ -926,18 +958,20 @@ mod tests {
     fn a_foreman() -> Warranted {
         Warranted {
             speaker: Speaker::Foreman(a_project()),
-            thread: Some(Thread {
+            place: Some(stageman_core::Place::from(Thread {
                 channel: stageman_core::Channel::Slack,
                 room: "C0123456789".to_owned(),
                 id: "1788000000.000001".to_owned(),
-            }),
+            })),
+            from: Some("U0HUMAN".to_owned()),
         }
     }
 
     fn a_job() -> Warranted {
         Warranted {
             speaker: Speaker::Job(stageman_core::JobId::from_uuid(Uuid::from_u128(7))),
-            thread: None,
+            place: None,
+            from: None,
         }
     }
 
@@ -986,12 +1020,13 @@ mod tests {
         assert_eq!(
             calling(&serde_json::json!({
                 "name": "start_job",
-                "arguments": {"reason": "why", "instructions": "what", "kit": "Claude"},
+                "arguments": {"reason": "why", "instructions": "what", "kit": "Claude", "title": "a title"},
             })),
             Call::Starting(Starting {
                 reason: "why".to_owned(),
                 instructions: "what".to_owned(),
                 kit: "Claude".to_owned(),
+                title: "a title".to_owned(),
             })
         );
         assert_eq!(
@@ -1014,6 +1049,7 @@ mod tests {
                 reason: String::new(),
                 instructions: String::new(),
                 kit: String::new(),
+                title: String::new(),
             }),
             "a missing argument is an empty one, refused where the job is created"
         );

@@ -7,7 +7,9 @@ use stageman_core::{Outcome, Progress, Waiting};
 use stageman_instance::Instance;
 use stageman_vocabulary::RequestId;
 
-use crate::simulation::{Sent, Simulation, job, seed, tunnel_host, watching, watching_a_channel};
+use crate::simulation::{
+    Sent, Simulation, Spoken, job, seed, tunnel_host, watching, watching_a_channel,
+};
 
 /// Visits a job's name and runs until it has been answered.
 fn visit(sim: &mut Simulation, instance: &mut Instance, which: u128) -> RequestId {
@@ -153,7 +155,7 @@ fn a_port_that_can_have_moved_is_looked_up_again() {
     assert_eq!(looked(&sim), 3, "halting forgot the port");
 
     // A reply resumes the job, which restarts the container on a fresh port.
-    let reply = sim.said_in(1, "go on");
+    let reply = sim.said_in_room(1, "go on", Spoken::Mention);
     for effect in instance.step(reply) {
         sim.perform(effect);
     }

@@ -19,8 +19,8 @@ use stageman_agent::{Answer, Command, Heard, Label, Said, StopReason};
 use stageman_channel::Call;
 use stageman_core::{
     Agent, AgentConfig, Channel, ChannelConfig, Errand, InstanceId, Job, JobId, Key, Kit,
-    KitConfig, KitName, NONCE_LEN, Nonce, Progress, Project, ProjectId, Secret, Snapshot, State,
-    Thread, Timestamp, Uuid,
+    KitConfig, KitName, NONCE_LEN, Nonce, Place, Progress, Project, ProjectId, Room, Secret,
+    Snapshot, State, Thread, Timestamp, Uuid,
 };
 use stageman_instance::{
     AppEffect, AppEvent, Effect, Event, Instance, Request, RequestId, Response, Seed, Target,
@@ -196,8 +196,6 @@ pub struct Simulation {
     routes: BTreeMap<Asked, Sent>,
     /// The last host port handed out.
     ports: u16,
-    /// Threads opened so far, so each gets a number of its own.
-    threads_opened: u32,
     /// Jobs whose container the world has been asked to make. A job is on
     /// the record before its container exists, so only after this may the
     /// oracle expect the container.
@@ -205,7 +203,19 @@ pub struct Simulation {
     /// How long a turn takes.
     turn_takes: Now,
     trace: Vec<String>,
-    posts: Vec<(Thread, String)>,
+    posts: Vec<(Place, String)>,
+    /// Rooms made so far, so each is named apart.
+    rooms_made: u32,
+    /// Every room made: its identifier, and the name asked for.
+    rooms: Vec<(String, String)>,
+    /// Every description a room was given: the room, and the text.
+    described: Vec<(String, String)>,
+    /// Everyone invited into a room: the room, and who.
+    invited: Vec<(String, String)>,
+    /// Every room archived.
+    archived: Vec<String>,
+    /// Why the platform refuses the next rooms, front first.
+    room_failures: VecDeque<String>,
     /// The sockets the platform holds, by the identifier each was connected
     /// under, and whether each is still open.
     sockets: BTreeMap<EffectId, bool>,
@@ -288,7 +298,7 @@ pub const fn job(n: u128) -> JobId {
     JobId::from_uuid(Uuid::from_u128(n))
 }
 
-/// A thread in the project's home room, named by number.
+/// A thread in the room people talk in, named by number.
 pub fn thread(n: u32) -> Thread {
     Thread {
         channel: Channel::Slack,
@@ -297,7 +307,25 @@ pub fn thread(n: u32) -> Thread {
     }
 }
 
-fn a_job(progress: &Progress, thread: Option<Thread>) -> Job {
+/// A job's room, named by number: the n-th room the platform made.
+pub fn room(n: u32) -> Room {
+    Room {
+        channel: Channel::Slack,
+        id: format!("C-job-{n:03}"),
+    }
+}
+
+/// The root of a job's room, as a place to speak.
+pub fn in_room(n: u32) -> Place {
+    Place::root(room(n))
+}
+
+/// A thread in the room people talk in, as a place to speak.
+pub fn in_thread(n: u32) -> Place {
+    Place::from(thread(n))
+}
+
+fn a_job(progress: &Progress, room: Option<Room>) -> Job {
     let mut job = Job::new(
         Kit::defaults(Agent::Claude),
         "a reason".to_owned(),
@@ -305,7 +333,7 @@ fn a_job(progress: &Progress, thread: Option<Thread>) -> Job {
         Timestamp::UNIX_EPOCH,
     );
     job.progress = progress.clone();
-    job.thread = thread;
+    job.room = room;
     job
 }
 
@@ -315,7 +343,6 @@ fn a_project(jobs: BTreeMap<JobId, Job>, bound: bool) -> Project {
         channels.insert(
             Channel::Slack,
             ChannelConfig {
-                address: CHANNEL.to_owned(),
                 credential: Secret::new("xoxb-not-a-real-token".to_owned()),
                 listen_credential: Secret::new("xapp-not-a-real-token".to_owned()),
             },
@@ -360,12 +387,12 @@ pub fn watching(jobs: &[(JobId, Progress)]) -> State {
     ))
 }
 
-/// An instance watching one project with a channel bound, each job speaking
-/// in the thread numbered for it.
+/// An instance watching one project with a channel bound, each job in the
+/// room numbered for it.
 pub fn watching_a_channel(jobs: &[(JobId, Progress, u32)]) -> State {
     configured(a_project(
         jobs.iter()
-            .map(|(id, progress, thread)| (*id, a_job(progress, Some(self::thread(*thread)))))
+            .map(|(id, progress, n)| (*id, a_job(progress, Some(self::room(*n)))))
             .collect(),
         true,
     ))
@@ -382,6 +409,7 @@ pub fn holding_a_message(state: &mut State, n: u32, text: &str) {
         .take(Errand {
             said: text.to_owned(),
             thread: thread(n),
+            from: Some("U0HUMAN".to_owned()),
         });
 }
 
@@ -439,11 +467,16 @@ impl Simulation {
             responses: BTreeMap::new(),
             routes: BTreeMap::new(),
             ports: 40_000,
-            threads_opened: 100,
             begun: BTreeSet::new(),
             turn_takes: 1_000,
             trace: Vec::new(),
             posts: Vec::new(),
+            rooms_made: 0,
+            rooms: Vec::new(),
+            described: Vec::new(),
+            invited: Vec::new(),
+            archived: Vec::new(),
+            room_failures: VecDeque::new(),
             sockets: BTreeMap::new(),
             streams_opened: 0,
             envelopes: 0,
@@ -577,6 +610,12 @@ impl Simulation {
     /// reason — as the platform refuses, which is with a successful status.
     pub fn next_post_fails(&mut self, why: &str) {
         self.post_failures.push_back(why.to_owned());
+    }
+
+    /// Scripts the next room to be refused by the platform, with that
+    /// reason: a name already taken is the ordinary one.
+    pub fn next_room_fails(&mut self, why: &str) {
+        self.room_failures.push_back(why.to_owned());
     }
 
     /// Scripts the next build to fail, saying why.
@@ -1549,41 +1588,64 @@ impl Simulation {
             headers,
             body: body.map(Bytes::into_inner),
         };
+        // As the platform answers everything: a successful status, and the
+        // body saying whether it was.
+        let answered = |body: String| Responded::Answered {
+            status: 200,
+            headers: [("content-type".to_owned(), "application/json".to_owned())].into(),
+            body: body.into(),
+        };
         let responded = match Call::parse(&request) {
             Some(Call::Post {
                 channel,
                 room,
                 text,
-                thread: in_thread,
+                thread,
             }) => {
                 let body = if let Some(error) = self.post_failures.pop_front() {
                     format!(r#"{{"ok":false,"error":"{error}"}}"#)
                 } else {
-                    // Named as the platform names it: a post at the root is a
-                    // thread, and one in a thread is a message of its own.
-                    let named = match in_thread {
-                        None => {
-                            self.threads_opened += 1;
-                            Thread {
-                                room,
-                                ..thread(self.threads_opened)
-                            }
-                        }
-                        Some(id) => Thread { channel, room, id },
+                    let place = Place {
+                        room: Room { channel, id: room },
+                        thread,
                     };
-                    let identifier = if named.id == thread(self.threads_opened).id {
-                        named.id.clone()
-                    } else {
-                        format!("1788000000.9{:05}", self.posts.len())
-                    };
-                    self.posts.push((named, text));
+                    let identifier = format!("1788000000.9{:05}", self.posts.len());
+                    self.posts.push((place, text));
                     format!(r#"{{"ok":true,"ts":"{identifier}"}}"#)
                 };
-                Responded::Answered {
-                    status: 200,
-                    headers: [("content-type".to_owned(), "application/json".to_owned())].into(),
-                    body: body.into(),
-                }
+                answered(body)
+            }
+            // A room made, named as the platform names it: by number, in the
+            // order made, unless the next one was scripted to be refused.
+            Some(Call::CreateRoom { name, .. }) => {
+                let body = if let Some(error) = self.room_failures.pop_front() {
+                    format!(r#"{{"ok":false,"error":"{error}"}}"#)
+                } else {
+                    self.rooms_made += 1;
+                    let made = room(self.rooms_made);
+                    self.rooms.push((made.id.clone(), name.clone()));
+                    format!(
+                        r#"{{"ok":true,"channel":{{"id":"{}","name":"{name}"}}}}"#,
+                        made.id
+                    )
+                };
+                answered(body)
+            }
+            Some(Call::SetPurpose { room, purpose, .. }) => {
+                self.described.push((room, purpose));
+                answered(r#"{"ok":true}"#.to_owned())
+            }
+            Some(Call::SetTopic { room, topic, .. }) => {
+                self.described.push((room, topic));
+                answered(r#"{"ok":true}"#.to_owned())
+            }
+            Some(Call::Invite { room, user, .. }) => {
+                self.invited.push((room, user));
+                answered(r#"{"ok":true}"#.to_owned())
+            }
+            Some(Call::Archive { room, .. }) => {
+                self.archived.push(room);
+                answered(r#"{"ok":true}"#.to_owned())
             }
             Some(question @ (Call::WhoAmI { .. } | Call::OpenSocket { .. })) => {
                 let body = if let Some(error) = self.listen_failures.pop_front() {
@@ -1597,11 +1659,7 @@ impl Simulation {
                         self.streams_opened
                     )
                 };
-                Responded::Answered {
-                    status: 200,
-                    headers: [("content-type".to_owned(), "application/json".to_owned())].into(),
-                    body: body.into(),
-                }
+                answered(body)
             }
             None => Responded::Failed("the simulation does not know this request".to_owned()),
         };
@@ -1690,10 +1748,15 @@ impl Simulation {
 
     /// One message as the platform delivers it: a frame on a socket, in an
     /// envelope of its own.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a frame is exactly these, and a struct would name the same seven things once more"
+    )]
     fn frame_on(
         &mut self,
         socket: EffectId,
         at: Now,
+        room: &str,
         id: &str,
         in_thread: Option<&str>,
         text: &str,
@@ -1716,25 +1779,10 @@ impl Simulation {
         Event::Frame {
             id: socket,
             text: format!(
-                r#"{{"envelope_id":"{envelope}","type":"events_api","payload":{{"event":{{"type":"{kind}","channel":"{CHANNEL}",{speaker},"text":{text},"ts":"{id}"{thread_ts}}}}}}}"#
+                r#"{{"envelope_id":"{envelope}","type":"events_api","payload":{{"event":{{"type":"{kind}","channel":"{room}",{speaker},"text":{text},"ts":"{id}"{thread_ts}}}}}}}"#
             ),
             at,
         }
-    }
-
-    /// Somebody mentioning this instance in a thread in the project's home
-    /// room, as the platform would deliver it now.
-    pub fn said_in(&mut self, thread: u32, text: &str) -> Event {
-        let socket = self.live_socket();
-        let now = self.now;
-        self.frame_on(
-            socket,
-            now,
-            "1788000099.000001",
-            Some(&self::thread(thread).id),
-            &format!("<@U0BOT> {text}"),
-            Spoken::Mention,
-        )
     }
 
     /// Somebody mentioning this instance in a thread, said at an instant.
@@ -1743,56 +1791,13 @@ impl Simulation {
         let event = self.frame_on(
             socket,
             at,
+            CHANNEL,
             "1788000099.000001",
             Some(&self::thread(thread).id),
             &format!("<@U0BOT> {text}"),
             Spoken::Mention,
         );
         self.schedule(at, event);
-    }
-
-    /// Somebody talking in a thread without mentioning this instance.
-    pub fn said_in_plainly(&mut self, thread: u32, text: &str) -> Event {
-        let socket = self.live_socket();
-        let now = self.now;
-        self.frame_on(
-            socket,
-            now,
-            "1788000099.000002",
-            Some(&self::thread(thread).id),
-            text,
-            Spoken::Plain,
-        )
-    }
-
-    /// The copy of somebody's mention that the message subscription
-    /// delivers beside the mention event: the same words, the same
-    /// identifier, and not to be read twice.
-    pub fn said_in_as_a_message(&mut self, thread: u32, text: &str) -> Event {
-        let socket = self.live_socket();
-        let now = self.now;
-        self.frame_on(
-            socket,
-            now,
-            "1788000099.000001",
-            Some(&self::thread(thread).id),
-            &format!("<@U0BOT> {text}"),
-            Spoken::Plain,
-        )
-    }
-
-    /// Something this instance itself posted in a thread, heard back.
-    pub fn said_in_by_us(&mut self, thread: u32, text: &str) -> Event {
-        let socket = self.live_socket();
-        let now = self.now;
-        self.frame_on(
-            socket,
-            now,
-            "1788000099.000003",
-            Some(&self::thread(thread).id),
-            &format!("<@U0BOT> {text}"),
-            Spoken::Ours,
-        )
     }
 
     /// Somebody mentioning this instance at the root of the project's home
@@ -1803,6 +1808,7 @@ impl Simulation {
         let event = self.frame_on(
             socket,
             at,
+            CHANNEL,
             &self::thread(n).id,
             None,
             &format!("<@U0BOT> {text}"),
@@ -1818,12 +1824,62 @@ impl Simulation {
         let event = self.frame_on(
             socket,
             at,
+            CHANNEL,
             &self::thread(n).id,
             None,
             &format!("<@U0BOT> {text}"),
             Spoken::Mention,
         );
         self.schedule(at, event);
+    }
+
+    /// Somebody mentioning this instance at the root of a job's room, said
+    /// at an instant.
+    pub fn says_in_room(&mut self, at: Now, n: u32, text: &str) {
+        let socket = self.live_socket();
+        let event = self.frame_on(
+            socket,
+            at,
+            &room(n).id,
+            "1788000099.000004",
+            None,
+            &format!("<@U0BOT> {text}"),
+            Spoken::Mention,
+        );
+        self.schedule(at, event);
+    }
+
+    /// Somebody mentioning this instance in a thread inside a job's room,
+    /// said at an instant.
+    pub fn says_in_rooms_thread(&mut self, at: Now, n: u32, thread: &str, text: &str) {
+        let socket = self.live_socket();
+        let event = self.frame_on(
+            socket,
+            at,
+            &room(n).id,
+            "1788000099.000005",
+            Some(thread),
+            &format!("<@U0BOT> {text}"),
+            Spoken::Mention,
+        );
+        self.schedule(at, event);
+    }
+
+    /// Something said in a job's room that is not a person's mention: plain
+    /// talk, the copy of a mention on the message subscription, or this
+    /// instance's own post.
+    pub fn said_in_room(&mut self, n: u32, text: &str, spoken: Spoken) -> Event {
+        let socket = self.live_socket();
+        let now = self.now;
+        self.frame_on(
+            socket,
+            now,
+            &room(n).id,
+            "1788000099.000006",
+            None,
+            text,
+            spoken,
+        )
     }
 
     /// The platform warns, at an instant, that it is about to close the
@@ -1994,8 +2050,28 @@ impl Simulation {
         self.containers.contains_key(name)
     }
 
-    pub fn posts(&self) -> &[(Thread, String)] {
+    pub fn posts(&self) -> &[(Place, String)] {
         &self.posts
+    }
+
+    /// Every room the platform was asked to make, with the name asked for.
+    pub fn rooms(&self) -> &[(String, String)] {
+        &self.rooms
+    }
+
+    /// Every description a room was given.
+    pub fn described(&self) -> &[(String, String)] {
+        &self.described
+    }
+
+    /// Everyone invited into a room.
+    pub fn invited(&self) -> &[(String, String)] {
+        &self.invited
+    }
+
+    /// Every room archived.
+    pub fn archived(&self) -> &[String] {
+        &self.archived
     }
 
     pub fn reclaims(&self) -> usize {

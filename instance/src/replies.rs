@@ -5,7 +5,7 @@
 //! is tested against every combination rather than the ones a live workspace
 //! happens to produce. What is here is what follows from the answer.
 
-use stageman_core::{Arriving, Channel, JobId, Progress, ProjectId, Recipient, State};
+use stageman_core::{Arriving, Channel, JobId, Place, Progress, ProjectId, Recipient, Room, State};
 
 use crate::Running;
 use crate::turns::{Run, Turn, speaking_for};
@@ -65,8 +65,17 @@ impl Running {
         };
         match self.state.recipient(project, channel, &arriving) {
             Recipient::Job(job) => {
-                tracing::info!(%job, "handing a reply to the job whose thread it is in");
-                self.replied(job, &message.text);
+                tracing::info!(%job, "handing a reply to the job whose room it is in");
+                // Answered where it was said: in the thread the person asked
+                // in, or at the root of the room.
+                let place = Place {
+                    room: Room {
+                        channel,
+                        id: message.room.clone(),
+                    },
+                    thread: message.thread.clone(),
+                };
+                self.replied(job, &message.text, place);
             }
             Recipient::Foreman(project) => {
                 tracing::info!(%project, "a message for the foreman");
@@ -77,24 +86,26 @@ impl Running {
         }
     }
 
-    /// Gives a reply to the job whose thread it arrived in, if it can take
+    /// Gives a reply to the job whose room it arrived in, if it can take
     /// one, and says which otherwise.
     ///
     /// A taken reply is a turn, and the turn waits for the record that the
     /// job is working to land: the record before the container, as
     /// everywhere. A refusal changes nothing, so the notice of it is said at
-    /// once.
-    fn replied(&mut self, job: JobId, said: &str) {
+    /// once. The turn speaks where the reply was said, in the thread if it
+    /// was in one; the notice that it ended goes to the root of the room,
+    /// because it is about the job rather than part of the exchange.
+    fn replied(&mut self, job: JobId, said: &str, place: Place) {
         match accepting(&mut self.state, job) {
             Accepted::Taken => {
                 // `accepting` wrote the state; this is the one writer that
                 // does not go through `record`, so it says so itself.
                 self.dirty = true;
-                let Some((thread, kit)) = self.recorded(job) else {
+                let Some((_, kit)) = self.recorded(job) else {
                     return;
                 };
                 let speaker = Speaker::Job(job);
-                let warrant = self.warrant(speaker, thread);
+                let warrant = self.warrant(speaker, Some(place), None);
                 // Resuming starts the container, which publishes its tunnel
                 // on a fresh port.
                 self.forget_tunnel(job);
@@ -118,12 +129,12 @@ impl Running {
         }
     }
 
-    /// Says something in a job's thread, if it has one, once whatever this
-    /// step changed is on the disk — which for a refusal is nothing, so it
-    /// goes at once.
+    /// Says something at the root of a job's room, if it has one, once
+    /// whatever this step changed is on the disk — which for a refusal is
+    /// nothing, so it goes at once.
     fn notice(&mut self, job: JobId, text: &str) {
-        if let Some((speaking, thread)) = speaking_for(&self.state, job) {
-            self.say(&speaking, &thread, text);
+        if let Some((speaking, place)) = speaking_for(&self.state, job) {
+            self.say(&speaking, &place, text);
         }
     }
 }

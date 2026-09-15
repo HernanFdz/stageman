@@ -1,7 +1,9 @@
 //! A reply arriving on a job's thread, run against the simulated world.
 
-use crate::simulation::{Simulation, job, seed, thread, watching_a_channel};
-use stageman_core::{JobId, Outcome, Progress, State, Waiting};
+use crate::simulation::{
+    Simulation, Spoken, in_room, in_thread, job, room, seed, watching_a_channel,
+};
+use stageman_core::{JobId, Outcome, Place, Progress, State, Waiting};
 
 fn progress_of(state: &State, id: JobId) -> Progress {
     state.job(id).expect("the job").progress.clone()
@@ -24,7 +26,7 @@ fn a_reply_to_an_idle_job_resumes_it_after_the_record_lands() {
     let mut instance = world.wake(seed(1));
     world.run_until(&mut instance, 10);
 
-    world.says_in(100, 1, "use postgres");
+    world.says_in_room(100, 1, "use postgres");
     world.run_until(&mut instance, 5_000);
 
     let shape = world.shape();
@@ -46,7 +48,7 @@ fn a_reply_to_an_idle_job_resumes_it_after_the_record_lands() {
     );
     assert_eq!(
         world.posts(),
-        [(thread(1), stageman_foreman::attention_notice().to_owned())],
+        [(in_room(1), stageman_foreman::attention_notice().to_owned())],
         "the thread is told once, when the turn ends"
     );
 }
@@ -77,7 +79,7 @@ fn a_dropped_turn_forgets_only_its_own_warrant() {
 
     // The reply is taken, and the write that would let it resume fails.
     world.next_write_fails("the disk is full");
-    world.says_in(100, 1, "use postgres");
+    world.says_in_room(100, 1, "use postgres");
     world.run_until(&mut instance, 200);
 
     assert!(
@@ -106,12 +108,12 @@ fn a_reply_to_a_working_job_is_refused_and_said_so() {
     let mut instance = world.wake(seed(1));
 
     // Before its resumed turn ends.
-    world.says_in(100, 1, "also check the tests");
+    world.says_in_room(100, 1, "also check the tests");
     world.run_until(&mut instance, 200);
 
     assert_eq!(
         world.posts(),
-        [(thread(1), stageman_foreman::busy_notice().to_owned())]
+        [(in_room(1), stageman_foreman::busy_notice().to_owned())]
     );
     assert_eq!(progress_of(instance.state(), working), Progress::Working);
     assert_eq!(
@@ -137,8 +139,8 @@ fn two_replies_arriving_together_resume_one_turn() {
     world.container(&name, held);
     let mut instance = world.wake(seed(1));
 
-    world.says_in(100, 1, "first");
-    world.says_in(100, 1, "second");
+    world.says_in_room(100, 1, "first");
+    world.says_in_room(100, 1, "second");
     world.run_until(&mut instance, 5_000);
 
     let runs = world.talks();
@@ -163,17 +165,65 @@ fn a_reply_to_a_job_that_is_over_is_refused_with_its_own_notice() {
     )]));
     let mut instance = world.wake(seed(1));
 
-    world.says_in(100, 1, "one more thing");
+    world.says_in_room(100, 1, "one more thing");
     world.run_until(&mut instance, 200);
 
     assert_eq!(
         world.posts(),
-        [(thread(1), stageman_foreman::over_notice().to_owned())]
+        [(in_room(1), stageman_foreman::over_notice().to_owned())]
     );
     assert_eq!(
         progress_of(instance.state(), over),
         Progress::Retired(Outcome::Done),
         "a verdict is never overwritten"
+    );
+}
+
+/// A mention inside a thread of a job's room reaches the job, and the turn
+/// answers in that thread — its warrant names it — while the notice that
+/// it ended goes to the root of the room, because that is about the job
+/// rather than part of the exchange.
+#[test]
+fn a_mention_in_a_thread_of_a_jobs_room_is_answered_there_and_noticed_at_the_root() {
+    let mut world = Simulation::new();
+    let idle = job(1);
+    world.holding(&watching_a_channel(&[(
+        idle,
+        Progress::Idle(Waiting::Silent),
+        1,
+    )]));
+    let (name, held) = Simulation::ours(&stageman_job::container(idle));
+    world.container(&name, held);
+    let mut instance = world.wake(seed(1));
+
+    world.says_in_rooms_thread(100, 1, "1788000000.500000", "use postgres");
+    world.run_until(&mut instance, 150);
+    let warrant = world.warrants().last().expect("the job's warrant").clone();
+    let warranted = instance
+        .warranted(warrant.as_str())
+        .expect("known while the turn runs");
+    assert_eq!(
+        warranted.place,
+        Some(Place {
+            room: room(1),
+            thread: Some("1788000000.500000".to_owned()),
+        }),
+        "the job answers where it was asked"
+    );
+
+    world.run_until(&mut instance, 5_000);
+    assert!(
+        world
+            .talks()
+            .iter()
+            .any(|talk| talk.was_told("use postgres")),
+        "{:?}",
+        world.talks()
+    );
+    assert_eq!(
+        world.posts(),
+        [(in_room(1), stageman_foreman::attention_notice().to_owned())],
+        "told at the root of its room, whatever thread the exchange was in"
     );
 }
 
@@ -198,7 +248,7 @@ fn a_mention_in_a_thread_belonging_to_no_job_reaches_the_foreman() {
 
     assert_eq!(
         world.posts(),
-        [(thread(7), stageman_foreman::received_notice(0))],
+        [(in_thread(7), stageman_foreman::received_notice(0))],
         "acknowledged where it was said"
     );
     assert!(
@@ -229,9 +279,9 @@ fn what_is_not_a_persons_mention_reaches_nobody() {
     world.container(&name, held);
     let mut instance = world.wake(seed(1));
 
-    let plain = world.said_in_plainly(1, "people talking to each other");
-    let ours = world.said_in_by_us(1, "something this instance posted");
-    let copy = world.said_in_as_a_message(1, "use postgres");
+    let plain = world.said_in_room(1, "people talking to each other", Spoken::Plain);
+    let ours = world.said_in_room(1, "<@U0BOT> something this instance posted", Spoken::Ours);
+    let copy = world.said_in_room(1, "<@U0BOT> use postgres", Spoken::Plain);
     world.schedule(100, plain);
     world.schedule(101, ours);
     world.schedule(102, copy);
@@ -261,7 +311,7 @@ fn a_crash_before_the_record_lands_loses_the_reply_but_not_the_job() {
     world.container(&name, held);
     let mut instance = world.wake(seed(1));
 
-    world.says_in(100, 1, "use postgres");
+    world.says_in_room(100, 1, "use postgres");
     // The reply is taken at 100 and its write lands at 101; the daemon dies
     // in between.
     world.run_until(&mut instance, 100);
@@ -300,7 +350,7 @@ fn a_failed_write_fails_the_turn_before_it_starts() {
     let mut instance = world.wake(seed(1));
     world.next_write_fails("the disk is full");
 
-    world.says_in(100, 1, "use postgres");
+    world.says_in_room(100, 1, "use postgres");
     world.run_until(&mut instance, 5_000);
 
     assert!(world.talks().is_empty(), "{:?}", world.talks());

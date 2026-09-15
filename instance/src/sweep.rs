@@ -6,7 +6,7 @@
 //! below pin them without a runtime. What they decide reaches the world as
 //! effects; nothing here is removed, stopped or resumed directly.
 
-use stageman_core::{InstanceId, JobId, Outcome, Progress, ProjectId, State};
+use stageman_core::{InstanceId, JobId, Outcome, Place, Progress, ProjectId, State};
 
 use crate::turns::{Run, Turn};
 use crate::vocabulary::{Container, Speaker};
@@ -279,11 +279,11 @@ impl Running {
         // on the disk, so resuming waits for nothing.
         let resuming: Vec<JobId> = self.state.working().collect();
         for job in &resuming {
-            let Some((thread, kit)) = self.recorded(*job) else {
+            let Some((room, kit)) = self.recorded(*job) else {
                 continue;
             };
             let speaker = Speaker::Job(*job);
-            let warrant = self.warrant(speaker, thread);
+            let warrant = self.warrant(speaker, room.map(Place::root), None);
             let first = self.turn(
                 speaker,
                 Turn::quiet(Run::Resume {

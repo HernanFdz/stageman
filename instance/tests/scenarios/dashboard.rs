@@ -7,7 +7,9 @@ use stageman_core::{Agent, JobId, Outcome, Progress, ProjectId, Timestamp, Uuid,
 use stageman_instance::{Instance, Request, Response};
 use stageman_wire::{ChannelDraft, Draft, Ending, Fitted, KitDraft, Refusal, Standing};
 
-use crate::simulation::{Simulation, job, project, request, seed, watching, watching_a_channel};
+use crate::simulation::{
+    Simulation, job, project, request, room, seed, watching, watching_a_channel,
+};
 
 /// Asks, performs, and lets the write land and the answer follow.
 fn ask(sim: &mut Simulation, instance: &mut Instance, id: u64, asked: Request) -> Response {
@@ -43,7 +45,6 @@ pub fn a_draft(name: &str) -> Draft {
         }],
         credential: "ghp-not-a-real-token".to_owned(),
         channel: ChannelDraft {
-            address: format!("C-{name}"),
             credential: "xoxb-not-a-real-token".to_owned(),
             listen_credential: "xapp-not-a-real-token".to_owned(),
         },
@@ -210,7 +211,7 @@ fn an_agent_a_project_names_cannot_be_forgotten() {
 }
 
 /// A project bound to a channel is listened on from the moment its record
-/// has landed, and a second project on that channel is refused.
+/// has landed.
 #[test]
 fn creating_a_project_listens_on_its_channel_once_the_record_has_landed() {
     let mut sim = Simulation::new();
@@ -220,18 +221,11 @@ fn creating_a_project_listens_on_its_channel_once_the_record_has_landed() {
 
     let mut draft = a_draft("burrow");
     draft.channel = ChannelDraft {
-        address: "C0000000042".to_owned(),
         credential: "xoxb-not-a-real-token".to_owned(),
         listen_credential: "xapp-not-a-real-token".to_owned(),
     };
-    let Response::Projects(shown) = ask(
-        &mut sim,
-        &mut instance,
-        1,
-        Request::Create {
-            draft: draft.clone(),
-        },
-    ) else {
+    let Response::Projects(shown) = ask(&mut sim, &mut instance, 1, Request::Create { draft })
+    else {
         panic!("the projects screen");
     };
     assert_eq!(shown.projects.len(), 2);
@@ -257,13 +251,6 @@ fn creating_a_project_listens_on_its_channel_once_the_record_has_landed() {
     assert!(asked < first(&sim, "-> Respond"));
     assert!(sim.disk().expect("landed").projects.contains_key(&created));
 
-    draft.name = "another".to_owned();
-    assert_eq!(
-        ask(&mut sim, &mut instance, 2, Request::Create { draft }),
-        Response::Refused(Refusal::ChannelAlreadyBound {
-            project: "burrow".to_owned()
-        })
-    );
     let mut blank = a_draft("blank");
     blank.name = "  ".to_owned();
     assert_eq!(
@@ -503,10 +490,10 @@ fn starting_a_job_by_hand_runs_its_first_turn_once_the_record_has_landed() {
     assert_eq!(instance.state().projects[&project()].jobs.len(), 1);
 }
 
-/// On a project with a channel, the thread is opened before the turn, and
-/// the announcement is what is posted in it.
+/// On a project with a channel, the room is made before the turn, and the
+/// job's record names it.
 #[test]
-fn a_job_started_by_hand_on_a_bound_project_opens_its_thread_first() {
+fn a_job_started_by_hand_on_a_bound_project_has_its_room_made_first() {
     let mut sim = Simulation::new();
     sim.holding(&watching_a_channel(&[]));
     let mut instance = sim.wake(seed(1));
@@ -525,17 +512,17 @@ fn a_job_started_by_hand_on_a_bound_project_opens_its_thread_first() {
         panic!("the project's screen");
     };
     assert_eq!(shown.jobs.len(), 1);
-    let opened = sim
-        .first_call(|call| matches!(call, Call::Post { thread: None, .. }))
-        .expect("the thread was opened");
-    assert!(opened < sim.first_turn().expect("a turn"));
-    assert_eq!(sim.posts().len(), 1);
+    let made = sim
+        .first_call(|call| matches!(call, Call::CreateRoom { .. }))
+        .expect("the room was made");
+    assert!(made < sim.first_turn().expect("a turn"));
+    assert_eq!(sim.rooms().len(), 1);
     let started = JobId::from_uuid(Uuid::parse_str(&shown.jobs[0].id).expect("an identifier"));
     assert!(
         instance
             .state()
             .job(started)
-            .and_then(|job| job.thread.clone())
+            .and_then(|job| job.room.clone())
             .is_some()
     );
 }
@@ -630,9 +617,9 @@ fn stopping_a_job_ends_its_turn_and_leaves_it_paused() {
 #[test]
 fn retiring_a_job_records_the_verdict_before_its_container_goes() {
     let mut sim = Simulation::new();
-    sim.holding(&watching(&[
-        (job(1), Progress::Idle(Waiting::Asked)),
-        (job(2), Progress::Working),
+    sim.holding(&watching_a_channel(&[
+        (job(1), Progress::Idle(Waiting::Asked), 1),
+        (job(2), Progress::Working, 2),
     ]));
     let (name, held) = Simulation::ours(&stageman_job::container(job(1)));
     sim.container(&name, held);
@@ -663,6 +650,13 @@ fn retiring_a_job_records_the_verdict_before_its_container_goes() {
     assert!(first(&sim, "-> Write") < first_removal(&sim));
     assert!(!sim.exists(&stageman_job::container(job(1))));
     assert_eq!(sim.reclaims(), reclaimed + 1);
+    // Its room went with it, once the verdict was on the disk: an archived
+    // room leaves the sidebar and takes no more posts.
+    assert_eq!(sim.archived(), [room(1).id]);
+    let archived = sim
+        .first_call(|call| matches!(call, Call::Archive { .. }))
+        .expect("the room was archived");
+    assert!(first(&sim, "-> Write") < archived);
     assert_eq!(
         sim.disk()
             .expect("landed")

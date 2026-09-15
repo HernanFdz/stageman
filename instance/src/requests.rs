@@ -247,10 +247,7 @@ impl Running {
     /// Starts watching a repository.
     ///
     /// Asked of a copy before it is asked of the instance, so that a refusal
-    /// leaves nothing changed. Two projects on one channel are refused here
-    /// rather than in `State::check`, because a rule there would refuse to
-    /// open an instance that already breaks it — putting the repair behind
-    /// the door it just locked.
+    /// leaves nothing changed.
     fn create(&mut self, draft: &Draft) -> Result<Response, Refusal> {
         let name = required("name", &draft.name)?;
         let repository = required("repository", &draft.repository)?;
@@ -259,10 +256,6 @@ impl Running {
         let kits = kits_of(&draft.kits)?;
         let channels = binding(&draft.channel)?;
         let variables = resolved(&BTreeMap::new(), &draft.variables)?;
-
-        if let Some(taken) = already_bound(&self.state, &channels) {
-            return Err(Refusal::ChannelAlreadyBound { project: taken });
-        }
 
         let mut candidate = self.state.clone();
         let created = ProjectId::from_uuid(crate::mint(&mut self.rng));
@@ -353,6 +346,9 @@ impl Running {
         }
         let jobs: Vec<JobId> = watched.jobs.keys().copied().collect();
         for job in &jobs {
+            // Its room is archived before its record goes, since the record
+            // is what names the room.
+            self.archive_room_of(*job);
             self.forget_tunnel(*job);
             let discard = self.discard(stageman_job::container(*job));
             self.defer(discard);
@@ -412,7 +408,13 @@ impl Running {
             project: watched.name.clone(),
         })?;
         let name = watched.name.clone();
-        self.begin(identifier, chosen, BY_HAND, work, at)
+        let commission = crate::jobs::Commission {
+            kit: chosen,
+            reason: BY_HAND,
+            work,
+            title: &title_of(work),
+        };
+        self.begin(identifier, commission, None, at)
             .map_err(|reason| match reason {
                 // The one refusal an operator can act on: bind a channel.
                 crate::jobs::BeginError::NoChannel(_) => Refusal::ChannelMissing { project: name },
@@ -472,6 +474,10 @@ impl Running {
                 self.dirty = true;
             }
         }
+        // Its room is archived once the verdict is on the disk: an archived
+        // room leaves the sidebar, stays readable, and takes no more posts,
+        // which is what makes the conversation over on the platform too.
+        self.archive_room_of(named);
         self.forget_tunnel(named);
         let discard = self.discard(stageman_job::container(named));
         self.defer(discard);
@@ -623,40 +629,31 @@ pub fn busy(project: &Project) -> Option<usize> {
 ///
 /// # Errors
 ///
-/// Fails if any of the three is missing.
+/// Fails if either credential is missing.
 pub fn binding(channel: &ChannelDraft) -> Result<BTreeMap<Channel, ChannelConfig>, Refusal> {
-    let address = channel.address.trim();
     let credential = channel.credential.trim();
     let listening = channel.listen_credential.trim();
 
-    if address.is_empty() || credential.is_empty() || listening.is_empty() {
+    if credential.is_empty() || listening.is_empty() {
         return Err(Refusal::ChannelIncomplete);
     }
     Ok(BTreeMap::from([(
         Channel::Slack,
         ChannelConfig {
-            address: address.to_owned(),
             credential: Secret::new(credential.to_owned()),
             listen_credential: Secret::new(listening.to_owned()),
         },
     )]))
 }
 
-/// The project already bound where these bindings would go, if any is,
-/// named so that an operator can tell which of their projects has it.
-pub fn already_bound(state: &State, wanted: &BTreeMap<Channel, ChannelConfig>) -> Option<String> {
-    state
-        .projects
-        .values()
-        .find(|project| {
-            wanted.iter().any(|(channel, binding)| {
-                project
-                    .channels
-                    .get(channel)
-                    .is_some_and(|held| held.address == binding.address)
-            })
-        })
-        .map(|project| project.name.clone())
+/// A title for a job started by hand: the first few words of the work,
+/// which is what a person would read in a sidebar. A foreman gives a job
+/// its title; a person starting one from the dashboard gave the work.
+pub fn title_of(work: &str) -> String {
+    work.split_whitespace()
+        .take(6)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// A field that has to say something.
@@ -676,7 +673,7 @@ pub fn required(field: &str, given: &str) -> Result<String, Refusal> {
 
 #[cfg(test)]
 mod tests {
-    use super::{already_bound, amended, binding, busy, identify_job, kits_of, offered, resolved};
+    use super::{amended, binding, busy, identify_job, kits_of, offered, resolved, title_of};
     use stageman_core::{
         Agent, AgentConfig, Channel, ChannelConfig, ClaudeEffort, ClaudeModel, Job, JobId, Kit,
         KitConfig, KitName, Platform, Progress, Project, ProjectId, Secret, State, Timestamp, Uuid,
@@ -685,9 +682,8 @@ mod tests {
     use stageman_wire::{ChannelDraft, Fitted, KitDraft, Refusal, VariableDraft};
     use std::collections::BTreeMap;
 
-    fn drafted(address: &str, credential: &str, listening: &str) -> ChannelDraft {
+    fn drafted(credential: &str, listening: &str) -> ChannelDraft {
         ChannelDraft {
-            address: address.to_owned(),
             credential: credential.to_owned(),
             listen_credential: listening.to_owned(),
         }
@@ -779,7 +775,6 @@ mod tests {
         project.channels.insert(
             Channel::Slack,
             ChannelConfig {
-                address: "C0123456789".to_owned(),
                 credential: Secret::new("xoxb-not-a-real-token".to_owned()),
                 listen_credential: Secret::new("xapp-token".to_owned()),
             },
@@ -965,28 +960,23 @@ mod tests {
         assert!(resolved(&BTreeMap::new(), &[row("  ", "anything")]).is_err());
     }
 
-    /// All three bind, trimmed, and anything less is refused.
+    /// Both credentials bind, trimmed, and anything less is refused.
     #[test]
-    fn a_channel_is_bound_by_all_three_or_refused() {
+    fn a_channel_is_bound_by_both_credentials_or_refused() {
         let bound = binding(&drafted(
-            " C0123456789 ",
             " xoxb-not-a-real-token ",
             " xapp-not-a-real-token ",
         ))
-        .expect("all three");
+        .expect("both");
         let slack = bound.get(&Channel::Slack).expect("keyed by the channel");
-        assert_eq!(slack.address, "C0123456789");
         assert_eq!(slack.credential.expose(), "xoxb-not-a-real-token");
         assert_eq!(slack.listen_credential.expose(), "xapp-not-a-real-token");
 
         for partial in [
-            drafted("", "", ""),
-            drafted("  ", "\t", ""),
-            drafted("C0123456789", "", ""),
-            drafted("", "xoxb-not-a-real-token", ""),
-            drafted("", "", "xapp-token"),
-            drafted("C0123456789", "xoxb-not-a-real-token", ""),
-            drafted("C0123456789", "", "xapp-token"),
+            drafted("", ""),
+            drafted("  ", "\t"),
+            drafted("xoxb-not-a-real-token", ""),
+            drafted("", "xapp-token"),
         ] {
             assert!(
                 matches!(binding(&partial), Err(Refusal::ChannelIncomplete)),
@@ -998,30 +988,15 @@ mod tests {
         assert!(!shown.contains("xapp-not-a-real-token"), "{shown}");
     }
 
-    /// Two projects on one channel is refused, and the holder is named.
+    /// A job started by hand is titled by the first words of its work.
     #[test]
-    fn a_channel_another_project_already_binds_is_refused() {
-        let mut state = State::default();
-        let mut watched = holding(&[]);
-        watched.channels.insert(
-            Channel::Slack,
-            ChannelConfig {
-                address: "C0123456789".to_owned(),
-                credential: Secret::new("xoxb-token".to_owned()),
-                listen_credential: Secret::new("xapp-token".to_owned()),
-            },
+    fn a_job_started_by_hand_is_titled_by_its_first_words() {
+        assert_eq!(
+            title_of("Fix the flaky parser test before the release ships"),
+            "Fix the flaky parser test before"
         );
-        state
-            .projects
-            .insert(ProjectId::from_uuid(Uuid::from_u128(1)), watched);
-
-        let wanted =
-            binding(&drafted("C0123456789", "xoxb-other", "xapp-other")).expect("a binding");
-        assert_eq!(already_bound(&state, &wanted), Some("aviary".to_owned()));
-        let elsewhere =
-            binding(&drafted("C9999999999", "xoxb-other", "xapp-other")).expect("a binding");
-        assert_eq!(already_bound(&state, &elsewhere), None);
-        assert_eq!(already_bound(&state, &BTreeMap::new()), None);
+        assert_eq!(title_of("  one   thing  "), "one thing");
+        assert_eq!(title_of(""), "");
     }
 
     /// The count is of running jobs, not of jobs.

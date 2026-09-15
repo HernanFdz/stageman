@@ -686,21 +686,11 @@ fn ProjectForm(
                 "Scoped to this repository, with contents and pull requests write. A token that \
                  reaches more than this project is a token every job on it could misuse."
             }
-            // Only when creating. A binding's address never reaches the
+            // Only when creating. A binding's credentials never reach the
             // browser, so there is nothing to show here for a project that has
             // one — and an empty box that meant *unbind* would disconnect a
             // project every time somebody corrected its name.
             if creating {
-            Field { label: "Slack channel",
-                input {
-                    class: FIELD,
-                    placeholder: "C0123456789, where a job's thread opens",
-                    value: "{draft().channel.address}",
-                    oninput: move |event| {
-                        draft.with_mut(|draft| draft.channel.address = event.value());
-                    },
-                }
-            }
             Field { label: "Slack bot token",
                 input {
                     r#type: "password",
@@ -725,8 +715,8 @@ fn ProjectForm(
             }
             p { class: "text-xs text-faint-foreground",
                 "Every project talks on Slack, through an app of its own: it hears any channel \
-                 it is invited to, and a job's thread opens in the channel named here. All three \
-                 are required, because a job that asks needs somebody able to answer."
+                 it is invited to, and every job gets a channel of its own. Both tokens are \
+                 required, because a job that asks needs somebody able to answer."
             }
             }
             Field { label: "Variables (optional)",

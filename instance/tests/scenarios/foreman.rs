@@ -3,7 +3,7 @@
 //! world.
 
 use crate::simulation::{
-    Simulation, Talk, holding_a_message, project, seed, thread, watching_a_channel,
+    Simulation, Talk, holding_a_message, in_thread, project, seed, watching_a_channel,
 };
 use stageman_agent::Command;
 use stageman_foreman::Starting;
@@ -52,7 +52,7 @@ fn a_first_message_opens_a_session_and_is_acknowledged_first() {
     assert!(world.exists(&stageman_foreman::container(project())));
     assert_eq!(
         world.posts(),
-        [(thread(1), stageman_foreman::received_notice(0))],
+        [(in_thread(1), stageman_foreman::received_notice(0))],
         "acknowledged once, and told nothing when the turn ended"
     );
 }
@@ -135,9 +135,9 @@ fn messages_arriving_while_it_works_are_queued_and_worked_in_order() {
     assert_eq!(
         world.posts(),
         [
-            (thread(1), stageman_foreman::received_notice(0)),
-            (thread(2), stageman_foreman::received_notice(1)),
-            (thread(3), stageman_foreman::received_notice(2)),
+            (in_thread(1), stageman_foreman::received_notice(0)),
+            (in_thread(2), stageman_foreman::received_notice(1)),
+            (in_thread(3), stageman_foreman::received_notice(2)),
         ]
     );
     // Never two turns at once: each begins after the last ended.
@@ -191,7 +191,7 @@ fn a_foreman_interrupted_mid_turn_is_picked_up_on_waking() {
     );
     assert_eq!(
         world.posts(),
-        [(thread(1), stageman_foreman::resumed_notice().to_owned())],
+        [(in_thread(1), stageman_foreman::resumed_notice().to_owned())],
         "no message is re-acknowledged"
     );
 }
@@ -238,9 +238,9 @@ fn a_turn_that_fails_is_said_to_be_stuck_and_the_next_is_worked() {
     assert_eq!(
         world.posts(),
         [
-            (thread(1), stageman_foreman::received_notice(0)),
-            (thread(2), stageman_foreman::received_notice(1)),
-            (thread(1), stageman_foreman::stuck_notice().to_owned()),
+            (in_thread(1), stageman_foreman::received_notice(0)),
+            (in_thread(2), stageman_foreman::received_notice(1)),
+            (in_thread(1), stageman_foreman::stuck_notice().to_owned()),
         ]
     );
 }
@@ -263,7 +263,7 @@ fn a_foremans_warrant_names_the_thread_of_the_message_it_answers() {
         warranted.speaker,
         stageman_instance::Speaker::Foreman(project())
     );
-    assert_eq!(warranted.thread, Some(thread(1)));
+    assert_eq!(warranted.place, Some(in_thread(1)));
 
     world.run_until(&mut instance, 5_000);
     assert!(instance.warranted(warrant.as_str()).is_none());

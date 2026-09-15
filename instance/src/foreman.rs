@@ -11,7 +11,7 @@
 //! never believed: a container is the truth about whether a session exists.
 
 use stageman_core::{
-    Agent, Channel, ChannelConfig, Errand, Handout, ProjectId, State, Taken, Thread,
+    Agent, Channel, ChannelConfig, Errand, Handout, Place, ProjectId, State, Taken, Thread,
 };
 use stageman_foreman::Starting;
 
@@ -100,6 +100,7 @@ impl Running {
         let taken = watched.attending.take(Errand {
             said: message.text.clone(),
             thread: thread.clone(),
+            from: message.user.clone(),
         });
         // Counting the one in hand: from outside, everything not yet
         // answered is ahead of this.
@@ -201,7 +202,11 @@ impl Running {
             },
             &kits,
         );
-        let warrant = self.warrant(speaker, Some(errand.thread.clone()));
+        let warrant = self.warrant(
+            speaker,
+            Some(errand.thread.clone().into()),
+            errand.from.clone(),
+        );
 
         let run = if present && keeps(agent, handout.agent()) {
             // The kit goes with every turn, not only the first: a loaded
@@ -304,7 +309,8 @@ impl Running {
             .get(&project)
             .map(|watched| watched.repository.clone())
             .ok_or(stageman_core::HandoutError::UnknownProject(project))?;
-        let handout = Handout::for_foreman(&self.state, project)?.speaking_in(thread.clone());
+        let handout =
+            Handout::for_foreman(&self.state, project)?.speaking_in(thread.clone().into());
         Ok((repository, handout))
     }
 
@@ -320,7 +326,7 @@ impl Running {
         else {
             return;
         };
-        self.say(&speaking, thread, text);
+        self.say(&speaking, &Place::from(thread.clone()), text);
     }
 }
 
@@ -381,6 +387,7 @@ mod tests {
                 room: "C0123456789".to_owned(),
                 id: "1700000000.000100".to_owned(),
             },
+            from: Some("U0HUMAN".to_owned()),
         }
     }
 

@@ -6,7 +6,10 @@ record decides are not, and this exists so that the shape they need is settled
 before either is written. One app per project was measured to be a must
 rather than a preference, and the app-level token to be required rather than
 optional, in `docs/decisions/0060-a-binding-is-a-workspace.md` and
-`docs/decisions/0059-a-project-speaks-and-listens-on-slack-always.md`.
+`docs/decisions/0059-a-project-speaks-and-listens-on-slack-always.md`. A
+reply is routed by its room since
+`docs/decisions/0061-a-job-has-a-room-of-its-own.md`, which gives a job a
+room instead of the thread this record chose; the transport stands.
 
 ## Context
 

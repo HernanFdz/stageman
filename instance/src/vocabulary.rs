@@ -28,7 +28,7 @@
 //! names each and none owns it.
 
 use serde::{Deserialize, Serialize};
-use stageman_core::{Agent, InstanceId, JobId, ProjectId, Thread};
+use stageman_core::{Agent, InstanceId, JobId, Place, ProjectId};
 use stageman_vocabulary::Named;
 
 /// What identifies one request the world is waiting to answer.
@@ -68,14 +68,18 @@ pub enum Speaker {
 /// What a credential presented to the tools endpoint entitles its bearer to.
 ///
 /// Minted when a turn starts and forgotten when it ends, so a warrant from
-/// before a crash names nothing. The thread is where anything the bearer says
-/// lands: a job's for its whole life, a foreman's per turn.
+/// before a crash names nothing. The place is where anything the bearer says
+/// lands: a job's room, or the thread in it a person asked in; a foreman's
+/// thread, per turn.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Warranted {
     /// Who holds it.
     pub speaker: Speaker,
     /// Where they speak, if anywhere.
-    pub thread: Option<Thread>,
+    pub place: Option<Place>,
+    /// Who the message being answered is from, when the platform said: what
+    /// a job started in this turn records as who asked for it.
+    pub from: Option<String>,
 }
 
 /// One thing the world tells the instance.

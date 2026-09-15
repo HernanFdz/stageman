@@ -359,7 +359,6 @@ fn watching(name: &str, repository: &str) -> State {
                 channels: BTreeMap::from([(
                     Channel::Slack,
                     ChannelConfig {
-                        address: "C0123456789".to_owned(),
                         credential: Secret::new(CHANNEL_CREDENTIAL.to_owned()),
                         listen_credential: Secret::new(LISTEN_CREDENTIAL.to_owned()),
                     },
