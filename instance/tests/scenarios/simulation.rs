@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use stageman_agent::{Answer, Command, Heard, Label, Said, StopReason};
-use stageman_channel::Call;
+use stageman_channel::{Call, Reaction};
 use stageman_core::{
     Agent, AgentConfig, Channel, ChannelConfig, Errand, InstanceId, Job, JobId, Key, Kit,
     KitConfig, KitName, NONCE_LEN, Nonce, Place, Progress, Project, ProjectId, Room, Secret,
@@ -214,6 +214,8 @@ pub struct Simulation {
     invited: Vec<(String, String)>,
     /// Every room archived.
     archived: Vec<String>,
+    /// Every reaction put on a message: the room, the message, and which.
+    reactions: Vec<(String, String, Reaction)>,
     /// Why the platform refuses the next rooms, front first.
     room_failures: VecDeque<String>,
     /// The sockets the platform holds, by the identifier each was connected
@@ -410,6 +412,7 @@ pub fn holding_a_message(state: &mut State, n: u32, text: &str) {
             said: text.to_owned(),
             thread: thread(n),
             from: Some("U0HUMAN".to_owned()),
+            message: Some(thread(n).id),
         });
 }
 
@@ -476,6 +479,7 @@ impl Simulation {
             described: Vec::new(),
             invited: Vec::new(),
             archived: Vec::new(),
+            reactions: Vec::new(),
             room_failures: VecDeque::new(),
             sockets: BTreeMap::new(),
             streams_opened: 0,
@@ -1647,6 +1651,15 @@ impl Simulation {
                 self.archived.push(room);
                 answered(r#"{"ok":true}"#.to_owned())
             }
+            Some(Call::React {
+                room,
+                message,
+                reaction,
+                ..
+            }) => {
+                self.reactions.push((room, message, reaction));
+                answered(r#"{"ok":true}"#.to_owned())
+            }
             Some(question @ (Call::WhoAmI { .. } | Call::OpenSocket { .. })) => {
                 let body = if let Some(error) = self.listen_failures.pop_front() {
                     format!(r#"{{"ok":false,"error":"{error}"}}"#)
@@ -2072,6 +2085,20 @@ impl Simulation {
     /// Every room archived.
     pub fn archived(&self) -> &[String] {
         &self.archived
+    }
+
+    /// Every reaction put on a message, in order.
+    pub fn reactions(&self) -> &[(String, String, Reaction)] {
+        &self.reactions
+    }
+
+    /// The messages a reaction was put on, in order, for one reaction.
+    pub fn reacted(&self, wanted: Reaction) -> Vec<String> {
+        self.reactions
+            .iter()
+            .filter(|(_, _, reaction)| *reaction == wanted)
+            .map(|(_, message, _)| message.clone())
+            .collect()
     }
 
     pub fn reclaims(&self) -> usize {

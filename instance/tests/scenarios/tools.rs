@@ -262,6 +262,10 @@ fn minting_a_warrant_forgets_only_that_speakers_previous_one() {
 /// message the foreman was answering is invited into the room and recorded
 /// as having asked, and their thread is told where the job is.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one flow asserted end to end, where the order of its steps is the point"
+)]
 fn a_foreman_starts_a_job_whose_room_is_made_before_its_agent_speaks() {
     let (mut world, mut instance, warrant) = with_a_foreman_working();
 
@@ -361,10 +365,15 @@ fn a_foreman_starts_a_job_whose_room_is_made_before_its_agent_speaks() {
         "and its first turn ended"
     );
     assert!(
-        world
-            .posts()
-            .iter()
-            .any(|(at, text)| *at == in_room(1) && text == stageman_foreman::attention_notice()),
+        world.posts().iter().any(|(at, text)| {
+            *at == in_room(1)
+                && *text
+                    == stageman_foreman::stopped_notice(
+                        &Waiting::Silent,
+                        Some("<@U0HUMAN>"),
+                        "<@U0BOT>",
+                    )
+        }),
         "its room was told when the turn ended: {:?}",
         world.posts()
     );

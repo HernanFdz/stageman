@@ -2,8 +2,11 @@
 //! foreman interrupted mid-turn put back to work, against the simulated
 //! world.
 
+use stageman_channel::Reaction;
+
 use crate::simulation::{
-    Simulation, Talk, holding_a_message, in_thread, project, seed, watching_a_channel,
+    CHANNEL, Simulation, Talk, holding_a_message, in_thread, project, seed, thread,
+    watching_a_channel,
 };
 use stageman_agent::Command;
 use stageman_foreman::Starting;
@@ -50,10 +53,18 @@ fn a_first_message_opens_a_session_and_is_acknowledged_first() {
     assert!(run.was_told("You are the foreman for"), "{run:?}");
     assert!(run.was_told("look at the parser"), "{run:?}");
     assert!(world.exists(&stageman_foreman::container(project())));
+    assert!(
+        world.posts().is_empty(),
+        "nothing is said on the instance's behalf: {:?}",
+        world.posts()
+    );
     assert_eq!(
-        world.posts(),
-        [(in_thread(1), stageman_foreman::received_notice(0))],
-        "acknowledged once, and told nothing when the turn ended"
+        world.reactions(),
+        [
+            (CHANNEL.to_owned(), thread(1).id, Reaction::Seen),
+            (CHANNEL.to_owned(), thread(1).id, Reaction::Done),
+        ],
+        "seen on arrival, done when the turn ended"
     );
 }
 
@@ -132,13 +143,16 @@ fn messages_arriving_while_it_works_are_queued_and_worked_in_order() {
     for (run, said) in runs.iter().zip(["first", "second", "third"]) {
         assert!(run.was_told(said), "in arrival order: {run:?}");
     }
+    assert!(world.posts().is_empty(), "{:?}", world.posts());
     assert_eq!(
-        world.posts(),
-        [
-            (in_thread(1), stageman_foreman::received_notice(0)),
-            (in_thread(2), stageman_foreman::received_notice(1)),
-            (in_thread(3), stageman_foreman::received_notice(2)),
-        ]
+        world.reacted(Reaction::Seen),
+        [thread(1).id, thread(2).id, thread(3).id],
+        "each seen as it arrived"
+    );
+    assert_eq!(
+        world.reacted(Reaction::Done),
+        [thread(1).id, thread(2).id, thread(3).id],
+        "and done in the order worked"
     );
     // Never two turns at once: each begins after the last ended.
     for pair in runs.windows(2) {
@@ -235,13 +249,20 @@ fn a_turn_that_fails_is_said_to_be_stuck_and_the_next_is_worked() {
     world.run_until(&mut instance, 10_000);
 
     assert_eq!(runs(&world).len(), 2);
+    let [(said_at, said)] = world.posts() else {
+        panic!("one notice, for the turn that failed: {:?}", world.posts());
+    };
+    assert_eq!(said_at, &in_thread(1), "said where the message was");
+    assert!(
+        said.starts_with("❌ That could not be handled: `")
+            && said.contains("the agent would not start"),
+        "with the reason, as the instance saw it: {said}"
+    );
+    assert_eq!(world.reacted(Reaction::Seen), [thread(1).id, thread(2).id]);
     assert_eq!(
-        world.posts(),
-        [
-            (in_thread(1), stageman_foreman::received_notice(0)),
-            (in_thread(2), stageman_foreman::received_notice(1)),
-            (in_thread(1), stageman_foreman::stuck_notice().to_owned()),
-        ]
+        world.reacted(Reaction::Done),
+        [thread(2).id],
+        "only the turn that finished is done"
     );
 }
 

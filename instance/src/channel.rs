@@ -106,6 +106,13 @@ pub enum Keeping {
         /// Which room.
         room: String,
     },
+    /// A reaction put on somebody's message: received, or done.
+    Reacting {
+        /// Which room.
+        room: String,
+        /// Which message.
+        message: String,
+    },
 }
 
 /// What a listener asked, on its way to a connection.
@@ -275,6 +282,41 @@ impl Running {
             stageman_channel::archive(channel, &speaking, &room),
             Keeping::Archiving { room },
         );
+    }
+
+    /// Puts a reaction on a message, once whatever this step changed is on
+    /// the disk: what a foreman says instead of "got it", per
+    /// `docs/decisions/0062-what-this-instance-says-is-markdown.md`.
+    pub fn react(
+        &mut self,
+        channel: Channel,
+        speaking: &Speaking,
+        room: &str,
+        message: &str,
+        reaction: stageman_channel::Reaction,
+    ) {
+        self.keep(
+            channel,
+            stageman_channel::react(channel, speaking, room, message, reaction),
+            Keeping::Reacting {
+                room: room.to_owned(),
+                message: message.to_owned(),
+            },
+        );
+    }
+
+    /// How this instance is mentioned on a project's channel: its own
+    /// identity there, once its listener has been told who it is, and the
+    /// name the setup instructions give the app until then.
+    #[must_use]
+    pub fn own_mention(&self, project: ProjectId, channel: Channel) -> String {
+        self.listeners
+            .get(&project)
+            .and_then(|listener| listener.us.as_ref())
+            .map_or_else(
+                || "@stageman".to_owned(),
+                |us| stageman_channel::mention(channel, &us.user),
+            )
     }
 
     /// Posts on an agent's behalf, with the tool call held open until the

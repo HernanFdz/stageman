@@ -734,6 +734,10 @@ impl Running {
             }
         };
         said_about(job, &progress);
+        let reading = match &progress {
+            Progress::Idle(waiting) => Some(waiting.clone()),
+            Progress::Working | Progress::Retired(_) => None,
+        };
         self.record(job, progress);
 
         // The container is asked whether it is still showing something, at
@@ -741,16 +745,30 @@ impl Running {
         // wait for the record to land.
         self.probe(job, effects);
 
-        // Said whichever way it went: the agent has already reported for
-        // itself if it could, and this says the one thing the agent cannot,
-        // which is that it has stopped and a mention now reaches it. Outward,
-        // so it waits for the record. At the root of the room, whatever
-        // thread the exchange was in: it is about the job, and the root is
-        // the job's timeline.
+        // Said whichever way it went, with the reading the agent gave and
+        // the one thing the agent cannot say, which is that a mention now
+        // reaches it. Outward, so it waits for the record. At the root of
+        // the room, whatever thread the exchange was in: it is about the
+        // job, and the root is the job's timeline.
         if turn.notify
+            && let Some(waiting) = reading
             && let Some((speaking, root)) = speaking_for(&self.state, job)
         {
-            self.say(&speaking, &root, stageman_foreman::attention_notice());
+            let channel = root.room.channel;
+            let asked_by = self
+                .state
+                .job(job)
+                .and_then(|recorded| recorded.asked_by.clone())
+                .map(|user| stageman_channel::mention(channel, &user));
+            let mention = self.state.project_of(job).map_or_else(
+                || "@stageman".to_owned(),
+                |project| self.own_mention(project, channel),
+            );
+            self.say(
+                &speaking,
+                &root,
+                &stageman_foreman::stopped_notice(&waiting, asked_by.as_deref(), &mention),
+            );
         }
     }
 

@@ -18,7 +18,7 @@ use stageman_foreman::Starting;
 use crate::Effect;
 use crate::Running;
 use crate::turns::{Run, Turn};
-use stageman_channel::Message;
+use stageman_channel::{Message, Reaction};
 
 use crate::vocabulary::Speaker;
 use crate::{Asked, Command};
@@ -82,7 +82,7 @@ impl Running {
     /// A message for a project's foreman, from any room the app is in.
     ///
     /// Taken or queued in this step, in the order messages arrive — which is
-    /// the whole of what an inbox promises — and acknowledged on its thread
+    /// the whole of what an inbox promises — and acknowledged with a reaction
     /// once the inbox is on the disk, so that "got it" is never said of a
     /// message a crash could lose. The message that found the foreman idle
     /// is the one that starts its loop.
@@ -99,17 +99,13 @@ impl Running {
         };
         let taken = watched.attending.take(Errand {
             said: message.text.clone(),
-            thread: thread.clone(),
+            thread,
             from: message.user.clone(),
+            message: Some(message.id.clone()),
         });
-        // Counting the one in hand: from outside, everything not yet
-        // answered is ahead of this.
-        let ahead = match taken {
-            Taken::Started => 0,
-            Taken::Waiting => watched.attending.waiting(),
-        };
         self.dirty = true;
-        self.notice_in(project, &thread, &stageman_foreman::received_notice(ahead));
+        // Received: a reaction on the message rather than a line under it.
+        self.react_in(project, channel, &message.room, &message.id, Reaction::Seen);
         if taken == Taken::Started {
             self.look_before_turning(project);
         }
@@ -179,7 +175,11 @@ impl Running {
                 // cannot be handled must not become a message that is handled
                 // for ever, and the person who sent it is told.
                 tracing::warn!(%project, %why, "the foreman's turn could not be decided");
-                self.notice_in(project, &errand.thread, stageman_foreman::stuck_notice());
+                self.notice_in(
+                    project,
+                    &errand.thread,
+                    &stageman_foreman::stuck_notice(&why.to_string()),
+                );
                 self.move_on(project);
                 return;
             }
@@ -236,7 +236,11 @@ impl Running {
                 Ok(environment) => environment,
                 Err(why) => {
                     tracing::warn!(%project, %why, "the foreman's environment could not be decided");
-                    self.notice_in(project, &errand.thread, stageman_foreman::stuck_notice());
+                    self.notice_in(
+                        project,
+                        &errand.thread,
+                        &stageman_foreman::stuck_notice(&why.to_string()),
+                    );
                     self.move_on(project);
                     return;
                 }
@@ -264,15 +268,37 @@ impl Running {
     }
 
     /// A foreman's turn ended: put the message down, pick up the next.
+    ///
+    /// A turn that finished marks its message done, with a reaction; one
+    /// that did not says so in the message's thread, with the reason.
     pub fn foreman_ended(
         &mut self,
         project: ProjectId,
         outcome: Result<stageman_agent::Answer, String>,
     ) {
-        if let Err(why) = outcome {
-            tracing::warn!(%project, %why, "the foreman's turn did not finish");
-            if let Some(errand) = waiting_on(&self.state, project) {
-                self.notice_in(project, &errand.thread, stageman_foreman::stuck_notice());
+        match outcome {
+            Ok(_) => {
+                if let Some(errand) = waiting_on(&self.state, project)
+                    && let Some(message) = errand.message
+                {
+                    self.react_in(
+                        project,
+                        errand.thread.channel,
+                        &errand.thread.room,
+                        &message,
+                        Reaction::Done,
+                    );
+                }
+            }
+            Err(why) => {
+                tracing::warn!(%project, %why, "the foreman's turn did not finish");
+                if let Some(errand) = waiting_on(&self.state, project) {
+                    self.notice_in(
+                        project,
+                        &errand.thread,
+                        &stageman_foreman::stuck_notice(&why),
+                    );
+                }
             }
         }
         self.move_on(project);
@@ -312,6 +338,28 @@ impl Running {
         let handout =
             Handout::for_foreman(&self.state, project)?.speaking_in(thread.clone().into());
         Ok((repository, handout))
+    }
+
+    /// Reacts to a message on a project's behalf, once whatever this step
+    /// changed is on the disk.
+    fn react_in(
+        &mut self,
+        project: ProjectId,
+        channel: Channel,
+        room: &str,
+        message: &str,
+        reaction: Reaction,
+    ) {
+        let Some(speaking) = self
+            .state
+            .projects
+            .get(&project)
+            .and_then(|watched| watched.channels.get(&channel))
+            .map(ChannelConfig::speaking)
+        else {
+            return;
+        };
+        self.react(channel, &speaking, room, message, reaction);
     }
 
     /// Says something in a thread on the instance's own behalf, once whatever
@@ -388,6 +436,7 @@ mod tests {
                 id: "1700000000.000100".to_owned(),
             },
             from: Some("U0HUMAN".to_owned()),
+            message: Some("1700000000.000100".to_owned()),
         }
     }
 

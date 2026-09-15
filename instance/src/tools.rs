@@ -73,16 +73,17 @@ pub fn tools(warranted: &Warranted, kits: &[(String, String)]) -> Vec<Tool> {
     // thing a foreman and a job both do.
     let say = Tool {
         name: "say",
-        description: "Say something to the people on this project's channel. \
-                      This is the only way anything you write reaches a person: \
-                      ordinary output is seen by nobody."
+        description: "Say something to the people on this project's channel, in \
+                      Markdown: it is rendered, so headings, lists, code, tables \
+                      and links all show. This is the only way anything you write \
+                      reaches a person: ordinary output is seen by nobody."
             .to_owned(),
         schema: serde_json::json!({
             "type": "object",
             "properties": {
                 "message": {
                     "type": "string",
-                    "description": "What to say, in your own words.",
+                    "description": "What to say, in Markdown, in your own words.",
                 },
             },
             "required": ["message"],

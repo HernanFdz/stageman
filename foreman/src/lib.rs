@@ -23,7 +23,7 @@
 //! the credential invariant and `docs/conventions.md` §4 for why prompts are
 //! held to a test.
 
-use stageman_core::{ProjectId, VariableName};
+use stageman_core::{ProjectId, VariableName, Waiting};
 
 /// What every foreman's container is named for.
 ///
@@ -114,12 +114,12 @@ pub const fn resumption_notice() -> &'static str {
 pub fn room_opening(repository: &str, reason: &str, mention: &str) -> String {
     format!(
         "\
-A job on {repository}.
+**A job on {repository}**
 
 {reason}
 
-Everything it has to say appears here. Mention {mention} to talk to it; \
-anything else said here is between people."
+_Everything it has to say appears here. Mention {mention} to talk to it; \
+anything else said here is between people._"
     )
 }
 
@@ -152,7 +152,8 @@ pub fn opening(repository: &str) -> String {
 You are the foreman for {repository}.
 
 People talk to you on a channel. Each message they send you arrives as its own \
-turn, and the only way to answer is to **call the `say` tool**.
+turn, and the only way to answer is to **call the `say` tool**, in Markdown, \
+which is rendered.
 
 Nothing you write as ordinary output is seen by anybody. What you pass to \
 `say` lands in the thread of the message you are answering, so a person can \
@@ -262,7 +263,7 @@ assume your last step completed, and do not assume it did not.";
 /// and forgotten is the thing it must not be mistaken for.
 #[must_use]
 pub const fn resumed_notice() -> &'static str {
-    "This instance restarted while it was working on that. It is picking it up again now."
+    "stageman restarted while working on this, and is picking it up again."
 }
 
 /// What a foreman is told when a person sends it a message.
@@ -321,23 +322,39 @@ to check it."
     )
 }
 
-/// What a job's thread is told when its agent stops.
+/// What a job's room is told when its agent stops: which reading of idle
+/// the job landed in, and what to do about it.
 ///
-/// **Deliberately says nothing about how it went.** The instance knows the
-/// turn ended and cannot know whether that was an answer, a question, or an
-/// agent giving up — deciding would mean reading what it said, and reading it
-/// properly would mean another model call. A notice that guessed would be
-/// wrong often enough to be worse than one that does not try.
-///
-/// What it does carry is the fact worth having: the agent has stopped, so a
-/// mention now reaches it. While
-/// `docs/open-questions.md` has messaging a *running* job unsupported, that is
-/// the difference between a room somebody can act on and one they cannot.
-/// Said at the root of the job's room, whatever thread the exchange was in,
-/// because it is about the job and the root is the job's timeline.
+/// It used to say nothing about how it went, because the instance could
+/// not tell an answer from a question from an agent giving up. Since
+/// `docs/decisions/0055-a-job-says-why-it-stopped.md` the agent says, and
+/// this passes that on — the agent's own claim, never a guess — with the
+/// one thing the agent cannot say, which is that a mention now reaches it.
+/// A job waiting for an answer names the person who asked for it, rendered
+/// by the channel, so that they are notified. Said at the root of the job's
+/// room, whatever thread the exchange was in, because it is about the job
+/// and the root is the job's timeline. See
+/// `docs/decisions/0062-what-this-instance-says-is-markdown.md`.
 #[must_use]
-pub const fn attention_notice() -> &'static str {
-    "⚠️ Check this out. The agent has stopped; a mention here will reach it."
+pub fn stopped_notice(waiting: &Waiting, asked_by: Option<&str>, mention: &str) -> String {
+    match waiting {
+        Waiting::Asked => asked_by.map_or_else(
+            || format!("❓ **Waiting for an answer.** Mention {mention} here to reply."),
+            |who| format!("❓ **Waiting for an answer**, {who}. Mention {mention} here to reply."),
+        ),
+        Waiting::Proposed => {
+            format!("✅ **Ready for review.** Mention {mention} here to send it back for changes.")
+        }
+        Waiting::Paused => {
+            format!("⏸️ **Stopped by an operator.** Mention {mention} here to carry on.")
+        }
+        Waiting::Failed(why) => format!(
+            "❌ **Failed:** `{why}`. Mention {mention} here to try again once that is fixed."
+        ),
+        Waiting::Silent => {
+            format!("⏹️ **Stopped without saying why.** Mention {mention} here to carry on.")
+        }
+    }
 }
 
 /// What a thread is told when a reply arrives for a job that is still working.
@@ -348,7 +365,7 @@ pub const fn attention_notice() -> &'static str {
 /// not coming.
 #[must_use]
 pub const fn busy_notice() -> &'static str {
-    "This job is still working, so that did not reach it. Wait until it stops, then say it again."
+    "⏳ Still working, so that did not reach it. Say it again once it stops."
 }
 
 /// What a thread is told when a reply arrives for a job that is over.
@@ -360,8 +377,7 @@ pub const fn busy_notice() -> &'static str {
 /// container went with the retirement, and the session with it.
 #[must_use]
 pub const fn over_notice() -> &'static str {
-    "This job is over, so that did not reach it. Nothing more can be added to it — \
-start a new job if there is still work here."
+    "This job is over, so nothing more reaches it. Start a new job if there is still work here."
 }
 
 /// What a job's agent is told when a person replies on its thread.
@@ -387,46 +403,25 @@ say what you did when you finish."
     )
 }
 
-/// What a person is told the moment their message is accepted.
-///
-/// Said before any work begins, because the alternative is silence for as long
-/// as a turn takes — and a foreman that is three messages behind may be silent
-/// for a while. Somebody who hears nothing cannot tell *received and queued*
-/// from *ignored*, and the second is what they will assume.
-///
-/// It used to teach a rule as well — that a reply in this thread reaches
-/// nobody — and no longer does, because the rule is gone: since
-/// `docs/decisions/0060-a-binding-is-a-workspace.md` a mention in this thread
-/// reaches the foreman like any other, so replying where you were answered
-/// is exactly what works.
-///
-/// `ahead` is how many messages this one is behind, counting the one being
-/// worked on. Said only when there are any, because "0 messages ahead" is
-/// noise where "working on this now" is an answer.
-#[must_use]
-pub fn received_notice(ahead: usize) -> String {
-    let standing = if ahead == 0 {
-        "Working on this now.".to_owned()
-    } else {
-        format!("It is behind {ahead} other message(s), so it may be a moment.")
-    };
-    format!("Got it. {standing} The answer appears in this thread.")
-}
-
-/// What a thread is told when a foreman's turn could not be taken at all.
+/// What a thread is told when a foreman's turn could not be taken at all,
+/// and why.
 ///
 /// **Not the same as a foreman deciding it cannot help.** That is something it
 /// says for itself, in its own words, and this is what is said when it never
 /// got to speak — its agent would not run, or the turn ended without
 /// finishing. A person who asked for something and hears nothing has no way to
-/// tell that from being ignored.
+/// tell that from being ignored, and one told only that something went wrong
+/// has no way to fix it, which is why the reason is said rather than left
+/// to the log.
 ///
 /// The message is not retried. A message that cannot be handled must not
 /// become one that is handled for ever, blocking every message behind it.
 #[must_use]
-pub const fn stuck_notice() -> &'static str {
-    "Something went wrong handling that, so it did not get done. The server log says what. \
-Send it again once that is fixed — it has not been kept."
+pub fn stuck_notice(why: &str) -> String {
+    format!(
+        "❌ That could not be handled: `{why}`. It will not be retried — send it again once \
+that is fixed."
+    )
 }
 
 /// The instruction a job begins from.
@@ -483,7 +478,8 @@ to look with the `say` tool, because nobody finds that address on their own."
 belongs to, and the `say` tool for talking to people.";
 
     let speaking = "\
-Finish by saying what you did, by calling the `say` tool. Nobody reads this \
+Finish by saying what you did, by calling the `say` tool, in Markdown, which is \
+rendered. Nobody reads this \
 terminal, so anything you do not say there is lost — including the answer, if the work was a question. Say what \
 you found, what you changed, or what you could not do.
 
@@ -551,7 +547,7 @@ reasons nobody knows."
 
 #[cfg(test)]
 mod tests {
-    use super::{ProjectId, VariableName, resumption_notice};
+    use super::{ProjectId, VariableName, Waiting, resumption_notice};
 
     /// Where a job of this project would be reachable.
     ///
@@ -641,8 +637,8 @@ When you have a change to propose, open a pull request and stop there. Do not me
 deploy anything, and do not push to the default branch. Somebody reads what you propose before \
 it counts for anything, which is what lets you work unattended.
 
-Finish by saying what you did, by calling the `say` tool. Nobody reads this terminal, so \
-anything you do not say there is lost — including the \
+Finish by saying what you did, by calling the `say` tool, in Markdown, which is rendered. \
+Nobody reads this terminal, so anything you do not say there is lost — including the \
 answer, if the work was a question. Say what you found, what you changed, or what you could not \
 do.
 
@@ -729,8 +725,8 @@ When you have a change to propose, open a pull request and stop there. Do not me
 deploy anything, and do not push to the default branch. Somebody reads what you propose before \
 it counts for anything, which is what lets you work unattended.
 
-Finish by saying what you did, by calling the `say` tool. Nobody reads this terminal, so \
-anything you do not say there is lost — including the \
+Finish by saying what you did, by calling the `say` tool, in Markdown, which is rendered. \
+Nobody reads this terminal, so anything you do not say there is lost — including the \
 answer, if the work was a question. Say what you found, what you changed, or what you could not \
 do.
 
@@ -778,12 +774,12 @@ having stopped for reasons nobody knows."
                 "an issue was opened",
                 "<@U0BOT>"
             ),
-            "A job on https://example.invalid/repo.
+            "**A job on https://example.invalid/repo**
 
 an issue was opened
 
-Everything it has to say appears here. Mention <@U0BOT> to talk to it; anything else said \
-here is between people."
+_Everything it has to say appears here. Mention <@U0BOT> to talk to it; anything else said \
+here is between people._"
         );
         assert_eq!(
             super::started_notice("<#C0C1VNX9AA2>"),
@@ -832,41 +828,57 @@ here is between people."
 
     /// Asserted as literal text, per `docs/conventions.md` §4.
     ///
-    /// Both of these are read by a person on a channel and by nothing else, so
-    /// a rewrite would change what an operator sees and no other test would go
-    /// red.
+    /// Every one of these is read by a person on a channel and by nothing
+    /// else, so a rewrite would change what an operator sees and no other
+    /// test would go red.
     #[test]
     fn the_notices_read_exactly_as_written() {
         assert_eq!(
-            super::attention_notice(),
-            "⚠️ Check this out. The agent has stopped; a mention here will reach it."
+            super::stopped_notice(&Waiting::Asked, Some("<@U0HUMAN>"), "<@U0BOT>"),
+            "❓ **Waiting for an answer**, <@U0HUMAN>. Mention <@U0BOT> here to reply."
         );
         assert_eq!(
-            super::stuck_notice(),
-            "Something went wrong handling that, so it did not get done. The server log says \
-what. Send it again once that is fixed — it has not been kept."
+            super::stopped_notice(&Waiting::Asked, None, "<@U0BOT>"),
+            "❓ **Waiting for an answer.** Mention <@U0BOT> here to reply."
         );
         assert_eq!(
-            super::received_notice(0),
-            "Got it. Working on this now. The answer appears in this thread."
+            super::stopped_notice(&Waiting::Proposed, Some("<@U0HUMAN>"), "<@U0BOT>"),
+            "✅ **Ready for review.** Mention <@U0BOT> here to send it back for changes."
         );
         assert_eq!(
-            super::received_notice(2),
-            "Got it. It is behind 2 other message(s), so it may be a moment. The answer appears \
-in this thread."
+            super::stopped_notice(&Waiting::Paused, None, "<@U0BOT>"),
+            "⏸️ **Stopped by an operator.** Mention <@U0BOT> here to carry on."
+        );
+        assert_eq!(
+            super::stopped_notice(
+                &Waiting::Failed("the credential had expired".to_owned()),
+                None,
+                "<@U0BOT>"
+            ),
+            "❌ **Failed:** `the credential had expired`. Mention <@U0BOT> here to try again once \
+that is fixed."
+        );
+        assert_eq!(
+            super::stopped_notice(&Waiting::Silent, None, "<@U0BOT>"),
+            "⏹️ **Stopped without saying why.** Mention <@U0BOT> here to carry on."
+        );
+        assert_eq!(
+            super::stuck_notice("the agent would not start"),
+            "❌ That could not be handled: `the agent would not start`. It will not be retried — \
+send it again once that is fixed."
         );
         assert_eq!(
             super::busy_notice(),
-            "This job is still working, so that did not reach it. Wait until it stops, then say \
-it again."
+            "⏳ Still working, so that did not reach it. Say it again once it stops."
         );
         assert_eq!(
             super::resumed_notice(),
-            "This instance restarted while it was working on that. It is picking it up again now."
+            "stageman restarted while working on this, and is picking it up again."
         );
         assert_eq!(
             super::over_notice(),
-            "This job is over, so that did not reach it. Nothing more can be added to it — start a new job if there is still work here."
+            "This job is over, so nothing more reaches it. Start a new job if there is still work \
+here."
         );
     }
 
@@ -923,32 +935,6 @@ it again."
         assert!(super::INTERRUPTION.contains("a job you started"));
     }
 
-    /// An acknowledgement teaches no rule about where to say the next thing,
-    /// because there is none: a reply where the person was answered reaches
-    /// the foreman. The sentence that used to be here would now be false.
-    #[test]
-    fn an_acknowledgement_teaches_no_follow_up_rule() {
-        for ahead in [0, 1, 7] {
-            let said = super::received_notice(ahead);
-
-            assert!(!said.contains("do not reach"), "{said}");
-            assert!(!said.contains("root of the channel"), "{said}");
-        }
-    }
-
-    /// Waiting is said only when there is something to wait behind.
-    ///
-    /// "0 messages ahead" is noise where "working on this now" is an answer,
-    /// and the difference is what tells somebody whether to expect a pause.
-    #[test]
-    fn an_acknowledgement_says_how_far_behind_only_when_it_is() {
-        assert!(super::received_notice(0).contains("Working on this now"));
-        assert!(!super::received_notice(0).contains("behind"));
-
-        assert!(super::received_notice(2).contains("behind 2"));
-        assert!(!super::received_notice(2).contains("Working on this now"));
-    }
-
     /// The stuck notice must say the message is gone, not that it is queued.
     ///
     /// It is deliberately not retried — a message that cannot be handled must
@@ -956,25 +942,47 @@ it again."
     /// person has to be told to send it again. A notice that merely apologised
     /// would leave them waiting for a turn that is never coming.
     #[test]
-    fn the_stuck_notice_says_the_message_was_not_kept() {
-        let said = super::stuck_notice();
+    fn the_stuck_notice_says_the_message_was_not_kept_and_why() {
+        let said = super::stuck_notice("the disk is full");
 
-        assert!(said.contains("Send it again"), "{said}");
-        assert!(said.contains("not been kept"), "{said}");
+        assert!(said.contains("send it again"), "{said}");
+        assert!(said.contains("not be retried"), "{said}");
+        assert!(said.contains("the disk is full"), "{said}");
     }
 
-    /// The attention notice must not claim to know how it went.
+    /// Every reading of idle has a line of its own, each says how to reach
+    /// the job, and only the one waiting on a person names them.
     ///
-    /// The instance sees a turn end and cannot tell an answer from a question
-    /// from an agent giving up. Every word suggesting otherwise is one an
-    /// operator would reasonably act on, so this is what stops a well-meant
-    /// "finished" being added later.
+    /// The instance passes on the agent's claim and never guesses, so five
+    /// readings are five texts: one that collapsed two would tell an
+    /// operator to do the wrong thing about one of them.
     #[test]
-    fn the_attention_notice_says_nothing_about_how_it_went() {
-        let said = super::attention_notice().to_lowercase();
+    fn every_reading_of_idle_has_a_line_of_its_own() {
+        let readings = [
+            Waiting::Asked,
+            Waiting::Proposed,
+            Waiting::Paused,
+            Waiting::Failed("why".to_owned()),
+            Waiting::Silent,
+        ];
+        let lines: Vec<String> = readings
+            .iter()
+            .map(|waiting| super::stopped_notice(waiting, Some("<@U0HUMAN>"), "<@U0BOT>"))
+            .collect();
 
-        for claim in ["finish", "done", "complete", "success", "fail", "error"] {
-            assert!(!said.contains(claim), "it must not claim {claim}: {said}");
+        for (i, line) in lines.iter().enumerate() {
+            assert!(line.contains("Mention <@U0BOT> here"), "{line}");
+            assert!(
+                lines.iter().filter(|other| *other == line).count() == 1,
+                "reading {i} shares its line with another: {line}"
+            );
+        }
+        assert!(
+            lines[0].contains("<@U0HUMAN>"),
+            "asked names who is waited on"
+        );
+        for line in &lines[1..] {
+            assert!(!line.contains("<@U0HUMAN>"), "nobody is waited on: {line}");
         }
     }
 
@@ -1040,7 +1048,7 @@ when you finish."
             "You are the foreman for https://example.invalid/repo.
 
 People talk to you on a channel. Each message they send you arrives as its own turn, and the \
-only way to answer is to **call the `say` tool**.
+only way to answer is to **call the `say` tool**, in Markdown, which is rendered.
 
 Nothing you write as ordinary output is seen by anybody. What you pass to `say` lands in the \
 thread of the message you are answering, so a person can always see which of their messages you \

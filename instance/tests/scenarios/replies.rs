@@ -1,7 +1,9 @@
 //! A reply arriving on a job's thread, run against the simulated world.
 
+use stageman_channel::Reaction;
+
 use crate::simulation::{
-    Simulation, Spoken, in_room, in_thread, job, room, seed, watching_a_channel,
+    CHANNEL, Simulation, Spoken, in_room, job, room, seed, watching_a_channel,
 };
 use stageman_core::{JobId, Outcome, Place, Progress, State, Waiting};
 
@@ -48,7 +50,10 @@ fn a_reply_to_an_idle_job_resumes_it_after_the_record_lands() {
     );
     assert_eq!(
         world.posts(),
-        [(in_room(1), stageman_foreman::attention_notice().to_owned())],
+        [(
+            in_room(1),
+            stageman_foreman::stopped_notice(&Waiting::Silent, None, "<@U0BOT>")
+        )],
         "the thread is told once, when the turn ends"
     );
 }
@@ -222,7 +227,10 @@ fn a_mention_in_a_thread_of_a_jobs_room_is_answered_there_and_noticed_at_the_roo
     );
     assert_eq!(
         world.posts(),
-        [(in_room(1), stageman_foreman::attention_notice().to_owned())],
+        [(
+            in_room(1),
+            stageman_foreman::stopped_notice(&Waiting::Silent, None, "<@U0BOT>")
+        )],
         "told at the root of its room, whatever thread the exchange was in"
     );
 }
@@ -246,10 +254,15 @@ fn a_mention_in_a_thread_belonging_to_no_job_reaches_the_foreman() {
     world.says_in(100, 7, "hello?");
     world.run_until(&mut instance, 5_000);
 
+    assert!(world.posts().is_empty(), "{:?}", world.posts());
     assert_eq!(
-        world.posts(),
-        [(in_thread(7), stageman_foreman::received_notice(0))],
-        "acknowledged where it was said"
+        world.reactions().first(),
+        Some(&(
+            CHANNEL.to_owned(),
+            "1788000099.000001".to_owned(),
+            Reaction::Seen
+        )),
+        "seen where it was said"
     );
     assert!(
         world.talks().iter().any(|talk| talk.was_told("hello?")),

@@ -197,17 +197,7 @@ impl Running {
         if let Some(user) = origin.as_ref().and_then(|origin| origin.user.as_deref()) {
             self.invite_into(job, channel, &speaking, &room.id, user);
         }
-        // The mention the opening teaches is this instance's own identity
-        // on the channel, known once its listener has been told who it is;
-        // before that, the name the app is given in the setup instructions.
-        let mention = self
-            .listeners
-            .get(&project)
-            .and_then(|listener| listener.us.as_ref())
-            .map_or_else(
-                || "@stageman".to_owned(),
-                |us| stageman_channel::mention(channel, &us.user),
-            );
+        let mention = self.own_mention(project, channel);
         self.say(
             &speaking,
             &Place::root(room.clone()),

@@ -584,6 +584,14 @@ justify is usually obsolete.
   with finished work is try to push it, and a rule enforced only by a remote's
   refusal teaches itself expensively.
 
+- **Nothing posted is written in the platform's own markup.** Since
+  `docs/decisions/0062-what-this-instance-says-is-markdown.md` the adapter
+  posts everything as Markdown through the platform's own Markdown parameter,
+  and agents are told to write Markdown. The platform's dialect — single
+  asterisks for bold, angle brackets for links — looks close enough to pass
+  review and renders wrong, which is why it is worth a rule: a text that
+  needs a link or a mention gets it from the channel crate, which is the
+  one place that spells the platform's references.
 - **One Slack app per project is a must, and its manifest must subscribe to
   `app_mention`.** Measured, both: Socket Mode hands each event to *one* of an
   app's open connections, so two projects sharing an app-level token each
@@ -799,12 +807,17 @@ it lands.
   record's read-back cannot be exact either: an account's entitlements change
   how a value is spelled in a reply, so what is checked is that the reading
   moved.
-- **Kickoff prompts are snapshot-tested.** The prompt text the foreman
-  composes is asserted as literal text, so a change to what a job is told to do
-  shows up as a reviewable diff. Prompt text is the highest-leverage code here
-  and the only kind that changes behaviour without changing control flow, so it
-  is also the only kind that can be rewritten completely without a single test
-  going red.
+- **Every text this system posts is snapshot-tested, and it is Markdown.**
+  The prompt text the foreman composes, and every notice this instance says
+  on its own behalf, is asserted as literal text, so a change to what a job
+  is told to do or what a person is told shows up as a reviewable diff.
+  Prompt text is the highest-leverage code here and the only kind that
+  changes behaviour without changing control flow, so it is also the only
+  kind that can be rewritten completely without a single test going red.
+  Since `docs/decisions/0062-what-this-instance-says-is-markdown.md` every
+  such text is Markdown and goes out as Markdown: a notice written in the
+  platform's own markup would render its asterisks literally, and a
+  translator between the two is exactly what that record refuses.
 
 - **Sequencing is tested by scenarios and seeds, and their snapshots are
   reviewed as behaviour.** Every flow that crosses an await today — a turn
