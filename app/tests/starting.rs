@@ -361,7 +361,7 @@ fn watching(name: &str, repository: &str) -> State {
                     ChannelConfig {
                         address: "C0123456789".to_owned(),
                         credential: Secret::new(CHANNEL_CREDENTIAL.to_owned()),
-                        listen_credential: Some(Secret::new(LISTEN_CREDENTIAL.to_owned())),
+                        listen_credential: Secret::new(LISTEN_CREDENTIAL.to_owned()),
                     },
                 )]),
                 variables: BTreeMap::from([(

@@ -3,7 +3,10 @@
 ## Status
 Accepted. Outbound threading is built; the transport and the router this
 record decides are not, and this exists so that the shape they need is settled
-before either is written.
+before either is written. One app per project was measured to be a must
+rather than a preference, and the app-level token to be required rather than
+optional, in `docs/decisions/0060-a-binding-is-a-workspace.md` and
+`docs/decisions/0059-a-project-speaks-and-listens-on-slack-always.md`.
 
 ## Context
 

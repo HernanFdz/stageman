@@ -3228,9 +3228,9 @@ mod tests {
     /// The same, with a channel bound.
     ///
     /// Separate from the fixture above rather than replacing it, because both
-    /// shapes are real and each is the subject of its own claim: a project with
-    /// nothing bound is a working project, per
-    /// `docs/decisions/0005-conversation-happens-on-channels.md`.
+    /// shapes are real and each is the subject of its own claim: a project
+    /// with nothing bound is what the last release could write, and what its
+    /// agent is handed still has to be decidable.
     fn instance_with_a_channel(credential: &str) -> (State, ProjectId) {
         let (mut state, id) = instance_with_a_project(credential);
         state
@@ -3243,7 +3243,7 @@ mod tests {
                 stageman_core::ChannelConfig {
                     address: "C0123456789".to_owned(),
                     credential: Secret::new("xoxb-not-a-real-token".to_owned()),
-                    listen_credential: Some(Secret::new("xapp-not-a-real-token".to_owned())),
+                    listen_credential: Secret::new("xapp-not-a-real-token".to_owned()),
                 },
             );
         (state, id)
@@ -3276,6 +3276,7 @@ mod tests {
             .expect("a watched project")
             .speaking_in(stageman_core::Thread {
                 channel: Channel::Slack,
+                room: "C0123456789".to_owned(),
                 id: "1728312345.678901".to_owned(),
             });
 

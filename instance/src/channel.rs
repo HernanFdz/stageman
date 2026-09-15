@@ -61,6 +61,8 @@ pub enum Post {
     Opening {
         /// Whose thread.
         job: JobId,
+        /// The room it was posted in, which the thread is then in.
+        room: String,
     },
     /// A message on an agent's behalf, with the tool call that asked for it
     /// held open until the platform answers.
@@ -104,11 +106,12 @@ impl Running {
         &mut self,
         channel: Channel,
         speaking: &Speaking,
+        room: &str,
         text: &str,
         thread: Option<&str>,
         post: Post,
     ) -> Effect {
-        let rendered = stageman_channel::post(channel, speaking, text, thread);
+        let rendered = stageman_channel::post(channel, speaking, room, text, thread);
         let id = self.effect_id();
         self.sent.insert(
             id,
@@ -126,6 +129,7 @@ impl Running {
         let request = self.spoken(
             thread.channel,
             speaking,
+            &thread.room,
             text,
             Some(&thread.id),
             Post::Notice,
@@ -133,36 +137,28 @@ impl Running {
         self.defer(request);
     }
 
-    /// Says something in a thread on the instance's own behalf, without
-    /// waiting for anything: a notice that changes no state.
-    pub fn say_now(
-        &mut self,
-        speaking: &Speaking,
-        thread: &Thread,
-        text: &str,
-        effects: &mut Vec<Effect>,
-    ) {
-        let request = self.spoken(
-            thread.channel,
-            speaking,
-            text,
-            Some(&thread.id),
-            Post::Notice,
-        );
-        effects.push(request);
-    }
-
     /// Opens the thread a job's conversation happens in, by posting its
-    /// announcement at the root of the channel, once the job's record is on
-    /// the disk.
+    /// announcement at the root of the project's home room, once the job's
+    /// record is on the disk.
     pub fn open_thread(
         &mut self,
         job: JobId,
         channel: Channel,
         speaking: &Speaking,
+        room: &str,
         announcement: &str,
     ) {
-        let request = self.spoken(channel, speaking, announcement, None, Post::Opening { job });
+        let request = self.spoken(
+            channel,
+            speaking,
+            room,
+            announcement,
+            None,
+            Post::Opening {
+                job,
+                room: room.to_owned(),
+            },
+        );
         self.defer(request);
     }
 
@@ -179,6 +175,7 @@ impl Running {
         let posting = self.spoken(
             thread.channel,
             speaking,
+            &thread.room,
             text,
             Some(&thread.id),
             Post::Saying { request },
@@ -231,8 +228,15 @@ impl Running {
                     tracing::warn!(%why, "the thread could not be spoken to");
                 }
             }
-            Post::Opening { job } => {
-                self.thread_opened(*job, outcome.map(|id| Thread { channel, id }));
+            Post::Opening { job, room } => {
+                self.thread_opened(
+                    *job,
+                    outcome.map(|id| Thread {
+                        channel,
+                        room: room.clone(),
+                        id,
+                    }),
+                );
             }
             Post::Saying { request } => self.posted(*request, outcome.map(|_| ())),
         }

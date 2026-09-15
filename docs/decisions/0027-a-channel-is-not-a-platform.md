@@ -1,7 +1,12 @@
 # 0027 — A channel is not a platform, and does not share its map
 
 ## Status
-Accepted.
+Accepted. Narrowed by
+`docs/decisions/0059-a-project-speaks-and-listens-on-slack-always.md`, which
+requires the binding and both of its credentials, and by
+`docs/decisions/0060-a-binding-is-a-workspace.md`, which stops the address
+deciding where a project is listened to: it names the home room a job's
+thread opens in, and nothing else.
 
 ## Context
 

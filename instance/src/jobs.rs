@@ -4,7 +4,6 @@
 use stageman_core::{
     Handout, HandoutError, Job, JobId, Kit, Progress, ProjectId, Thread, Timestamp, Waiting,
 };
-use stageman_foreman::Voice;
 
 use crate::Running;
 use crate::turns::{Run, Turn, speaking_for};
@@ -16,6 +15,15 @@ pub enum BeginError {
     /// The project is not one this instance watches.
     #[error("no project {0} in this instance")]
     UnknownProject(ProjectId),
+    /// The project has no channel bound, so a job on it would have nowhere
+    /// to speak. Only a project the last release wrote can be in this state
+    /// — see
+    /// `docs/decisions/0059-a-project-speaks-and-listens-on-slack-always.md`.
+    #[error(
+        "project {0} has no Slack binding, so a job on it would have nowhere to speak; bind one \
+         in the dashboard"
+    )]
+    NoChannel(ProjectId),
     /// What the job's agent may see could not be decided.
     #[error("what the job's agent may see could not be decided")]
     Handout(#[source] HandoutError),
@@ -37,8 +45,8 @@ impl Running {
     ///
     /// # Errors
     ///
-    /// Fails if the project is unknown, or if a handout cannot be decided
-    /// for it.
+    /// Fails if the project is unknown, if it has no channel bound, or if a
+    /// handout cannot be decided for it.
     pub fn begin(
         &mut self,
         project: ProjectId,
@@ -56,15 +64,20 @@ impl Running {
         // The kit arrives decided — by a foreman naming one of the project's,
         // or by a person picking one — and is never composed here.
         let handout = Handout::for_job(&self.state, kit, project).map_err(BeginError::Handout)?;
-
-        // What the job can be told depends on what it was handed, so the
-        // prompt and the environment the container is started with are
-        // decided from one value.
-        let voice = if handout.channels().next().is_some() {
-            Voice::Channel
-        } else {
-            Voice::Silent
-        };
+        // Where the job's thread will be opened: the project's home room.
+        // Refused before anything is recorded when there is none, which only
+        // a project the last release wrote can lack.
+        let (channel, room) = self
+            .state
+            .projects
+            .get(&project)
+            .and_then(|watched| watched.channels.iter().next())
+            .map(|(channel, bound)| (*channel, bound.address.clone()))
+            .ok_or(BeginError::NoChannel(project))?;
+        let speaking = handout
+            .channel(channel)
+            .cloned()
+            .ok_or(BeginError::NoChannel(project))?;
         // Minted before the instruction, because the instruction names where
         // this job can be reached and that address is built from the
         // identifier.
@@ -73,7 +86,6 @@ impl Running {
         let kickoff = stageman_foreman::kickoff(
             &repository,
             work,
-            voice,
             &crate::tunnel::address(&self.domain, job, self.serving),
             &variables,
         );
@@ -92,13 +104,7 @@ impl Running {
         // agent it can reach a person, and running it anyway would make that
         // quietly false. It is also the cheapest moment to fail — no
         // container exists yet.
-        match handout.channels().next() {
-            Some((channel, speaking)) => {
-                let speaking = speaking.clone();
-                self.open_thread(job, channel, &speaking, &announcement);
-            }
-            None => self.start(job),
-        }
+        self.open_thread(job, channel, &speaking, &room, &announcement);
         Ok(job)
     }
 

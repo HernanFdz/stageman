@@ -200,16 +200,16 @@ pub struct Choice {
 
 /// The boxes that bind a channel, travelling together.
 ///
-/// Both empty means no channel. Both filled means one. Exactly one filled is
-/// refused, and that rule is written in one place, on the instance.
+/// All three filled binds a channel, and creating a project needs one:
+/// anything less is refused, and that rule is written in one place, on the
+/// instance. Amending never offers them.
 #[derive(Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ChannelDraft {
-    /// Where on the channel this project's conversation happens.
+    /// The home room: where on the channel a job's thread opens.
     pub address: String,
-    /// What reaches that channel.
+    /// What speaks on that channel.
     pub credential: String,
-    /// What listens on it, if this project is to be answered at all.
-    /// Optional where the two above are both-or-neither.
+    /// What listens on it.
     pub listen_credential: String,
 }
 
@@ -316,10 +316,10 @@ impl Draft {
     /// that submits is unavailable until pressing it would succeed. It is
     /// not a second definition of validity — the instance still checks —
     /// but it is the screen refusing to ask the question badly. Creating
-    /// needs a credential and may bind a channel; amending needs neither,
-    /// because a blank credential there means the one already held and the
-    /// channel is not offered at all. A row of variables needs a value
-    /// unless the project already holds that name.
+    /// needs a credential and a whole channel binding; amending needs
+    /// neither, because a blank credential there means the one already held
+    /// and the channel is not offered at all. A row of variables needs a
+    /// value unless the project already holds that name.
     #[must_use]
     pub fn is_complete(&self, filling: &Filling, held: &[String]) -> bool {
         let described = !self.name.trim().is_empty()
@@ -339,12 +339,9 @@ impl Draft {
                     && named
                     && valued
                     && !self.credential.trim().is_empty()
-                    && self.channel.address.trim().is_empty()
-                        == self.channel.credential.trim().is_empty()
-                    // Listening needs somewhere to listen. The reverse is
-                    // fine.
-                    && (self.channel.listen_credential.trim().is_empty()
-                        || !self.channel.address.trim().is_empty())
+                    && !self.channel.address.trim().is_empty()
+                    && !self.channel.credential.trim().is_empty()
+                    && !self.channel.listen_credential.trim().is_empty()
             }
             Filling::Amending(_) => described && named && valued,
         }
@@ -536,9 +533,16 @@ pub enum Refusal {
         /// The project that has it, as the screen names it.
         project: String,
     },
-    /// A channel was given an address without a credential, or the reverse.
-    #[error("a channel needs an address and a credential, or neither")]
+    /// A project was drafted without a whole channel binding.
+    #[error("a project needs a Slack channel, a bot token and an app-level token")]
     ChannelIncomplete,
+    /// A job was asked for on a project that has no channel bound, which only
+    /// a project the last release wrote can lack.
+    #[error("{project} has no Slack binding, so a job on it would have nowhere to speak")]
+    ChannelMissing {
+        /// The project, as the screen names it.
+        project: String,
+    },
     /// A project names an agent that has no credential.
     #[error("{name} has no credential, so a project cannot name it")]
     AgentNotConfigured {
@@ -654,7 +658,8 @@ impl Refusal {
             Self::AgentInUse { .. }
             | Self::ProjectBusy { .. }
             | Self::JobWorking
-            | Self::ChannelAlreadyBound { .. } => 409,
+            | Self::ChannelAlreadyBound { .. }
+            | Self::ChannelMissing { .. } => 409,
         }
     }
 }
@@ -804,12 +809,13 @@ mod tests {
         );
     }
 
-    /// The channel is the one thing a project may go without, and half of
-    /// one is the mistake worth catching on the screen.
+    /// A project is created with a whole channel binding, and any part of
+    /// one missing is the mistake worth catching on the screen — see
+    /// `docs/decisions/0059-a-project-speaks-and-listens-on-slack-always.md`.
     #[test]
-    fn a_channel_is_optional_and_half_of_one_is_not_complete() {
+    fn a_channel_is_required_whole() {
         assert!(
-            without(|draft| draft.channel = ChannelDraft::default())
+            !without(|draft| draft.channel = ChannelDraft::default())
                 .is_complete(&Filling::Creating, NOTHING_HELD)
         );
         assert!(
@@ -820,21 +826,8 @@ mod tests {
             !without(|draft| draft.channel.credential.clear())
                 .is_complete(&Filling::Creating, NOTHING_HELD)
         );
-    }
-
-    /// Listening without a channel is refused on the screen too, and
-    /// dropping only the listening token is fine.
-    #[test]
-    fn a_draft_listening_with_nowhere_to_listen_is_not_complete() {
         assert!(
-            !without(|draft| {
-                draft.channel.address.clear();
-                draft.channel.credential.clear();
-            })
-            .is_complete(&Filling::Creating, NOTHING_HELD)
-        );
-        assert!(
-            without(|draft| draft.channel.listen_credential.clear())
+            !without(|draft| draft.channel.listen_credential.clear())
                 .is_complete(&Filling::Creating, NOTHING_HELD)
         );
     }

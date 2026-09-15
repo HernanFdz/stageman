@@ -666,8 +666,10 @@ impl Running {
         match self.begin(project, kit, &starting.reason, &starting.instructions, at) {
             Ok(job) => Ok(format!("started job {job}")),
             Err(why) => {
-                tracing::warn!(%project, %why, "the job could not be recorded");
-                Err("the job could not be recorded".to_owned())
+                tracing::warn!(%project, %why, "the job could not be started");
+                // Said as it is, so that the foreman can report what was
+                // printed rather than what it thinks it meant.
+                Err(format!("the job could not be started: {why}"))
             }
         }
     }
@@ -926,6 +928,7 @@ mod tests {
             speaker: Speaker::Foreman(a_project()),
             thread: Some(Thread {
                 channel: stageman_core::Channel::Slack,
+                room: "C0123456789".to_owned(),
                 id: "1788000000.000001".to_owned(),
             }),
         }

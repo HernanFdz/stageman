@@ -691,32 +691,32 @@ fn ProjectForm(
             // one — and an empty box that meant *unbind* would disconnect a
             // project every time somebody corrected its name.
             if creating {
-            Field { label: "Slack channel (optional)",
+            Field { label: "Slack channel",
                 input {
                     class: FIELD,
-                    placeholder: "C0123456789",
+                    placeholder: "C0123456789, where a job's thread opens",
                     value: "{draft().channel.address}",
                     oninput: move |event| {
                         draft.with_mut(|draft| draft.channel.address = event.value());
                     },
                 }
             }
-            Field { label: "Slack credential (optional)",
+            Field { label: "Slack bot token",
                 input {
                     r#type: "password",
                     class: FIELD,
-                    placeholder: "a bot token that can post there",
+                    placeholder: "xoxb-…, what speaks",
                     value: "{draft().channel.credential}",
                     oninput: move |event| {
                         draft.with_mut(|draft| draft.channel.credential = event.value());
                     },
                 }
             }
-            Field { label: "Slack app-level token (optional)",
+            Field { label: "Slack app-level token",
                 input {
                     r#type: "password",
                     class: FIELD,
-                    placeholder: "xapp-… , so replies reach the job",
+                    placeholder: "xapp-…, what listens",
                     value: "{draft().channel.listen_credential}",
                     oninput: move |event| {
                         draft.with_mut(|draft| draft.channel.listen_credential = event.value());
@@ -724,9 +724,9 @@ fn ProjectForm(
                 }
             }
             p { class: "text-xs text-faint-foreground",
-                "Where a job asks when it hits something it cannot decide. Leave both empty and \
-                 this project can only run work that never needs to ask. Give one without the \
-                 other and it is refused: neither half works alone."
+                "Every project talks on Slack, through an app of its own: it hears any channel \
+                 it is invited to, and a job's thread opens in the channel named here. All three \
+                 are required, because a job that asks needs somebody able to answer."
             }
             }
             Field { label: "Variables (optional)",

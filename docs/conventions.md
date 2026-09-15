@@ -95,17 +95,34 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   what "idle" means the absence of.
 
 - **mention** — how somebody says they mean stageman rather than each other.
-  It is the whole of what makes a message ours: nothing without one is read,
-  in a thread or at the root — see
-  `docs/decisions/0031-a-mention-is-what-makes-it-ours.md`. Worth a word of its
-  own because it is the only rule an operator has to hold in their head, and
-  the only one whose failure is silence.
+  It is the whole of what makes a person's message ours: nothing without one
+  is read, in a thread or at the root — see
+  `docs/decisions/0031-a-mention-is-what-makes-it-ours.md`. Since
+  `docs/decisions/0060-a-binding-is-a-workspace.md` the platform's own
+  mention event is what is read, in every room the app has been invited to,
+  so a mention is also what makes a person's message *arrive* at all. Worth a
+  word of its own because it is the only rule an operator has to hold in
+  their head, and the only one whose failure is silence.
 
 - **channel** — somewhere the foreman watches and a job can speak into.
   Two-directional by definition, which is why it is not called a *source* or a
   *feed*: the same Slack that carries a question out carries the answer back.
   Not *integration* or *connector* either — both describe plumbing, and the
-  interesting part is that somebody is on the other end.
+  interesting part is that somebody is on the other end. Every project is
+  bound to one, with the credential that speaks and the one that listens
+  both given, per
+  `docs/decisions/0059-a-project-speaks-and-listens-on-slack-always.md`; for
+  Slack the binding is one app installed in one workspace, and the app hears
+  every room it has been invited to.
+- **room** — one Slack channel, as a person sees it in the sidebar. The word
+  this project uses because *channel* is taken: `Channel::Slack` names the
+  platform, and Slack's own word would make "a job's channel" mean two
+  things in one sentence. A project's **home room** is the one its binding
+  names, where a job's thread is opened; the foreman has no room of its own
+  and is heard in every room the app is in — see
+  `docs/decisions/0060-a-binding-is-a-workspace.md`. Not *conversation*,
+  refused under **thread** for the same reason, and not *address*, which is
+  what the binding's field is still called and names the home room alone.
 - **signal** — one observation on a channel: an issue opened, an alert fired, a
   message posted. Signals are read and judged, not stored or addressed. They
   are deliberately not entities; see **reason** below.
@@ -178,14 +195,20 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   routable, since a message arriving names its thread and nothing else. Not a
   *conversation*, which is the thing that happens in one rather than the place
   it happens in, and would leave nothing to call the identifier. The
-  foreman has none, deliberately: it speaks at the root of the channel,
-  and that is what makes a message there addressed to it rather than to any
-  job. See `docs/decisions/0029-a-reply-is-routed-by-its-thread.md`.
+  foreman has none of its own to be addressed in: a mention anywhere that is
+  not a job's thread is for it, and it answers in a thread under the message,
+  or in the one the message was already in. See
+  `docs/decisions/0029-a-reply-is-routed-by-its-thread.md` and
+  `docs/decisions/0060-a-binding-is-a-workspace.md`.
 
   Its identifier is opaque to this project and **must stay text**. For Slack it
   is the parent message's timestamp, which looks like a number and is not one:
   parsed as one it loses the microseconds and addresses no message, and the
-  failure reads like a permissions problem.
+  failure reads like a permissions problem. It names its room as well,
+  because an identifier is only unique within one room and the app hears
+  more than one. Since `docs/decisions/0060-a-binding-is-a-workspace.md` a
+  person can go on talking to the foreman in the thread it answered in,
+  because each message there is its own turn and the session remembers.
 
 - **tunnel** — the way in to what a job has put up for somebody to look at:
   one port published from its container when that container is created, and
@@ -552,6 +575,17 @@ justify is usually obsolete.
   with finished work is try to push it, and a rule enforced only by a remote's
   refusal teaches itself expensively.
 
+- **One Slack app per project is a must, and its manifest must subscribe to
+  `app_mention`.** Measured, both: Socket Mode hands each event to *one* of an
+  app's open connections, so two projects sharing an app-level token each
+  hear half of what is said, with nothing anywhere saying so; and since
+  `docs/decisions/0060-a-binding-is-a-workspace.md` a person is read from the
+  platform's own mention event and from nothing else, so an app whose
+  manifest lacks that subscription connects, greets, and hears nobody. The
+  same message also arrives on the message subscription, and that copy is
+  acknowledged and dropped rather than read twice. `README.md` carries the
+  manifest so that neither has to be remembered.
+
 - **Dependency versions live in `Cargo.toml` and are not restated here.** They
   are derivable, they go stale, and `just drift` cannot catch a version number
   in prose. Gotchas belong here; numbers do not.
@@ -701,6 +735,17 @@ it lands.
   This project is not stable and has no outside consumers, so the window is a
   choice rather than an obligation. Widening it later is free; what would not
   be free is discovering that a shim nobody could test had rotted.
+
+  **What must survive that window is the instance, not every job in it.** The
+  configured agents and the projects, with their credentials and bindings,
+  must open on the release after the one that wrote them, because losing
+  them is losing everything an operator typed. A job, a foreman's inbox, or
+  the half of a binding that cannot be carried honestly may be dropped on
+  opening, with a line at startup saying so, when carrying it would mean
+  inventing a value for it — a job mid-flight across an upgrade is a job the
+  operator can retire and restart, and a message in hand is one they can
+  send again. Never the other way round: a file must not fail to open over
+  a job.
 
 - **A field added to the sealed form is defaulted, and a literal older file
   proves it.** `docs/decisions/0011-state-is-a-snapshot-not-a-database.md`

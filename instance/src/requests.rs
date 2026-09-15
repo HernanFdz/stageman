@@ -411,13 +411,18 @@ impl Running {
             name: kit.to_owned(),
             project: watched.name.clone(),
         })?;
+        let name = watched.name.clone();
         self.begin(identifier, chosen, BY_HAND, work, at)
-            .map_err(|reason| {
+            .map_err(|reason| match reason {
+                // The one refusal an operator can act on: bind a channel.
+                crate::jobs::BeginError::NoChannel(_) => Refusal::ChannelMissing { project: name },
                 // Nothing an operator can act on: the project exists and its
                 // agents are configured, or the checks above would have
                 // refused.
-                tracing::error!(%reason, "a job could not be started");
-                Refusal::Failed
+                reason => {
+                    tracing::error!(%reason, "a job could not be started");
+                    Refusal::Failed
+                }
             })?;
         self.jobs(project)
     }
@@ -610,32 +615,31 @@ pub fn busy(project: &Project) -> Option<usize> {
     (running > 0).then_some(running)
 }
 
-/// What a project's channel bindings are, from the boxes the form offers:
-/// empty, one, or a refusal. A half-bound channel looks bound on every screen
-/// right up to the moment a job has a question and nowhere to put it.
+/// What a project's channel binding is, from the boxes the form offers: one,
+/// or a refusal. A project is created with a whole binding, per
+/// `docs/decisions/0059-a-project-speaks-and-listens-on-slack-always.md`; a
+/// partial one looks bound on every screen right up to the moment a job has
+/// a question and nowhere to put it, or asks one nobody can answer.
 ///
 /// # Errors
 ///
-/// Fails if exactly one half was given, or a credential to listen with and
-/// nowhere to listen.
+/// Fails if any of the three is missing.
 pub fn binding(channel: &ChannelDraft) -> Result<BTreeMap<Channel, ChannelConfig>, Refusal> {
     let address = channel.address.trim();
     let credential = channel.credential.trim();
     let listening = channel.listen_credential.trim();
 
-    match (address.is_empty(), credential.is_empty()) {
-        (true, true) if listening.is_empty() => Ok(BTreeMap::new()),
-        (false, false) => Ok(BTreeMap::from([(
-            Channel::Slack,
-            ChannelConfig {
-                address: address.to_owned(),
-                credential: Secret::new(credential.to_owned()),
-                listen_credential: (!listening.is_empty())
-                    .then(|| Secret::new(listening.to_owned())),
-            },
-        )])),
-        _ => Err(Refusal::ChannelIncomplete),
+    if address.is_empty() || credential.is_empty() || listening.is_empty() {
+        return Err(Refusal::ChannelIncomplete);
     }
+    Ok(BTreeMap::from([(
+        Channel::Slack,
+        ChannelConfig {
+            address: address.to_owned(),
+            credential: Secret::new(credential.to_owned()),
+            listen_credential: Secret::new(listening.to_owned()),
+        },
+    )]))
 }
 
 /// The project already bound where these bindings would go, if any is,
@@ -777,7 +781,7 @@ mod tests {
             ChannelConfig {
                 address: "C0123456789".to_owned(),
                 credential: Secret::new("xoxb-not-a-real-token".to_owned()),
-                listen_credential: None,
+                listen_credential: Secret::new("xapp-token".to_owned()),
             },
         );
         let deep = KitConfig {
@@ -961,43 +965,37 @@ mod tests {
         assert!(resolved(&BTreeMap::new(), &[row("  ", "anything")]).is_err());
     }
 
-    /// Both halves bind, neither binds nothing, one alone is refused, and
-    /// listening needs somewhere to listen.
+    /// All three bind, trimmed, and anything less is refused.
     #[test]
-    fn a_channel_is_bound_by_both_halves_or_neither() {
-        assert!(binding(&drafted("", "", "")).expect("nothing").is_empty());
-        assert!(
-            binding(&drafted("  ", "\t", ""))
-                .expect("whitespace")
-                .is_empty()
-        );
-
-        let bound =
-            binding(&drafted(" C0123456789 ", " xoxb-not-a-real-token ", "")).expect("both halves");
+    fn a_channel_is_bound_by_all_three_or_refused() {
+        let bound = binding(&drafted(
+            " C0123456789 ",
+            " xoxb-not-a-real-token ",
+            " xapp-not-a-real-token ",
+        ))
+        .expect("all three");
         let slack = bound.get(&Channel::Slack).expect("keyed by the channel");
         assert_eq!(slack.address, "C0123456789");
         assert_eq!(slack.credential.expose(), "xoxb-not-a-real-token");
-        assert!(slack.listen_credential.is_none());
+        assert_eq!(slack.listen_credential.expose(), "xapp-not-a-real-token");
 
-        let listening =
-            binding(&drafted("C0123456789", "xoxb-token", "xapp-token")).expect("all three");
-        assert_eq!(
-            listening
-                .get(&Channel::Slack)
-                .and_then(|slack| slack.listen_credential.as_ref())
-                .map(Secret::expose),
-            Some("xapp-token")
-        );
-
-        for half in [
+        for partial in [
+            drafted("", "", ""),
+            drafted("  ", "\t", ""),
             drafted("C0123456789", "", ""),
             drafted("", "xoxb-not-a-real-token", ""),
             drafted("", "", "xapp-token"),
+            drafted("C0123456789", "xoxb-not-a-real-token", ""),
+            drafted("C0123456789", "", "xapp-token"),
         ] {
-            assert!(matches!(binding(&half), Err(Refusal::ChannelIncomplete)));
+            assert!(
+                matches!(binding(&partial), Err(Refusal::ChannelIncomplete)),
+                "{partial:?}"
+            );
         }
         let shown = format!("{bound:?}");
         assert!(!shown.contains("xoxb-not-a-real-token"), "{shown}");
+        assert!(!shown.contains("xapp-not-a-real-token"), "{shown}");
     }
 
     /// Two projects on one channel is refused, and the holder is named.
@@ -1010,16 +1008,18 @@ mod tests {
             ChannelConfig {
                 address: "C0123456789".to_owned(),
                 credential: Secret::new("xoxb-token".to_owned()),
-                listen_credential: None,
+                listen_credential: Secret::new("xapp-token".to_owned()),
             },
         );
         state
             .projects
             .insert(ProjectId::from_uuid(Uuid::from_u128(1)), watched);
 
-        let wanted = binding(&drafted("C0123456789", "xoxb-other", "")).expect("a binding");
+        let wanted =
+            binding(&drafted("C0123456789", "xoxb-other", "xapp-other")).expect("a binding");
         assert_eq!(already_bound(&state, &wanted), Some("aviary".to_owned()));
-        let elsewhere = binding(&drafted("C9999999999", "xoxb-other", "")).expect("a binding");
+        let elsewhere =
+            binding(&drafted("C9999999999", "xoxb-other", "xapp-other")).expect("a binding");
         assert_eq!(already_bound(&state, &elsewhere), None);
         assert_eq!(already_bound(&state, &BTreeMap::new()), None);
     }

@@ -77,6 +77,51 @@ What gets reported is `STAGEMAN_LOG`. It takes the same filter syntax as
 `RUST_LOG` and defaults to `warn` — enough to see what needs attention, not a
 commentary on things going right.
 
+## Talking to it on Slack
+
+Every project is bound to a Slack app of its own, installed in the workspace
+its people talk in, and the app hears every channel it is invited to. Create
+the app at api.slack.com from this manifest, install it, and give the project
+the bot token, the app-level token with the `connections:write` scope, and the
+identifier of the channel a job's thread should open in:
+
+```yaml
+display_information:
+  name: stageman
+features:
+  bot_user:
+    display_name: stageman
+    always_online: false
+oauth_config:
+  scopes:
+    bot:
+      - chat:write
+      - channels:history
+      - groups:history
+      - app_mentions:read
+settings:
+  event_subscriptions:
+    bot_events:
+      - message.channels
+      - message.groups
+      - app_mention
+  socket_mode_enabled: true
+  org_deploy_enabled: false
+  token_rotation_enabled: false
+```
+
+**One app per project, not one for the instance.** Slack hands each event to
+one of an app's open connections, so two projects sharing an app would each
+hear half of what is said, and nothing would say so.
+
+Then `/invite @stageman` into any channel where people should be able to talk
+to it, and mention it: **stageman reads nothing that does not mention it.** A
+mention in a job's thread reaches that job. A mention anywhere else reaches
+the project's foreman, which answers in a thread under your message, and
+you can go on talking to it there — every message still needs the mention,
+so that people can talk to each other under a job or a foreman without waking
+either.
+
 ## Installing it
 
 One command. It works out which binary this machine needs, installs it, sets it
