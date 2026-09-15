@@ -249,6 +249,22 @@ pub struct Simulation {
     recorder: Option<Recorder<Instance>>,
 }
 
+/// Who a simulated frame is from, and on which subscription.
+///
+/// Three shapes, as measured on the real platform: a person's mention
+/// arrives as its own event, a person's message arrives on the message
+/// subscription — whether the copy of a mention or plain talk — and what
+/// this instance posted comes back carrying its own identifiers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Spoken {
+    /// A person mentioning this instance, delivered as a mention event.
+    Mention,
+    /// A person's message on the message subscription.
+    Plain,
+    /// Something this instance posted itself.
+    Ours,
+}
+
 /// The identity every simulated instance has.
 pub const fn this_instance() -> InstanceId {
     InstanceId::from_uuid(Uuid::from_u128(0xabc))
@@ -272,10 +288,11 @@ pub const fn job(n: u128) -> JobId {
     JobId::from_uuid(Uuid::from_u128(n))
 }
 
-/// A thread on the project's channel, named by number.
+/// A thread in the project's home room, named by number.
 pub fn thread(n: u32) -> Thread {
     Thread {
         channel: Channel::Slack,
+        room: CHANNEL.to_owned(),
         id: format!("1788000000.{n:06}"),
     }
 }
@@ -300,7 +317,7 @@ fn a_project(jobs: BTreeMap<JobId, Job>, bound: bool) -> Project {
             ChannelConfig {
                 address: CHANNEL.to_owned(),
                 credential: Secret::new("xoxb-not-a-real-token".to_owned()),
-                listen_credential: Some(Secret::new("xapp-not-a-real-token".to_owned())),
+                listen_credential: Secret::new("xapp-not-a-real-token".to_owned()),
             },
         );
     }
@@ -1535,9 +1552,9 @@ impl Simulation {
         let responded = match Call::parse(&request) {
             Some(Call::Post {
                 channel,
+                room,
                 text,
                 thread: in_thread,
-                ..
             }) => {
                 let body = if let Some(error) = self.post_failures.pop_front() {
                     format!(r#"{{"ok":false,"error":"{error}"}}"#)
@@ -1547,9 +1564,12 @@ impl Simulation {
                     let named = match in_thread {
                         None => {
                             self.threads_opened += 1;
-                            thread(self.threads_opened)
+                            Thread {
+                                room,
+                                ..thread(self.threads_opened)
+                            }
                         }
-                        Some(id) => Thread { channel, id },
+                        Some(id) => Thread { channel, room, id },
                     };
                     let identifier = if named.id == thread(self.threads_opened).id {
                         named.id.clone()
@@ -1569,7 +1589,7 @@ impl Simulation {
                 let body = if let Some(error) = self.listen_failures.pop_front() {
                     format!(r#"{{"ok":false,"error":"{error}"}}"#)
                 } else if matches!(question, Call::WhoAmI { .. }) {
-                    r#"{"ok":true,"user_id":"U0BOT"}"#.to_owned()
+                    r#"{"ok":true,"user_id":"U0BOT","bot_id":"B0SELF"}"#.to_owned()
                 } else {
                     self.streams_opened += 1;
                     format!(
@@ -1677,29 +1697,33 @@ impl Simulation {
         id: &str,
         in_thread: Option<&str>,
         text: &str,
-        from_us: bool,
+        spoken: Spoken,
     ) -> Event {
         self.envelopes += 1;
         let envelope = format!("e-{}", self.envelopes);
         let thread_ts =
             in_thread.map_or_else(String::new, |thread| format!(r#","thread_ts":"{thread}""#));
-        let speaker = if from_us {
-            r#""bot_id":"B0SELF","subtype":"bot_message""#
-        } else {
-            r#""user":"U0HUMAN""#
+        // As measured: a person's mention is its own event, a person's
+        // message is the copy of one on the message subscription, and what
+        // this instance posted comes back as a message carrying both of its
+        // identifiers.
+        let (kind, speaker) = match spoken {
+            Spoken::Mention => ("app_mention", r#""user":"U0HUMAN""#),
+            Spoken::Plain => ("message", r#""user":"U0HUMAN""#),
+            Spoken::Ours => ("message", r#""bot_id":"B0SELF","user":"U0BOT""#),
         };
         let text = serde_json::Value::String(text.to_owned()).to_string();
         Event::Frame {
             id: socket,
             text: format!(
-                r#"{{"envelope_id":"{envelope}","type":"events_api","payload":{{"event":{{"type":"message","channel":"{CHANNEL}",{speaker},"text":{text},"ts":"{id}"{thread_ts}}}}}}}"#
+                r#"{{"envelope_id":"{envelope}","type":"events_api","payload":{{"event":{{"type":"{kind}","channel":"{CHANNEL}",{speaker},"text":{text},"ts":"{id}"{thread_ts}}}}}}}"#
             ),
             at,
         }
     }
 
-    /// Somebody mentioning this instance in a thread on the project's
-    /// channel, as the platform would deliver it now.
+    /// Somebody mentioning this instance in a thread in the project's home
+    /// room, as the platform would deliver it now.
     pub fn said_in(&mut self, thread: u32, text: &str) -> Event {
         let socket = self.live_socket();
         let now = self.now;
@@ -1709,7 +1733,7 @@ impl Simulation {
             "1788000099.000001",
             Some(&self::thread(thread).id),
             &format!("<@U0BOT> {text}"),
-            false,
+            Spoken::Mention,
         )
     }
 
@@ -1722,7 +1746,7 @@ impl Simulation {
             "1788000099.000001",
             Some(&self::thread(thread).id),
             &format!("<@U0BOT> {text}"),
-            false,
+            Spoken::Mention,
         );
         self.schedule(at, event);
     }
@@ -1737,7 +1761,23 @@ impl Simulation {
             "1788000099.000002",
             Some(&self::thread(thread).id),
             text,
-            false,
+            Spoken::Plain,
+        )
+    }
+
+    /// The copy of somebody's mention that the message subscription
+    /// delivers beside the mention event: the same words, the same
+    /// identifier, and not to be read twice.
+    pub fn said_in_as_a_message(&mut self, thread: u32, text: &str) -> Event {
+        let socket = self.live_socket();
+        let now = self.now;
+        self.frame_on(
+            socket,
+            now,
+            "1788000099.000001",
+            Some(&self::thread(thread).id),
+            &format!("<@U0BOT> {text}"),
+            Spoken::Plain,
         )
     }
 
@@ -1751,13 +1791,13 @@ impl Simulation {
             "1788000099.000003",
             Some(&self::thread(thread).id),
             &format!("<@U0BOT> {text}"),
-            true,
+            Spoken::Ours,
         )
     }
 
-    /// Somebody mentioning this instance at the root of the project's
-    /// channel, said at an instant. Each is its own message, so each opens
-    /// its own thread.
+    /// Somebody mentioning this instance at the root of the project's home
+    /// room, said at an instant. Each is its own message, so each opens its
+    /// own thread.
     pub fn says_at_root(&mut self, at: Now, n: u32, text: &str) {
         let socket = self.live_socket();
         let event = self.frame_on(
@@ -1766,7 +1806,7 @@ impl Simulation {
             &self::thread(n).id,
             None,
             &format!("<@U0BOT> {text}"),
-            false,
+            Spoken::Mention,
         );
         self.schedule(at, event);
     }
@@ -1781,7 +1821,7 @@ impl Simulation {
             &self::thread(n).id,
             None,
             &format!("<@U0BOT> {text}"),
-            false,
+            Spoken::Mention,
         );
         self.schedule(at, event);
     }

@@ -4,7 +4,11 @@
 Accepted. Supersedes the routing rule in
 `docs/decisions/0029-a-reply-is-routed-by-its-thread.md`; everything else that
 record decided — Socket Mode, one app per project, a reply routed by its thread
-— stands unchanged.
+— stands unchanged. Superseded in one part by
+`docs/decisions/0060-a-binding-is-a-workspace.md`: a mention in a thread
+belonging to no job now reaches the foreman and is answered there, rather
+than being answered with a fixed sentence. The mention itself, and its being
+required inside a job's thread, stand.
 
 ## Context
 

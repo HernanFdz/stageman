@@ -276,14 +276,17 @@ pub fn speaking_for(state: &State, job: JobId) -> Option<(Speaking, Thread)> {
     Some((bound, thread))
 }
 
-/// What to listen to on one project, if there is anything.
+/// What to listen to on one project, if it has a binding.
 ///
-/// A binding with no credential to listen with is not listened to, and it is
-/// not an error: it looks exactly like a platform that has sent nothing.
+/// None only for a project the last release wrote without one, which is
+/// named at startup — see `unbound` in the boot — so that its silence is not
+/// mistaken for a platform that has sent nothing.
 pub fn listening_on(project: &Project) -> Option<(Channel, Secret, Speaking)> {
-    project.channels.iter().find_map(|(channel, bound)| {
-        Some((*channel, bound.listen_credential.clone()?, bound.speaking()))
-    })
+    project
+        .channels
+        .iter()
+        .next()
+        .map(|(channel, bound)| (*channel, bound.listen_credential.clone(), bound.speaking()))
 }
 
 /// A failure and everything underneath it, as one line of prose.
@@ -908,6 +911,7 @@ mod tests {
 
         state.job_mut(job).expect("the job").thread = Some(Thread {
             channel: Channel::Slack,
+            room: "C0123456789".to_owned(),
             id: "1728312345.678901".to_owned(),
         });
         state
@@ -920,11 +924,12 @@ mod tests {
                 ChannelConfig {
                     address: "C0123456789".to_owned(),
                     credential: Secret::new("xoxb-not-a-real-token".to_owned()),
-                    listen_credential: None,
+                    listen_credential: Secret::new("xapp-not-a-real-token".to_owned()),
                 },
             );
         let (bound, thread) = speaking_for(&state, job).expect("somewhere to speak");
-        assert_eq!(bound.address, "C0123456789");
+        assert_eq!(bound.credential.expose(), "xoxb-not-a-real-token");
+        assert_eq!(thread.room, "C0123456789");
         assert_eq!(thread.id, "1728312345.678901");
 
         state

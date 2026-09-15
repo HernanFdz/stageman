@@ -643,12 +643,13 @@ impl Boot {
                         };
                         match file::opened(found.as_ref().map(Bytes::as_slice), key) {
                             Ok(opened) => {
-                                for project in unheard(&opened.0) {
+                                for project in unbound(&opened.0) {
                                     tracing::warn!(
                                         %project,
-                                        "a channel is bound with no credential to listen with, so \
-                                         nothing it says will be heard — which is indistinguishable \
-                                         from nobody saying anything"
+                                        "no Slack binding, or one the last release wrote without \
+                                         the credential that listens: its foreman cannot be reached \
+                                         and no job can start on it until one is bound in the \
+                                         dashboard"
                                     );
                                 }
                                 self.opened = Some(opened);
@@ -819,31 +820,42 @@ impl Boot {
 /// Every project whose channels this instance cannot hear replies on.
 ///
 /// By name rather than by count: an operator told that two of three projects
-/// are listening still has to work out which one is not. A binding with no
-/// credential to listen with is not an error and produces no warning of its
-/// own — it looks exactly like a platform that has sent nothing — so this is
-/// the only thing that tells the two apart.
-pub fn unheard(state: &State) -> Vec<String> {
+/// are listening still has to work out which one is not. A project with no
+/// binding is not an error and produces no warning of its own — it looks
+/// exactly like a platform that has sent nothing — so this is the only thing
+/// that tells the two apart. Only a file the last release wrote can hold one,
+/// since
+/// `docs/decisions/0059-a-project-speaks-and-listens-on-slack-always.md`:
+/// either it had no binding, or it had one without the credential that
+/// listens, which opening drops.
+pub fn unbound(state: &State) -> Vec<String> {
     state
         .projects
         .values()
-        .filter(|project| {
-            project
-                .channels
-                .values()
-                .any(|bound| bound.listen_credential.is_none())
-        })
+        .filter(|project| project.channels.is_empty())
         .map(|project| project.name.clone())
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::unheard;
+    use super::unbound;
     use stageman_core::{Agent, Channel, ChannelConfig, Project, ProjectId, Secret, State, Uuid};
     use std::collections::BTreeMap;
 
-    fn watching(name: &str, listens: bool) -> Project {
+    fn watching(name: &str, bound: bool) -> Project {
+        let channels = if bound {
+            BTreeMap::from([(
+                Channel::Slack,
+                ChannelConfig {
+                    address: format!("C-{name}"),
+                    credential: Secret::new("xoxb-token".to_owned()),
+                    listen_credential: Secret::new("xapp-token".to_owned()),
+                },
+            )])
+        } else {
+            BTreeMap::new()
+        };
         Project {
             name: name.to_owned(),
             repository: "https://example.invalid/repo".to_owned(),
@@ -853,14 +865,7 @@ mod tests {
                 stageman_core::KitConfig::defaults(Agent::Claude),
             )]),
             credentials: BTreeMap::new(),
-            channels: BTreeMap::from([(
-                Channel::Slack,
-                ChannelConfig {
-                    address: format!("C-{name}"),
-                    credential: Secret::new("xoxb-token".to_owned()),
-                    listen_credential: listens.then(|| Secret::new("xapp-token".to_owned())),
-                },
-            )]),
+            channels,
             jobs: BTreeMap::new(),
             variables: BTreeMap::new(),
             attending: stageman_core::Attending::default(),
@@ -868,23 +873,23 @@ mod tests {
     }
 
     #[test]
-    fn only_a_project_that_cannot_be_heard_is_named() {
+    fn only_a_project_with_no_binding_is_named() {
         let mut state = State::default();
-        assert!(unheard(&state).is_empty());
+        assert!(unbound(&state).is_empty());
 
         state.projects.insert(
             ProjectId::from_uuid(Uuid::from_u128(1)),
             watching("heard", true),
         );
         assert!(
-            unheard(&state).is_empty(),
-            "a listening channel is not a problem"
+            unbound(&state).is_empty(),
+            "a bound channel is not a problem"
         );
 
         state.projects.insert(
             ProjectId::from_uuid(Uuid::from_u128(2)),
             watching("deaf", false),
         );
-        assert_eq!(unheard(&state), vec!["deaf".to_owned()]);
+        assert_eq!(unbound(&state), vec!["deaf".to_owned()]);
     }
 }

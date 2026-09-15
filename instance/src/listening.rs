@@ -353,16 +353,15 @@ impl Running {
                 // Said at debug so that what is left at info is somebody
                 // talking to it.
                 if message.from_us {
-                    tracing::debug!(address = %message.address, "heard itself, and ignored it");
+                    tracing::debug!(room = %message.room, "heard itself, and ignored it");
                 } else {
                     tracing::info!(
-                        address = %message.address,
+                        room = %message.room,
                         thread = message.thread.as_deref().unwrap_or("(root)"),
-                        mentions = message.mentions,
                         "heard somebody speak"
                     );
                 }
-                self.heard(channel, &message, effects);
+                self.heard(project, channel, &message);
             }
             Incoming::Acknowledge(_) | Incoming::Ignore => {}
         }
@@ -387,7 +386,6 @@ impl Running {
         // side — an event subscription that was never added.
         tracing::info!(
             %project,
-            address = %listener.speaking.address,
             as_user = listener.us.as_ref().map_or("?", |us| us.user.as_str()),
             "listening"
         );

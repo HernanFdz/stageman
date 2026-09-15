@@ -6,9 +6,18 @@
 //! somebody's own machine, per
 //! `docs/decisions/0029-a-reply-is-routed-by-its-thread.md`. Two questions
 //! come before it: who this instance is, asked with the credential that
-//! speaks, because that is what a mention names; and where to connect,
-//! asked with the app-level credential, because that is the one that opens
-//! a stream and it never leaves the daemon.
+//! speaks, because that is what a mention names and what its own posts
+//! carry; and where to connect, asked with the app-level credential, because
+//! that is the one that opens a stream and it never leaves the daemon.
+//!
+//! **A person is read from the platform's own mention event and from nothing
+//! else.** A mention arrives twice — once on the message subscription and
+//! once as an `app_mention` — and only the second is delivered when the
+//! mention is what got the app invited into the room. So the message
+//! subscription is read for one thing, what this instance said itself, which
+//! is how its own posts are told apart; a person's copy there is
+//! acknowledged and dropped. See
+//! `docs/decisions/0060-a-binding-is-a-workspace.md`.
 //!
 //! **A thread has no independent existence**, which is why a job's thread
 //! is opened by the daemon rather than by the job. There is no call that
@@ -56,14 +65,25 @@ pub fn open_socket(opening: &Secret) -> Request {
 }
 
 /// Who this instance is, from the answer to [`who_am_i`].
+///
+/// Both identifiers, and the second is what makes the credential a bot's: a
+/// user token is answered without one, and a user token could not tell its
+/// own posts from anybody else's, so it is refused here rather than
+/// connected and left to read its own words back.
 pub fn identity(status: u16, body: &[u8]) -> Result<Identity, ChannelError> {
     let told = accepted(status, body)?;
-    told.get("user_id")
+    let user = told
+        .get("user_id")
         .and_then(serde_json::Value::as_str)
-        .map(|user| Identity {
-            user: user.to_owned(),
-        })
-        .ok_or(ChannelError::NoAnswer)
+        .ok_or(ChannelError::NoAnswer)?;
+    let bot = told
+        .get("bot_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(ChannelError::NotABot)?;
+    Ok(Identity {
+        user: user.to_owned(),
+        bot: bot.to_owned(),
+    })
 }
 
 /// Where to connect, from the answer to [`open_socket`].
@@ -127,17 +147,32 @@ pub fn decode(frame: &str, us: &Identity) -> Incoming {
         return Incoming::Acknowledge(id);
     };
 
-    // Only a plain message is a message. An edit, a deletion, somebody
-    // joining — all arrive as this type with a subtype, and none of them is
-    // somebody talking to a job. A bot's own message is the one subtype
-    // worth reading, because recognising it is how a loop is prevented.
-    let plain = said.subtype.is_none();
-    let ours = said.bot_id.is_some() || said.subtype.as_deref() == Some("bot_message");
-    if said.kind.as_deref() != Some("message") || !(plain || ours) {
-        return Incoming::Acknowledge(id);
-    }
+    let from_us = match said.kind.as_deref() {
+        // Somebody mentioning this instance, as its own event. It is what
+        // makes a person's message arrive at all, and the one delivery that
+        // reaches a room the app was invited into by that very mention.
+        Some("app_mention") => said.user.as_deref() == Some(us.user.as_str()),
+        // The message subscription is read for what this instance said
+        // itself and for nothing else. A person's message here is the copy
+        // of a mention that arrives as its own event above, and another
+        // bot's is not read. Recognised by this instance's own identifiers,
+        // never by being a bot: a bot's post carries the bot identifier,
+        // and one from the user the token belongs to carries the user's.
+        // Either alone is enough, since the two do not always arrive
+        // together, and an edit or a broadcast is not a thing said.
+        Some("message") => {
+            let ours = said.bot_id.as_deref() == Some(us.bot.as_str())
+                || said.user.as_deref() == Some(us.user.as_str());
+            let plain = said.subtype.is_none() || said.subtype.as_deref() == Some("bot_message");
+            if !(ours && plain) {
+                return Incoming::Acknowledge(id);
+            }
+            true
+        }
+        _ => return Incoming::Acknowledge(id),
+    };
 
-    let Some(address) = said.channel else {
+    let Some(room) = said.channel else {
         return Incoming::Acknowledge(id);
     };
 
@@ -151,11 +186,10 @@ pub fn decode(frame: &str, us: &Identity) -> Incoming {
     Incoming::Said {
         envelope: id,
         message: Message {
-            mentions: said.text.contains(&format!("<@{}>", us.user)),
-            from_us: ours || said.user.as_deref() == Some(us.user.as_str()),
+            from_us,
             id: spoken,
             text: said.text,
-            address,
+            room,
             thread: said.thread_ts,
         },
     }
@@ -196,15 +230,15 @@ struct Said {
     thread_ts: Option<String>,
 }
 
-/// Renders one message posted: at the root of the address, or in a thread.
-pub fn post(speaking: &Speaking, text: &str, thread: Option<&str>) -> Request {
+/// Renders one message posted in a room: at its root, or in a thread there.
+pub fn post(speaking: &Speaking, room: &str, text: &str, thread: Option<&str>) -> Request {
     // Built as a map rather than indexed into as a value: indexing into a
     // value is the operation the gate is right to call a panic, and a map
     // has nothing to fail on. The thread is left out rather than sent as
     // null, because the platform reads a present-but-empty field as an
     // address rather than as no address.
     let mut posting = serde_json::Map::new();
-    posting.insert("channel".to_owned(), speaking.address.as_str().into());
+    posting.insert("channel".to_owned(), room.into());
     posting.insert("text".to_owned(), text.into());
     if let Some(thread) = thread {
         posting.insert("thread_ts".to_owned(), thread.into());
@@ -249,7 +283,7 @@ pub fn call(request: &Request) -> Option<Call> {
     let posted: Posted = serde_json::from_slice(request.body.as_deref()?).ok()?;
     Some(Call::Post {
         channel: Channel::Slack,
-        address: posted.channel,
+        room: posted.channel,
         text: posted.text,
         thread: posted.thread_ts,
     })
@@ -310,12 +344,13 @@ struct Answered {
 
 #[cfg(test)]
 mod tests {
-    use super::{accepted, decode, posted};
+    use super::{accepted, decode, identity, posted};
     use crate::{ChannelError, Identity, Incoming};
 
     fn us() -> Identity {
         Identity {
             user: "U0BOT".to_owned(),
+            bot: "B0SELF".to_owned(),
         }
     }
 
@@ -336,12 +371,13 @@ mod tests {
         );
     }
 
-    /// A plain message from a person, in a thread.
+    /// A person mentioning this instance in a thread, as the platform
+    /// delivers it: its own event, carrying the thread it was said in.
     #[test]
-    fn a_reply_in_a_thread_carries_everything_routing_needs() {
+    fn a_mention_in_a_thread_carries_everything_routing_needs() {
         let frame = r#"{"envelope_id":"e-1","type":"events_api","payload":{"event":{
-            "type":"message","channel":"C0123","user":"U0HUMAN",
-            "text":"use postgres","ts":"1788000001.000001","thread_ts":"1728312345.678901"}}}"#;
+            "type":"app_mention","channel":"C0123","user":"U0HUMAN",
+            "text":"<@U0BOT> use postgres","ts":"1788000001.000001","thread_ts":"1728312345.678901"}}}"#;
 
         let Incoming::Said { envelope, message } = said(frame) else {
             panic!("expected a message, got {:?}", said(frame));
@@ -351,45 +387,38 @@ mod tests {
         // The message's own identifier, which is what a foreman would
         // answer under if this had been at the root.
         assert_eq!(message.id, "1788000001.000001");
-        assert_eq!(message.text, "use postgres");
-        assert_eq!(message.address, "C0123");
+        assert_eq!(message.text, "<@U0BOT> use postgres");
+        assert_eq!(message.room, "C0123");
         // A string, never a number: parsed as one it addresses no message.
         assert_eq!(message.thread.as_deref(), Some("1728312345.678901"));
-        assert!(!message.mentions);
         assert!(!message.from_us);
     }
 
-    /// A mention is recognised by identifier rather than by name.
+    /// A person is read from the mention event, and the copy of the same
+    /// message on the message subscription is acknowledged and dropped.
     ///
-    /// The rendered form is the identifier, so somebody typing the bot's
-    /// display name is not a mention and does not become one.
+    /// Measured: a mention arrives on both, with the same identifier, and
+    /// only the mention event is delivered when the mention is what got the
+    /// app invited. Reading both would hand every mention over twice.
     #[test]
-    fn a_mention_is_the_rendered_identifier() {
-        let frame = |text: &str| {
-            format!(
-                r#"{{"envelope_id":"e-2","payload":{{"event":{{
-                "type":"message","channel":"C0123","user":"U0HUMAN","ts":"1788000002.000002","text":"{text}"}}}}}}"#
-            )
-        };
-        let mentions = |frame: &str| match said(frame) {
-            Incoming::Said { message, .. } => message.mentions,
-            other => panic!("expected a message: {other:?}"),
-        };
+    fn a_person_is_read_from_the_mention_event_and_not_from_the_message_subscription() {
+        let as_mention = r#"{"envelope_id":"e-2","payload":{"event":{"type":"app_mention",
+            "channel":"C0123","user":"U0HUMAN","ts":"1788000002.000002","text":"<@U0BOT> hello"}}}"#;
+        let as_message = r#"{"envelope_id":"e-3","payload":{"event":{"type":"message",
+            "channel":"C0123","user":"U0HUMAN","ts":"1788000002.000002","text":"<@U0BOT> hello"}}}"#;
 
-        assert!(mentions(&frame("<@U0BOT> what is happening")));
-        for missing in ["stageman what is happening", "<@U0SOMEBODYELSE> hello"] {
-            assert!(!mentions(&frame(missing)), "{missing} is not a mention");
-        }
+        assert!(matches!(said(as_mention), Incoming::Said { .. }));
+        assert_eq!(said(as_message), Incoming::Acknowledge("e-3".to_owned()));
     }
 
-    /// Anything this instance said is marked as its own.
+    /// Anything this instance said is marked as its own, by its own
+    /// identifiers.
     ///
-    /// Two ways of telling, because a message from this app arrives carrying
-    /// a bot identifier and the subtype that goes with it, and a message
-    /// from the user the token belongs to arrives as an ordinary one. Either
-    /// marker alone is enough, and both have to be, because they do not
-    /// always arrive together: requiring both would let one shape through
-    /// and reopen the loop this exists to close.
+    /// Two ways of telling, because a post made with the token carries the
+    /// bot identifier, and a message from the user the token belongs to
+    /// carries the user's. Either alone is enough, and both have to be,
+    /// because they do not always arrive together: requiring both would let
+    /// one shape through and reopen the loop this exists to close.
     #[test]
     fn anything_this_instance_said_is_recognised_as_its_own() {
         let from_us = |frame: &str| match said(frame) {
@@ -397,30 +426,60 @@ mod tests {
             other => panic!("expected a message: {other:?}"),
         };
 
-        assert!(from_us(
-            r#"{"envelope_id":"e-3","payload":{"event":{"type":"message","subtype":"bot_message",
-            "channel":"C0123","bot_id":"B0SELF","ts":"1788000003.000003","text":"⚠️ Check this out."}}}"#,
-        ));
+        // As measured: a post made with the token, carrying both.
         assert!(from_us(
             r#"{"envelope_id":"e-4","payload":{"event":{"type":"message",
-            "channel":"C0123","user":"U0BOT","ts":"1788000004.000004","text":"hello"}}}"#,
+            "channel":"C0123","user":"U0BOT","bot_id":"B0SELF","ts":"1788000004.000004","text":"posted"}}}"#,
         ));
         assert!(from_us(
-            r#"{"envelope_id":"e-9","payload":{"event":{"type":"message",
-            "channel":"C0123","bot_id":"B0SELF","ts":"1788000005.000005","text":"posted"}}}"#,
+            r#"{"envelope_id":"e-5","payload":{"event":{"type":"message","subtype":"bot_message",
+            "channel":"C0123","bot_id":"B0SELF","ts":"1788000005.000005","text":"⚠️ Check this out."}}}"#,
         ));
         assert!(from_us(
-            r#"{"envelope_id":"e-10","payload":{"event":{"type":"message",
-            "subtype":"bot_message","channel":"C0123","ts":"1788000006.000006","text":"rendered"}}}"#,
+            r#"{"envelope_id":"e-6","payload":{"event":{"type":"message",
+            "channel":"C0123","user":"U0BOT","ts":"1788000006.000006","text":"hello"}}}"#,
         ));
+        // A mention this instance made of itself is still its own.
+        assert!(from_us(
+            r#"{"envelope_id":"e-7","payload":{"event":{"type":"app_mention",
+            "channel":"C0123","user":"U0BOT","ts":"1788000007.000007","text":"<@U0BOT> hi"}}}"#,
+        ));
+    }
+
+    /// Another bot's message is not this instance's, and is not read.
+    ///
+    /// The reader used to take any bot for this one, which was safe while
+    /// nothing else ever posted where it listened and is the loop guard
+    /// letting every other app through the moment one does. Not read yet
+    /// either: what is done about other bots is a decision of its own.
+    #[test]
+    fn another_bots_message_is_neither_ours_nor_read() {
+        for frame in [
+            // A post from another app, as measured: a user and a bot
+            // identifier, neither of them this instance's.
+            r#"{"envelope_id":"e-8","payload":{"event":{"type":"message",
+            "channel":"C0123","user":"U0GITHUB","bot_id":"B0OTHER","ts":"1788000008.000008","text":""}}}"#,
+            // A classic integration's post.
+            r#"{"envelope_id":"e-9","payload":{"event":{"type":"message","subtype":"bot_message",
+            "channel":"C0123","bot_id":"B0OTHER","ts":"1788000009.000009","text":"deployed"}}}"#,
+            // Another app's follow-up, broadcast from a thread to the room.
+            r#"{"envelope_id":"e-10","payload":{"event":{"type":"message","subtype":"thread_broadcast",
+            "channel":"C0123","user":"U0GITHUB","bot_id":"B0OTHER","ts":"1788000010.000010",
+            "thread_ts":"1788000008.000008","text":""}}}"#,
+        ] {
+            assert!(
+                matches!(said(frame), Incoming::Acknowledge(_)),
+                "{frame} is somebody else's, and is not read"
+            );
+        }
     }
 
     /// Everything with an envelope is acknowledged, and nothing else is.
     #[test]
     fn exactly_what_carries_an_envelope_is_acknowledged() {
         let reply = said(
-            r#"{"envelope_id":"e-11","payload":{"event":{"type":"message",
-            "channel":"C0123","user":"U0HUMAN","ts":"1788000007.000007","text":"hello"}}}"#,
+            r#"{"envelope_id":"e-11","payload":{"event":{"type":"app_mention",
+            "channel":"C0123","user":"U0HUMAN","ts":"1788000011.000011","text":"<@U0BOT> hello"}}}"#,
         );
         assert_eq!(reply.acknowledging(), Some("e-11"));
         assert_eq!(
@@ -442,19 +501,25 @@ mod tests {
     #[test]
     fn what_is_not_acted_on_is_still_acknowledged() {
         for frame in [
-            // An edit, which is not somebody talking to a job.
-            r#"{"envelope_id":"e-5","payload":{"event":{"type":"message","subtype":"message_changed","channel":"C0123"}}}"#,
+            // People talking to each other, which is most of a room.
+            r#"{"envelope_id":"e-13","payload":{"event":{"type":"message","channel":"C0123",
+            "user":"U0HUMAN","ts":"1788000013.000013","text":"lunch?"}}}"#,
+            // An edit, which is not somebody talking to a job — including
+            // an edit of something this instance said.
+            r#"{"envelope_id":"e-14","payload":{"event":{"type":"message","subtype":"message_changed","channel":"C0123"}}}"#,
+            r#"{"envelope_id":"e-15","payload":{"event":{"type":"message","subtype":"message_changed",
+            "channel":"C0123","bot_id":"B0SELF","ts":"1788000015.000015","text":"edited"}}}"#,
             // Somebody joining.
-            r#"{"envelope_id":"e-6","payload":{"event":{"type":"member_joined_channel","channel":"C0123"}}}"#,
-            // A message with nowhere attached to it.
-            r#"{"envelope_id":"e-7","payload":{"event":{"type":"message","user":"U0HUMAN","text":"hi"}}}"#,
+            r#"{"envelope_id":"e-16","payload":{"event":{"type":"member_joined_channel","channel":"C0123"}}}"#,
+            // A mention with nowhere attached to it.
+            r#"{"envelope_id":"e-17","payload":{"event":{"type":"app_mention","user":"U0HUMAN","text":"<@U0BOT> hi"}}}"#,
             // An envelope carrying no event at all.
-            r#"{"envelope_id":"e-8","payload":{}}"#,
+            r#"{"envelope_id":"e-18","payload":{}}"#,
             // Somebody joining, with everything a message would have but
             // being one: it is what is joined, not what is said, and a
             // reader that only checked for a subtype would read it aloud.
-            r#"{"envelope_id":"e-13","payload":{"event":{"type":"member_joined_channel",
-            "channel":"C0123","user":"U0HUMAN","ts":"1788000008.000008"}}}"#,
+            r#"{"envelope_id":"e-19","payload":{"event":{"type":"member_joined_channel",
+            "channel":"C0123","user":"U0HUMAN","ts":"1788000019.000019"}}}"#,
         ] {
             assert!(
                 matches!(said(frame), Incoming::Acknowledge(_)),
@@ -469,6 +534,27 @@ mod tests {
         for frame in ["not json at all", "{}", r#"{"type":"something_new"}"#] {
             assert_eq!(said(frame), Incoming::Ignore, "{frame}");
         }
+    }
+
+    /// Who this instance is needs a bot token, because only a bot's posts
+    /// can be told apart by the identifier they carry.
+    #[test]
+    fn who_this_instance_is_needs_a_bot_token() {
+        assert_eq!(
+            identity(200, br#"{"ok":true,"user_id":"U0BOT","bot_id":"B0SELF"}"#).expect("a bot"),
+            Identity {
+                user: "U0BOT".to_owned(),
+                bot: "B0SELF".to_owned(),
+            }
+        );
+        assert!(matches!(
+            identity(200, br#"{"ok":true,"user_id":"U0PERSON"}"#),
+            Err(ChannelError::NotABot)
+        ));
+        assert!(matches!(
+            identity(200, br#"{"ok":true,"bot_id":"B0SELF"}"#),
+            Err(ChannelError::NoAnswer)
+        ));
     }
 
     /// The same refusal guard, on the reader of a question's answer.

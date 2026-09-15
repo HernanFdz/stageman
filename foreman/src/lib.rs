@@ -380,13 +380,11 @@ say what you did when you finish."
 /// for a while. Somebody who hears nothing cannot tell *received and queued*
 /// from *ignored*, and the second is what they will assume.
 ///
-/// **It carries the follow-up rule**, and this is the only place that rule is
-/// ever taught. Replying in this thread reaches nobody:
-/// `docs/decisions/0031-a-mention-is-what-makes-it-ours.md` sends a mention in
-/// a thread owning no job to a fixed refusal, and a foreman's threads own no
-/// job. Somebody who has just been answered will reply where they were
-/// answered unless told otherwise, so they are told here, once per thread,
-/// which is once per message.
+/// It used to teach a rule as well — that a reply in this thread reaches
+/// nobody — and no longer does, because the rule is gone: since
+/// `docs/decisions/0060-a-binding-is-a-workspace.md` a mention in this thread
+/// reaches the foreman like any other, so replying where you were answered
+/// is exactly what works.
 ///
 /// `ahead` is how many messages this one is behind, counting the one being
 /// worked on. Said only when there are any, because "0 messages ahead" is
@@ -398,13 +396,7 @@ pub fn received_notice(ahead: usize) -> String {
     } else {
         format!("It is behind {ahead} other message(s), so it may be a moment.")
     };
-    format!(
-        "\
-Got it. {standing} The answer appears in this thread.
-
-Replies in this thread do not reach me — say anything new at the root of the \
-channel instead."
-    )
+    format!("Got it. {standing} The answer appears in this thread.")
 }
 
 /// What a thread is told when a foreman's turn could not be taken at all.
@@ -421,40 +413,6 @@ channel instead."
 pub const fn stuck_notice() -> &'static str {
     "Something went wrong handling that, so it did not get done. The server log says what. \
 Send it again once that is fixed — it has not been kept."
-}
-
-/// What a thread is told when somebody addresses this instance in one that
-/// belongs to no job."""
-///
-/// **Said rather than ignored**, because they asked. Silence here is
-/// indistinguishable from being broken, and this is the case a person reaches
-/// by the most natural move available: replying to something a foreman said.
-///
-/// It names where to go instead, because a rule nobody was told is a rule
-/// nobody can follow.
-#[must_use]
-pub const fn no_such_job_notice() -> &'static str {
-    "No job belongs to this thread — it may have been retired. If you meant the foreman, \
-say so at the root of the channel instead: it does not read replies here."
-}
-
-/// Whether a job has anywhere to speak.
-///
-/// Decides one paragraph of the kickoff, and it has to be decided rather than
-/// assumed either way. A prompt naming the `say` tool to a job whose project
-/// has no channel bound teaches an agent to run a command that cannot work; a
-/// prompt withholding it from one that has leaves the tool installed and
-/// unmentioned, which is the same as not shipping it.
-///
-/// A two-variant type rather than a `bool`, because the call site is where this
-/// is read and `kickoff(repository, work, true)` says nothing at all.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Voice {
-    /// A channel is bound, so the `say` tool reaches somebody.
-    Channel,
-    /// Nothing is bound. The job can still do work that never needs to speak —
-    /// see `docs/decisions/0005-conversation-happens-on-channels.md`.
-    Silent,
 }
 
 /// The instruction a job begins from.
@@ -478,78 +436,46 @@ pub enum Voice {
 /// nothing to open, and an unconditional instruction would have it inventing
 /// one to comply.
 ///
-/// **The closing instruction is unconditional and the one before it is not.**
-/// Saying something needs a channel; saying why you stopped does not, because
-/// it is recorded on the job and read from the dashboard. So every job is told
-/// to call it, including a job on a project nobody has bound a channel to —
-/// see `docs/decisions/0055-a-job-says-why-it-stopped.md`.
+/// **Every job is told it can speak, and every job is told to say why it
+/// stopped.** The first used to be conditional on a channel being bound, and
+/// since `docs/decisions/0059-a-project-speaks-and-listens-on-slack-always.md`
+/// there is no job without one. The second was never conditional, because
+/// why a job stopped is recorded on the job and read from the dashboard — see
+/// `docs/decisions/0055-a-job-says-why-it-stopped.md`.
 ///
-/// The paragraph before it is conditional for a different reason, and one worth
-/// knowing before changing it. `docs/open-questions.md` records that this
-/// instruction cannot honestly become *ask and wait* until a reply can reach a
-/// running job, and it still does not say that: what changed is where a
-/// question goes, not whether the job stops. Both forms end the same way,
-/// because with outbound alone nobody answers this session.
+/// The paragraph about asking is conditional for a different reason, and one
+/// worth knowing before changing it. `docs/open-questions.md` records that
+/// this instruction cannot honestly become *ask and wait* until a reply can
+/// reach a running job, and it still does not say that: a job that asks
+/// stops, because nobody answers this session while it runs.
 #[must_use]
-pub fn kickoff(
-    repository: &str,
-    work: &str,
-    voice: Voice,
-    tunnel: &str,
-    variables: &[VariableName],
-) -> String {
+pub fn kickoff(repository: &str, work: &str, tunnel: &str, variables: &[VariableName]) -> String {
     let port = stageman_agent::TUNNEL_PORT;
     // Two things this has to get across, and the second is the one that fails
     // silently. A server bound inside the container to loopback is reachable
     // from nowhere else, and an agent checking its own work with curl sees it
     // answering perfectly — so the instruction is repeated rather than
     // mentioned, because being wrong about it costs a whole session.
-    let showing = match voice {
-        Voice::Channel => format!(
-            "\
+    let showing = format!(
+        "\
 You can show people what you are doing. Anything you serve inside this container on port \
 {port} is reachable at {tunnel} — a dev server while you work, or a built result for somebody \
 to look at before you propose it. Bind it to 0.0.0.0 and not to localhost: a server on \
 localhost answers you from inside this container and is reachable from nowhere else. Say where \
 to look with the `say` tool, because nobody finds that address on their own."
-        ),
-        Voice::Silent => format!(
-            "\
-You can show what you are doing. Anything you serve inside this container on port {port} is \
-reachable at {tunnel} — a dev server while you work, or a built result for somebody to look at \
-before you propose it. Bind it to 0.0.0.0 and not to localhost: a server on localhost answers \
-you from inside this container and is reachable from nowhere else."
-        ),
-    };
+    );
 
-    let tools = match voice {
-        Voice::Channel => {
-            "You have git and gh, both signed in as the account this work \
-belongs to, and the `say` tool for talking to people."
-        }
-        Voice::Silent => {
-            "You have git and gh, both signed in as the account this work \
-belongs to."
-        }
-    };
+    let tools = "You have git and gh, both signed in as the account this work \
+belongs to, and the `say` tool for talking to people.";
 
-    let speaking = match voice {
-        Voice::Channel => {
-            "\
+    let speaking = "\
 Finish by saying what you did, by calling the `say` tool. Nobody reads this \
 terminal, so anything you do not say there is lost — including the answer, if the work was a question. Say what \
 you found, what you changed, or what you could not do.
 
 Use it during the work as well, whenever you need an answer from a person: say \
 what you need, then stop. It reaches somebody who can answer, but not now — no \
-reply arrives in this session, so do not wait for one and do not guess."
-        }
-        Voice::Silent => {
-            "\
-If you need an answer from a person before you can continue, say so plainly \
-and stop. Do not guess, and do not wait — nobody is watching this terminal."
-        }
-    };
+reply arrives in this session, so do not wait for one and do not guess.";
 
     // Named and never valued, and the type is what enforces it: a
     // `VariableName` cannot hold a credential, so there is no call site at
@@ -557,10 +483,10 @@ and stop. Do not guess, and do not wait — nobody is watching this terminal."
     // looks — a kickoff is stored on the job and crosses the snapshot boundary
     // in the clear, because a job holds no credential.
     //
-    // Empty when there are none, on the same reasoning `Voice` is decided
-    // rather than assumed: naming nothing would teach an agent to go looking
-    // in an empty environment, and saying nothing where there *are* variables
-    // leaves them set and unmentioned, which is the same as not setting them.
+    // Empty when there are none, and decided rather than assumed either way:
+    // naming nothing would teach an agent to go looking in an empty
+    // environment, and saying nothing where there *are* variables leaves
+    // them set and unmentioned, which is the same as not setting them.
     //
     // The leading blank lines live inside this value rather than in the
     // template below, so that a project with no variables gets a prompt that
@@ -611,7 +537,7 @@ reasons nobody knows."
 
 #[cfg(test)]
 mod tests {
-    use super::{JobId, ProjectId, VariableName, Voice, resumption_notice};
+    use super::{JobId, ProjectId, VariableName, resumption_notice};
 
     /// Where a job of this project would be reachable.
     ///
@@ -649,49 +575,6 @@ Then carry on with the work you were given."
         );
     }
 
-    /// Asserted whole, per `docs/conventions.md` §4. This is the text that
-    /// decides what every job does, and it can be rewritten completely without
-    /// a single other test going red — so the diff is the review.
-    #[test]
-    fn a_kickoff_reads_exactly_as_written() {
-        assert_eq!(
-            super::kickoff(
-                "https://example.invalid/repo",
-                "Fix the flaky test in the parser.",
-                Voice::Silent,
-                A_TUNNEL,
-                NONE,
-            ),
-            "You are working on https://example.invalid/repo.
-
-It is checked out in the current directory, on its default branch. You have git and gh, both \
-signed in as the account this work belongs to.
-
-The work:
-
-Fix the flaky test in the parser.
-
-You can show what you are doing. Anything you serve inside this container on port 47201 is \
-reachable at https://00000000-0000-0000-0000-000000000001.example.com — a dev server while you \
-work, or a built result for somebody to look at before you propose it. Bind it to 0.0.0.0 and \
-not to localhost: a server on localhost answers you from inside this container and is reachable \
-from nowhere else.
-
-When you have a change to propose, open a pull request and stop there. Do not merge it, do not \
-deploy anything, and do not push to the default branch. Somebody reads what you propose before \
-it counts for anything, which is what lets you work unattended.
-
-If you need an answer from a person before you can continue, say so plainly and stop. Do not \
-guess, and do not wait — nobody is watching this terminal.
-
-Before you stop, call the `stopping` tool, every time and last of all. Say `ready_for_review` if \
-you have done what was asked and there is something for a person to look at, or \
-`waiting_for_an_answer` if you need something from a person before you can go on. Nothing else \
-tells anybody which of the two this is, so a job that stops without calling it is recorded as \
-having stopped for reasons nobody knows."
-        );
-    }
-
     /// A kickoff naming what a project put in the environment, as literal text.
     ///
     /// `docs/conventions.md` §4: prompt text is the only kind that changes
@@ -716,24 +599,24 @@ having stopped for reasons nobody knows."
             super::kickoff(
                 "https://example.invalid/repo",
                 "Fix the flaky test in the parser.",
-                Voice::Silent,
                 A_TUNNEL,
                 &variables,
             ),
             "You are working on https://example.invalid/repo.
 
 It is checked out in the current directory, on its default branch. You have git and gh, both \
-signed in as the account this work belongs to.
+signed in as the account this work belongs to, and the `say` tool for talking to people.
 
 The work:
 
 Fix the flaky test in the parser.
 
-You can show what you are doing. Anything you serve inside this container on port 47201 is \
-reachable at https://00000000-0000-0000-0000-000000000001.example.com — a dev server while you \
-work, or a built result for somebody to look at before you propose it. Bind it to 0.0.0.0 and \
-not to localhost: a server on localhost answers you from inside this container and is reachable \
-from nowhere else.
+You can show people what you are doing. Anything you serve inside this container on port 47201 \
+is reachable at https://00000000-0000-0000-0000-000000000001.example.com — a dev server while \
+you work, or a built result for somebody to look at before you propose it. Bind it to 0.0.0.0 \
+and not to localhost: a server on localhost answers you from inside this container and is \
+reachable from nowhere else. Say where to look with the `say` tool, because nobody finds that \
+address on their own.
 
 Some of what this project needs is already in your environment: STRIPE_API_KEY, DATABASE_URL. \
 Nothing here knows what any of them is for, so follow whatever the repository says about them. \
@@ -744,8 +627,14 @@ When you have a change to propose, open a pull request and stop there. Do not me
 deploy anything, and do not push to the default branch. Somebody reads what you propose before \
 it counts for anything, which is what lets you work unattended.
 
-If you need an answer from a person before you can continue, say so plainly and stop. Do not \
-guess, and do not wait — nobody is watching this terminal.
+Finish by saying what you did, by calling the `say` tool. Nobody reads this terminal, so \
+anything you do not say there is lost — including the \
+answer, if the work was a question. Say what you found, what you changed, or what you could not \
+do.
+
+Use it during the work as well, whenever you need an answer from a person: say what you need, \
+then stop. It reaches somebody who can answer, but not now — no reply arrives in this session, \
+so do not wait for one and do not guess.
 
 Before you stop, call the `stopping` tool, every time and last of all. Say `ready_for_review` if \
 you have done what was asked and there is something for a person to look at, or \
@@ -763,21 +652,13 @@ having stopped for reasons nobody knows."
     /// every one of their prompts for nothing.
     #[test]
     fn a_project_with_no_variables_is_told_nothing_about_them() {
-        for voice in [Voice::Channel, Voice::Silent] {
-            let prompt = super::kickoff(
-                "https://example.invalid/repo",
-                "anything",
-                voice,
-                A_TUNNEL,
-                NONE,
-            );
+        let prompt = super::kickoff("https://example.invalid/repo", "anything", A_TUNNEL, NONE);
 
-            assert!(!prompt.contains("in your environment"), "{prompt}");
-            assert!(
-                !prompt.contains("\n\n\n"),
-                "an absent paragraph must leave no gap behind: {prompt:?}",
-            );
-        }
+        assert!(!prompt.contains("in your environment"), "{prompt}");
+        assert!(
+            !prompt.contains("\n\n\n"),
+            "an absent paragraph must leave no gap behind: {prompt:?}",
+        );
     }
 
     /// Names travel; values have nowhere to travel in.
@@ -791,7 +672,6 @@ having stopped for reasons nobody knows."
         let prompt = super::kickoff(
             "https://example.invalid/repo",
             "anything",
-            Voice::Channel,
             A_TUNNEL,
             &variables,
         );
@@ -803,18 +683,15 @@ having stopped for reasons nobody knows."
         );
     }
 
-    /// The other half of the same text, and asserted whole for the same reason.
-    ///
-    /// Two variants means two snapshots. A single one would leave the paragraph
-    /// that actually changed — the one naming the tool — as the only prompt
-    /// text in the project nothing asserts.
+    /// Asserted whole, per `docs/conventions.md` §4. This is the text that
+    /// decides what every job does, and it can be rewritten completely without
+    /// a single other test going red — so the diff is the review.
     #[test]
-    fn a_kickoff_with_a_channel_bound_reads_exactly_as_written() {
+    fn a_kickoff_reads_exactly_as_written() {
         assert_eq!(
             super::kickoff(
                 "https://example.invalid/repo",
                 "Fix the flaky test in the parser.",
-                Voice::Channel,
                 A_TUNNEL,
                 NONE,
             ),
@@ -855,51 +732,25 @@ having stopped for reasons nobody knows."
         );
     }
 
-    /// A job with nothing bound is never told to run a command that cannot
-    /// work.
-    ///
-    /// The failure this prevents is an agent doing as it is told and reporting
-    /// a tool that fails, which reads as a broken instance rather than as an
-    /// unbound project.
+    /// Every job is told which tool reaches a person, because every job has
+    /// one: an agent not told has no way to know that ordinary output goes
+    /// nowhere.
     #[test]
-    fn a_kickoff_names_the_tool_only_when_there_is_a_channel() {
-        let bound = super::kickoff(
-            "https://example.invalid/repo",
-            "anything",
-            Voice::Channel,
-            A_TUNNEL,
-            NONE,
-        );
-        let silent = super::kickoff(
-            "https://example.invalid/repo",
-            "anything",
-            Voice::Silent,
-            A_TUNNEL,
-            NONE,
-        );
+    fn a_kickoff_names_the_tool_that_speaks() {
+        let prompt = super::kickoff("https://example.invalid/repo", "anything", A_TUNNEL, NONE);
 
-        assert!(bound.contains("`say` tool"), "{bound}");
-        assert!(!silent.contains("`say`"), "{silent}");
+        assert!(prompt.contains("`say` tool"), "{prompt}");
     }
 
-    /// Neither form tells a job to wait, and that is the constraint
+    /// A kickoff never tells a job to wait, and that is the constraint
     /// `docs/open-questions.md` puts on this text until a reply can reach a
-    /// running job. Outbound alone moves where a question goes, not whether
-    /// the job stops.
+    /// running job: a question moves to the channel, and the job still stops.
     #[test]
     fn no_kickoff_tells_a_job_to_wait_for_an_answer() {
-        for voice in [Voice::Channel, Voice::Silent] {
-            let prompt = super::kickoff(
-                "https://example.invalid/repo",
-                "anything",
-                voice,
-                A_TUNNEL,
-                NONE,
-            );
+        let prompt = super::kickoff("https://example.invalid/repo", "anything", A_TUNNEL, NONE);
 
-            assert!(prompt.contains("do not wait"), "{prompt}");
-            assert!(prompt.contains("stop"), "{prompt}");
-        }
+        assert!(prompt.contains("do not wait"), "{prompt}");
+        assert!(prompt.contains("stop"), "{prompt}");
     }
 
     /// Asserted whole, per `docs/conventions.md` §4. Read by a person rather
@@ -954,14 +805,8 @@ Whatever it has to say appears in this thread. Job \
     /// snapshot is updated wholesale by whoever changes the text and records
     /// no opinion about which sentence mattered.
     #[test]
-    fn a_kickoff_with_a_channel_makes_reporting_the_ending() {
-        let prompt = super::kickoff(
-            "https://example.invalid/repo",
-            "anything",
-            Voice::Channel,
-            A_TUNNEL,
-            NONE,
-        );
+    fn a_kickoff_makes_reporting_the_ending() {
+        let prompt = super::kickoff("https://example.invalid/repo", "anything", A_TUNNEL, NONE);
 
         let reporting = prompt
             .find("Finish by saying")
@@ -993,9 +838,13 @@ Whatever it has to say appears in this thread. Job \
 what. Send it again once that is fixed — it has not been kept."
         );
         assert_eq!(
-            super::no_such_job_notice(),
-            "No job belongs to this thread — it may have been retired. If you meant the foreman, \
-say so at the root of the channel instead: it does not read replies here."
+            super::received_notice(0),
+            "Got it. Working on this now. The answer appears in this thread."
+        );
+        assert_eq!(
+            super::received_notice(2),
+            "Got it. It is behind 2 other message(s), so it may be a moment. The answer appears \
+in this thread."
         );
         assert_eq!(
             super::busy_notice(),
@@ -1065,18 +914,16 @@ it again."
         assert!(super::INTERRUPTION.contains("a job you started"));
     }
 
-    /// Every acknowledgement teaches the follow-up rule, whatever its standing.
-    ///
-    /// It is the only place that rule is ever taught, and somebody who has
-    /// just been answered will reply where they were answered unless told
-    /// otherwise. Asserted across both forms so a third cannot quietly drop it.
+    /// An acknowledgement teaches no rule about where to say the next thing,
+    /// because there is none: a reply where the person was answered reaches
+    /// the foreman. The sentence that used to be here would now be false.
     #[test]
-    fn an_acknowledgement_always_says_where_to_say_the_next_thing() {
+    fn an_acknowledgement_teaches_no_follow_up_rule() {
         for ahead in [0, 1, 7] {
             let said = super::received_notice(ahead);
 
-            assert!(said.contains("do not reach me"), "{said}");
-            assert!(said.contains("root of the channel"), "{said}");
+            assert!(!said.contains("do not reach"), "{said}");
+            assert!(!said.contains("root of the channel"), "{said}");
         }
     }
 
@@ -1105,20 +952,6 @@ it again."
 
         assert!(said.contains("Send it again"), "{said}");
         assert!(said.contains("not been kept"), "{said}");
-    }
-
-    /// The notice for an unowned thread must say where to go instead.
-    ///
-    /// Its whole reason for existing is that silence reads as broken. A notice
-    /// that said only "nothing here" would leave a person exactly as stuck,
-    /// having been answered — which is worse, because now they know they were
-    /// heard and still cannot get anywhere.
-    #[test]
-    fn the_unowned_thread_notice_names_somewhere_to_go() {
-        let said = super::no_such_job_notice();
-
-        assert!(said.contains("root of the channel"), "{said}");
-        assert!(said.contains("foreman"), "{said}");
     }
 
     /// The attention notice must not claim to know how it went.
@@ -1386,7 +1219,6 @@ inferred is one a person will act on, and you have no way to check it."
         let prompt = super::kickoff(
             "https://example.invalid/repo",
             "anything at all",
-            Voice::Channel,
             A_TUNNEL,
             NONE,
         );

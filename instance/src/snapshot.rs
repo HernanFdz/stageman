@@ -50,7 +50,7 @@ pub fn exposed(state: &State) -> Value {
                     (format!("{channel:?}"), json!({
                         "address": bound.address,
                         "credential": bound.credential.expose(),
-                        "listen_credential": bound.listen_credential.as_ref().map(|it| it.expose().to_owned()),
+                        "listen_credential": bound.listen_credential.expose(),
                     }))
                 })),
                 "variables": keyed(project.variables.iter().map(|(name, secret)| {
@@ -94,7 +94,6 @@ pub fn of(running: &Running) -> Value {
                 (project, json!({
                     "channel": format!("{:?}", listener.channel),
                     "opening": listener.opening.expose(),
-                    "address": listener.speaking.address,
                     "credential": listener.speaking.credential.expose(),
                     "us": value(&listener.us),
                     "phase": value(&listener.phase),

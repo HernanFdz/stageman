@@ -6,7 +6,7 @@ use stageman_agent::Command;
 use stageman_core::{JobId, Progress, Timestamp, Uuid, Waiting};
 use stageman_instance::{Instance, Request, Response};
 
-use crate::simulation::{Simulation, job, project, request, seed, watching};
+use crate::simulation::{Simulation, job, project, request, seed, watching_a_channel};
 
 /// Asks for a job by hand, and performs what asking caused.
 fn asking(sim: &mut Simulation, instance: &mut Instance, id: u64, work: &str) {
@@ -67,7 +67,7 @@ fn asked(sim: &Simulation, wanted: impl Fn(&Command) -> bool) -> usize {
 #[test]
 fn an_image_is_built_once_for_every_turn_that_wants_it() {
     let mut sim = Simulation::new();
-    sim.holding(&watching(&[]));
+    sim.holding(&watching_a_channel(&[]));
     let mut instance = sim.wake(seed(1));
 
     asking(&mut sim, &mut instance, 1, "one thing");
@@ -100,7 +100,7 @@ fn an_image_is_built_once_for_every_turn_that_wants_it() {
 #[test]
 fn a_build_that_fails_fails_every_turn_waiting_on_it() {
     let mut sim = Simulation::new();
-    sim.holding(&watching(&[]));
+    sim.holding(&watching_a_channel(&[]));
     let mut instance = sim.wake(seed(1));
     sim.next_build_fails("step 3/7: RUN npm install\nfailed to fetch the adapter\n");
 
@@ -140,7 +140,7 @@ fn a_build_that_fails_fails_every_turn_waiting_on_it() {
 #[test]
 fn a_checkout_that_fails_fails_the_job_before_its_agent_speaks() {
     let mut sim = Simulation::new();
-    sim.holding(&watching(&[]));
+    sim.holding(&watching_a_channel(&[]));
     let mut instance = sim.wake(seed(1));
     sim.next_checkout_fails("fatal: repository not found\n");
 
@@ -164,7 +164,7 @@ fn a_checkout_that_fails_fails_the_job_before_its_agent_speaks() {
 #[test]
 fn a_stop_before_the_agent_speaks_ends_the_turn_at_its_next_step() {
     let mut sim = Simulation::new();
-    sim.holding(&watching(&[]));
+    sim.holding(&watching_a_channel(&[]));
     let mut instance = sim.wake(seed(1));
 
     // Started, and stopped while the runtime is still being given the
@@ -198,7 +198,7 @@ fn a_stop_before_the_agent_speaks_ends_the_turn_at_its_next_step() {
 #[test]
 fn a_turn_is_the_commands_it_runs_in_order() {
     let mut sim = Simulation::new();
-    sim.holding(&watching(&[(job(1), Progress::Working)]));
+    sim.holding(&watching_a_channel(&[(job(1), Progress::Working, 1)]));
     let (name, held) = Simulation::ours(&stageman_job::container(job(1)));
     sim.container(&name, held);
     let mut instance = sim.wake(seed(1));

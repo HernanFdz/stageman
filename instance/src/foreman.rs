@@ -79,7 +79,7 @@ fn keeps(made_for: Option<Agent>, wanted: Agent) -> bool {
 }
 
 impl Running {
-    /// A message at the root of a project's channel, for its foreman.
+    /// A message for a project's foreman, from any room the app is in.
     ///
     /// Taken or queued in this step, in the order messages arrive — which is
     /// the whole of what an inbox promises — and acknowledged on its thread
@@ -91,6 +91,7 @@ impl Running {
         // belongs under; one in a thread is answered where it was said.
         let thread = Thread {
             channel,
+            room: message.room.clone(),
             id: message.thread.clone().unwrap_or_else(|| message.id.clone()),
         };
         let Some(watched) = self.state.projects.get_mut(&project) else {
@@ -377,6 +378,7 @@ mod tests {
             said: "look at the parser".to_owned(),
             thread: Thread {
                 channel: Channel::Slack,
+                room: "C0123456789".to_owned(),
                 id: "1700000000.000100".to_owned(),
             },
         }

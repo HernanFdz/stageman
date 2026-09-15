@@ -29,7 +29,8 @@ fn as_it_comes() -> Fitted {
     }
 }
 
-/// A project as a person drafts one: no channel unless the test binds one.
+/// A project as a person drafts one, bound to a room of its own name, since
+/// a project is created with a binding or not at all.
 pub fn a_draft(name: &str) -> Draft {
     Draft {
         name: name.to_owned(),
@@ -41,7 +42,11 @@ pub fn a_draft(name: &str) -> Draft {
             fitted: as_it_comes(),
         }],
         credential: "ghp-not-a-real-token".to_owned(),
-        channel: ChannelDraft::default(),
+        channel: ChannelDraft {
+            address: format!("C-{name}"),
+            credential: "xoxb-not-a-real-token".to_owned(),
+            listen_credential: "xapp-not-a-real-token".to_owned(),
+        },
         variables: Vec::new(),
     }
 }
@@ -431,7 +436,7 @@ fn forgetting_a_project_removes_its_containers_and_refuses_while_busy() {
 #[test]
 fn starting_a_job_by_hand_runs_its_first_turn_once_the_record_has_landed() {
     let mut sim = Simulation::new();
-    sim.holding(&watching(&[]));
+    sim.holding(&watching_a_channel(&[]));
     let mut instance = sim.wake(seed(1));
     let id = project().to_string();
 
@@ -728,4 +733,33 @@ fn the_same_requests_leave_the_same_trace() {
         sim.trace().to_vec()
     };
     assert_eq!(run(), run());
+}
+
+/// A job cannot start on a project with no channel bound, which only a
+/// project the last release wrote can lack, and the refusal names the
+/// project so that the operator knows what to bind — see
+/// `docs/decisions/0059-a-project-speaks-and-listens-on-slack-always.md`.
+#[test]
+fn starting_a_job_on_a_project_with_no_binding_is_refused_by_name() {
+    let mut sim = Simulation::new();
+    sim.holding(&watching(&[]));
+    let mut instance = sim.wake(seed(1));
+
+    assert_eq!(
+        ask(
+            &mut sim,
+            &mut instance,
+            1,
+            Request::Start {
+                project: project().to_string(),
+                kit: "Claude".to_owned(),
+                work: "fix the build".to_owned(),
+                at: Timestamp::UNIX_EPOCH,
+            },
+        ),
+        Response::Refused(Refusal::ChannelMissing {
+            project: "example".to_owned(),
+        })
+    );
+    assert!(sim.first_turn().is_none(), "nothing ran: {:?}", sim.shape());
 }

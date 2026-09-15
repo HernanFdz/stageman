@@ -5,9 +5,8 @@
 //! is tested against every combination rather than the ones a live workspace
 //! happens to produce. What is here is what follows from the answer.
 
-use stageman_core::{Arriving, Channel, ChannelConfig, JobId, Progress, Recipient, State, Thread};
+use stageman_core::{Arriving, Channel, JobId, Progress, ProjectId, Recipient, State};
 
-use crate::Effect;
 use crate::Running;
 use crate::turns::{Run, Turn, speaking_for};
 use stageman_channel::Message;
@@ -56,16 +55,15 @@ pub fn accepting(state: &mut State, job: JobId) -> Accepted {
 }
 
 impl Running {
-    /// Hands one message to whoever it is for.
-    pub fn heard(&mut self, channel: Channel, message: &Message, effects: &mut Vec<Effect>) {
+    /// Hands one message heard on a project's socket to whoever it is for.
+    pub fn heard(&mut self, project: ProjectId, channel: Channel, message: &Message) {
         let arriving = Arriving {
-            address: &message.address,
+            room: &message.room,
             id: &message.id,
             thread: message.thread.as_deref(),
-            mentions: message.mentions,
             from_us: message.from_us,
         };
-        match self.state.recipient(channel, &arriving) {
+        match self.state.recipient(project, channel, &arriving) {
             Recipient::Job(job) => {
                 tracing::info!(%job, "handing a reply to the job whose thread it is in");
                 self.replied(job, &message.text);
@@ -74,35 +72,7 @@ impl Running {
                 tracing::info!(%project, "a message for the foreman");
                 self.for_foreman(project, channel, message);
             }
-            // Answered rather than ignored. They addressed this instance, so
-            // silence would read as broken — and this is where somebody lands
-            // by replying to a foreman's own message.
-            Recipient::NoSuchJob(project) => {
-                tracing::info!(%project, "a message in a thread belonging to no job");
-                let Some(id) = message.thread.as_deref() else {
-                    return;
-                };
-                let Some(speaking) = self
-                    .state
-                    .projects
-                    .get(&project)
-                    .and_then(|watched| watched.channels.get(&channel))
-                    .map(ChannelConfig::speaking)
-                else {
-                    return;
-                };
-                self.say_now(
-                    &speaking,
-                    &Thread {
-                        channel,
-                        id: id.to_owned(),
-                    },
-                    stageman_foreman::no_such_job_notice(),
-                    effects,
-                );
-            }
-            // Ordinary — most of what is said in a project's channel is people
-            // talking to each other.
+            // Ordinary: what this instance said itself, heard back.
             Recipient::Nobody => tracing::debug!("nobody that message was for"),
         }
     }

@@ -177,32 +177,47 @@ fn a_reply_to_a_job_that_is_over_is_refused_with_its_own_notice() {
     );
 }
 
-/// A mention in a thread that belongs to no job is answered rather than
-/// ignored, and nothing else is said to.
+/// A mention in a thread that belongs to no job reaches the foreman, and is
+/// acknowledged in that thread — which is where a person lands by replying
+/// to something the foreman said. The idle job beside it is left alone.
 #[test]
-fn a_mention_in_a_thread_belonging_to_nothing_is_answered() {
+fn a_mention_in_a_thread_belonging_to_no_job_reaches_the_foreman() {
     let mut world = Simulation::new();
+    let idle = job(1);
     world.holding(&watching_a_channel(&[(
-        job(1),
+        idle,
         Progress::Idle(Waiting::Silent),
         1,
     )]));
-    let (name, held) = Simulation::ours(&stageman_job::container(job(1)));
+    let (name, held) = Simulation::ours(&stageman_job::container(idle));
     world.container(&name, held);
     let mut instance = world.wake(seed(1));
 
     world.says_in(100, 7, "hello?");
-    world.run_until(&mut instance, 200);
+    world.run_until(&mut instance, 5_000);
 
     assert_eq!(
         world.posts(),
-        [(thread(7), stageman_foreman::no_such_job_notice().to_owned())]
+        [(thread(7), stageman_foreman::received_notice(0))],
+        "acknowledged where it was said"
+    );
+    assert!(
+        world.talks().iter().any(|talk| talk.was_told("hello?")),
+        "the foreman was given it: {:?}",
+        world.talks()
+    );
+    assert_eq!(
+        progress_of(instance.state(), idle),
+        Progress::Idle(Waiting::Silent),
+        "not the job's thread, so not the job's"
     );
 }
 
-/// What is not addressed to this instance reaches nobody.
+/// What is not a person's mention reaches nobody: people talking to each
+/// other, something this instance said, and the copy of a mention that the
+/// message subscription delivers beside the mention event.
 #[test]
-fn a_message_without_a_mention_or_from_this_instance_reaches_nobody() {
+fn what_is_not_a_persons_mention_reaches_nobody() {
     let mut world = Simulation::new();
     let idle = job(1);
     world.holding(&watching_a_channel(&[(
@@ -216,11 +231,14 @@ fn a_message_without_a_mention_or_from_this_instance_reaches_nobody() {
 
     let plain = world.said_in_plainly(1, "people talking to each other");
     let ours = world.said_in_by_us(1, "something this instance posted");
+    let copy = world.said_in_as_a_message(1, "use postgres");
     world.schedule(100, plain);
     world.schedule(101, ours);
+    world.schedule(102, copy);
     world.run_until(&mut instance, 200);
 
     assert!(world.posts().is_empty());
+    assert!(world.talks().is_empty(), "{:?}", world.talks());
     assert_eq!(
         progress_of(instance.state(), idle),
         Progress::Idle(Waiting::Silent)

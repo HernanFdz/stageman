@@ -589,14 +589,17 @@ pub enum Channel {
 /// hide that the field types do not already.
 #[derive(Debug, Clone)]
 pub struct ChannelConfig {
-    /// Where on that channel this project's conversation happens.
+    /// The home room: where on that channel a job's thread is opened.
     ///
-    /// For Slack, the identifier of the channel a project's threads hang from
-    /// — one channel per project, one thread per job.
+    /// For Slack, the identifier of one channel. It used to be the whole of
+    /// where a project was listened to, and since
+    /// `docs/decisions/0060-a-binding-is-a-workspace.md` it is not: the app
+    /// hears every room it has been invited to, and this names only the room
+    /// a job's thread hangs from, until a job has a room of its own.
     ///
     /// Called an address rather than a *destination* because
     /// `docs/conventions.md` §2 rejects one-directional words for this concept:
-    /// the foreman watches this exact place, and a job posts to it.
+    /// a job posts here, and a person answers here.
     pub address: String,
     /// What the channel is reached with.
     ///
@@ -605,7 +608,7 @@ pub struct ChannelConfig {
     /// watching a project's channels needs that project's credentials, and one
     /// holder of every project's at once is the shape being avoided.
     pub credential: Secret,
-    /// What listening on that channel needs, if this project listens at all.
+    /// What listening on that channel needs.
     ///
     /// A second credential rather than a wider first one, because the two
     /// authorise different things and are held by different processes.
@@ -615,11 +618,11 @@ pub struct ChannelConfig {
     /// it could ever do — see
     /// `docs/decisions/0029-a-reply-is-routed-by-its-thread.md`.
     ///
-    /// Optional, and its absence is a working configuration rather than a
-    /// half-finished one: a project that speaks and does not listen is exactly
-    /// what existed before this, and `docs/decisions/0005-conversation-happens-on-channels.md`
-    /// only ever required somewhere to escalate *to*.
-    pub listen_credential: Option<Secret>,
+    /// Required, since
+    /// `docs/decisions/0059-a-project-speaks-and-listens-on-slack-always.md`:
+    /// a project that speaks and is never answered is a project whose jobs
+    /// wait for answers that have no way to arrive.
+    pub listen_credential: Secret,
 }
 
 /// Where one job's conversation happens.
@@ -636,13 +639,16 @@ pub struct ChannelConfig {
 /// no message. The domain does not need to know that, and does need to not
 /// convert it.
 ///
-/// It names its channel as well as the thread, because an identifier is only
-/// unique within one channel and a project's binding can be changed underneath
-/// a running job.
+/// It names its channel and its room as well as the thread, because an
+/// identifier is only unique within one room, and since
+/// `docs/decisions/0060-a-binding-is-a-workspace.md` the app hears more than
+/// one: a foreman answers wherever it was mentioned.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Thread {
     /// The channel it is a thread on.
     pub channel: Channel,
+    /// The room it is in, as the platform names it.
+    pub room: String,
     /// What identifies it there.
     pub id: String,
 }
@@ -717,10 +723,14 @@ pub struct Job {
     /// nothing else, so the instance needs to know which job that is, and that
     /// lookup has to survive the process dying.
     ///
-    /// Absent for a job on a project with no channel bound, and for every job
+    /// Absent for a job whose thread could not be opened, and for every job
     /// that existed before there were threads at all — which is why it is
-    /// defaulted, per `docs/conventions.md` §4.
-    #[serde(default)]
+    /// defaulted, per `docs/conventions.md` §4. Read through a bridge as
+    /// well: a thread the last release wrote names no room, and opens as
+    /// none rather than as a guess about where it was. The job keeps its
+    /// record and loses its place to be answered in, which is the loss §4
+    /// permits.
+    #[serde(default, deserialize_with = "thread_or_older")]
     pub thread: Option<Thread>,
     /// What the agent's session reported it was set to, after being set.
     ///
@@ -954,6 +964,61 @@ where
         Written::Now(progress) => progress,
         Written::Then(Older::Idle) => Progress::Idle(Waiting::Silent),
         Written::Then(Older::Failed(why)) => Progress::Idle(Waiting::Failed(why)),
+    })
+}
+
+/// Reads a job's thread, in this shape or in the one before it.
+///
+/// The bridge `docs/conventions.md` §4 requires. What the last release wrote
+/// named a channel and an identifier and no room, because the one room a
+/// project had was the whole of where it listened. That thread opens as none
+/// rather than as a thread in a room this cannot name: the job keeps its
+/// record, and a reply cannot reach it, which is the loss §4 allows.
+fn thread_or_older<'de, D>(deserializer: D) -> Result<Option<Thread>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    struct Written {
+        channel: Channel,
+        #[serde(default)]
+        room: Option<String>,
+        id: String,
+    }
+
+    Ok(
+        Option::<Written>::deserialize(deserializer)?.and_then(|written| {
+            written.room.map(|room| Thread {
+                channel: written.channel,
+                room,
+                id: written.id,
+            })
+        }),
+    )
+}
+
+/// Reads a foreman's inbox, in this shape or in any other.
+///
+/// The bridge `docs/conventions.md` §4 requires. An inbox the last release
+/// wrote holds errands whose threads name no room, so it cannot be carried:
+/// a thread in a room this cannot name is nowhere to answer. It opens as
+/// idle, and so does anything else that is not this release's shape, because
+/// §4 says a file must not fail to open over an inbox — what is lost is a
+/// message in hand across an upgrade, which the person can send again.
+fn attending_or_older<'de, D>(deserializer: D) -> Result<Attending, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Written {
+        Now(Attending),
+        Then(serde::de::IgnoredAny),
+    }
+
+    Ok(match Written::deserialize(deserializer)? {
+        Written::Now(attending) => attending,
+        Written::Then(_) => Attending::Idle,
     })
 }
 
@@ -1337,19 +1402,24 @@ impl State {
     /// Who a message arriving on a channel is for.
     ///
     /// The rule in `docs/decisions/0031-a-mention-is-what-makes-it-ours.md`,
-    /// and the whole of it: **nothing without a mention is read at all.** What
-    /// mentions this instance goes to the job whose thread it is in, or to the
-    /// foreman if it is at the root, or is answered as belonging to no job.
+    /// as `docs/decisions/0060-a-binding-is-a-workspace.md` narrows it. The
+    /// project is given rather than found: it is whichever project's socket
+    /// the message arrived on, and the room it was said in decides nothing.
+    /// What is left to decide is whether the thread it was in belongs to one
+    /// of that project's jobs — then it is that job's — and otherwise it is
+    /// the foreman's, at the root or in a thread alike.
     ///
-    /// The mention is required *everywhere*, including inside a job's own
-    /// thread, and that reverses what 0029 decided. The reason is a use it
-    /// missed: people need to talk under a job — about the change it proposed,
-    /// most obviously — without waking its agent and paying for a turn. A
-    /// thread stageman opened is still a room, and the mention is how somebody
-    /// says they mean the machine rather than each other.
+    /// That a person's message mentions this instance is not consulted,
+    /// because it is what made the message arrive: the reader hands over a
+    /// person's words only when the platform delivered them as a mention, and
+    /// the mention is still required inside a job's own thread, for the
+    /// reason 0031 gives — people need to talk under a job without waking its
+    /// agent. What *is* consulted, and first, is whether this instance said
+    /// it, before anything else can match, so that a job's own thread is no
+    /// exception.
     ///
-    /// A thread is matched on its channel as well as its identifier, because an
-    /// identifier is only unique within one channel.
+    /// A thread is matched on its room as well as its identifier, because an
+    /// identifier is only unique within one room.
     ///
     /// Note what is *not* consulted: whether the job is still running. A
     /// finished job's thread still routes to it, and that is deliberate — the
@@ -1357,39 +1427,34 @@ impl State {
     /// later means the job. What happens when a job cannot take the message is
     /// a question for whoever delivers it, not for this.
     #[must_use]
-    pub fn recipient(&self, channel: Channel, arriving: &Arriving<'_>) -> Recipient {
-        // Nothing this instance said, and nothing that did not address it.
-        // Both before anything else can match, so that a job's own thread is
-        // no exception to either.
-        if arriving.from_us || !arriving.mentions {
+    pub fn recipient(
+        &self,
+        project: ProjectId,
+        channel: Channel,
+        arriving: &Arriving<'_>,
+    ) -> Recipient {
+        // Nothing this instance said, before anything else can match, so that
+        // a job's own thread is no exception.
+        if arriving.from_us {
             return Recipient::Nobody;
         }
-
-        let watching = self.projects.iter().find(|(_, project)| {
-            project
-                .channels
-                .get(&channel)
-                .is_some_and(|bound| bound.address == arriving.address)
-        });
-        let Some((project, _)) = watching else {
+        let Some(watched) = self.projects.get(&project) else {
             return Recipient::Nobody;
         };
-
         let Some(thread) = arriving.thread else {
-            return Recipient::Foreman(*project);
+            return Recipient::Foreman(project);
         };
-
-        self.projects
-            .values()
-            .flat_map(|watched| &watched.jobs)
+        watched
+            .jobs
+            .iter()
             .find(|(_, job)| {
-                job.thread
-                    .as_ref()
-                    .is_some_and(|speaking| speaking.channel == channel && speaking.id == thread)
+                job.thread.as_ref().is_some_and(|speaking| {
+                    speaking.channel == channel
+                        && speaking.room == arriving.room
+                        && speaking.id == thread
+                })
             })
-            .map_or(Recipient::NoSuchJob(*project), |(job, _)| {
-                Recipient::Job(*job)
-            })
+            .map_or(Recipient::Foreman(project), |(job, _)| Recipient::Job(*job))
     }
 
     /// Converts to the form that goes on disk, sealing every credential.
@@ -1446,11 +1511,9 @@ impl State {
                             SealedChannelConfig {
                                 address: config.address.clone(),
                                 credential: config.credential.seal(key, nonces())?,
-                                listen_credential: config
-                                    .listen_credential
-                                    .as_ref()
-                                    .map(|secret| secret.seal(key, nonces()))
-                                    .transpose()?,
+                                listen_credential: Some(
+                                    config.listen_credential.seal(key, nonces())?,
+                                ),
                             },
                         ))
                     })
@@ -1718,12 +1781,14 @@ pub struct SealedChannelConfig {
     pub address: String,
     /// The sealed credential.
     pub credential: SealedSecret,
-    /// The sealed credential for listening, if this project listens.
+    /// The sealed credential for listening.
     ///
-    /// Defaulted, because bindings exist that were written before listening
-    /// did — `docs/conventions.md` §4. `None` and absent mean the same thing
-    /// here, which is what makes the default the true answer rather than a
-    /// substitute for one.
+    /// Always written, since
+    /// `docs/decisions/0059-a-project-speaks-and-listens-on-slack-always.md`,
+    /// and still read as optional, because the last release wrote none for a
+    /// project that did not listen — `docs/conventions.md` §4. A binding read
+    /// without one is dropped on opening rather than carried, and the project
+    /// is kept.
     #[serde(default)]
     pub listen_credential: Option<SealedSecret>,
 }
@@ -1797,8 +1862,13 @@ pub struct SealedProject {
     /// a message from a person is not a credential.
     ///
     /// Defaulted, because every snapshot written before foremen had an inbox
-    /// has no such field — `docs/conventions.md` §4.
-    #[serde(default)]
+    /// has no such field — `docs/conventions.md` §4. Read through a bridge as
+    /// well: an inbox the last release wrote holds threads that name no
+    /// room, and opens as idle. The messages in it are lost, which §4
+    /// permits — a restart during an upgrade with a message in hand is the
+    /// whole of the window — and the alternative was a file that would not
+    /// open.
+    #[serde(default, deserialize_with = "attending_or_older")]
     pub attending: Attending,
 }
 
@@ -1869,19 +1939,23 @@ impl Snapshot {
                     .into_iter()
                     .map(|(platform, sealed)| Ok((platform, sealed.open(key)?)))
                     .collect::<Result<BTreeMap<_, _>, OpenError>>()?;
+                // A binding the last release wrote without the credential
+                // that listens is no binding, per 0059: the project is kept
+                // and told so at startup, rather than the file refused.
                 let channels = project
                     .channels
                     .into_iter()
-                    .map(|(channel, sealed)| {
+                    .filter_map(|(channel, sealed)| {
+                        let listening = sealed.listen_credential?;
+                        Some((channel, sealed.address, sealed.credential, listening))
+                    })
+                    .map(|(channel, address, credential, listening)| {
                         Ok((
                             channel,
                             ChannelConfig {
-                                address: sealed.address,
-                                credential: sealed.credential.open(key)?,
-                                listen_credential: sealed
-                                    .listen_credential
-                                    .map(|secret| secret.open(key))
-                                    .transpose()?,
+                                address,
+                                credential: credential.open(key)?,
+                                listen_credential: listening.open(key)?,
                             },
                         ))
                     })
@@ -1940,9 +2014,9 @@ impl Snapshot {
 /// by there being no field for it rather than by remembering to strip one.
 #[derive(Debug, Clone)]
 pub struct Speaking {
-    /// Where to speak.
-    pub address: String,
-    /// What to authenticate with.
+    /// What to authenticate with. Where to speak is not here: since
+    /// `docs/decisions/0060-a-binding-is-a-workspace.md` a room is named by
+    /// the conversation, not by the binding, and a thread carries its own.
     pub credential: Secret,
 }
 
@@ -1951,7 +2025,6 @@ impl ChannelConfig {
     #[must_use]
     pub fn speaking(&self) -> Speaking {
         Speaking {
-            address: self.address.clone(),
             credential: self.credential.clone(),
         }
     }
@@ -1960,13 +2033,18 @@ impl ChannelConfig {
 /// A message that arrived on a channel, as much of it as routing needs.
 ///
 /// Deliberately not the platform's own event type. What decides where a message
-/// goes is four facts, and taking only those keeps the deciding in this crate —
-/// which has no I/O and can therefore be tested against every combination
+/// goes is three facts, and taking only those keeps the deciding in this crate
+/// — which has no I/O and can therefore be tested against every combination
 /// rather than against whichever ones a live workspace happens to produce.
+///
+/// That a person's message mentions this instance is not among them, since
+/// `docs/decisions/0060-a-binding-is-a-workspace.md`: it is what made the
+/// message arrive, because a person is read from the platform's own mention
+/// event and from nothing else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Arriving<'a> {
-    /// Where it arrived, as the platform names that place.
-    pub address: &'a str,
+    /// The room it was said in, as the platform names it.
+    pub room: &'a str,
     /// What identifies this message itself.
     ///
     /// Needed because a message at the root *is* the parent of the thread a
@@ -1976,8 +2054,6 @@ pub struct Arriving<'a> {
     pub id: &'a str,
     /// The thread it was in, if it was in one at all.
     pub thread: Option<&'a str>,
-    /// Whether it named this project's bot.
-    pub mentions: bool,
     /// Whether this instance is what said it.
     ///
     /// Carried into the decision rather than filtered before it, because
@@ -1994,21 +2070,15 @@ pub struct Arriving<'a> {
 pub enum Recipient {
     /// The job whose thread it arrived in.
     Job(JobId),
-    /// The foreman of the project that binds the channel.
+    /// The foreman of the project whose socket it arrived on: a mention at
+    /// the root of any room, or in a thread belonging to no job — which is
+    /// where a person lands by replying to something the foreman said, and
+    /// which used to be answered with a fixed sentence.
     Foreman(ProjectId),
-    /// Nobody at all, and this is the ordinary answer rather than a failure.
-    /// Most of what is said in a project's channel is people talking to each
-    /// other, and none of it is addressed here.
+    /// Nobody at all, and this is the ordinary answer rather than a failure:
+    /// what this instance said itself, heard back, or a message for a project
+    /// this instance does not watch.
     Nobody,
-    /// Somebody addressed this instance in a thread that belongs to no job.
-    ///
-    /// Distinct from [`Recipient::Nobody`] because it needs an *answer* rather
-    /// than silence: they asked, so saying that nothing here owns this thread
-    /// — and where to go instead — is the difference between a system that is
-    /// quiet and one that looks broken. It is what somebody reaches by
-    /// replying to a foreman's own message, which is the natural thing to try
-    /// and the thing that cannot work.
-    NoSuchJob(ProjectId),
 }
 
 /// Which of the two things that run an agent this is for.
@@ -2149,11 +2219,8 @@ impl Handout {
             // possible example of something it has no business holding.
             variables: BTreeMap::new(),
             channels: speaking(watching),
-            // Only a foreman may ask this instance for anything, so only a
-            // foreman's handout carries what proves the asking.
-            // The foreman speaks at the root of the channel, which is
-            // what makes a reply there addressed to it. See
-            // `docs/decisions/0029-a-reply-is-routed-by-its-thread.md`.
+            // Narrowed by [`Handout::speaking_in`] to the thread of the
+            // message being answered, every turn; nothing is fixed here.
             thread: None,
         })
     }
@@ -2453,7 +2520,7 @@ mod tests {
         ChannelConfig {
             address: CHANNEL_ADDRESS.to_owned(),
             credential: Secret::new(CHANNEL_TOKEN.to_owned()),
-            listen_credential: Some(Secret::new(LISTEN_TOKEN.to_owned())),
+            listen_credential: Secret::new(LISTEN_TOKEN.to_owned()),
         }
     }
 
@@ -2671,102 +2738,71 @@ mod tests {
         let thread = "1728312345.678901".to_owned();
         state.job_mut(job).expect("the job").thread = Some(Thread {
             channel: Channel::Slack,
+            room: CHANNEL_ADDRESS.to_owned(),
             id: thread.clone(),
         });
         (state, project, job, thread)
     }
 
+    /// A person's message, as much of it as routing sees.
+    fn arriving<'a>(room: &'a str, thread: Option<&'a str>) -> Arriving<'a> {
+        Arriving {
+            room,
+            id: "1788000000.000000",
+            thread,
+            from_us: false,
+        }
+    }
+
     /// A mention in a job's thread is that job's.
     #[test]
     fn a_mention_in_a_jobs_thread_is_for_that_job() {
-        let (state, _, job, thread) = listening();
+        let (state, project, job, thread) = listening();
 
         assert_eq!(
             state.recipient(
+                project,
                 Channel::Slack,
-                &Arriving {
-                    address: CHANNEL_ADDRESS,
-                    id: "1788000000.000000",
-                    thread: Some(&thread),
-                    mentions: true,
-                    from_us: false,
-                }
+                &arriving(CHANNEL_ADDRESS, Some(&thread))
             ),
             Recipient::Job(job)
         );
     }
 
-    /// **The rule the whole change is for.** People must be able to talk under
-    /// a job — about the change it proposed, most obviously — without waking
-    /// its agent and paying for a turn.
-    ///
-    /// This reverses `docs/decisions/0029-a-reply-is-routed-by-its-thread.md`,
-    /// where a thread was enough on its own. A thread stageman opened is still
-    /// a room, and the mention is how somebody says they mean the machine
-    /// rather than each other.
+    /// A mention at the root is the foreman's, in the home room and in any
+    /// other: the project is the socket's, and the room decides nothing.
     #[test]
-    fn a_job_thread_without_a_mention_is_people_talking() {
-        let (state, _, _, thread) = listening();
+    fn a_mention_at_the_root_of_any_room_is_for_the_foreman() {
+        let (state, project, _, _) = listening();
+
+        for room in [CHANNEL_ADDRESS, "C-somewhere-else"] {
+            assert_eq!(
+                state.recipient(project, Channel::Slack, &arriving(room, None)),
+                Recipient::Foreman(project),
+                "{room}"
+            );
+        }
+    }
+
+    /// A mention in a thread owning no job is the foreman's as well.
+    ///
+    /// This is where a person lands by replying to something a foreman said,
+    /// which is the most natural move available.
+    /// `docs/decisions/0031-a-mention-is-what-makes-it-ours.md` answered it
+    /// with a fixed sentence, and
+    /// `docs/decisions/0060-a-binding-is-a-workspace.md` makes it work: the
+    /// errand carries its thread, so the answer lands where the person is.
+    #[test]
+    fn a_mention_in_a_thread_belonging_to_no_job_is_for_the_foreman() {
+        let (state, project, _, _) = listening();
 
         assert_eq!(
             state.recipient(
+                project,
                 Channel::Slack,
-                &Arriving {
-                    address: CHANNEL_ADDRESS,
-                    id: "1788000000.000000",
-                    thread: Some(&thread),
-                    mentions: false,
-                    from_us: false,
-                }
+                &arriving(CHANNEL_ADDRESS, Some("1111111111.000000"))
             ),
-            Recipient::Nobody
-        );
-    }
-
-    /// A message at the root is the foreman's, when it asks to be.
-    #[test]
-    fn a_mention_at_the_root_is_for_the_foreman() {
-        let (state, project, _, _) = listening();
-        let at_root = |mentions| Arriving {
-            address: CHANNEL_ADDRESS,
-            id: "1788000000.000000",
-            thread: None,
-            mentions,
-            from_us: false,
-        };
-
-        assert_eq!(
-            state.recipient(Channel::Slack, &at_root(true)),
             Recipient::Foreman(project)
-        );
-        // Two people talking in a project's channel are not addressing this.
-        assert_eq!(
-            state.recipient(Channel::Slack, &at_root(false)),
-            Recipient::Nobody
-        );
-    }
-
-    /// A mention in a thread owning no job is answered, not dropped.
-    ///
-    /// Somebody asked, so silence would read as broken — and this is exactly
-    /// where a person lands by replying to something a foreman said, which is
-    /// the most natural move available and the one thing that cannot work.
-    #[test]
-    fn a_mention_in_a_thread_belonging_to_nothing_is_answered() {
-        let (state, project, _, _) = listening();
-
-        assert_eq!(
-            state.recipient(
-                Channel::Slack,
-                &Arriving {
-                    address: CHANNEL_ADDRESS,
-                    id: "1788000000.000000",
-                    thread: Some("1111111111.000000"),
-                    mentions: true,
-                    from_us: false,
-                }
-            ),
-            Recipient::NoSuchJob(project)
         );
     }
 
@@ -2777,17 +2813,17 @@ mod tests {
     /// strongest match there is.
     #[test]
     fn nothing_this_instance_said_is_routed_back_to_it() {
-        let (state, _, _, thread) = listening();
+        let (state, project, _, thread) = listening();
 
-        for mentions in [true, false] {
+        for thread in [Some(thread.as_str()), None] {
             assert_eq!(
                 state.recipient(
+                    project,
                     Channel::Slack,
                     &Arriving {
-                        address: CHANNEL_ADDRESS,
+                        room: CHANNEL_ADDRESS,
                         id: "1788000000.000000",
-                        thread: Some(&thread),
-                        mentions,
+                        thread,
                         from_us: true,
                     }
                 ),
@@ -2797,54 +2833,60 @@ mod tests {
         }
     }
 
-    /// A thread identifier is only unique within its channel.
+    /// A thread identifier is only unique within its room, so the same
+    /// identifier in another room is a thread belonging to no job.
     #[test]
-    fn a_thread_on_another_channel_is_not_this_jobs_thread() {
-        let (mut state, project, job, thread) = listening();
-        // Move the job's thread to a channel this message did not arrive on.
-        // With one channel in the set this is the only way to say it, and it
-        // is the condition that stops being trivially true on the second.
-        state.job_mut(job).expect("the job").thread = Some(Thread {
-            channel: Channel::Slack,
-            id: format!("{thread}-elsewhere"),
-        });
+    fn a_thread_in_another_room_is_not_this_jobs_thread() {
+        let (state, project, _, thread) = listening();
 
         assert_eq!(
             state.recipient(
+                project,
                 Channel::Slack,
-                &Arriving {
-                    address: CHANNEL_ADDRESS,
-                    id: "1788000000.000000",
-                    thread: Some(&thread),
-                    mentions: false,
-                    from_us: false,
-                }
+                &arriving("C-somewhere-else", Some(&thread))
             ),
-            Recipient::Nobody
-        );
-        assert_eq!(
-            state.projects.get(&project).expect("the project").name,
-            "example"
+            Recipient::Foreman(project)
         );
     }
 
-    /// A channel nothing binds is nobody's, mention or not.
+    /// A message for a project this instance does not watch is nobody's.
+    ///
+    /// Not a case a socket can produce, since every socket is a project's;
+    /// asserted so that the answer to an impossible question is silence
+    /// rather than a foreman that does not exist.
     #[test]
-    fn a_message_from_a_channel_no_project_binds_is_nobodys() {
+    fn a_message_for_a_project_this_instance_does_not_watch_is_nobodys() {
         let (state, _, _, _) = listening();
 
         assert_eq!(
             state.recipient(
+                ProjectId::from_uuid(Uuid::from_u128(404)),
                 Channel::Slack,
-                &Arriving {
-                    address: "C-somewhere-else",
-                    id: "1788000000.000000",
-                    thread: None,
-                    mentions: true,
-                    from_us: false,
-                }
+                &arriving(CHANNEL_ADDRESS, None)
             ),
             Recipient::Nobody
+        );
+    }
+
+    /// Only the socket's own project's jobs are looked at.
+    ///
+    /// Two projects' apps can share a room, and each hears its own copy of a
+    /// mention there. A thread belonging to the other project's job is, for
+    /// this one, a thread belonging to no job — and so its foreman's, not
+    /// silence and not the other project's job.
+    #[test]
+    fn another_projects_jobs_thread_is_this_projects_foremans() {
+        let (mut state, _, _, thread) = listening();
+        let other = ProjectId::from_uuid(Uuid::from_u128(4));
+        state.projects.insert(other, a_project_with_a_job());
+
+        assert_eq!(
+            state.recipient(
+                other,
+                Channel::Slack,
+                &arriving(CHANNEL_ADDRESS, Some(&thread))
+            ),
+            Recipient::Foreman(other)
         );
     }
 
@@ -2855,19 +2897,14 @@ mod tests {
     /// the message is the deliverer's problem, not this one's.
     #[test]
     fn an_idle_jobs_thread_still_routes_to_it() {
-        let (mut state, _, job, thread) = listening();
+        let (mut state, project, job, thread) = listening();
         state.job_mut(job).expect("the job").progress = Progress::Idle(Waiting::Silent);
 
         assert_eq!(
             state.recipient(
+                project,
                 Channel::Slack,
-                &Arriving {
-                    address: CHANNEL_ADDRESS,
-                    id: "1788000000.000000",
-                    thread: Some(&thread),
-                    mentions: true,
-                    from_us: false,
-                }
+                &arriving(CHANNEL_ADDRESS, Some(&thread))
             ),
             Recipient::Job(job)
         );
@@ -2979,8 +3016,8 @@ mod tests {
         assert_eq!(bound.address, CHANNEL_ADDRESS);
         assert_eq!(bound.credential.expose(), CHANNEL_TOKEN);
         assert_eq!(
-            bound.listen_credential.as_ref().map(Secret::expose),
-            Some(LISTEN_TOKEN),
+            bound.listen_credential.expose(),
+            LISTEN_TOKEN,
             "both credentials cross the boundary, not only the one that posts"
         );
     }
@@ -3034,6 +3071,7 @@ mod tests {
             .expect("a job");
         state.job_mut(job).expect("the job").thread = Some(Thread {
             channel: Channel::Slack,
+            room: CHANNEL_ADDRESS.to_owned(),
             id: "1728312345.678901".to_owned(),
         });
 
@@ -3257,18 +3295,29 @@ mod tests {
     /// now, and a search-and-replace across the crate will silently update
     /// them and leave this passing against a file nothing ever produced.
     ///
-    /// Note what is absent: the field naming the agents a project's jobs could
-    /// run on. The last release read one and never wrote one, so a file it
-    /// wrote has kits and nothing else.
-    #[test]
-    fn a_snapshot_written_by_the_last_release_still_opens() {
+    /// A file as the last release wrote it, holding two projects.
+    ///
+    /// Two, because the last release wrote two shapes of binding and two
+    /// shapes of thread, and what survives differs per `docs/conventions.md`
+    /// §4. The first project speaks and does not listen, holds a job in a
+    /// thread that names no room, and has a message in hand. The second
+    /// listens.
+    ///
+    /// **Nothing in here may be renamed to match the source.** These are the
+    /// names the last release wrote, not the names the types happen to use
+    /// now, and a search-and-replace across the crate will silently update
+    /// them and leave this passing against a file nothing ever produced.
+    /// Note what is absent: the field naming the agents a project's jobs
+    /// could run on. The last release read one and never wrote one, so a
+    /// file it wrote has kits and nothing else.
+    fn written_by_the_last_release() -> String {
         let sealed = serde_json::to_string(
             &Secret::new("agent-token".to_owned())
                 .seal(&key(), [1; NONCE_LEN])
                 .expect("sealing a well-formed secret"),
         )
         .expect("a sealed secret serialises");
-        let older = format!(
+        format!(
             r#"{{
               "agents": {{
                 "Claude": {{ "auth_token": {sealed} }}
@@ -3285,7 +3334,9 @@ mod tests {
                     }}
                   }},
                   "credentials": {{}},
-                  "channels": {{}},
+                  "channels": {{
+                    "Slack": {{ "address": "C0123456789", "credential": {sealed} }}
+                  }},
                   "variables": {{}},
                   "jobs": {{
                     "00000000-0000-0000-0000-000000000009": {{
@@ -3294,22 +3345,59 @@ mod tests {
                       "kickoff": "work on it",
                       "created_at": "1970-01-01T00:00:00Z",
                       "progress": "Idle",
-                      "thread": null,
+                      "thread": {{ "channel": "Slack", "id": "1728312345.678901" }},
                       "reported": {{}}
                     }}
                   }},
+                  "attending": {{
+                    "Working": {{
+                      "on": {{
+                        "said": "look at the parser",
+                        "thread": {{ "channel": "Slack", "id": "1728312345.678901" }}
+                      }},
+                      "waiting": []
+                    }}
+                  }}
+                }},
+                "00000000-0000-0000-0000-000000000004": {{
+                  "name": "listening",
+                  "repository": "https://example.invalid/other",
+                  "foreman_kit": {{ "Claude": {{ "model": {{ "Default": {{ "effort": "Default" }} }} }} }},
+                  "kits": {{
+                    "Claude": {{
+                      "kit": {{ "Claude": {{ "model": {{ "Default": {{ "effort": "Default" }} }} }} }},
+                      "description": "its defaults"
+                    }}
+                  }},
+                  "credentials": {{}},
+                  "channels": {{
+                    "Slack": {{
+                      "address": "C0123456789",
+                      "credential": {sealed},
+                      "listen_credential": {sealed}
+                    }}
+                  }},
+                  "variables": {{}},
+                  "jobs": {{}},
                   "attending": "Idle"
                 }}
               }}
             }}"#
-        );
+        )
+    }
 
-        let parsed: Snapshot = serde_json::from_str(&older).expect("an older file still parses");
+    /// A snapshot as the last release wrote it still opens, and what cannot
+    /// be carried is dropped rather than refused: a binding without the
+    /// credential that listens, a thread that names no room, and an inbox
+    /// whose threads name none. The project and its job are kept.
+    #[test]
+    fn a_snapshot_written_by_the_last_release_still_opens() {
+        let parsed: Snapshot = serde_json::from_str(&written_by_the_last_release())
+            .expect("an older file still parses");
         let state = parsed.open(&key()).expect("and still opens");
         let project = state
             .projects
-            .values()
-            .next()
+            .get(&ProjectId::from_uuid(Uuid::from_u128(3)))
             .expect("the project survived");
 
         assert_eq!(project.name, "example");
@@ -3321,6 +3409,15 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["Claude".to_owned()],
         );
+        assert!(
+            project.channels.is_empty(),
+            "a binding without the credential that listens is no binding"
+        );
+        assert_eq!(
+            project.attending,
+            Attending::Idle,
+            "an inbox whose threads name no room opens idle"
+        );
 
         let job = project.jobs.values().next().expect("and its job");
         assert_eq!(job.reason, "an issue was opened");
@@ -3329,6 +3426,31 @@ mod tests {
             Progress::Idle(Waiting::Silent),
             "a state that could not say why becomes the reading that says so",
         );
+        assert_eq!(
+            job.thread, None,
+            "a thread that names no room is nowhere to answer"
+        );
+    }
+
+    /// A binding the last release wrote with both credentials comes through
+    /// whole, which is the shape every real instance has been in.
+    #[test]
+    fn a_binding_with_both_credentials_written_by_the_last_release_comes_through_whole() {
+        let parsed: Snapshot = serde_json::from_str(&written_by_the_last_release())
+            .expect("an older file still parses");
+        let state = parsed.open(&key()).expect("and still opens");
+
+        let listening = state
+            .projects
+            .get(&ProjectId::from_uuid(Uuid::from_u128(4)))
+            .expect("the other project survived");
+        let bound = listening
+            .channels
+            .get(&Channel::Slack)
+            .expect("a binding with both credentials comes through whole");
+        assert_eq!(bound.address, "C0123456789");
+        assert_eq!(bound.credential.expose(), "agent-token");
+        assert_eq!(bound.listen_credential.expose(), "agent-token");
     }
 
     /// Where a name stops being believed.
@@ -3461,9 +3583,7 @@ mod tests {
             ChannelConfig {
                 address: "C9999999999".to_owned(),
                 credential: Secret::new(ALIEN_CHANNEL_TOKEN.to_owned()),
-                // Speaks and does not listen, so both shapes cross every test
-                // below rather than only the fuller one.
-                listen_credential: None,
+                listen_credential: Secret::new("xapp-not-yours-either".to_owned()),
             },
         );
         // The same name holding a different value, which is what makes the
@@ -3503,7 +3623,6 @@ mod tests {
         let watching = handout
             .channel(Channel::Slack)
             .expect("the binding came through");
-        assert_eq!(watching.address, CHANNEL_ADDRESS);
         assert_eq!(watching.credential.expose(), CHANNEL_TOKEN);
         assert_eq!(handout.channels().count(), 1);
     }
@@ -3555,7 +3674,6 @@ mod tests {
         let speaking = handout
             .channel(Channel::Slack)
             .expect("the binding came through");
-        assert_eq!(speaking.address, CHANNEL_ADDRESS);
         assert_eq!(speaking.credential.expose(), CHANNEL_TOKEN);
     }
 
@@ -3688,6 +3806,7 @@ mod tests {
 
         let narrowed = job.speaking_in(Thread {
             channel: Channel::Slack,
+            room: CHANNEL_ADDRESS.to_owned(),
             id: "1728312345.678901".to_owned(),
         });
         assert_eq!(
@@ -3721,7 +3840,6 @@ mod tests {
         ] {
             let bound = handout.channel(Channel::Slack).expect("a binding");
             assert_eq!(bound.credential.expose(), CHANNEL_TOKEN);
-            assert_eq!(bound.address, CHANNEL_ADDRESS);
 
             // The whole structure, in case a field is added later that does
             // carry it. Formatting is redacted, so this reads the values.
@@ -3743,9 +3861,8 @@ mod tests {
                 .get(&Channel::Slack)
                 .expect("its binding")
                 .listen_credential
-                .as_ref()
-                .map(Secret::expose),
-            Some(LISTEN_TOKEN)
+                .expose(),
+            LISTEN_TOKEN
         );
     }
 
@@ -3958,6 +4075,7 @@ mod tests {
             said: said.to_owned(),
             thread: Thread {
                 channel: Channel::Slack,
+                room: CHANNEL_ADDRESS.to_owned(),
                 id: format!("{said}.thread"),
             },
         }

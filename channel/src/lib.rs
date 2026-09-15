@@ -1,8 +1,8 @@
 //! The contract every channel is spoken on, and the adapters that implement
 //! it.
 //!
-//! One contract: a message posted at the root of an address or in a thread
-//! on it, and an event stream opened — who this instance is on the channel,
+//! One contract: a message posted at the root of a room or in a thread
+//! there, and an event stream opened — who this instance is on the channel,
 //! where to connect — with its frames read and acknowledged. Since
 //! `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`
 //! none of it is performed here. What is said to a platform is rendered as a
@@ -25,27 +25,36 @@ use stageman_core::{Channel, Secret, Speaking};
 
 /// Who this instance is on a channel, so it can recognise itself.
 ///
-/// One identifier, asked for once per connection. It answers both questions
-/// the routing rule asks about the speaker: whether a message mentions this
-/// instance, and whether this instance is what said it.
+/// Two identifiers, asked for once per connection. The user is what a
+/// mention names and what a message from the token's own user carries; the
+/// bot is what every post made with the token carries. Together they answer
+/// the one question the routing rule asks about the speaker — whether this
+/// instance is what said it — by its own identifiers rather than by its
+/// being a bot, which stopped being the same thing the moment another bot
+/// could be heard.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Identity {
     /// What a mention of this instance looks up to.
     pub user: String,
+    /// What a post made with this instance's credential carries.
+    pub bot: String,
 }
 
 /// One message heard on a channel, as decoded.
 ///
-/// What routing needs and nothing else: where it was said, what identifies
-/// it, the thread it was in if any, the words, and the two facts about the
-/// speaker the rule in
-/// `docs/decisions/0031-a-mention-is-what-makes-it-ours.md` turns on. Which
-/// job or foreman it is for is not decided here: that is the domain's
-/// routing rule, asked by the instance.
+/// What routing needs and nothing else: the room it was said in, what
+/// identifies it, the thread it was in if any, the words, and whether this
+/// instance said it. That a person's message mentions this instance is not
+/// carried, because since
+/// `docs/decisions/0060-a-binding-is-a-workspace.md` it is what made the
+/// message arrive: a person is read from the platform's own mention event,
+/// and nothing a person says without one is decoded at all. Which job or
+/// foreman it is for is not decided here: that is the domain's routing
+/// rule, asked by the instance.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Message {
-    /// Where it was said.
-    pub address: String,
+    /// The room it was said in, as the platform names it.
+    pub room: String,
     /// What identifies this message, which is the thread a foreman answers
     /// in when the message is at the root.
     pub id: String,
@@ -53,8 +62,6 @@ pub struct Message {
     pub thread: Option<String>,
     /// What was said, as the person wrote it.
     pub text: String,
-    /// Whether it named this instance.
-    pub mentions: bool,
     /// Whether this instance is what said it.
     pub from_us: bool,
 }
@@ -123,12 +130,18 @@ pub struct Request {
     pub body: Option<Vec<u8>>,
 }
 
-/// Renders posting one message on a channel: at the root of the address
+/// Renders posting one message in a room on a channel: at the room's root
 /// when `thread` is none, and in that thread otherwise.
 #[must_use]
-pub fn post(channel: Channel, speaking: &Speaking, text: &str, thread: Option<&str>) -> Request {
+pub fn post(
+    channel: Channel,
+    speaking: &Speaking,
+    room: &str,
+    text: &str,
+    thread: Option<&str>,
+) -> Request {
     match channel {
-        Channel::Slack => slack::post(speaking, text, thread),
+        Channel::Slack => slack::post(speaking, room, text, thread),
     }
 }
 
@@ -150,7 +163,8 @@ pub fn posted(channel: Channel, status: u16, body: &[u8]) -> Result<String, Chan
 ///
 /// Once per connection rather than once per message, and with the
 /// credential that speaks rather than the one that opens the event stream,
-/// because the speaking one is what a mention names.
+/// because the speaking one is what a mention names and what its own posts
+/// carry.
 #[must_use]
 pub fn who_am_i(channel: Channel, speaking: &Speaking) -> Request {
     match channel {
@@ -229,8 +243,8 @@ pub enum Call {
     Post {
         /// Which channel it goes to.
         channel: Channel,
-        /// Where on it.
-        address: String,
+        /// Which room on it.
+        room: String,
         /// What.
         text: String,
         /// In which thread, if any.
@@ -266,6 +280,12 @@ pub enum ChannelError {
     /// is, or where to connect.
     #[error("the channel accepted the question and did not answer it")]
     NoAnswer,
+    /// The credential that speaks is not a bot's, so nothing it posts could
+    /// be told apart from what anybody else says.
+    #[error(
+        "the credential is not a bot token, so this instance could not recognise its own words"
+    )]
+    NotABot,
 }
 
 #[cfg(test)]
@@ -278,16 +298,18 @@ mod tests {
 
     fn speaking() -> Speaking {
         Speaking {
-            address: "C0123456789".to_owned(),
             credential: Secret::new("xoxb-not-a-real-token".to_owned()),
         }
     }
+
+    /// The room every post here goes to.
+    const ROOM: &str = "C0123456789";
 
     /// What is rendered reads back as what was asked, at the root and in a
     /// thread, and the credential travels as the platform expects it.
     #[test]
     fn a_post_reads_back_as_what_it_asked() {
-        let root = post(Channel::Slack, &speaking(), "a job", None);
+        let root = post(Channel::Slack, &speaking(), ROOM, "a job", None);
         assert_eq!(root.method, "POST");
         assert_eq!(
             root.headers.get("authorization").map(String::as_str),
@@ -297,7 +319,7 @@ mod tests {
             Call::parse(&root),
             Some(Call::Post {
                 channel: Channel::Slack,
-                address: "C0123456789".to_owned(),
+                room: ROOM.to_owned(),
                 text: "a job".to_owned(),
                 thread: None,
             })
@@ -306,6 +328,7 @@ mod tests {
         let reply = post(
             Channel::Slack,
             &speaking(),
+            ROOM,
             "said",
             Some("1788000000.000001"),
         );
@@ -313,7 +336,7 @@ mod tests {
             Call::parse(&reply),
             Some(Call::Post {
                 channel: Channel::Slack,
-                address: "C0123456789".to_owned(),
+                room: ROOM.to_owned(),
                 text: "said".to_owned(),
                 thread: Some("1788000000.000001".to_owned()),
             })
@@ -356,9 +379,15 @@ mod tests {
             "asked with the credential that speaks"
         );
         assert_eq!(
-            identity(Channel::Slack, 200, br#"{"ok":true,"user_id":"U0BOT"}"#).expect("told"),
+            identity(
+                Channel::Slack,
+                200,
+                br#"{"ok":true,"user_id":"U0BOT","bot_id":"B0SELF"}"#
+            )
+            .expect("told"),
             Identity {
-                user: "U0BOT".to_owned()
+                user: "U0BOT".to_owned(),
+                bot: "B0SELF".to_owned(),
             }
         );
         assert!(matches!(
@@ -400,10 +429,11 @@ mod tests {
     fn a_frame_is_read_and_acknowledged_through_its_channel() {
         let us = Identity {
             user: "U0BOT".to_owned(),
+            bot: "B0SELF".to_owned(),
         };
         let heard = decode(
             Channel::Slack,
-            r#"{"envelope_id":"e-1","payload":{"event":{"type":"message","channel":"C0123",
+            r#"{"envelope_id":"e-1","payload":{"event":{"type":"app_mention","channel":"C0123",
             "user":"U0HUMAN","text":"<@U0BOT> hello","ts":"1788000001.000001"}}}"#,
             &us,
         );
@@ -411,7 +441,8 @@ mod tests {
             panic!("a message: {heard:?}");
         };
         assert_eq!(envelope, "e-1");
-        assert!(message.mentions);
+        assert_eq!(message.room, "C0123");
+        assert!(!message.from_us);
         assert_eq!(
             acknowledgement(Channel::Slack, &envelope),
             r#"{"envelope_id":"e-1"}"#
@@ -425,11 +456,11 @@ mod tests {
     /// A request this crate did not render is not a call.
     #[test]
     fn what_this_did_not_render_is_not_a_call() {
-        let mut other = post(Channel::Slack, &speaking(), "x", None);
+        let mut other = post(Channel::Slack, &speaking(), ROOM, "x", None);
         other.url = "https://example.test/api".to_owned();
         assert_eq!(Call::parse(&other), None);
 
-        let mut bodiless = post(Channel::Slack, &speaking(), "x", None);
+        let mut bodiless = post(Channel::Slack, &speaking(), ROOM, "x", None);
         bodiless.body = None;
         assert_eq!(Call::parse(&bodiless), None);
     }
