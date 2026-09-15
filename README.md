@@ -99,6 +99,7 @@ oauth_config:
       - groups:history
       - app_mentions:read
       - channels:manage      # a channel per job, archived when the job is retired
+      - reactions:write      # an eyes reaction says your message was received
 settings:
   event_subscriptions:
     bot_events:
@@ -117,7 +118,10 @@ hear half of what is said, and nothing would say so.
 Then `/invite @stageman` into any channel where people should be able to talk
 to it, and mention it: **stageman reads nothing that does not mention it.** A
 mention anywhere reaches the project's foreman, which answers in a thread
-under your message, and you can go on talking to it there.
+under your message, and you can go on talking to it there. An eyes reaction
+on your message means it has been received, and a check mark that the
+foreman is done with it. Everything stageman and its agents write is
+Markdown, rendered by Slack.
 
 **Every job gets a channel of its own**, named after the project, the job's
 title and a short identifier, and described with why the job exists and where

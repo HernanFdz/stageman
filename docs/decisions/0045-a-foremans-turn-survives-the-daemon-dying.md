@@ -45,7 +45,7 @@ it was interrupted.
 
 - **Nothing is taken and nothing is re-acknowledged.** The arrival already
   happened and was already answered on its thread when it did, so repeating
-  `received_notice` would tell somebody their message had been received twice.
+  the acknowledgement would tell somebody their message had been received twice.
   What the thread is told instead is `resumed_notice` — that the instance
   restarted and is picking it up — because the person has been waiting since
   before the restart, and a wait nobody explains is indistinguishable from

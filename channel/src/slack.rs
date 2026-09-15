@@ -28,7 +28,7 @@
 
 use stageman_core::{Channel, JobId, Secret, Speaking};
 
-use crate::{Call, ChannelError, Identity, Incoming, Message, Request};
+use crate::{Call, ChannelError, Identity, Incoming, Message, Reaction, Request};
 
 /// Where Slack takes a message.
 const POST_MESSAGE: &str = "https://slack.com/api/chat.postMessage";
@@ -53,6 +53,9 @@ const INVITE: &str = "https://slack.com/api/conversations.invite";
 
 /// Where Slack archives a room.
 const ARCHIVE: &str = "https://slack.com/api/conversations.archive";
+
+/// Where Slack takes a reaction.
+const REACT: &str = "https://slack.com/api/reactions.add";
 
 /// The most a room's name may be, in characters.
 const NAME_AT_MOST: usize = 80;
@@ -165,6 +168,35 @@ pub fn archive(speaking: &Speaking, room: &str) -> Request {
     let mut body = serde_json::Map::new();
     body.insert("channel".to_owned(), room.into());
     telling(ARCHIVE, speaking, body)
+}
+
+/// Renders putting a reaction on a message.
+pub fn react(speaking: &Speaking, room: &str, message: &str, reaction: Reaction) -> Request {
+    let mut body = serde_json::Map::new();
+    body.insert("channel".to_owned(), room.into());
+    body.insert("timestamp".to_owned(), message.into());
+    body.insert("name".to_owned(), spelled(reaction).into());
+    telling(REACT, speaking, body)
+}
+
+/// How Slack spells a reaction, and the inverse.
+///
+/// Slack's names for its emoji, which is why they live here and nowhere
+/// else: what a reaction means is the instance's, and what it is called is
+/// the platform's.
+const fn spelled(reaction: Reaction) -> &'static str {
+    match reaction {
+        Reaction::Seen => "eyes",
+        Reaction::Done => "white_check_mark",
+    }
+}
+
+fn reaction_of(spelling: &str) -> Option<Reaction> {
+    match spelling {
+        "eyes" => Some(Reaction::Seen),
+        "white_check_mark" => Some(Reaction::Done),
+        _ => None,
+    }
 }
 
 /// Whether a request that returns nothing was done.
@@ -428,7 +460,14 @@ struct Said {
     thread_ts: Option<String>,
 }
 
-/// Renders one message posted in a room: at its root, or in a thread there.
+/// Renders one message posted in a room, as Markdown: at its root, or in a
+/// thread there.
+///
+/// Through the platform's own Markdown parameter, which it translates into
+/// its native blocks and writes the notification fallback for — measured,
+/// with no special feature enabled, per
+/// `docs/decisions/0062-what-this-instance-says-is-markdown.md`. It cannot
+/// be combined with the plain text field, so nothing here sends one.
 pub fn post(speaking: &Speaking, room: &str, text: &str, thread: Option<&str>) -> Request {
     // Built as a map rather than indexed into as a value: indexing into a
     // value is the operation the gate is right to call a panic, and a map
@@ -437,7 +476,7 @@ pub fn post(speaking: &Speaking, room: &str, text: &str, thread: Option<&str>) -
     // address rather than as no address.
     let mut posting = serde_json::Map::new();
     posting.insert("channel".to_owned(), room.into());
-    posting.insert("text".to_owned(), text.into());
+    posting.insert("markdown_text".to_owned(), text.into());
     if let Some(thread) = thread {
         posting.insert("thread_ts".to_owned(), thread.into());
     }
@@ -460,7 +499,7 @@ pub fn call(request: &Request) -> Option<Call> {
                 channel: Channel::Slack,
             });
         }
-        POST_MESSAGE | CREATE_ROOM | SET_PURPOSE | SET_TOPIC | INVITE | ARCHIVE => {}
+        POST_MESSAGE | CREATE_ROOM | SET_PURPOSE | SET_TOPIC | INVITE | ARCHIVE | REACT => {}
         _ => return None,
     }
     let told: Told = serde_json::from_slice(request.body.as_deref()?).ok()?;
@@ -489,10 +528,16 @@ pub fn call(request: &Request) -> Option<Call> {
             channel,
             room: told.channel?,
         },
+        REACT => Call::React {
+            channel,
+            room: told.channel?,
+            message: told.timestamp?,
+            reaction: reaction_of(&told.name?)?,
+        },
         _ => Call::Post {
             channel,
             room: told.channel?,
-            text: told.text?,
+            text: told.markdown_text?,
             thread: told.thread_ts,
         },
     })
@@ -538,12 +583,13 @@ pub fn posted(status: u16, body: &[u8]) -> Result<String, ChannelError> {
 #[derive(serde::Deserialize)]
 struct Told {
     channel: Option<String>,
-    text: Option<String>,
+    markdown_text: Option<String>,
     thread_ts: Option<String>,
     name: Option<String>,
     purpose: Option<String>,
     topic: Option<String>,
     users: Option<String>,
+    timestamp: Option<String>,
 }
 
 /// What Slack says back.

@@ -92,7 +92,7 @@ fn a_jobs_room_is_made_before_it_starts() {
     assert!(sim.invited().is_empty(), "started by hand, so nobody asked");
     let (opened_at, opening) = sim.posts().first().expect("the opening");
     assert_eq!(opened_at, &in_room(1));
-    assert!(opening.starts_with("A job on"), "{opening}");
+    assert!(opening.starts_with("**A job on"), "{opening}");
 
     let shape = sim.shape();
     let asked = shape

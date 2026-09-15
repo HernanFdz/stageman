@@ -132,8 +132,23 @@ pub struct Request {
     pub body: Option<Vec<u8>>,
 }
 
-/// Renders posting one message in a room on a channel: at the room's root
-/// when `thread` is none, and in that thread otherwise.
+/// A reaction this instance puts on somebody's message: what it means,
+/// with the spelling left to the channel.
+///
+/// The acknowledgement a foreman gives, since
+/// `docs/decisions/0062-what-this-instance-says-is-markdown.md`: a reaction
+/// says "received" and "done" without a line in the room's timeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Reaction {
+    /// The message has been received: it is being worked on, or waits its
+    /// turn.
+    Seen,
+    /// The message has been handled.
+    Done,
+}
+
+/// Renders posting one message in a room on a channel, as Markdown: at the
+/// room's root when `thread` is none, and in that thread otherwise.
 #[must_use]
 pub fn post(
     channel: Channel,
@@ -210,6 +225,20 @@ pub fn set_topic(channel: Channel, speaking: &Speaking, room: &str, topic: &str)
 pub fn invite(channel: Channel, speaking: &Speaking, room: &str, user: &str) -> Request {
     match channel {
         Channel::Slack => slack::invite(speaking, room, user),
+    }
+}
+
+/// Renders putting a reaction on a message in a room.
+#[must_use]
+pub fn react(
+    channel: Channel,
+    speaking: &Speaking,
+    room: &str,
+    message: &str,
+    reaction: Reaction,
+) -> Request {
+    match channel {
+        Channel::Slack => slack::react(speaking, room, message, reaction),
     }
 }
 
@@ -396,6 +425,17 @@ pub enum Call {
         /// Which room.
         room: String,
     },
+    /// A reaction put on a message.
+    React {
+        /// Which channel.
+        channel: Channel,
+        /// Which room.
+        room: String,
+        /// Which message.
+        message: String,
+        /// Which reaction.
+        reaction: Reaction,
+    },
 }
 
 impl Call {
@@ -437,9 +477,9 @@ pub enum ChannelError {
 #[cfg(test)]
 mod tests {
     use super::{
-        Call, ChannelError, Identity, Incoming, acknowledgement, archive, create_room, decode,
-        done, identity, invite, mention, open_socket, post, posted, room_created, room_link,
-        room_name, set_purpose, set_topic, socket_url, who_am_i,
+        Call, ChannelError, Identity, Incoming, Reaction, acknowledgement, archive, create_room,
+        decode, done, identity, invite, mention, open_socket, post, posted, react, room_created,
+        room_link, room_name, set_purpose, set_topic, socket_url, who_am_i,
     };
     use stageman_core::{Channel, JobId, Secret, Speaking, Uuid};
 
@@ -666,6 +706,23 @@ mod tests {
                 room: ROOM.to_owned(),
             })
         );
+        for reaction in [Reaction::Seen, Reaction::Done] {
+            assert_eq!(
+                Call::parse(&react(
+                    Channel::Slack,
+                    &speaking(),
+                    ROOM,
+                    "1788000000.000001",
+                    reaction
+                )),
+                Some(Call::React {
+                    channel: Channel::Slack,
+                    room: ROOM.to_owned(),
+                    message: "1788000000.000001".to_owned(),
+                    reaction,
+                })
+            );
+        }
         assert!(done(Channel::Slack, 200, br#"{"ok":true}"#).is_ok());
         assert!(matches!(
             done(Channel::Slack, 200, br#"{"ok":false,"error":"already_archived"}"#),

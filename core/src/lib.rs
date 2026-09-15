@@ -1058,6 +1058,12 @@ pub struct Errand {
     /// errand the last release wrote, which is why it is defaulted.
     #[serde(default)]
     pub from: Option<String>,
+    /// What identifies the message itself, to react on: the mention's own
+    /// identifier, where the thread above names the message it hangs under.
+    /// None for every errand the last release wrote, which is why it is
+    /// defaulted; such a message is simply not reacted to.
+    #[serde(default)]
+    pub message: Option<String>,
 }
 
 /// What a project's foreman is doing, and what is waiting behind it.
@@ -4041,6 +4047,7 @@ mod tests {
                 id: format!("{said}.thread"),
             },
             from: Some("U0HUMAN".to_owned()),
+            message: Some(format!("{said}.thread")),
         }
     }
 
