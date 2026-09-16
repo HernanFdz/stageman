@@ -64,8 +64,11 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   `docs/decisions/0020-the-orchestrator-belongs-to-a-project.md`.
 - **foreman** — the one thing per project that reads what a person says and
   decides what to do about it: answer, do nothing, or start a job. It runs an
-  agent to think with, in one long-lived container of its own, and it is the
-  only thing that composes an instruction — a job never writes its own.
+  agent to think with, in one container of its own — kept for as long as the
+  project is, and running only while a turn runs in it, per
+  `docs/decisions/0066-a-foremans-container-runs-only-while-a-turn-runs-in-it.md`
+  — and it is the only thing that composes an instruction: a job never writes
+  its own.
 
   Called a foreman because the word is a *role* and the job is the work it
   assigns: "why did the foreman do that?" is a question with an answer, in a
@@ -773,14 +776,26 @@ it lands.
   This is why the container tests earn their minutes: the gap was not in the
   reasoning, it was in what the cheap test could reach.
 
+  **A foreman's container is under the same rule, with the tunnel half
+  vacuous.** Nothing is ever told where a foreman's port is, so its container
+  runs while a turn runs in it and is stopped when its inbox empties, at the
+  same three moments — see
+  `docs/decisions/0066-a-foremans-container-runs-only-while-a-turn-runs-in-it.md`,
+  which exists because for a while nothing stopped one at all, and every
+  foreman's container ran for ever with this bar reading as satisfied.
+
   Since `docs/decisions/0056-the-instance-decides-and-the-world-performs.md`
-  this is an invariant the simulated world checks after every step of every
-  seed — nothing running without a turn in it or a tunnel answering, and
-  nothing left that the instance cannot name — and the container tests are
-  what tie the simulated runtime to the real one. Both halves are needed: the
-  simulation reaches the crash between two steps that no container test can,
-  and the container test reaches the proxy that no simulation would have
-  imagined.
+  the running half of this is an invariant the simulated world checks after
+  every step of every scenario, once the instance is awake and has swept: no
+  container of this instance's that it has listed or made is running with
+  nothing in it — no turn in flight for it, no message waiting for its
+  foreman, nothing answering on its tunnel, and no question about it in
+  flight. The other half, that nothing is left the instance cannot name, is
+  the waking sweep's, pinned by its scenario rather than by the oracle. The
+  container tests are what tie the simulated runtime to the real one, and
+  both are needed: the simulation reaches the crash between two steps that no
+  container test can, and the container test reaches the proxy that no
+  simulation would have imagined.
 - **What a snapshot must still open is what the last release wrote, and
   nothing older.** Compatibility is a window of one tag, not a growing pile:
   when a released version exists, a schema change carries a bridge from *that*

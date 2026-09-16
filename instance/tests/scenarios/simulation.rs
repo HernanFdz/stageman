@@ -200,6 +200,15 @@ pub struct Simulation {
     /// the record before its container exists, so only after this may the
     /// oracle expect the container.
     begun: BTreeSet<JobId>,
+    /// Every container the instance has been told about or asked for: what
+    /// a listing named, and what it made. The oracle judges only these. A
+    /// container that appeared behind the instance's back is its business
+    /// from the next listing, which is the sweep's own promise.
+    seen: BTreeSet<String>,
+    /// What each listing asked for named, by the identifier its answer
+    /// carries: what the instance is told of when that answer lands, and
+    /// judged on from then.
+    listings: BTreeMap<EffectId, Vec<String>>,
     /// How long a turn takes.
     turn_takes: Now,
     trace: Vec<String>,
@@ -499,6 +508,8 @@ impl Simulation {
             routes: BTreeMap::new(),
             ports: 40_000,
             begun: BTreeSet::new(),
+            seen: BTreeSet::new(),
+            listings: BTreeMap::new(),
             turn_takes: 1_000,
             trace: Vec::new(),
             posts: Vec::new(),
@@ -951,6 +962,10 @@ impl Simulation {
         // the platform sees them close, and delivers nothing to them again.
         self.adapters.clear();
         self.sockets.clear();
+        // Nothing asked before the crash is answered after it, and the next
+        // boot lists what is there.
+        self.listings.clear();
+        self.seen.clear();
         self.trace.push(format!("{}: CRASH", self.now));
         self.wake(seed)
     }
@@ -997,6 +1012,13 @@ impl Simulation {
     /// Steps the instance once: what it asks for is performed, and the turn
     /// is written down where a recording is being made.
     fn stepped(&mut self, instance: &mut Instance, event: Event) {
+        // A listing's answer landing is when the instance is told what is
+        // there, and from then on it is judged on it.
+        if let Event::Ran { id, .. } = &event
+            && let Some(named) = self.listings.remove(id)
+        {
+            self.seen.extend(named);
+        }
         let effects = instance.step(event.clone());
         if let Some(recorder) = &mut self.recorder {
             recorder.turned(self.now, event, effects.clone(), instance.snapshot());
@@ -1043,16 +1065,69 @@ impl Simulation {
         std::fs::write(directory.join(format!("{name}.json")), written).expect("the replay lands");
     }
 
-    /// What must hold between the instance and the world after every step.
+    /// What must hold after every step: the bar in `docs/conventions.md` §4,
+    /// as far as a simulated runtime can see it.
+    ///
+    /// A working job has a container, unless its first turn has not been
+    /// asked for yet: the record is written before the container exists, on
+    /// purpose, and the container is made by the turn. And once the instance
+    /// is awake and has swept, nothing of its own that it has listed or made
+    /// is running with nothing in it — no turn in flight for it, no message
+    /// waiting for its foreman, nothing answering on its tunnel, and no
+    /// question about it in flight. Another instance's container is not judged,
+    /// and neither is one that appeared behind this instance's back until a
+    /// listing has named it, which is the sweep's own promise. See
+    /// `docs/decisions/0066-a-foremans-container-runs-only-while-a-turn-runs-in-it.md`,
+    /// which is the state this fails on.
     fn oracle(&self, instance: &Instance) {
         for job in instance.state().working() {
-            // A working job has a container, unless its first turn has not
-            // been asked for yet: the record is written before the container
-            // exists, on purpose, and the container is made by the turn.
             assert!(
                 self.containers.contains_key(&stageman_job::container(job))
                     || !self.begun.contains(&job),
                 "job {job} is working with no container"
+            );
+        }
+        if instance.swept().is_none() {
+            return;
+        }
+        let turning = instance.turning();
+        let asking = instance.asking_about();
+        for (name, held) in &self.containers {
+            if !held.running || held.instance != Some(this_instance()) || !self.seen.contains(name)
+            {
+                continue;
+            }
+            let talking = self
+                .adapters
+                .values()
+                .any(|adapter| adapter.container == *name);
+            let deciding = asking.iter().any(|about| about == name);
+            let busy = match (
+                stageman_job::job_of(name),
+                stageman_foreman::project_of(name),
+            ) {
+                (Some(job), _) => {
+                    turning.contains(&stageman_instance::Speaker::Job(job))
+                        || held.serving
+                        || deciding
+                }
+                (None, Some(project)) => {
+                    turning.contains(&stageman_instance::Speaker::Foreman(project))
+                        || deciding
+                        || instance
+                            .state()
+                            .projects
+                            .get(&project)
+                            .is_some_and(|watched| watched.attending.on().is_some())
+                }
+                // A name this version cannot read is the waking sweep's to
+                // remove, in the step that finds it.
+                (None, None) => false,
+            };
+            assert!(
+                talking || busy,
+                "container {name} is running with nothing in it, after: {:?}",
+                self.trace.iter().rev().take(8).collect::<Vec<_>>()
             );
         }
     }
@@ -1324,6 +1399,7 @@ impl Simulation {
                     environment: given,
                 },
             );
+            self.seen.insert(name.to_owned());
             if let Some(job) = stageman_job::job_of(name) {
                 self.begun.insert(job);
             }
@@ -1482,16 +1558,20 @@ impl Simulation {
                 Some(Command::Version) => {
                     exited(format!("{} version 0.0-simulated\n", program.display()))
                 }
-                Some(Command::Containers { running_only }) => exited(
-                    self.containers
+                Some(Command::Containers { running_only }) => {
+                    let named: Vec<String> = self
+                        .containers
                         .iter()
                         .filter(|(_, held)| held.running || !running_only)
-                        .fold(String::new(), |mut listed, (name, _)| {
-                            listed.push_str(name);
-                            listed.push('\n');
-                            listed
-                        }),
-                ),
+                        .map(|(name, _)| name.clone())
+                        .collect();
+                    self.listings.insert(id, named.clone());
+                    exited(named.iter().fold(String::new(), |mut listed, name| {
+                        listed.push_str(name);
+                        listed.push('\n');
+                        listed
+                    }))
+                }
                 Some(Command::Label { name, label }) => self.containers.get(&name).map_or_else(
                     || Finished::Exited {
                         status: Some(1),

@@ -219,6 +219,58 @@ impl Instance {
         }
     }
 
+    /// Whose turns are in flight, once it is awake.
+    ///
+    /// What the simulated world's oracle asks, to tell a container with a
+    /// turn in it from one left up with nothing.
+    #[must_use]
+    pub fn turning(&self) -> Vec<Speaker> {
+        match &self.stage {
+            Stage::Booting(_) => Vec::new(),
+            Stage::Awake(running) => running.turns.keys().copied().collect(),
+        }
+    }
+
+    /// The containers this instance has a question in flight about, once it
+    /// is awake: a label or an inspection asked, a listing being placed, a
+    /// tunnel's port asked or probed, a stop or a removal asked.
+    ///
+    /// What the simulated world's oracle asks beside [`Instance::turning`]:
+    /// a container the instance is asking about is one it is deciding on,
+    /// not one it has left up.
+    #[must_use]
+    pub fn asking_about(&self) -> Vec<String> {
+        let Stage::Awake(running) = &self.stage else {
+            return Vec::new();
+        };
+        running
+            .asked
+            .values()
+            .filter_map(|asked| match asked {
+                Asked::Halted { container }
+                | Asked::Discarded { container }
+                | Asked::Inspected { container } => Some(container.clone()),
+                Asked::Labelled { name, .. } => Some(name.clone()),
+                Asked::Port { job } | Asked::Probing { job } => Some(stageman_job::container(*job)),
+                Asked::Listing
+                | Asked::Images
+                | Asked::Reclaimed { .. }
+                | Asked::Present { .. }
+                | Asked::Built { .. }
+                | Asked::Created { .. }
+                | Asked::Started { .. }
+                | Asked::CheckedOut { .. } => None,
+            })
+            .chain(running.listing.keys().cloned())
+            .chain(
+                running
+                    .probes
+                    .values()
+                    .map(|job| stageman_job::container(*job)),
+            )
+            .collect()
+    }
+
     /// What waking found, once it has.
     #[must_use]
     pub fn swept(&self) -> Option<&Swept> {
@@ -278,7 +330,8 @@ struct Called {
 /// says which question was being answered.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum Asked {
-    /// A container told to stop, which is a job's tunnel gone quiet.
+    /// A container told to stop: a job's tunnel gone quiet, or a foreman's
+    /// inbox empty.
     Halted {
         /// The container.
         container: String,

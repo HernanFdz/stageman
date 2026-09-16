@@ -9,6 +9,13 @@
 //!
 //! Whether a turn starts a session or continues one is asked of the runtime,
 //! never believed: a container is the truth about whether a session exists.
+//!
+//! A foreman's container runs only while a turn runs in it. An inbox that
+//! empties rests it, and a sweep that finds one up with nothing to do rests
+//! it too — the rule of
+//! `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`
+//! with the tunnel half vacuous, per
+//! `docs/decisions/0066-a-foremans-container-runs-only-while-a-turn-runs-in-it.md`.
 
 use stageman_core::{
     Agent, Channel, ChannelConfig, Errand, Handout, Place, ProjectId, State, Taken, Thread,
@@ -198,7 +205,7 @@ impl Running {
                     &errand.thread,
                     &stageman_foreman::stuck_notice(&why.to_string()),
                 );
-                self.move_on(project);
+                self.move_on(project, present, effects);
                 return;
             }
         };
@@ -248,7 +255,7 @@ impl Running {
                         &errand.thread,
                         &stageman_foreman::stuck_notice(&why.to_string()),
                     );
-                    self.move_on(project);
+                    self.move_on(project, present, effects);
                     return;
                 }
             };
@@ -295,7 +302,9 @@ impl Running {
         )
     }
 
-    /// A foreman's turn ended: put the message down, pick up the next.
+    /// A foreman's turn ended: put the message down, pick up the next, and
+    /// with none to pick up, rest the container — if the turn had one, which
+    /// `made` says.
     ///
     /// A turn that finished marks its message done, with a reaction; one
     /// that did not says so in the message's thread, with the reason.
@@ -303,6 +312,8 @@ impl Running {
         &mut self,
         project: ProjectId,
         outcome: Result<stageman_agent::Answer, String>,
+        made: bool,
+        effects: &mut Vec<Effect>,
     ) {
         match outcome {
             Ok(_) => {
@@ -329,24 +340,46 @@ impl Running {
                 }
             }
         }
-        self.move_on(project);
+        self.move_on(project, made, effects);
     }
 
-    /// Puts down the message in hand and starts on the next, if any.
+    /// Puts down the message in hand and starts on the next, if any; with
+    /// none, rests the container, if there is one to rest.
     ///
     /// Whatever was queued was never begun, so it is fresh however the loop
-    /// was entered.
-    fn move_on(&mut self, project: ProjectId) {
+    /// was entered. A project no longer watched has nothing to rest: being
+    /// forgotten is what discards its foreman's container.
+    fn move_on(&mut self, project: ProjectId, rest: bool, effects: &mut Vec<Effect>) {
         let next = self
             .state
             .projects
             .get_mut(&project)
-            .is_some_and(|watched| watched.attending.finish().is_some());
+            .map(|watched| watched.attending.finish().is_some());
         self.dirty = true;
         self.interrupted.remove(&project);
-        if next {
-            self.look_before_turning(project);
+        match next {
+            Some(true) => self.look_before_turning(project),
+            Some(false) if rest => self.rest(project, effects),
+            Some(false) | None => {}
         }
+    }
+
+    /// Stops a foreman's container: it has nothing to do, and a container
+    /// with nothing in it is not kept up. The rule of
+    /// `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`,
+    /// applied to a container whose tunnel answers nobody — see
+    /// `docs/decisions/0066-a-foremans-container-runs-only-while-a-turn-runs-in-it.md`.
+    /// Inward-facing, so it waits on no write, like a job's probe.
+    pub fn rest(&mut self, project: ProjectId, effects: &mut Vec<Effect>) {
+        let container = stageman_foreman::container(project);
+        tracing::info!(%project, "its foreman has nothing to do, so its container is stopped");
+        let halt = self.ask(
+            &Command::Halt {
+                name: container.clone(),
+            },
+            Asked::Halted { container },
+        );
+        effects.push(halt);
     }
 
     /// What a foreman's turn is decided from: the repository it speaks

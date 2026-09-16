@@ -14,7 +14,12 @@ WORKDIR /workspace
 # any one turn. The agent is run *inside* this container rather than being it —
 # see `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`,
 # which needs a container able to keep serving after the agent that started
-# something has stopped.
+# something has stopped. A job's, that is: a foreman's container is held open
+# the same way while a turn runs in it and stopped by the instance when its
+# inbox empties, per
+# `docs/decisions/0066-a-foremans-container-runs-only-while-a-turn-runs-in-it.md`,
+# so the command below is what a turn runs beside, never what keeps an idle
+# foreman up.
 #
 # Deliberately not a program this project writes, which is
 # `docs/decisions/0034-tools-are-served-not-shipped.md`'s property and would
