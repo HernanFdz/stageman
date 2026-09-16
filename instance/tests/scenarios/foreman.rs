@@ -291,3 +291,185 @@ fn a_foremans_warrant_names_the_thread_of_the_message_it_answers() {
     world.run_until(&mut instance, 5_000);
     assert!(instance.warranted(warrant.as_str()).is_none());
 }
+
+/// How many times a container was asked to stop.
+fn halts(world: &Simulation, container: &str) -> usize {
+    world
+        .commands()
+        .iter()
+        .filter(|command| matches!(command, Command::Halt { name } if name == container))
+        .count()
+}
+
+/// Where a container was first asked to stop, in the trace.
+fn first_halt(world: &Simulation, container: &str) -> Option<usize> {
+    world.first_asking(|command| matches!(command, Command::Halt { name } if name == container))
+}
+
+/// A foreman's container is stopped when its inbox empties and started again
+/// by the next message, with the session inside it continued — the rule of
+/// `docs/decisions/0066-a-foremans-container-runs-only-while-a-turn-runs-in-it.md`.
+#[test]
+fn a_foremans_container_rests_when_its_inbox_empties_and_wakes_for_the_next_message() {
+    let mut world = Simulation::new();
+    world.holding(&watching_a_channel(&[]));
+    let mut instance = world.wake(seed(1));
+    let container = stageman_foreman::container(project());
+
+    world.says_at_root(100, 1, "look at the parser");
+    world.run_until(&mut instance, 5_000);
+
+    let talks = runs(&world);
+    assert_eq!(talks.len(), 1, "{:?}", world.shape());
+    assert!(world.exists(&container), "kept, with its session");
+    assert!(
+        !world.is_running(&container),
+        "and stopped, having nothing to do"
+    );
+    let ended = talks[0].ended_at.expect("the turn ended");
+    let rested = first_halt(&world, &container).expect("the container was asked to stop");
+    assert!(
+        ended < rested,
+        "stopped after the turn ended, never under it: {:?}",
+        world.shape()
+    );
+
+    world.says_at_root(10_000, 2, "and the tests");
+    world.run_until(&mut instance, 15_000);
+
+    let talks = runs(&world);
+    assert_eq!(talks.len(), 2, "{:?}", world.shape());
+    assert!(
+        talks[1].resumed(),
+        "the session in the stopped container was continued: {:?}",
+        talks[1]
+    );
+    assert!(!world.is_running(&container), "and it rests again");
+    assert_eq!(halts(&world, &container), 2, "{:?}", world.commands());
+}
+
+/// Draining an inbox rests the container once, after the last message, and
+/// never between two: what waits behind a turn is worked in the container
+/// that is already up.
+#[test]
+fn a_drain_rests_the_container_once_after_the_last_message() {
+    let mut world = Simulation::new();
+    world.holding(&watching_a_channel(&[]));
+    let mut instance = world.wake(seed(1));
+    let container = stageman_foreman::container(project());
+
+    world.says_at_root(100, 1, "first");
+    world.says_at_root(200, 2, "second");
+    world.says_at_root(300, 3, "third");
+    world.run_until(&mut instance, 10_000);
+
+    let talks = runs(&world);
+    assert_eq!(talks.len(), 3, "{:?}", world.shape());
+    assert_eq!(halts(&world, &container), 1, "{:?}", world.commands());
+    let rested = first_halt(&world, &container).expect("rested once");
+    assert!(
+        talks[2].ended_at.is_some_and(|ended| ended < rested),
+        "after the last turn, not between two: {:?}",
+        world.shape()
+    );
+    assert!(!world.is_running(&container));
+}
+
+/// A foreman's container found up on waking with nothing to do is stopped,
+/// and no turn is run in it: nothing was in hand.
+#[test]
+fn a_foremans_container_found_up_with_nothing_to_do_is_stopped_on_waking() {
+    let mut world = Simulation::new();
+    world.holding(&watching_a_channel(&[]));
+    let container = stageman_foreman::container(project());
+    world.container(&container, Simulation::up(false));
+
+    let mut instance = world.wake(seed(1));
+    world.run_until(&mut instance, 1_000);
+
+    assert!(world.exists(&container), "kept, with its session");
+    assert!(!world.is_running(&container), "{:?}", world.shape());
+    assert!(
+        runs(&world).is_empty(),
+        "nothing in hand, so nothing to work"
+    );
+}
+
+/// A foreman's container found up on waking with a message in hand is worked
+/// in — never stopped under the pick-up — and rested once the message is
+/// handled.
+#[test]
+fn a_foremans_container_found_up_with_a_message_in_hand_is_worked_in() {
+    let mut world = Simulation::new();
+    let mut state = watching_a_channel(&[]);
+    holding_a_message(&mut state, 1, "look at the parser");
+    world.holding(&state);
+    let container = stageman_foreman::container(project());
+    world.container(&container, Simulation::up(false));
+
+    let mut instance = world.wake(seed(1));
+    world.run_until(&mut instance, 10_000);
+
+    let talks = runs(&world);
+    assert_eq!(talks.len(), 1, "{:?}", world.shape());
+    assert!(talks[0].resumed(), "{:?}", talks[0]);
+    let rested = first_halt(&world, &container).expect("rested once the message was handled");
+    assert!(
+        talks[0].opened_at < rested,
+        "never stopped under a pick-up: {:?}",
+        world.shape()
+    );
+    assert!(!world.is_running(&container));
+}
+
+/// A foreman's container left up with nothing in it — as a kill between a
+/// turn ending and its stop landing leaves one — is stopped by the settling
+/// sweep, without a turn being run in it.
+#[test]
+fn settling_stops_a_foremans_container_left_up_with_nothing_to_do() {
+    let mut world = Simulation::new();
+    world.holding(&watching_a_channel(&[]));
+    let mut instance = world.wake(seed(1));
+    let container = stageman_foreman::container(project());
+    // Appears after waking, up, as a crash in that window leaves one.
+    world.container(&container, Simulation::up(false));
+
+    world.run_until(&mut instance, 59_000);
+    assert!(world.is_running(&container), "nothing has looked yet");
+    world.run_until(&mut instance, 61_000);
+    assert!(!world.is_running(&container), "{:?}", world.shape());
+    assert!(
+        runs(&world).is_empty(),
+        "nothing in hand, so nothing to work"
+    );
+}
+
+/// A turn that failed before its container existed has nothing to rest:
+/// nothing is asked to stop, because there is nothing there to stop, and the
+/// person is told the turn was stuck.
+#[test]
+fn a_turn_that_failed_before_its_container_existed_rests_nothing() {
+    let mut world = Simulation::new();
+    world.holding(&watching_a_channel(&[]));
+    let mut instance = world.wake(seed(1));
+    let container = stageman_foreman::container(project());
+    world.next_build_fails("no network");
+
+    world.says_at_root(100, 1, "look at the parser");
+    world.run_until(&mut instance, 5_000);
+
+    assert!(!world.exists(&container), "{:?}", world.shape());
+    assert!(runs(&world).is_empty(), "no container, so no agent ran");
+    assert_eq!(
+        halts(&world, &container),
+        0,
+        "nothing to stop: {:?}",
+        world.commands()
+    );
+    assert_eq!(
+        world.posts().len(),
+        1,
+        "the person is told it was stuck: {:?}",
+        world.posts()
+    );
+}

@@ -6,6 +6,8 @@
 //! below pin them without a runtime. What they decide reaches the world as
 //! effects; nothing here is removed, stopped or resumed directly.
 
+use std::collections::BTreeSet;
+
 use stageman_core::{InstanceId, JobId, Outcome, Place, Progress, ProjectId, State};
 
 use crate::turns::{Run, Turn};
@@ -22,6 +24,8 @@ pub struct Left<'a> {
     pub name: &'a str,
     /// The job it belongs to, if its name says so.
     pub job: Option<JobId>,
+    /// The project whose foreman it belongs to, if its name says so.
+    pub foreman: Option<ProjectId>,
     /// Which instance started it, if its label says.
     pub instance: Option<InstanceId>,
     /// Whether it is up.
@@ -33,6 +37,7 @@ impl<'a> Left<'a> {
         Self {
             name: &container.name,
             job: stageman_job::job_of(&container.name),
+            foreman: stageman_foreman::project_of(&container.name),
             instance: container.instance,
             running: container.running,
         }
@@ -99,7 +104,7 @@ pub const fn belonging(started: Option<InstanceId>, instance: InstanceId) -> Who
 pub fn unplaceable<'a>(left: &[Left<'a>], state: &State) -> Vec<Unplaceable<'a>> {
     left.iter()
         .filter_map(|container| match container.job {
-            None => match stageman_foreman::project_of(container.name) {
+            None => match container.foreman {
                 Some(project) if state.projects.contains_key(&project) => None,
                 Some(_) | None => Some(Unplaceable::Unidentified(container.name)),
             },
@@ -162,6 +167,35 @@ pub fn resting(up: &[JobId], state: &State) -> (Vec<JobId>, Vec<JobId>) {
         }
     }
     (placed, unplaced)
+}
+
+/// Which foremen's containers are up with nothing to do: a project's this
+/// instance watches, holding no message, with no turn in flight — `busy`,
+/// which on waking is nobody.
+///
+/// A foreman's container is under the rule of
+/// `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`
+/// with the tunnel half vacuous — see
+/// `docs/decisions/0066-a-foremans-container-runs-only-while-a-turn-runs-in-it.md`
+/// — so there is nothing to probe: up with nothing to do is the whole of the
+/// question. A container of a project this instance does not watch is not
+/// here; it is unplaceable, and dealt with as such.
+pub fn resting_foremen(
+    up: &[Left<'_>],
+    state: &State,
+    busy: &BTreeSet<ProjectId>,
+) -> Vec<ProjectId> {
+    up.iter()
+        .filter(|container| container.running)
+        .filter_map(|container| container.foreman)
+        .filter(|project| !busy.contains(project))
+        .filter(|project| {
+            state
+                .projects
+                .get(project)
+                .is_some_and(|watched| watched.attending.on().is_none())
+        })
+        .collect()
 }
 
 /// What waking found, and what it asked for.
@@ -310,6 +344,13 @@ impl Running {
             self.probe(job, &mut effects);
         }
 
+        // A foreman's container found up with nothing to do is stopped. No
+        // turn survives a restart, so only a message in hand keeps one up,
+        // and that foreman is picked up below rather than rested here.
+        for project in resting_foremen(&left, &self.state, &BTreeSet::new()) {
+            self.rest(project, &mut effects);
+        }
+
         let reclaiming = self.ask(&Command::Images, Asked::Images);
         effects.push(reclaiming);
         // Every bound channel is listened to from now: a project that
@@ -423,20 +464,36 @@ impl Running {
                 );
             }
         }
+        // A foreman's container up with no turn in it and nothing waiting is
+        // one a crash left behind, or one somebody else started: stopped
+        // either way, since nothing in it is reachable by anyone.
+        let left: Vec<Left<'_>> = running.iter().map(Left::of).collect();
+        let busy: BTreeSet<ProjectId> = self
+            .turns
+            .keys()
+            .filter_map(|speaker| match speaker {
+                Speaker::Foreman(project) => Some(*project),
+                Speaker::Job(_) => None,
+            })
+            .collect();
+        for project in resting_foremen(&left, &self.state, &busy) {
+            self.rest(project, effects);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        Left, Swept, Unplaceable, Whose, belonging, has_container, over, resting, tallied,
-        unplaceable,
+        Left, Swept, Unplaceable, Whose, belonging, has_container, over, resting, resting_foremen,
+        tallied, unplaceable,
     };
     use stageman_core::{
         Agent, AgentConfig, InstanceId, Job, JobId, Kit, KitConfig, KitName, Outcome, Progress,
         Project, ProjectId, Secret, State, Timestamp, Uuid, Waiting,
     };
     use std::collections::BTreeMap;
+    use std::collections::BTreeSet;
 
     fn instance() -> InstanceId {
         InstanceId::from_uuid(Uuid::from_u128(1))
@@ -489,6 +546,7 @@ mod tests {
         Left {
             name,
             job: stageman_job::job_of(name),
+            foreman: stageman_foreman::project_of(name),
             instance: None,
             running: false,
         }
@@ -672,5 +730,63 @@ mod tests {
             "older-scheme"
         );
         assert_eq!(Unplaceable::Forgotten("a-name", job).named(), "a-name");
+    }
+
+    /// A foreman's container up with nothing to do is the one to rest: not
+    /// one with a turn in it, not one whose foreman holds a message, not a
+    /// stopped one, and not one of a project this instance does not watch.
+    #[test]
+    fn only_a_foremans_container_up_with_nothing_to_do_is_rested() {
+        use stageman_core::{Channel, Errand, Thread};
+
+        fn up(name: &str) -> Left<'_> {
+            Left {
+                running: true,
+                ..left(name)
+            }
+        }
+
+        let (mut state, project, _) = with_a_running_job();
+        let ours = stageman_foreman::container(project);
+        let strangers = stageman_foreman::container(ProjectId::from_uuid(Uuid::from_u128(404)));
+        let containers = [up(&ours), up(&strangers)];
+
+        assert_eq!(
+            resting_foremen(&containers, &state, &BTreeSet::new()),
+            vec![project],
+            "ours and idle is rested; a project this instance does not watch is not its to rest"
+        );
+        assert_eq!(
+            resting_foremen(&containers, &state, &BTreeSet::from([project])),
+            vec![],
+            "a turn in it"
+        );
+        assert_eq!(
+            resting_foremen(&[left(&ours)], &state, &BTreeSet::new()),
+            vec![],
+            "already stopped"
+        );
+
+        state
+            .projects
+            .get_mut(&project)
+            .expect("the project")
+            .attending
+            .take(Errand {
+                said: "look at the parser".to_owned(),
+                thread: Thread {
+                    channel: Channel::Slack,
+                    room: "C0123456789".to_owned(),
+                    id: "1700000000.000100".to_owned(),
+                },
+                from: None,
+                message: None,
+                app: None,
+            });
+        assert_eq!(
+            resting_foremen(&containers, &state, &BTreeSet::new()),
+            vec![],
+            "holding a message: worked in, not rested"
+        );
     }
 }

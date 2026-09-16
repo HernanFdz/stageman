@@ -33,7 +33,11 @@ Two things make picking the message up genuinely possible rather than merely
 desirable. A foreman's session lives in one long-lived container per project,
 and since `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`
 that container is not stopped by a turn ending — so after an ordinary kill it
-is still there, and the turn resumes with everything the agent already knew. And
+is still there, and the turn resumes with everything the agent already knew.
+Since `docs/decisions/0066-a-foremans-container-runs-only-while-a-turn-runs-in-it.md`
+it *is* stopped once its inbox empties, and still there: what this record
+needs is the container and the session in it, which a stopped container
+keeps, and the pick-up starts it again. And
 the honest answer to "did the interrupted turn finish?" is that this process
 cannot know: whatever it did happened outside itself.
 

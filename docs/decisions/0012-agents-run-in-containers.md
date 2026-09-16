@@ -3,6 +3,10 @@
 ## Status
 Accepted. Answers the isolation question that was open in
 `docs/open-questions.md`.
+*Long-lived*, of the orchestrator's container below, means it exists for as
+long as its project does and keeps the session inside it; since
+`docs/decisions/0066-a-foremans-container-runs-only-while-a-turn-runs-in-it.md`
+it runs only while a turn runs in it.
 
 ## Context
 

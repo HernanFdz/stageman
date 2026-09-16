@@ -716,7 +716,18 @@ impl Running {
         self.warrants.retain(|_, known| known.speaker != speaker);
         let job = match speaker {
             Speaker::Foreman(project) => {
-                self.foreman_ended(project, outcome);
+                // Whether there is a container to rest: a resumed turn was
+                // inspected present before it began, and a begun one has a
+                // container from the moment it was made, which is every
+                // stage past creating.
+                let made = matches!(
+                    turn.stage,
+                    Stage::Starting
+                        | Stage::CheckingOut
+                        | Stage::Talking { .. }
+                        | Stage::Closing { .. }
+                );
+                self.foreman_ended(project, outcome, made, effects);
                 return;
             }
             Speaker::Job(job) => job,

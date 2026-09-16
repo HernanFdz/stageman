@@ -179,6 +179,13 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   is the foreman's own case: not paying a container start per signal,
   which is a cost rather than an obstacle.
 
+  Since `docs/decisions/0066-a-foremans-container-runs-only-while-a-turn-runs-in-it.md`
+  the container half is settled the other way from what 0043 left: a
+  foreman's container exists for as long as its project does and runs only
+  while a turn runs in it, so a message after idleness pays a container
+  start, measured at a tenth of a second. What a held connection would save
+  is the session load every turn pays, not the start.
+
 - **Should the runtime be Podman only?** The list compiled in by
   `docs/decisions/0023-the-container-runtime-is-discovered-once.md` is ordered
   Docker first, so that is what continuous integration finds and what most

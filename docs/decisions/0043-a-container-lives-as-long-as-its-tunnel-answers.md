@@ -8,7 +8,10 @@ container restarted and becomes a process run inside one that is already up —
 and makes true a promise
 `docs/decisions/0042-a-job-shows-its-work-on-a-subdomain.md` made and could not
 keep. It also restates `docs/conventions.md` §4's bar on what a hard kill may
-leave behind, which is the expensive half.
+leave behind, which is the expensive half. Its consequence below that a
+foreman's container persists is reversed by
+`docs/decisions/0066-a-foremans-container-runs-only-while-a-turn-runs-in-it.md`,
+which brings that container under the rule here rather than exempting it.
 
 Names this project does not yet define are unbackticked, for the reason 0042
 gives.
@@ -153,7 +156,10 @@ question, which that record's own reading calls a gap. This closes the half
 that is about a *container*. It does not touch the half
 `docs/open-questions.md` is actually about, which is holding a *connection*
 open across turns — that is still a task owning it and a channel to speak
-through, and still unbuilt.
+through, and still unbuilt. **Reversed for the foreman by
+`docs/decisions/0066-a-foremans-container-runs-only-while-a-turn-runs-in-it.md`:** the
+rule above is every container's, a foreman's tunnel answers nobody, and its
+container is stopped when its inbox empties.
 
 **A forgotten server is immortal.** An agent that leaves something bound keeps
 its container alive indefinitely, and nothing reclaims it. That is the accepted
