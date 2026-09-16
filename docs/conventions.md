@@ -681,6 +681,17 @@ justify is usually obsolete.
   started would make every one of those promises false. See
   `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`.
 
+- **A panic ends the process.** The release profile aborts rather than
+  unwinds, per `docs/decisions/0065-a-panic-aborts-the-daemon.md`, so nothing
+  here may rely on catching one: a task's join error saying it panicked, a
+  poisoned lock, anything wrapped to catch an unwind — each is a branch the
+  shipped binary never takes and a development build does, which is exactly
+  the divergence a rule is for. The reason is what a caught panic looked like
+  before: the instance steps on a task nobody joins, so a panic there left a
+  daemon that accepted every connection and answered none, and a page waiting
+  on it waited for ever. An abort is the kill this daemon already survives,
+  under the bar §4 sets for one, and a service manager restarts it.
+
 ## 4. Quality bar beyond the gate
 
 `AGENTS.md` carries the bar the gate enforces mechanically. This is for the part

@@ -49,17 +49,31 @@ stageman-instance = { path = "instance" }
 # This makes the runtime behaviour uniform, and is the backstop for the
 # overflow that clippy::arithmetic_side_effects only warns about statically.
 overflow-checks = true
-# Debug information, and not the symbol table. Measured on the shipped
-# artefact: 32.4MB unstripped, 21.1MB without debug information, 17.4MB
-# without symbols either.
+# A panic ends the process rather than unwinding one task of it. The instance
+# steps on a task nobody joins, so an unwinding panic there left a daemon that
+# accepted every connection and answered none, with the panic caught by the
+# runtime and seen by nobody. An abort is the kill this daemon already
+# promises to survive, and the one a service manager restarts. That it also
+# drops the landing pads and unwind tables from every crate compiled here is
+# welcome and not the reason — the standard library keeps its own either way.
+# See `docs/decisions/0065-a-panic-aborts-the-daemon.md`.
+#
+# Release only. A test harness unwinds whatever the profile says, so a profile
+# that aborts builds every crate the harness and the binary share twice, once
+# per strategy — a cost the gate would pay on every run for a binary it never
+# ships. Under `just dev` a panic therefore still unwinds, where somebody is
+# watching the log.
+panic = "abort"
+# Debug information, and not the symbol table: a third of the shipped
+# artefact, and nobody downloading it can use it.
 #
 # The last step is refused rather than overlooked. `overflow-checks` above
-# makes a panic a *designed* failure here rather than only a bug — and this is
-# a daemon on somebody else's machine, killed at three in the morning, where
-# one log is all anybody gets. A panic names its own file and line whatever is
-# stripped, because that is a static string rather than debug information; what
-# a symbol table buys is the chain of calls that led there. Three and a half
-# megabytes is a poor price for reading that chain once.
+# makes a panic a *designed* failure here rather than only a bug, and `panic`
+# above makes the log it prints the only evidence there is — this is a daemon
+# on somebody else's machine, killed at three in the morning. A panic names
+# its own file and line whatever is stripped, because that is a static string
+# rather than debug information; what a symbol table buys is the chain of
+# calls that led there, and that is worth more than the megabytes it costs.
 strip = "debuginfo"
 
 [workspace.lints.rust]
