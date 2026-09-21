@@ -9,7 +9,10 @@ optional, in `docs/decisions/0060-a-binding-is-a-workspace.md` and
 `docs/decisions/0059-a-project-speaks-and-listens-on-slack-always.md`. A
 reply is routed by its room since
 `docs/decisions/0061-a-job-has-a-room-of-its-own.md`, which gives a job a
-room instead of the thread this record chose; the transport stands.
+room instead of the thread this record chose; the transport stands. Since
+`docs/decisions/0069-a-message-reaches-a-working-job.md` a reply
+reaches a job while it works, by steering, and the refusal a busy job gave
+goes.
 
 ## Context
 

@@ -79,11 +79,14 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   deciding, and not a *dispatcher*, which is only the third of the three
   things it can do.
 
-- **inbox** — the messages waiting for a project's foreman, in the order they
-  arrived. It exists only while the foreman is working: a foreman with nothing
-  to do has nothing waiting, which is a property of the type rather than a rule
-  anybody keeps. Not a *queue*, which names the structure instead of what is in
-  it, and would invite a second one somewhere else.
+- **inbox** — the messages waiting for a project's foreman, or for a job
+  since `docs/decisions/0069-a-message-reaches-a-working-job.md`, in the
+  order they arrived. It exists only while its owner is working: a foreman
+  or a job with nothing to do has nothing waiting, which is a property of
+  the type rather than a rule anybody keeps. A job's is delivered into the
+  turn that is running, by steering, when that turn's conversation is open,
+  and waits otherwise. Not a *queue*, which names the structure instead of
+  what is in it, and would invite a second one somewhere else.
 
   It outlives this process, the way a job does. A message in hand when the
   daemon is killed is still in hand when it starts again, and startup is what
@@ -93,8 +96,10 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   interrupted accepted messages for ever and answered none of them.
 
 - **turn** — one message, handled from being handed to a foreman or a job until
-  its agent stops. The protocol's own word, and the unit everything else is
-  scoped to: a turn is what an inbox entry buys, what a thread collects, and
+  its agent stops, together with whatever a job's agent was steered while it
+  ran — see `docs/decisions/0069-a-message-reaches-a-working-job.md`. The
+  protocol's own word, and the unit everything else is scoped to: a turn is
+  what an inbox entry buys or is delivered into, what a thread collects, and
   what "idle" means the absence of.
 
 - **mention** — how somebody says they mean stageman rather than each other.
@@ -279,6 +284,15 @@ Record the near-miss too: the term you rejected, and what it would have implied.
 - **burst** — one run of working, posted as one message that grows in place
   until the next narration closes it. Not *batch*, which implies a size
   somebody chose, and not *turn*, which holds many.
+- **steering** — how a message reaches a job's agent while a turn runs in
+  it: delivered into the running turn at once, pre-empting whatever the
+  agent was doing, rather than waiting for the turn to end — see
+  `docs/decisions/0069-a-message-reaches-a-working-job.md`. The adapter's
+  own word for its extension, kept because the mechanism is somebody else's
+  and renaming it would hide which one. Not *interrupt*, which is what a
+  person's stop does and ends the turn; not *inject*, which names the wire
+  and not what a person sees; and not a second *prompt*, which the adapter
+  accepts and which was measured to lose the first prompt's answer.
 
 - **tunnel** — the way in to what a job has put up for somebody to look at:
   one port published from its container when that container is created, and
@@ -741,6 +755,14 @@ justify is usually obsolete.
   Nothing posted this way is load-bearing: a failure is logged, and the
   tool's answer is what guarantees a person sees what they must.
 
+- **Never a second prompt while one is open.** The adapter accepts one and
+  queues it, and the first prompt's answer is then lost without a word: it
+  was measured resolving with no output at all while the model answered only
+  the second. A prompt starts a turn and nothing else. A message for a job
+  that is working is delivered by steering when its conversation is open and
+  waits in the job's inbox otherwise — see
+  `docs/decisions/0069-a-message-reaches-a-working-job.md`.
+
 ## 4. Quality bar beyond the gate
 
 `AGENTS.md` carries the bar the gate enforces mechanically. This is for the part
@@ -835,11 +857,11 @@ it lands.
   every step of every scenario, once the instance is awake and has swept: no
   container of this instance's that it has listed or made is running with
   nothing in it — no turn in flight for it, no message waiting for its
-  foreman, nothing answering on its tunnel, and no question about it in
-  flight. The other half, that nothing is left the instance cannot name, is
-  the waking sweep's, pinned by its scenario rather than by the oracle. The
-  container tests are what tie the simulated runtime to the real one, and
-  both are needed: the simulation reaches the crash between two steps that no
+  foreman or for it, nothing answering on its tunnel, and no question about
+  it in flight. The other half, that nothing is left the instance cannot name,
+  is the waking sweep's, pinned by its scenario rather than by the oracle. The
+  container tests are what tie the simulated runtime to the real one, and both
+  are needed: the simulation reaches the crash between two steps that no
   container test can, and the container test reaches the proxy that no
   simulation would have imagined.
 - **What a snapshot must still open is what the last release wrote, and

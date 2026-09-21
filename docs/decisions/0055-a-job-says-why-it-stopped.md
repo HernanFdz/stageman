@@ -5,7 +5,10 @@ Accepted. Completes
 `docs/decisions/0052-a-jobs-state-says-what-somebody-does-about-it.md`, which
 defined five readings of an idle job and left four of them unreachable, and
 spends the mechanism
-`docs/decisions/0034-tools-are-served-not-shipped.md` built.
+`docs/decisions/0034-tools-are-served-not-shipped.md` built. Since
+`docs/decisions/0069-a-message-reaches-a-working-job.md` a claim made
+in a turn is cleared when a message is steered into it, and the job is told
+to claim again before it stops.
 
 ## Context
 

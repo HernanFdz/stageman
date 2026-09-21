@@ -131,10 +131,11 @@ what it decided, and why.
 **Every job gets a channel of its own**, named after the project, the job's
 title and a short identifier, and described with why the job exists and where
 it is showing its work. It is created when the job is, whoever asked for the
-job is invited into it, and a mention there reaches that job. Everything
-the job's agent writes appears there as it works, with what it ran and
-edited beneath each stretch of it, so the channel reads as the job's
-timeline; reply under any of it, with a mention, to talk about that part.
+job is invited into it, and a mention there reaches that job, even while it
+is working: it reads the message at once and carries on. Everything the
+job's agent writes appears there as it works, with what it ran and edited
+beneath each stretch of it, so the channel reads as the job's timeline;
+reply under any of it, with a mention, to talk about that part.
 Retiring the job archives the channel, so a finished conversation leaves the
 sidebar and stays searchable. A person's message still needs the mention
 everywhere, so that people can talk to each other in a job's channel, or

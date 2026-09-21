@@ -4,7 +4,9 @@
 
 Accepted. Nothing below is built yet; this record exists so that the shape is
 settled before it is, as
-`docs/decisions/0029-a-reply-is-routed-by-its-thread.md` was.
+`docs/decisions/0029-a-reply-is-routed-by-its-thread.md` was. Since
+`docs/decisions/0069-a-message-reaches-a-working-job.md` a second
+notice at the root says when a message reached a turn while it ran.
 
 Supersedes one sentence of
 `docs/decisions/0034-tools-are-served-not-shipped.md`, inherited from

@@ -8,7 +8,10 @@ half a person performs. Depends on
 `docs/decisions/0052-a-jobs-state-says-what-somebody-does-about-it.md` for the
 states these two acts write, and on
 `docs/decisions/0051-an-image-is-named-by-the-recipe-it-is-built-from.md` for
-what a removed container lets go of.
+what a removed container lets go of. Since
+`docs/decisions/0069-a-message-reaches-a-working-job.md` a person's
+stop of a working job is a cancel the agent answers rather than a closed
+process, with the same outcome.
 
 ## Context
 
