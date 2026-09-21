@@ -203,13 +203,31 @@ impl Running {
             &Place::root(room.clone()),
             &stageman_foreman::room_opening(&repository, &reason, &mention),
         );
-        if let Some(origin) = origin {
-            let link = stageman_channel::room_link(channel, &room.id);
-            self.say(
+        let link = stageman_channel::room_link(channel, &room.id);
+        match origin {
+            Some(origin) => self.say(
                 &speaking,
                 &Place::from(origin.thread),
                 &stageman_foreman::started_notice(&link),
-            );
+            ),
+            // A job nobody asked for on a channel — started from the
+            // dashboard — is announced where the project's foreman works,
+            // if it has such a room yet, per
+            // `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`.
+            None => {
+                if let Some(foremans) = self
+                    .state
+                    .projects
+                    .get(&project)
+                    .and_then(|watched| watched.foreman_room.clone())
+                {
+                    self.say(
+                        &speaking,
+                        &Place::root(foremans),
+                        &stageman_foreman::started_notice(&link),
+                    );
+                }
+            }
         }
         self.start(job);
     }

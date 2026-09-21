@@ -531,6 +531,9 @@ fn WatchedProject(project: Project, available: Vec<Agent>, onedit: EventHandler<
                 if !project.watched.is_empty() {
                     " · watching {watching}"
                 }
+                if let Some(foremans) = &project.foreman_room {
+                    " · foreman in {foremans}"
+                }
             }
         }
     }

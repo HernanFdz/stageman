@@ -960,6 +960,7 @@ mod tests {
                 attending: stageman_core::Attending::default(),
                 brief: String::new(),
                 watched: std::collections::BTreeSet::new(),
+                foreman_room: None,
             },
         );
 

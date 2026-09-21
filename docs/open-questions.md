@@ -331,9 +331,8 @@ and wrong within a day.
 
 - Next, the rest of
   `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`:
-  the foreman's room first, because until it exists a foreman's transcript
-  is let go; then the notice that says why a turn started, the signpost,
-  and the tool's target. Each is a scenario of its own.
+  the notice that says why a turn started, the signpost, and the tool's
+  target, each a scenario of its own.
 
 - Then show a mention its thread per
   `docs/decisions/0068-a-mention-is-shown-its-thread.md`,

@@ -324,7 +324,11 @@ fn a_foreman_starts_a_job_whose_room_is_made_before_its_agent_speaks() {
         .job(started)
         .expect("the job is on the record");
     assert_eq!(recorded.reason, "the parser is flaky");
-    assert_eq!(recorded.room, Some(room(1)), "in the room that was made");
+    assert_eq!(
+        recorded.room,
+        Some(room(2)),
+        "in the room that was made for it, after the foreman's own"
+    );
     assert_eq!(
         recorded.asked_by.as_deref(),
         Some("U0HUMAN"),
@@ -333,20 +337,20 @@ fn a_foreman_starts_a_job_whose_room_is_made_before_its_agent_speaks() {
     assert!(
         world
             .rooms()
-            .first()
+            .get(1)
             .is_some_and(|(_, name)| name.starts_with("example--flaky-parser-test--")),
         "named after the project and the title the foreman gave: {:?}",
         world.rooms()
     );
     assert_eq!(
         world.invited(),
-        [(room(1).id, "U0HUMAN".to_owned())],
+        [(room(2).id, "U0HUMAN".to_owned())],
         "and they are invited into it"
     );
     assert!(
         world.posts().contains(&(
             in_thread(1),
-            stageman_foreman::started_notice("<#C-job-001>")
+            stageman_foreman::started_notice("<#C-job-002>")
         )),
         "their thread is told where the job is: {:?}",
         world.posts()
@@ -355,7 +359,7 @@ fn a_foreman_starts_a_job_whose_room_is_made_before_its_agent_speaks() {
         world
             .posts()
             .iter()
-            .any(|(at, text)| *at == in_room(1) && text.contains("Mention <@U0BOT>")),
+            .any(|(at, text)| *at == in_room(2) && text.contains("Mention <@U0BOT>")),
         "the room opens by teaching the mention: {:?}",
         world.posts()
     );
@@ -366,7 +370,7 @@ fn a_foreman_starts_a_job_whose_room_is_made_before_its_agent_speaks() {
     );
     assert!(
         world.posts().iter().any(|(at, text)| {
-            *at == in_room(1)
+            *at == in_room(2)
                 && *text
                     == stageman_foreman::stopped_notice(
                         &Waiting::Silent,

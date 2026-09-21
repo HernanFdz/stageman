@@ -274,6 +274,7 @@ impl Running {
                 attending: stageman_core::Attending::default(),
                 brief,
                 watched: std::collections::BTreeSet::new(),
+                foreman_room: None,
             },
         );
         candidate
@@ -357,6 +358,8 @@ impl Running {
             let discard = self.discard(stageman_job::container(*job));
             self.defer(discard);
         }
+        // The foreman's room too, before the record that names it goes.
+        self.archive_foreman_room_of(identifier);
         let discard = self.discard(stageman_foreman::container(identifier));
         self.defer(discard);
         let reclaiming = self.ask(&Command::Images, Asked::Images);
@@ -728,6 +731,7 @@ mod tests {
             attending: stageman_core::Attending::default(),
             brief: String::new(),
             watched: std::collections::BTreeSet::new(),
+            foreman_room: None,
             jobs: jobs
                 .iter()
                 .zip(1_u128..)

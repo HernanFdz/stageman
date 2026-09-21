@@ -261,7 +261,14 @@ fn a_mention_in_a_thread_belonging_to_no_job_reaches_the_foreman() {
     world.says_in(100, 7, "hello?");
     world.run_until(&mut instance, 5_000);
 
-    assert!(world.posts().is_empty(), "{:?}", world.posts());
+    assert!(
+        world
+            .posts()
+            .iter()
+            .all(|(place, _)| place.thread.is_none()),
+        "nothing in the thread on the instance's behalf: {:?}",
+        world.posts()
+    );
     assert_eq!(
         world.reactions().first(),
         Some(&(

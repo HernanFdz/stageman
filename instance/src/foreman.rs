@@ -18,7 +18,7 @@
 //! `docs/decisions/0066-a-foremans-container-runs-only-while-a-turn-runs-in-it.md`.
 
 use stageman_core::{
-    Agent, Channel, ChannelConfig, Errand, Handout, Place, ProjectId, State, Taken, Thread,
+    Agent, Channel, ChannelConfig, Errand, Handout, Place, ProjectId, Room, State, Taken, Thread,
 };
 use stageman_foreman::Starting;
 
@@ -150,11 +150,81 @@ impl Running {
         self.look_before_turning(project);
     }
 
+    /// Makes the foreman's room if the project has none yet, and otherwise
+    /// asks the runtime about the foreman's container before turning.
+    ///
+    /// The room first, because it is where the turn's transcript goes, and
+    /// once, because it is recorded — see
+    /// `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`.
+    /// A platform that will not make it does not stop the turn: the message
+    /// is answered and the transcript let go, which is what a foreman with
+    /// no room already was.
+    fn look_before_turning(&mut self, project: ProjectId) {
+        let Some(watched) = self.state.projects.get(&project) else {
+            return;
+        };
+        if watched.foreman_room.is_none()
+            && let Some((channel, bound)) = watched.channels.iter().next()
+        {
+            let name = stageman_channel::foreman_room_name(*channel, &watched.name, project);
+            let speaking = bound.speaking();
+            self.create_foreman_room(project, *channel, &speaking, &name);
+            return;
+        }
+        self.inspect_before_turning(project);
+    }
+
+    /// The platform answered about the foreman's room: recorded, described
+    /// and opened if made, and the turn goes on either way.
+    pub fn foreman_room_made(
+        &mut self,
+        project: ProjectId,
+        channel: Channel,
+        outcome: Result<String, String>,
+    ) {
+        match outcome {
+            Ok(id) => {
+                let room = Room { channel, id };
+                let Some((speaking, name)) =
+                    self.state.projects.get(&project).and_then(|watched| {
+                        Some((
+                            watched.channels.get(&channel)?.speaking(),
+                            watched.name.clone(),
+                        ))
+                    })
+                else {
+                    return;
+                };
+                if let Some(watched) = self.state.projects.get_mut(&project) {
+                    watched.foreman_room = Some(room.clone());
+                    self.dirty = true;
+                }
+                self.describe_foreman_room(
+                    project,
+                    channel,
+                    &speaking,
+                    &room.id,
+                    &stageman_foreman::foreman_room_purpose(&name),
+                );
+                let mention = self.own_mention(project, channel);
+                self.say(
+                    &speaking,
+                    &Place::root(room),
+                    &stageman_foreman::foreman_room_opening(&name, &mention),
+                );
+            }
+            Err(why) => {
+                tracing::warn!(%project, %why, "the foreman's room could not be made");
+            }
+        }
+        self.inspect_before_turning(project);
+    }
+
     /// Asks the runtime about the foreman's container before turning.
     ///
     /// Held back behind whatever this step changed, so that a turn never
     /// starts on the strength of an inbox that is not on the disk.
-    fn look_before_turning(&mut self, project: ProjectId) {
+    fn inspect_before_turning(&mut self, project: ProjectId) {
         let container = stageman_foreman::container(project);
         let looking = self.ask(
             &Command::Label {
@@ -485,6 +555,7 @@ mod tests {
                 attending: Attending::default(),
                 brief: String::new(),
                 watched: std::collections::BTreeSet::new(),
+                foreman_room: None,
             },
         );
         (state, project)

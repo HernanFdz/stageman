@@ -18,6 +18,8 @@ use std::time::Duration;
 
 use stageman_agent::{Noticed, ToolCallStatus, ToolKind};
 
+use stageman_core::{Place, Speaking};
+
 use crate::turns::speaking_for;
 use crate::vocabulary::Speaker;
 use crate::{Effect, Running, Timer};
@@ -367,16 +369,27 @@ enum Tending {
 }
 
 impl Running {
+    /// Where a speaker's transcript goes, if it has anywhere: the root of
+    /// the room it owns, a job's own or its project's foreman's.
+    fn transcript_place(&self, speaker: Speaker) -> Option<(Speaking, Place)> {
+        match speaker {
+            Speaker::Job(job) => speaking_for(&self.state, job),
+            Speaker::Foreman(project) => {
+                let watched = self.state.projects.get(&project)?;
+                let room = watched.foreman_room.clone()?;
+                let bound = watched.channels.get(&room.channel)?;
+                Some((bound.speaking(), Place::root(room)))
+            }
+        }
+    }
+
     /// Something a turn's agent said or did, onto the message it is growing
     /// or a new one; and whatever that closed, opened or changed, sent.
     ///
-    /// A foreman's is let go: the room 0067 gives it is not built, which is
-    /// the one place that record is not yet true.
+    /// Let go when the speaker has no room: a job with none, or a foreman
+    /// whose room could not be made.
     pub fn noticed(&mut self, speaker: Speaker, noticed: Noticed) {
-        let Speaker::Job(job) = speaker else {
-            return;
-        };
-        let Some((_, root)) = speaking_for(&self.state, job) else {
+        let Some((_, root)) = self.transcript_place(speaker) else {
             return;
         };
         let channel = root.room.channel;
@@ -487,10 +500,7 @@ impl Running {
     /// growing message is edited at most that often. Nothing while an
     /// answer is awaited, since the answer looks again.
     fn tend(&mut self, speaker: Speaker, run: u64) {
-        let Speaker::Job(job) = speaker else {
-            return;
-        };
-        let Some((speaking, place)) = speaking_for(&self.state, job) else {
+        let Some((speaking, place)) = self.transcript_place(speaker) else {
             return;
         };
         let tending = {

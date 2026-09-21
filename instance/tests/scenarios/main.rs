@@ -15,6 +15,7 @@ mod booting;
 mod channel;
 mod dashboard;
 mod foreman;
+mod foreman_room;
 mod listening;
 mod replies;
 mod signals;

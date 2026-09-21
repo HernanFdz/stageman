@@ -3224,6 +3224,7 @@ mod tests {
                 attending: stageman_core::Attending::default(),
                 brief: String::new(),
                 watched: std::collections::BTreeSet::new(),
+                foreman_room: None,
             },
         );
         (state, id)
@@ -4292,6 +4293,7 @@ mod tests {
                     attending: stageman_core::Attending::default(),
                     brief: String::new(),
                     watched: std::collections::BTreeSet::new(),
+                    foreman_room: None,
                 },
             );
             let handout = Handout::for_foreman(&state, project).expect("a watched project");

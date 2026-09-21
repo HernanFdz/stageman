@@ -37,7 +37,7 @@
 //! and the identifier it comes back with is what a reply names — see
 //! `docs/decisions/0029-a-reply-is-routed-by-its-thread.md`.
 
-use stageman_core::{Channel, JobId, Secret, Speaking};
+use stageman_core::{Channel, JobId, ProjectId, Secret, Speaking, Uuid};
 
 use crate::{Call, ChannelError, Identity, Incoming, Message, Reaction, Request};
 
@@ -260,8 +260,20 @@ pub fn done(status: u16, body: &[u8]) -> Result<(), ChannelError> {
 /// survive creation, and an archived room's name is still taken, which is
 /// why the identifier is the one part always present.
 pub fn room_name(project: &str, title: &str, job: JobId) -> String {
-    let identifier: String = job
-        .as_uuid()
+    named(project, title, job.as_uuid())
+}
+
+/// The name a project's foreman's room is given: `<project>--foreman--<identifier>`,
+/// the project's identifier making it unique for ever, as a job's does a
+/// job's room — see
+/// `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`.
+pub fn foreman_room_name(project: &str, id: ProjectId) -> String {
+    named(project, "foreman", id.as_uuid())
+}
+
+/// A room's name from its three parts, folded to what Slack allows.
+fn named(project: &str, title: &str, identifier: &Uuid) -> String {
+    let identifier: String = identifier
         .simple()
         .to_string()
         .chars()

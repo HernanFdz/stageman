@@ -21,7 +21,7 @@ mod slack;
 
 use std::collections::BTreeMap;
 
-use stageman_core::{Channel, JobId, Secret, Speaking};
+use stageman_core::{Channel, JobId, ProjectId, Secret, Speaking};
 
 /// Who this instance is on a channel, so it can recognise itself.
 ///
@@ -310,6 +310,18 @@ pub fn room_name(channel: Channel, project: &str, title: &str, job: JobId) -> St
     }
 }
 
+/// The name a project's foreman's room is given on a channel.
+///
+/// The project, the word foreman, and the project's identifier's prefix,
+/// folded to what the channel allows. Only the identifier is load-bearing,
+/// for the reason [`room_name`] gives.
+#[must_use]
+pub fn foreman_room_name(channel: Channel, project: &str, id: ProjectId) -> String {
+    match channel {
+        Channel::Slack => slack::foreman_room_name(project, id),
+    }
+}
+
 /// A reference to a room, as the channel renders one inside a message.
 #[must_use]
 pub fn room_link(channel: Channel, room: &str) -> String {
@@ -522,10 +534,11 @@ pub enum ChannelError {
 mod tests {
     use super::{
         Call, ChannelError, Identity, Incoming, Reaction, acknowledgement, archive, create_room,
-        decode, done, identity, invite, mention, open_socket, pieces, post, posted, react,
-        room_created, room_link, room_name, set_purpose, set_topic, socket_url, update, who_am_i,
+        decode, done, foreman_room_name, identity, invite, mention, open_socket, pieces, post,
+        posted, react, room_created, room_link, room_name, set_purpose, set_topic, socket_url,
+        update, who_am_i,
     };
-    use stageman_core::{Channel, JobId, Secret, Speaking, Uuid};
+    use stageman_core::{Channel, JobId, ProjectId, Secret, Speaking, Uuid};
 
     fn speaking() -> Speaking {
         Speaking {
@@ -802,6 +815,14 @@ mod tests {
         let long = room_name(Channel::Slack, &"p".repeat(60), &"t".repeat(120), job);
         assert!(long.len() <= 80, "{long}");
         assert!(long.ends_with("--3fa85f64"), "{long}");
+        assert_eq!(
+            foreman_room_name(
+                Channel::Slack,
+                "Closed Loop",
+                ProjectId::from_uuid(Uuid::from_u128(0x3fa8_5f64_5717_4562_b3fc_2c96_3f66_afa6))
+            ),
+            "closed-loop--foreman--3fa85f64"
+        );
         assert_eq!(room_link(Channel::Slack, "C0C1VNX9AA2"), "<#C0C1VNX9AA2>");
         assert_eq!(mention(Channel::Slack, "U0HUMAN"), "<@U0HUMAN>");
     }

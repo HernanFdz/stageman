@@ -1247,6 +1247,11 @@ pub struct Project {
     /// thing; ordered, so the snapshot does not reshuffle it. Empty for
     /// most projects, and for every project the last release wrote.
     pub watched: BTreeSet<Room>,
+    /// The room its foreman's transcript is posted in, once one has been
+    /// made: before its first turn, per
+    /// `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`.
+    /// None until then, and for every project the last release wrote.
+    pub foreman_room: Option<Room>,
     /// What its jobs are given that this project never reads.
     ///
     /// A third map beside the two above rather than a wider version of either,
@@ -1616,6 +1621,7 @@ impl State {
                         variables,
                         brief: project.brief.clone(),
                         watched: project.watched.clone(),
+                        foreman_room: project.foreman_room.clone(),
                         jobs: project.jobs.clone(),
                         attending: project.attending.clone(),
                     },
@@ -1924,6 +1930,12 @@ pub struct SealedProject {
     /// is the true answer for a file from before: nothing was watched.
     #[serde(default)]
     pub watched: BTreeSet<Room>,
+    /// The room its foreman's transcript is posted in, which holds nothing
+    /// needing sealing. Defaulted, because it was added after snapshots
+    /// existed, and none is the true answer for a file from before: no such
+    /// room had been made.
+    #[serde(default)]
+    pub foreman_room: Option<Room>,
     /// Its variables, each with its value sealed and its name in the clear.
     ///
     /// Keyed by plain text rather than by the validated name, deliberately:
@@ -2075,6 +2087,7 @@ impl Snapshot {
                         variables,
                         brief: project.brief,
                         watched: project.watched,
+                        foreman_room: project.foreman_room,
                         jobs: project.jobs,
                         attending: project.attending,
                     },
@@ -2608,6 +2621,7 @@ mod tests {
             attending: Attending::default(),
             brief: String::new(),
             watched: BTreeSet::new(),
+            foreman_room: None,
         }
     }
 

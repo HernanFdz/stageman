@@ -181,14 +181,16 @@ pub fn tools(warranted: &Warranted, kits: &[(String, String)]) -> Vec<Tool> {
 /// narration already reaches its room, per
 /// `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`,
 /// so for a job the tool is for the thread a person asked in; a foreman's
-/// narration does not yet, so for a foreman the tool is still the only way.
+/// reaches a room of its own, where the person who asked is not, so for a
+/// foreman the tool is how the person is answered.
 const fn say_description(speaker: Speaker) -> &'static str {
     match speaker {
         Speaker::Foreman(_) => {
             "Say something to the people on this project's channel, in Markdown: it \
-             is rendered, so headings, lists, code, tables and links all show. This \
-             is the only way anything you write reaches a person: ordinary output is \
-             seen by nobody."
+             is rendered, so headings, lists, code, tables and links all show. It \
+             posts in the thread of the message you are answering. Everything you \
+             write as ordinary output is posted in a room of your own, where the \
+             person who asked is not, so this is the only way to answer them."
         }
         Speaker::Job(_) => {
             "Say something to the people in this job's room, in Markdown: it is \
@@ -1298,6 +1300,7 @@ mod tests {
                 attending: stageman_core::Attending::default(),
                 brief: String::new(),
                 watched: std::collections::BTreeSet::new(),
+                foreman_room: None,
             },
         );
 

@@ -275,6 +275,7 @@ pub fn projected(id: ProjectId, project: &Project) -> stageman_wire::Project {
             .collect(),
         brief: project.brief.clone(),
         watched: project.watched.iter().map(|room| room.id.clone()).collect(),
+        foreman_room: project.foreman_room.as_ref().map(|room| room.id.clone()),
         working: project
             .jobs
             .values()
@@ -580,6 +581,7 @@ mod tests {
                     attending: stageman_core::Attending::default(),
                     brief: String::new(),
                     watched: std::collections::BTreeSet::new(),
+                    foreman_room: None,
                 },
             )]),
         }

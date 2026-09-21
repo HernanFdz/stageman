@@ -134,6 +134,29 @@ pub fn started_notice(link: &str) -> String {
     format!("Started a job for this: {link}.")
 }
 
+/// What a foreman's room is for, as the sidebar shows it beside the name.
+#[must_use]
+pub fn foreman_room_purpose(project: &str) -> String {
+    format!("Where {project}'s foreman thinks: what it is handling, what it decided, and why.")
+}
+
+/// The first message in a foreman's room, for whoever finds the room.
+///
+/// It teaches the one rule that matters there: the foreman is talked to by
+/// a mention, anywhere, and this room is where its work shows. The mention
+/// is rendered by the channel, since how one is spelled is the platform's
+/// business.
+#[must_use]
+pub fn foreman_room_opening(project: &str, mention: &str) -> String {
+    format!(
+        "\
+**{project}'s foreman.**
+
+_Everything it says and does as it works appears here. Mention {mention} anywhere to \
+talk to it; anything else said here is between people._"
+    )
+}
+
 /// The first thing a project's foreman is ever told.
 ///
 /// Said once, at the start of a session that then lasts as long as the project
@@ -156,9 +179,10 @@ People talk to you on a channel. Each message they send you arrives as its own \
 turn, and the only way to answer is to **call the `say` tool**, in Markdown, \
 which is rendered.
 
-Nothing you write as ordinary output is seen by anybody. What you pass to \
-`say` lands in the thread of the message you are answering, so a person can \
-always see which of their messages you meant.
+Everything you write as ordinary output is posted in a room of your own, \
+where anybody can watch you work — but the person who asked is not there. \
+What you pass to `say` lands in the thread of the message you are answering, \
+so a person can always see which of their messages you meant.
 
 **You do not do the work yourself.** You have no copy of the repository and no \
 credentials to reach it, and that is deliberate rather than something missing: \
@@ -903,6 +927,17 @@ here is between people._"
             super::started_notice("<#C0C1VNX9AA2>"),
             "Started a job for this: <#C0C1VNX9AA2>."
         );
+        assert_eq!(
+            super::foreman_room_purpose("aviary"),
+            "Where aviary's foreman thinks: what it is handling, what it decided, and why."
+        );
+        assert_eq!(
+            super::foreman_room_opening("aviary", "<@U0BOT>"),
+            "**aviary's foreman.**
+
+_Everything it says and does as it works appears here. Mention <@U0BOT> anywhere to talk to \
+it; anything else said here is between people._"
+        );
     }
 
     /// The opening teaches the mention, because the room is where a
@@ -1220,7 +1255,8 @@ when you finish."
 People talk to you on a channel. Each message they send you arrives as its own turn, and the \
 only way to answer is to **call the `say` tool**, in Markdown, which is rendered.
 
-Nothing you write as ordinary output is seen by anybody. What you pass to `say` lands in the \
+Everything you write as ordinary output is posted in a room of your own, where anybody can \
+watch you work — but the person who asked is not there. What you pass to `say` lands in the \
 thread of the message you are answering, so a person can always see which of their messages you \
 meant.
 
@@ -1430,10 +1466,13 @@ inferred is one a person will act on, and you have no way to check it."
     /// `docs/decisions/0034-tools-are-served-not-shipped.md` resolved that by
     /// agreeing with the agent: it is a tool now, so the reflex that was wrong
     /// is right. What survives is the second half of the lesson, which was
-    /// never about the mechanism — an agent has no way to know that ordinary
-    /// output goes nowhere, so it has to be told.
+    /// never about the mechanism — an agent has no way to know where its
+    /// ordinary output goes, so it has to be told. Since
+    /// `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`
+    /// it goes to a room of the foreman's own, which the person who asked
+    /// is not in, and the lesson holds in that form.
     #[test]
-    fn a_foreman_is_told_which_tool_answers_and_that_output_reaches_nobody() {
+    fn a_foreman_is_told_which_tool_answers_and_where_its_output_goes() {
         let told = super::opening("https://example.invalid/repo");
 
         assert!(
@@ -1441,12 +1480,16 @@ inferred is one a person will act on, and you have no way to check it."
             "the tool that answers has to be named: {told}"
         );
         // The half of the original lesson that outlived the mechanism: an
-        // agent has no way to know its ordinary output goes nowhere, and one
-        // that is not told believes it has answered when it has not.
+        // agent has no way to know its ordinary output does not reach the
+        // person, and one that is not told believes it has answered when it
+        // has not.
         assert!(
-            told.contains("Nothing you write as ordinary output"),
+            told.contains(
+                "Everything you write as ordinary output is posted in a room of your own"
+            ),
             "{told}"
         );
+        assert!(told.contains("the person who asked is not there"), "{told}");
     }
 
     /// A foreman is told to report what failed, not to explain it.

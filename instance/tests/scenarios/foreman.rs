@@ -54,8 +54,12 @@ fn a_first_message_opens_a_session_and_is_acknowledged_first() {
     assert!(run.was_told("look at the parser"), "{run:?}");
     assert!(world.exists(&stageman_foreman::container(project())));
     assert!(
-        world.posts().is_empty(),
-        "nothing is said on the instance's behalf: {:?}",
+        world
+            .posts()
+            .iter()
+            .all(|(place, _)| place.thread.is_none()),
+        "nothing is said in the person's thread on the instance's behalf; the foreman's own \
+         room holds its opening and its transcript: {:?}",
         world.posts()
     );
     assert_eq!(
@@ -143,7 +147,14 @@ fn messages_arriving_while_it_works_are_queued_and_worked_in_order() {
     for (run, said) in runs.iter().zip(["first", "second", "third"]) {
         assert!(run.was_told(said), "in arrival order: {run:?}");
     }
-    assert!(world.posts().is_empty(), "{:?}", world.posts());
+    assert!(
+        world
+            .posts()
+            .iter()
+            .all(|(place, _)| place.thread.is_none()),
+        "nothing in anybody's thread: {:?}",
+        world.posts()
+    );
     assert_eq!(
         world.reacted(Reaction::Seen),
         [thread(1).id, thread(2).id, thread(3).id],
@@ -205,10 +216,15 @@ fn a_foreman_interrupted_mid_turn_is_picked_up_on_waking() {
         "the next was never begun: {:?}",
         runs[1]
     );
+    let in_threads: Vec<_> = world
+        .posts()
+        .iter()
+        .filter(|(place, _)| place.thread.is_some())
+        .collect();
     assert_eq!(
-        world.posts(),
-        [(in_thread(1), stageman_foreman::resumed_notice().to_owned())],
-        "no message is re-acknowledged"
+        in_threads,
+        vec![&(in_thread(1), stageman_foreman::resumed_notice().to_owned())],
+        "no message is re-acknowledged; the foreman's own room holds the rest"
     );
 }
 
@@ -251,7 +267,12 @@ fn a_turn_that_fails_is_said_to_be_stuck_and_the_next_is_worked() {
     world.run_until(&mut instance, 10_000);
 
     assert_eq!(runs(&world).len(), 2);
-    let [(said_at, said)] = world.posts() else {
+    let in_threads: Vec<_> = world
+        .posts()
+        .iter()
+        .filter(|(place, _)| place.thread.is_some())
+        .collect();
+    let [(said_at, said)] = in_threads.as_slice() else {
         panic!("one notice, for the turn that failed: {:?}", world.posts());
     };
     assert_eq!(said_at, &in_thread(1), "said where the message was");
@@ -467,7 +488,11 @@ fn a_turn_that_failed_before_its_container_existed_rests_nothing() {
         world.commands()
     );
     assert_eq!(
-        world.posts().len(),
+        world
+            .posts()
+            .iter()
+            .filter(|(place, _)| place.thread.is_some())
+            .count(),
         1,
         "the person is told it was stuck: {:?}",
         world.posts()

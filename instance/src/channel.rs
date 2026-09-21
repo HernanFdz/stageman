@@ -85,6 +85,11 @@ pub enum Purpose {
         /// it: told where the job is, and invited.
         origin: Option<Origin>,
     },
+    /// A foreman's room being made, before its first turn.
+    ForemanRoom {
+        /// Whose foreman.
+        project: ProjectId,
+    },
     /// Something done to a room whose outcome changes nothing here.
     Keeping(Keeping),
     /// A question a listener asks before it can read anything.
@@ -142,6 +147,11 @@ pub enum Keeping {
     Describing {
         /// Whose room.
         job: JobId,
+    },
+    /// A foreman's room described.
+    DescribingForemans {
+        /// Whose foreman.
+        project: ProjectId,
     },
     /// Somebody invited into a room.
     Inviting {
@@ -365,6 +375,64 @@ impl Running {
         self.defer(request);
     }
 
+    /// Makes the room a foreman's transcript is posted in, once the inbox
+    /// that first needs it is on the disk.
+    pub fn create_foreman_room(
+        &mut self,
+        project: ProjectId,
+        channel: Channel,
+        speaking: &Speaking,
+        name: &str,
+    ) {
+        let rendered = stageman_channel::create_room(channel, speaking, name);
+        let id = self.effect_id();
+        self.sent.insert(
+            id,
+            Sent {
+                channel,
+                purpose: Purpose::ForemanRoom { project },
+                room: None,
+            },
+        );
+        let request = request(id, rendered);
+        self.defer(request);
+    }
+
+    /// Describes a foreman's room: what it is for.
+    pub fn describe_foreman_room(
+        &mut self,
+        project: ProjectId,
+        channel: Channel,
+        speaking: &Speaking,
+        room: &str,
+        purpose: &str,
+    ) {
+        self.keep(
+            channel,
+            stageman_channel::set_purpose(channel, speaking, room, purpose),
+            Keeping::DescribingForemans { project },
+        );
+    }
+
+    /// Archives a project's foreman's room, if it has one, once the record
+    /// that forgets the project is on the disk.
+    pub fn archive_foreman_room_of(&mut self, project: ProjectId) {
+        let Some((channel, speaking, room)) =
+            self.state.projects.get(&project).and_then(|watched| {
+                let room = watched.foreman_room.clone()?;
+                let bound = watched.channels.get(&room.channel)?;
+                Some((room.channel, bound.speaking(), room.id))
+            })
+        else {
+            return;
+        };
+        self.keep(
+            channel,
+            stageman_channel::archive(channel, &speaking, &room),
+            Keeping::Archiving { room },
+        );
+    }
+
     /// Describes a job's room: what it is for, and where the job shows its
     /// work.
     pub fn describe_room(
@@ -513,6 +581,16 @@ impl Running {
                 };
                 self.room_created(job, origin, outcome);
             }
+            Purpose::ForemanRoom { project } => {
+                let outcome = match responded {
+                    Responded::Answered { status, body, .. } => {
+                        stageman_channel::room_created(sent.channel, *status, body.as_slice())
+                            .map_err(|why| why.to_string())
+                    }
+                    Responded::Failed(why) => Err(unreachable(why)),
+                };
+                self.foreman_room_made(project, sent.channel, outcome);
+            }
             Purpose::Keeping(keeping) => {
                 let outcome = match responded {
                     Responded::Answered { status, body, .. } => {
@@ -578,6 +656,9 @@ impl Running {
                 }
             }
             Purpose::Creating { job, origin } => self.room_created(job, origin, Err(never())),
+            Purpose::ForemanRoom { project } => {
+                self.foreman_room_made(project, sent.channel, Err(never()));
+            }
             Purpose::Keeping(keeping) => {
                 tracing::debug!(?keeping, "not done: {}", never());
             }

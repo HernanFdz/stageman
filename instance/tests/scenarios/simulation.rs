@@ -432,6 +432,7 @@ fn a_project(jobs: BTreeMap<JobId, Job>, bound: bool) -> Project {
         attending: stageman_core::Attending::default(),
         brief: String::new(),
         watched: std::collections::BTreeSet::new(),
+        foreman_room: None,
     }
 }
 
