@@ -39,7 +39,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
-pub use conversation::{Conversation, Exchange, Heard, Opening, Said};
+pub use conversation::{Conversation, Exchange, Heard, Noticed, Opening, Said};
 
 use agent_client_protocol::schema::v1::{
     HttpHeader, McpServer, McpServerHttp, SessionConfigKind, SessionConfigOption,
@@ -61,6 +61,7 @@ use tokio::io::AsyncWriteExt as _;
 /// which is the cost without the benefit.
 pub use agent_client_protocol::schema::ProtocolVersion;
 pub use agent_client_protocol::schema::v1::StopReason;
+pub use agent_client_protocol::schema::v1::ToolKind;
 
 /// How much of a failed agent's standard error is kept in what is recorded.
 ///

@@ -516,6 +516,10 @@ pub struct Running {
     sent: BTreeMap<EffectId, channel::Sent>,
     /// Effects waiting on a write, by the write they wait on, in order.
     deferred: VecDeque<(EffectId, Vec<Effect>)>,
+    /// Effects of this step that wait on nothing, released at its end.
+    immediate: Vec<Effect>,
+    /// What each room is being posted, one request in flight at a time.
+    posting: BTreeMap<stageman_core::Room, channel::Posting>,
     /// The wakes asked for that have not gone off, and what each was for.
     timers: BTreeMap<EffectId, Timer>,
     /// Every project whose channel is being listened to, and where its
@@ -597,6 +601,8 @@ impl Running {
             probes: BTreeMap::new(),
             sent: BTreeMap::new(),
             deferred: VecDeque::new(),
+            immediate: Vec::new(),
+            posting: BTreeMap::new(),
             timers: BTreeMap::new(),
             listeners: BTreeMap::new(),
             sockets: BTreeMap::new(),
@@ -1041,6 +1047,7 @@ impl Running {
     /// step held back waits on that write; an unchanged state releases the
     /// held-back effects at once, because there is nothing to wait for.
     fn flush(&mut self, effects: &mut Vec<Effect>) {
+        effects.append(&mut self.immediate);
         let staged = std::mem::take(&mut self.staged);
         if !self.dirty {
             effects.extend(staged);
@@ -1068,6 +1075,23 @@ impl Running {
     /// Holds an effect back until the state this step changed is on the disk.
     fn defer(&mut self, effect: impl Into<Effect>) {
         self.staged.push(effect.into());
+    }
+
+    /// Holds an effect back until every write in flight has landed: this
+    /// step's, if it changes anything; else the last one still being
+    /// written; else nothing, and it goes at the step's end.
+    ///
+    /// What a post waiting its turn in a room is released with, since the
+    /// step that justified it is over by then and its write may not be.
+    fn after_writes(&mut self, effect: impl Into<Effect>) {
+        let effect = effect.into();
+        if self.dirty {
+            self.staged.push(effect);
+        } else if let Some((_, waiting)) = self.deferred.back_mut() {
+            waiting.push(effect);
+        } else {
+            self.immediate.push(effect);
+        }
     }
 
     /// Writes what became of a job.

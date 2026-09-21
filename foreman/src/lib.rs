@@ -532,21 +532,28 @@ You can show people what you are doing. Anything you serve inside this container
 {port} is reachable at {tunnel} — a dev server while you work, or a built result for somebody \
 to look at before you propose it. Bind it to 0.0.0.0 and not to localhost: a server on \
 localhost answers you from inside this container and is reachable from nowhere else. Say where \
-to look with the `say` tool, because nobody finds that address on their own."
+to look, because nobody finds that address on their own."
     );
 
     let tools = "You have git and gh, both signed in as the account this work \
 belongs to, and the `say` tool for talking to people.";
 
+    // What a job is told about being read changed with
+    // `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`:
+    // its narration reaches the room as it is written, so the paragraph that
+    // asked it to finish by saying what it did is gone, and the tool is for
+    // the thread a person asked in.
     let speaking = "\
-Finish by saying what you did, by calling the `say` tool, in Markdown, which is \
-rendered. Nobody reads this \
-terminal, so anything you do not say there is lost — including the answer, if the work was a question. Say what \
-you found, what you changed, or what you could not do.
+Everything you write is posted to the people in this job's room as you write \
+it, in Markdown, which is rendered — so write for them: what you found, what \
+you changed, or what you could not do, and the answer, if the work was a \
+question.
 
-Use it during the work as well, whenever you need an answer from a person: say \
-what you need, then stop. It reaches somebody who can answer, but not now — no \
-reply arrives in this session, so do not wait for one and do not guess.";
+The `say` tool posts in the thread of the message you are answering, or at the \
+root of the room when you are answering nobody. Use it whenever you need an \
+answer from a person: say what you need, then stop. It reaches somebody who \
+can answer, but not now — no reply arrives in this session, so do not wait for \
+one and do not guess.";
 
     // Named and never valued, and the type is what enforces it: a
     // `VariableName` cannot hold a credential, so there is no call site at
@@ -686,8 +693,8 @@ You can show people what you are doing. Anything you serve inside this container
 is reachable at https://00000000-0000-0000-0000-000000000001.example.com — a dev server while \
 you work, or a built result for somebody to look at before you propose it. Bind it to 0.0.0.0 \
 and not to localhost: a server on localhost answers you from inside this container and is \
-reachable from nowhere else. Say where to look with the `say` tool, because nobody finds that \
-address on their own.
+reachable from nowhere else. Say where to look, because nobody finds that address on their \
+own.
 
 Some of what this project needs is already in your environment: STRIPE_API_KEY, DATABASE_URL. \
 Nothing here knows what any of them is for, so follow whatever the repository says about them. \
@@ -698,14 +705,14 @@ When you have a change to propose, open a pull request and stop there. Do not me
 deploy anything, and do not push to the default branch. Somebody reads what you propose before \
 it counts for anything, which is what lets you work unattended.
 
-Finish by saying what you did, by calling the `say` tool, in Markdown, which is rendered. \
-Nobody reads this terminal, so anything you do not say there is lost — including the \
-answer, if the work was a question. Say what you found, what you changed, or what you could not \
-do.
+Everything you write is posted to the people in this job's room as you write it, in Markdown, \
+which is rendered — so write for them: what you found, what you changed, or what you could not \
+do, and the answer, if the work was a question.
 
-Use it during the work as well, whenever you need an answer from a person: say what you need, \
-then stop. It reaches somebody who can answer, but not now — no reply arrives in this session, \
-so do not wait for one and do not guess.
+The `say` tool posts in the thread of the message you are answering, or at the root of the room \
+when you are answering nobody. Use it whenever you need an answer from a person: say what you \
+need, then stop. It reaches somebody who can answer, but not now — no reply arrives in this \
+session, so do not wait for one and do not guess.
 
 Before you stop, call the `stopping` tool, every time and last of all. Say `ready_for_review` if \
 you have done what was asked and there is something for a person to look at, or \
@@ -779,21 +786,21 @@ You can show people what you are doing. Anything you serve inside this container
 is reachable at https://00000000-0000-0000-0000-000000000001.example.com — a dev server while \
 you work, or a built result for somebody to look at before you propose it. Bind it to 0.0.0.0 \
 and not to localhost: a server on localhost answers you from inside this container and is \
-reachable from nowhere else. Say where to look with the `say` tool, because nobody finds that \
-address on their own.
+reachable from nowhere else. Say where to look, because nobody finds that address on their \
+own.
 
 When you have a change to propose, open a pull request and stop there. Do not merge it, do not \
 deploy anything, and do not push to the default branch. Somebody reads what you propose before \
 it counts for anything, which is what lets you work unattended.
 
-Finish by saying what you did, by calling the `say` tool, in Markdown, which is rendered. \
-Nobody reads this terminal, so anything you do not say there is lost — including the \
-answer, if the work was a question. Say what you found, what you changed, or what you could not \
-do.
+Everything you write is posted to the people in this job's room as you write it, in Markdown, \
+which is rendered — so write for them: what you found, what you changed, or what you could not \
+do, and the answer, if the work was a question.
 
-Use it during the work as well, whenever you need an answer from a person: say what you need, \
-then stop. It reaches somebody who can answer, but not now — no reply arrives in this session, \
-so do not wait for one and do not guess.
+The `say` tool posts in the thread of the message you are answering, or at the root of the room \
+when you are answering nobody. Use it whenever you need an answer from a person: say what you \
+need, then stop. It reaches somebody who can answer, but not now — no reply arrives in this \
+session, so do not wait for one and do not guess.
 
 Before you stop, call the `stopping` tool, every time and last of all. Say `ready_for_review` if \
 you have done what was asked and there is something for a person to look at, or \
@@ -803,9 +810,10 @@ having stopped for reasons nobody knows."
         );
     }
 
-    /// Every job is told which tool reaches a person, because every job has
-    /// one: an agent not told has no way to know that ordinary output goes
-    /// nowhere.
+    /// Every job is told about the tool that speaks, because every job has
+    /// one: its narration reaches the room on its own since
+    /// `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`,
+    /// and the tool is for the thread a person asked in.
     #[test]
     fn a_kickoff_names_the_tool_that_speaks() {
         let prompt = super::kickoff("https://example.invalid/repo", "anything", A_TUNNEL, NONE);
@@ -858,32 +866,35 @@ here is between people._"
         assert!(said.contains("between people"), "{said}");
     }
 
-    /// Reporting is the ending, not the exception — and this is why.
+    /// Being read is the rule, not the exception — and this is why.
     ///
     /// The first version of this paragraph opened with *if you need an answer
     /// from a person*, and put finishing in a subordinate clause at the end of
     /// it. An agent given read-only work then has no question, no change to
     /// propose, and no reason to speak: it answers into a session nothing
     /// keeps, and the channel stays empty. That is not hypothetical — it is
-    /// what the first real job did.
+    /// what the first real job did. Since
+    /// `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`
+    /// what a job writes is what a person reads, and the same order holds:
+    /// it is told that first, and about the tool for a person's thread after.
     ///
     /// Asserted alongside the snapshot rather than left to it, because a
     /// snapshot is updated wholesale by whoever changes the text and records
     /// no opinion about which sentence mattered.
     #[test]
-    fn a_kickoff_makes_reporting_the_ending() {
+    fn a_kickoff_makes_being_read_the_rule() {
         let prompt = super::kickoff("https://example.invalid/repo", "anything", A_TUNNEL, NONE);
 
-        let reporting = prompt
-            .find("Finish by saying")
-            .expect("it must say to report at the end");
+        let read = prompt
+            .find("Everything you write is posted")
+            .expect("it must say that what it writes is read");
         let asking = prompt
             .find("whenever you need an answer")
             .expect("and still offer the tool during the work");
 
         assert!(
-            reporting < asking,
-            "reporting must come first, or it reads as a special case of asking: {prompt}"
+            read < asking,
+            "being read must come first, or it reads as a special case of asking: {prompt}"
         );
     }
 

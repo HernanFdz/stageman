@@ -50,11 +50,14 @@ fn a_reply_to_an_idle_job_resumes_it_after_the_record_lands() {
     );
     assert_eq!(
         world.posts(),
-        [(
-            in_room(1),
-            stageman_foreman::stopped_notice(&Waiting::Silent, None, "<@U0BOT>")
-        )],
-        "the thread is told once, when the turn ends"
+        [
+            (in_room(1), "done".to_owned()),
+            (
+                in_room(1),
+                stageman_foreman::stopped_notice(&Waiting::Silent, None, "<@U0BOT>")
+            ),
+        ],
+        "what the agent said is posted at the root, and the room is told once, when the turn ends"
     );
 }
 
@@ -227,11 +230,15 @@ fn a_mention_in_a_thread_of_a_jobs_room_is_answered_there_and_noticed_at_the_roo
     );
     assert_eq!(
         world.posts(),
-        [(
-            in_room(1),
-            stageman_foreman::stopped_notice(&Waiting::Silent, None, "<@U0BOT>")
-        )],
-        "told at the root of its room, whatever thread the exchange was in"
+        [
+            (in_room(1), "done".to_owned()),
+            (
+                in_room(1),
+                stageman_foreman::stopped_notice(&Waiting::Silent, None, "<@U0BOT>")
+            ),
+        ],
+        "what the agent said and the notice both go to the root of its room, whatever thread \
+         the exchange was in"
     );
 }
 

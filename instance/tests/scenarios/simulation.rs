@@ -84,8 +84,21 @@ struct Adapter {
     /// How the prompt ends: the next scripted outcome, or a clean ending
     /// having said "done".
     outcome: Result<Answer, String>,
+    /// What it says and does before ending, when a transcript was scripted
+    /// for this turn; otherwise it says the outcome's text in one piece.
+    narrates: Option<Vec<Utterance>>,
     /// Which conversation this is, in the record of them.
     talk: usize,
+}
+
+/// One thing a scripted agent says or does while answering, in the order
+/// scripted: what the instance notices as narration and as working.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Utterance {
+    /// A piece of its own text.
+    Says(&'static str),
+    /// A tool call beginning, under this title.
+    Calls(&'static str),
 }
 
 /// One conversation the instance opened, as the simulation saw it.
@@ -213,6 +226,9 @@ pub struct Simulation {
     turn_takes: Now,
     trace: Vec<String>,
     posts: Vec<(Place, String)>,
+    /// What the next turns say and do before ending, front first, for the
+    /// turns a scenario scripts a transcript for.
+    transcripts: VecDeque<Vec<Utterance>>,
     /// Rooms made so far, so each is named apart.
     rooms_made: u32,
     /// Every room made: its identifier, and the name asked for.
@@ -513,6 +529,7 @@ impl Simulation {
             turn_takes: 1_000,
             trace: Vec::new(),
             posts: Vec::new(),
+            transcripts: VecDeque::new(),
             rooms_made: 0,
             rooms: Vec::new(),
             described: Vec::new(),
@@ -903,6 +920,33 @@ impl Simulation {
         self.answers.push_back(outcome);
     }
 
+    /// Scripts what the next turn's agent says and does before it ends, in
+    /// order, instead of saying its outcome's text in one piece.
+    pub fn next_turn_narrates(&mut self, script: Vec<Utterance>) {
+        self.transcripts.push_back(script);
+    }
+
+    /// Every post made, with where in the trace it was asked for.
+    pub fn post_calls(&self) -> Vec<(usize, String)> {
+        self.calls
+            .iter()
+            .filter_map(|(at, call)| match call {
+                Call::Post { text, .. } => Some((*at, text.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Where in the trace each answer from a platform arrived.
+    pub fn responded_at(&self) -> Vec<usize> {
+        self.shape()
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.starts_with("<- Responded"))
+            .map(|(at, _)| at)
+            .collect()
+    }
+
     /// Boots an instance and answers everything it asks on the way to being
     /// awake, which is everything scheduled for this instant.
     pub fn wake(&mut self, seed: Seed) -> Instance {
@@ -1178,6 +1222,7 @@ impl Simulation {
         });
         let talk = self.talks.len() - 1;
         self.talking.insert(id, talk);
+        let narrates = self.transcripts.pop_front();
         self.adapters.insert(
             id,
             Adapter {
@@ -1185,6 +1230,7 @@ impl Simulation {
                 session: None,
                 options: Vec::new(),
                 outcome,
+                narrates,
                 talk,
             },
         );
@@ -1315,15 +1361,37 @@ impl Simulation {
         }
         let session = adapter.session.clone().unwrap_or_default();
         let at = self.now + self.turn_takes;
+        let narrates = adapter.narrates.clone();
         match adapter.outcome.clone() {
             Ok(answer) => {
-                self.schedule(
-                    at,
-                    Event::Line {
-                        id,
-                        line: Heard::said(&session, &answer.text).line(),
-                    },
-                );
+                // What it says and does, as scripted, or the outcome's text
+                // in one piece: either way before the answer that ends it.
+                match narrates {
+                    Some(script) => {
+                        for (n, utterance) in script.iter().enumerate() {
+                            let line = match utterance {
+                                Utterance::Says(text) => Heard::said(&session, text),
+                                Utterance::Calls(title) => {
+                                    Heard::called(&session, &format!("call-{n}"), title)
+                                }
+                            };
+                            self.schedule(
+                                at,
+                                Event::Line {
+                                    id,
+                                    line: line.line(),
+                                },
+                            );
+                        }
+                    }
+                    None => self.schedule(
+                        at,
+                        Event::Line {
+                            id,
+                            line: Heard::said(&session, &answer.text).line(),
+                        },
+                    ),
+                }
                 self.schedule(
                     at,
                     Event::Line {

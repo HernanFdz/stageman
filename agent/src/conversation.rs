@@ -36,7 +36,7 @@ use agent_client_protocol::schema::v1::{
     SelectedPermissionOutcome, SessionConfigId, SessionConfigOption, SessionConfigOptionValue,
     SessionConfigSelectOption, SessionConfigValueId, SessionId, SessionInfo, SessionNotification,
     SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, TextContent,
-    ToolCallUpdate, ToolCallUpdateFields,
+    ToolCall, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
 };
 // The envelope is the protocol library's too: its versioned message, its
 // request, its response and its notification, which the library itself
@@ -182,6 +182,27 @@ pub enum Exchange {
     Over(Result<Answer, AgentError>),
 }
 
+/// Something the agent said or did while answering, as it arrived.
+///
+/// What the instance posts as the transcript, per
+/// `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`:
+/// the agent's own text, a piece at a time, and each tool call as it
+/// begins. Kept by the conversation until taken with
+/// [`Conversation::noticed`], so that the machine stays a value stepped one
+/// line at a time and what a line led to is read off it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub enum Noticed {
+    /// A piece of the agent's own text.
+    Said(String),
+    /// A tool call began.
+    Called {
+        /// What the adapter calls it, which for a command is the command.
+        title: String,
+        /// What kind of thing it does, as the protocol classifies tools.
+        kind: ToolKind,
+    },
+}
+
 /// Where the conversation has got to.
 #[derive(Clone, PartialEq, Eq, serde::Serialize)]
 enum Stage {
@@ -228,6 +249,8 @@ pub struct Conversation {
     stage: Stage,
     /// Everything the agent has said so far, its message text only.
     heard: String,
+    /// What the agent has said and done since it was last taken.
+    noticed: Vec<Noticed>,
     /// What the session currently reports it can be set to.
     advertised: Vec<SessionConfigOption>,
     /// What the session reported each setting to be, after being set.
@@ -251,6 +274,7 @@ impl Conversation {
             next: 1,
             stage: Stage::Over,
             heard: String::new(),
+            noticed: Vec::new(),
             advertised: Vec::new(),
             reported: BTreeMap::new(),
         };
@@ -345,10 +369,12 @@ impl Conversation {
         Exchange::Over(outcome)
     }
 
-    /// Something the agent said unasked: its message text is kept, and
-    /// everything else it reports on the same stream — its reasoning, its
-    /// tool calls, its plans — is deliberately let go. This is the answer,
-    /// not a transcript.
+    /// Something the agent said unasked: its message text is kept as the
+    /// answer and noticed as narration, and a tool call beginning is noticed
+    /// as working. Everything else it reports on the same stream — its plans,
+    /// its usage, a tool call's progress — is let go, until something posts
+    /// it. Its reasoning would be noticed too, and the pinned adapter was
+    /// measured to send none.
     fn noted(&mut self, method: &str, params: serde_json::Value) {
         if !SessionNotification::matches_method(method) {
             return;
@@ -356,11 +382,25 @@ impl Conversation {
         let Ok(notified) = serde_json::from_value::<SessionNotification>(params) else {
             return;
         };
-        if let SessionUpdate::AgentMessageChunk(chunk) = notified.update
-            && let ContentBlock::Text(said) = chunk.content
-        {
-            self.heard.push_str(&said.text);
+        match notified.update {
+            SessionUpdate::AgentMessageChunk(chunk) => {
+                if let ContentBlock::Text(said) = chunk.content {
+                    self.heard.push_str(&said.text);
+                    self.noticed.push(Noticed::Said(said.text));
+                }
+            }
+            SessionUpdate::ToolCall(call) => self.noticed.push(Noticed::Called {
+                title: call.title,
+                kind: call.kind,
+            }),
+            _ => {}
         }
+    }
+
+    /// Takes what the agent has said and done since this was last asked, in
+    /// the order it arrived.
+    pub fn noticed(&mut self) -> Vec<Noticed> {
+        std::mem::take(&mut self.noticed)
     }
 
     /// Something the agent asked: permission, which is granted, or anything
@@ -963,6 +1003,20 @@ impl Heard {
         }
     }
 
+    /// The agent beginning a tool call, as the pinned adapter announces
+    /// one: pending, under a title, running a command.
+    #[must_use]
+    pub fn called(session: &str, id: &str, title: &str) -> Self {
+        let notified = SessionNotification::new(
+            SessionId::new(session),
+            SessionUpdate::ToolCall(ToolCall::new(id.to_owned(), title).kind(ToolKind::Execute)),
+        );
+        Self::Notified {
+            method: notified.method().to_owned(),
+            params: value(&notified),
+        }
+    }
+
     /// The agent asking permission, offering the options named, each
     /// allowing or rejecting.
     #[must_use]
@@ -1026,9 +1080,9 @@ fn advertising(options: &[(&str, &str)]) -> Vec<SessionConfigOption> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Conversation, Exchange, Heard, Opening, Said};
+    use super::{Conversation, Exchange, Heard, Noticed, Opening, Said};
     use crate::{AgentError, StopReason, Tools, declaration};
-    use agent_client_protocol::schema::v1::RequestId;
+    use agent_client_protocol::schema::v1::{RequestId, ToolKind};
     use stageman_core::{Agent, ClaudeEffort, ClaudeModel, Kit, Secret};
 
     fn tools() -> Tools {
@@ -1073,6 +1127,42 @@ mod tests {
         ("model", "default"),
         ("effort", "default"),
     ];
+
+    /// What the agent says and does while answering is noticed as it
+    /// arrives and taken by whoever asks, in order: text as said, a tool
+    /// call as called, and nothing twice. The answer still collects the
+    /// text, as it always did.
+    #[test]
+    fn what_the_agent_says_and_does_is_noticed_once_and_in_order() {
+        let (mut conversation, _) = Conversation::begin(
+            Opening::Fresh,
+            None,
+            Kit::defaults(Agent::Claude),
+            "look at the parser",
+        );
+        assert!(conversation.noticed().is_empty(), "nothing yet");
+
+        continuing(&mut conversation, &Heard::said("sess-1", "Looking"));
+        continuing(
+            &mut conversation,
+            &Heard::called("sess-1", "call-1", "cargo test"),
+        );
+        continuing(&mut conversation, &Heard::said("sess-1", " around."));
+
+        assert_eq!(
+            conversation.noticed(),
+            vec![
+                Noticed::Said("Looking".to_owned()),
+                Noticed::Called {
+                    title: "cargo test".to_owned(),
+                    kind: ToolKind::Execute,
+                },
+                Noticed::Said(" around.".to_owned()),
+            ]
+        );
+        assert!(conversation.noticed().is_empty(), "taken once");
+        assert_eq!(conversation.heard, "Looking around.");
+    }
 
     /// The whole of a fresh conversation, from the handshake to the answer:
     /// what is said, in order, and what the answer is made of.

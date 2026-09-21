@@ -11,9 +11,10 @@
 //! answer means are `stageman_channel`'s, and this is only the asking and
 //! what follows from the answer.
 
+use std::collections::VecDeque;
 use std::time::Duration;
 
-use stageman_core::{Channel, JobId, Place, ProjectId, Speaking, Thread};
+use stageman_core::{Channel, JobId, Place, ProjectId, Room, Speaking, Thread};
 use stageman_vocabulary::{Bytes, Effect as Generic, EffectId, RequestId, Responded};
 
 use crate::{Effect, Running};
@@ -40,6 +41,34 @@ pub struct Sent {
     pub channel: Channel,
     /// What for.
     pub purpose: Purpose,
+    /// Which room, for a post: whose chain the answer moves along.
+    pub room: Option<Room>,
+}
+
+/// What one room is being posted: whether a request is in flight, and what
+/// waits behind it.
+///
+/// One request in flight per room, the next sent when the previous is
+/// answered, so that posts land in the order they were made — two in flight
+/// land in whichever order the platform receives them. The rule of
+/// `docs/conventions.md` §3, from
+/// `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`.
+#[derive(Default, Clone, PartialEq, serde::Serialize)]
+pub struct Posting {
+    /// Whether a request to this room is waiting to be answered.
+    in_flight: bool,
+    /// What is posted next, front first.
+    waiting: VecDeque<Queued>,
+}
+
+/// One post waiting its turn in a room.
+#[derive(Clone, PartialEq, serde::Serialize)]
+struct Queued {
+    /// The request, rendered.
+    effect: Effect,
+    /// Whether it waits for the writes in flight when its turn comes, as a
+    /// notice about a record does; a post that changes nothing goes at once.
+    after_writes: bool,
 }
 
 /// Why a request to a channel was made.
@@ -85,6 +114,10 @@ pub enum Post {
         /// Which call, as the world holds it open.
         request: RequestId,
     },
+    /// A run of an agent's narration, posted as it happened. Its failure is
+    /// said and changes nothing, like a notice's: what a person must see is
+    /// what the tool's answer guarantees.
+    Narration,
 }
 
 /// Something done to a room that changes nothing here: its failure is said
@@ -144,40 +177,97 @@ pub fn request(id: EffectId, rendered: stageman_channel::Request) -> Effect {
 }
 
 impl Running {
-    /// Asks the world to post one message, remembering what for.
+    /// Asks the world to post one message, remembering what for, in its turn
+    /// behind whatever the room is already being posted.
+    ///
+    /// A post about a record waits for the write, as it always did; one that
+    /// changes nothing goes at the step's end. Either way it goes only once
+    /// the room's previous post has been answered.
     fn spoken(
         &mut self,
-        channel: Channel,
         speaking: &Speaking,
-        room: &str,
+        place: &Place,
         text: &str,
-        thread: Option<&str>,
         post: Post,
-    ) -> Effect {
-        let rendered = stageman_channel::post(channel, speaking, room, text, thread);
+        after_writes: bool,
+    ) {
+        let channel = place.room.channel;
+        let rendered = stageman_channel::post(
+            channel,
+            speaking,
+            &place.room.id,
+            text,
+            place.thread.as_deref(),
+        );
         let id = self.effect_id();
         self.sent.insert(
             id,
             Sent {
                 channel,
                 purpose: Purpose::Post(post),
+                room: Some(place.room.clone()),
             },
         );
-        request(id, rendered)
+        self.enqueue(place.room.clone(), request(id, rendered), after_writes);
+    }
+
+    /// Puts a post in its room's chain: sent now if nothing is in flight
+    /// there, and behind what is otherwise.
+    fn enqueue(&mut self, room: Room, effect: Effect, after_writes: bool) {
+        let posting = self.posting.entry(room).or_default();
+        if posting.in_flight {
+            posting.waiting.push_back(Queued {
+                effect,
+                after_writes,
+            });
+            return;
+        }
+        posting.in_flight = true;
+        if after_writes {
+            self.defer(effect);
+        } else {
+            self.immediate.push(effect);
+        }
+    }
+
+    /// A room's post was answered: the next waiting one goes, or the room
+    /// is idle.
+    ///
+    /// A post released here was justified by a step that is over, so one
+    /// that waits on a write waits on every write still in flight rather
+    /// than on this step's.
+    fn next_post(&mut self, room: &Room) {
+        let next = self
+            .posting
+            .get_mut(room)
+            .and_then(|posting| posting.waiting.pop_front());
+        match next {
+            Some(Queued {
+                effect,
+                after_writes: true,
+            }) => self.after_writes(effect),
+            Some(Queued {
+                effect,
+                after_writes: false,
+            }) => self.immediate.push(effect),
+            None => {
+                if let Some(posting) = self.posting.get_mut(room) {
+                    posting.in_flight = false;
+                }
+            }
+        }
     }
 
     /// Says something at a place on the instance's own behalf, once
     /// whatever this step changed is on the disk.
     pub fn say(&mut self, speaking: &Speaking, place: &Place, text: &str) {
-        let request = self.spoken(
-            place.room.channel,
-            speaking,
-            &place.room.id,
-            text,
-            place.thread.as_deref(),
-            Post::Notice,
-        );
-        self.defer(request);
+        self.spoken(speaking, place, text, Post::Notice, true);
+    }
+
+    /// Posts one piece of an agent's narration at a place, at the step's
+    /// end: it changes no record, so it waits for no write.
+    pub fn narrated(&mut self, speaking: &Speaking, place: &Place, text: &str) {
+        self.spoken(speaking, place, text, Post::Narration, false);
     }
 
     /// Makes the room a job's conversation happens in, once the job's
@@ -197,6 +287,7 @@ impl Running {
             Sent {
                 channel,
                 purpose: Purpose::Creating { job, origin },
+                room: None,
             },
         );
         let request = request(id, rendered);
@@ -213,6 +304,7 @@ impl Running {
             Sent {
                 channel,
                 purpose: Purpose::Keeping(keeping),
+                room: None,
             },
         );
         let request = request(id, rendered);
@@ -321,23 +413,8 @@ impl Running {
 
     /// Posts on an agent's behalf, with the tool call held open until the
     /// platform answers.
-    pub fn post_for(
-        &mut self,
-        request: RequestId,
-        speaking: &Speaking,
-        place: &Place,
-        text: &str,
-        effects: &mut Vec<Effect>,
-    ) {
-        let posting = self.spoken(
-            place.room.channel,
-            speaking,
-            &place.room.id,
-            text,
-            place.thread.as_deref(),
-            Post::Saying { request },
-        );
-        effects.push(posting);
+    pub fn post_for(&mut self, request: RequestId, speaking: &Speaking, place: &Place, text: &str) {
+        self.spoken(speaking, place, text, Post::Saying { request }, false);
     }
 
     /// What the world said about a request to a channel.
@@ -368,6 +445,9 @@ impl Running {
                     Responded::Failed(why) => Err(unreachable(why)),
                 };
                 self.answered(&post, outcome);
+                if let Some(room) = &sent.room {
+                    self.next_post(room);
+                }
             }
             Purpose::Creating { job, origin } => {
                 let outcome = match responded {
@@ -406,6 +486,11 @@ impl Running {
                     tracing::warn!(%why, "the room could not be spoken to");
                 }
             }
+            Post::Narration => {
+                if let Err(why) = outcome {
+                    tracing::warn!(%why, "a run of narration could not be posted");
+                }
+            }
             Post::Saying { request } => self.posted(*request, outcome.map(|_| ())),
         }
     }
@@ -425,7 +510,12 @@ impl Running {
         };
         let never = || "the record it waited on could not be written".to_owned();
         match sent.purpose {
-            Purpose::Post(post) => self.answered(&post, Err(never())),
+            Purpose::Post(post) => {
+                self.answered(&post, Err(never()));
+                if let Some(room) = &sent.room {
+                    self.next_post(room);
+                }
+            }
             Purpose::Creating { job, origin } => self.room_created(job, origin, Err(never())),
             Purpose::Keeping(keeping) => {
                 tracing::debug!(?keeping, "not done: {}", never());

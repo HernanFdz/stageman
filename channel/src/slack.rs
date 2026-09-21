@@ -79,6 +79,38 @@ const SEPARATOR: &str = "--";
 /// refuses anything longer outright, so what is sent is cut to fit.
 const DESCRIPTION_AT_MOST: usize = 250;
 
+/// The most a Markdown post may be, in characters, per the platform's
+/// documentation: a longer one is refused outright, so a text that would
+/// pass it is posted in pieces that continue one another — see
+/// `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`.
+const POST_AT_MOST: usize = 12_000;
+
+/// Cuts a text into pieces the platform accepts, in order: each as long as
+/// a post may be, broken at the last line end in its second half where
+/// there is one and at a character otherwise, so that a list or a table is
+/// split between lines when it can be.
+pub fn pieces(text: &str) -> Vec<String> {
+    let mut pieces = Vec::new();
+    let mut rest = text;
+    while rest.chars().count() > POST_AT_MOST {
+        let limit = rest
+            .char_indices()
+            .nth(POST_AT_MOST)
+            .map_or(rest.len(), |(at, _)| at);
+        let cut = rest
+            .char_indices()
+            .take_while(|(at, _)| *at < limit)
+            .filter(|(at, c)| *c == '\n' && *at >= limit / 2)
+            .last()
+            .map_or(limit, |(at, _)| at);
+        let (piece, remaining) = rest.split_at(cut);
+        pieces.push(piece.to_owned());
+        rest = remaining.strip_prefix('\n').unwrap_or(remaining);
+    }
+    pieces.push(rest.to_owned());
+    pieces
+}
+
 /// How much of a project's name a room's name carries, at most.
 const PROJECT_AT_MOST: usize = 24;
 

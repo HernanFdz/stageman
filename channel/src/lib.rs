@@ -170,6 +170,15 @@ pub fn post(
     }
 }
 
+/// Cuts a text into the pieces a channel will accept as posts, in order,
+/// which for a text short enough is the one piece it already is.
+#[must_use]
+pub fn pieces(channel: Channel, text: &str) -> Vec<String> {
+    match channel {
+        Channel::Slack => slack::pieces(text),
+    }
+}
+
 /// What the platform's answer to a post means: the identifier of what was
 /// posted, as text, or why nothing was.
 ///
@@ -486,8 +495,8 @@ pub enum ChannelError {
 mod tests {
     use super::{
         Call, ChannelError, Identity, Incoming, Reaction, acknowledgement, archive, create_room,
-        decode, done, identity, invite, mention, open_socket, post, posted, react, room_created,
-        room_link, room_name, set_purpose, set_topic, socket_url, who_am_i,
+        decode, done, identity, invite, mention, open_socket, pieces, post, posted, react,
+        room_created, room_link, room_name, set_purpose, set_topic, socket_url, who_am_i,
     };
     use stageman_core::{Channel, JobId, Secret, Speaking, Uuid};
 
@@ -768,6 +777,37 @@ mod tests {
         assert!(long.ends_with("--3fa85f64"), "{long}");
         assert_eq!(room_link(Channel::Slack, "C0C1VNX9AA2"), "<#C0C1VNX9AA2>");
         assert_eq!(mention(Channel::Slack, "U0HUMAN"), "<@U0HUMAN>");
+    }
+
+    /// A text a post can carry is one piece; a longer one continues in the
+    /// next, cut at a line end when there is one late enough, and nothing is
+    /// lost between them.
+    #[test]
+    fn a_long_text_is_cut_into_posts_at_line_ends() {
+        assert_eq!(pieces(Channel::Slack, "short"), vec!["short".to_owned()]);
+        assert_eq!(pieces(Channel::Slack, ""), vec![String::new()]);
+
+        let line = "x".repeat(99);
+        let long = std::iter::repeat_n(line.as_str(), 130)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let cut = pieces(Channel::Slack, &long);
+        assert_eq!(
+            cut.len(),
+            2,
+            "{:?}",
+            cut.iter().map(String::len).collect::<Vec<_>>()
+        );
+        assert!(cut[0].chars().count() <= 12_000);
+        assert!(cut[0].ends_with(&line), "cut at a line end, not inside one");
+        assert!(!cut[1].starts_with('\n'), "the break itself is not carried");
+        assert_eq!(cut.join("\n"), long, "nothing lost");
+
+        let unbroken = "y".repeat(12_001);
+        let cut = pieces(Channel::Slack, &unbroken);
+        assert_eq!(cut.len(), 2);
+        assert_eq!(cut[0].chars().count(), 12_000);
+        assert_eq!(cut[1], "y");
     }
 
     /// A request this crate did not render is not a call.

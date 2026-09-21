@@ -81,11 +81,7 @@ pub fn tools(warranted: &Warranted, kits: &[(String, String)]) -> Vec<Tool> {
     // thing a foreman and a job both do.
     let say = Tool {
         name: "say",
-        description: "Say something to the people on this project's channel, in \
-                      Markdown: it is rendered, so headings, lists, code, tables \
-                      and links all show. This is the only way anything you write \
-                      reaches a person: ordinary output is seen by nobody."
-            .to_owned(),
+        description: say_description(warranted.speaker).to_owned(),
         schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -179,6 +175,31 @@ pub fn tools(warranted: &Warranted, kits: &[(String, String)]) -> Vec<Tool> {
         watch,
         stop_watching,
     ]
+}
+
+/// What the tool that speaks is for, which differs by who holds it: a job's
+/// narration already reaches its room, per
+/// `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`,
+/// so for a job the tool is for the thread a person asked in; a foreman's
+/// narration does not yet, so for a foreman the tool is still the only way.
+const fn say_description(speaker: Speaker) -> &'static str {
+    match speaker {
+        Speaker::Foreman(_) => {
+            "Say something to the people on this project's channel, in Markdown: it \
+             is rendered, so headings, lists, code, tables and links all show. This \
+             is the only way anything you write reaches a person: ordinary output is \
+             seen by nobody."
+        }
+        Speaker::Job(_) => {
+            "Say something to the people in this job's room, in Markdown: it is \
+             rendered, so headings, lists, code, tables and links all show. It posts \
+             in the thread of the message you are answering, or at the root of the \
+             room when you are answering nobody. Everything you write as ordinary \
+             output is posted at the root of the room as well, so use this when an \
+             answer belongs in a person's thread, or when you need an answer from a \
+             person."
+        }
+    }
 }
 
 /// The tool a job calls to say why it is stopping.
@@ -484,7 +505,6 @@ impl Running {
         nearby: bool,
         bearer: Option<&str>,
         body: &serde_json::Value,
-        effects: &mut Vec<Effect>,
     ) {
         if !nearby {
             tracing::warn!("the tools were reached from beyond this machine");
@@ -549,7 +569,7 @@ impl Running {
                 );
             }
             Call::Saying(message) => {
-                if let Err(why) = self.saying(id, &warranted, &message, effects) {
+                if let Err(why) = self.saying(id, &warranted, &message) {
                     self.answer(id, OK, Some(failed(incoming.id, &why)));
                 } else {
                     // Answered when the platform has, in `posted`. The
@@ -693,7 +713,6 @@ impl Running {
             called.nearby,
             called.bearer.as_deref(),
             &body,
-            effects,
         );
     }
 
@@ -794,7 +813,6 @@ impl Running {
         request: RequestId,
         warranted: &Warranted,
         message: &str,
-        effects: &mut Vec<Effect>,
     ) -> Result<(), String> {
         if message.trim().is_empty() {
             return Err("nothing was said, so nothing was posted".to_owned());
@@ -817,7 +835,7 @@ impl Running {
                 "no channel is bound to this project, so there is nobody to say this to".to_owned(),
             );
         };
-        self.post_for(request, &speaking, &place, message, effects);
+        self.post_for(request, &speaking, &place, message);
         Ok(())
     }
 

@@ -143,6 +143,7 @@ impl Running {
             Sent {
                 channel,
                 purpose: Purpose::Question(Question::Introducing { project }),
+                room: None,
             },
         );
         (
@@ -230,6 +231,7 @@ impl Running {
             Sent {
                 channel,
                 purpose: Purpose::Question(Question::Locating { project }),
+                room: None,
             },
         );
         if let Some(listener) = self.listeners.get_mut(&project) {

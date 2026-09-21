@@ -16,6 +16,7 @@ mod channel;
 mod dashboard;
 mod foreman;
 mod listening;
+mod narration;
 mod replies;
 mod signals;
 mod simulation;
