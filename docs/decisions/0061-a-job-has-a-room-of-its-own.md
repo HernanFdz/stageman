@@ -11,7 +11,11 @@ removes the last thing
 Depends on `docs/decisions/0053-a-job-is-stopped-or-retired-by-a-person.md`
 for the moment a room is archived, and on
 `docs/decisions/0034-tools-are-served-not-shipped.md` for why the credential
-that creates one never enters a container.
+that creates one never enters a container. Since
+`docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`
+a job's room also carries what its agent says and does as it happens, the
+foreman has a room of its own, and a job started from the dashboard is
+announced there.
 
 Every claim below about what the platform does was measured on 2026-09-15
 against a real workspace.

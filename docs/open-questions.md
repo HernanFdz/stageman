@@ -351,6 +351,13 @@ Intended next steps, in order, each with its reason. Written as intentions, not
 progress: "next X, because Y" — never "X is 60% done", which is both derivable
 and wrong within a day.
 
+- Next, post the transcript per
+  `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`,
+  narration first, because it is the smallest flow and the one that changes
+  an agent's behaviour; then bursts; then the foreman's room. Each is a
+  scenario of its own, and the layout can be read from the first before the
+  second is built.
+
 - Next, make the container tests a recorder, because what they check is what
   the pinned runtime and the pinned agent actually do, which is a recording
   rather than a test. A recipe runs reality, captures what it prints and how

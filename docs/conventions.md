@@ -126,8 +126,11 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   platform, and Slack's own word would make "a job's channel" mean two
   things in one sentence. A job has a room of its own, made with the job
   and archived with it, and a mention anywhere in it is that job's — see
-  `docs/decisions/0061-a-job-has-a-room-of-its-own.md`. The foreman has no
-  room of its own and is heard in every room the app is in — see
+  `docs/decisions/0061-a-job-has-a-room-of-its-own.md`. The foreman has a
+  room of its own too, since
+  `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`,
+  where what it says and does is posted; it is still heard in every room
+  the app is in — see
   `docs/decisions/0060-a-binding-is-a-workspace.md`. Not *conversation*,
   refused under **thread** for the same reason. Not *address*, which is
   what a binding used to carry when a project was listened to in one room,
@@ -244,6 +247,29 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   only the last part is load-bearing: an archived room keeps its name for
   ever on the platform, so the name has to be unique for ever too, and the
   identifier is what makes it so. The rest is for a sidebar.
+
+- **transcript** — everything an agent says and does in a turn, as the
+  protocol streams it: its narration, its working, and the notifications
+  nothing here posts. Since
+  `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`
+  it is posted as it happens, at the root of the room its speaker owns. Not
+  *output*, which is what the instructions called the text nobody saw. Not
+  *log*, which is a diagnostic of this project's own, per
+  `docs/decisions/0018-diagnostics-are-emitted-through-tracing.md`, and goes
+  somewhere else entirely. Not *answer* either, which is the agent crate's
+  word for the text alone.
+- **narration** — the agent's own text, written to be read: one message per
+  contiguous run of it, at the root of its room. Not *answer*, since nothing
+  need have been asked; not *message*, which is a person's word on a
+  channel; and not *reply*, which is what the tool that speaks does when
+  given a target.
+- **working** — what the agent does between two runs of narration: its tool
+  calls, and its thoughts where an adapter carries any. Posted as a burst.
+  Not *transcript*, which is the whole; not *trace*, which is a scenario's
+  word for effects; not *log*, refused under **transcript**.
+- **burst** — one run of working, posted as one message that grows in place
+  until the next narration closes it. Not *batch*, which implies a size
+  somebody chose, and not *turn*, which holds many.
 
 - **tunnel** — the way in to what a job has put up for somebody to look at:
   one port published from its container when that container is created, and
@@ -695,6 +721,17 @@ justify is usually obsolete.
   on it waited for ever. An abort is the kill this daemon already survives,
   under the bar §4 sets for one, and a service manager restarts it.
 
+- **A room is posted to one request at a time, and a burst grows by
+  editing.** Two posts in flight to one room land in whichever order the
+  platform receives them, so the next is sent when the previous is answered,
+  and the order of a transcript is a property of the chain rather than of
+  luck. A post per line looks simplest and is a few hundred posts per heavy
+  turn against a budget of about one a second per room, so a burst is one
+  message edited as it grows, paced by a timer — see
+  `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`.
+  Nothing posted this way is load-bearing: a failure is logged, and the
+  tool's answer is what guarantees a person sees what they must.
+
 ## 4. Quality bar beyond the gate
 
 `AGENTS.md` carries the bar the gate enforces mechanically. This is for the part
@@ -879,7 +916,11 @@ it lands.
   Since `docs/decisions/0062-what-this-instance-says-is-markdown.md` every
   such text is Markdown and goes out as Markdown: a notice written in the
   platform's own markup would render its asterisks literally, and a
-  translator between the two is exactly what that record refuses.
+  translator between the two is exactly what that record refuses. Since
+  `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`
+  an agent's own words are posted as they come, and they are not this
+  project's to assert; what is asserted whole is every text composed around
+  them — the notices, the framing, the lines a burst is built from.
 
 - **Sequencing is tested by scenarios and seeds, and their snapshots are
   reviewed as behaviour.** Every flow that crosses an await today — a turn

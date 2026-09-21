@@ -121,16 +121,22 @@ mention it.** A mention anywhere reaches the project's foreman, which answers
 in a thread under your message, and you can go on talking to it there. An
 eyes reaction on your message means it has been received, and a check mark
 that the foreman is done with it. Everything stageman and its agents write is
-Markdown, rendered by Slack.
+Markdown, rendered by Slack. Each project also gets a channel for its
+foreman, named after the project, where everything the foreman says and does
+appears as it happens: which message it is handling, what it decided, and
+why.
 
 **Every job gets a channel of its own**, named after the project, the job's
 title and a short identifier, and described with why the job exists and where
 it is showing its work. It is created when the job is, whoever asked for the
-job is invited into it, and a mention there reaches that job. Retiring the
-job archives the channel, so a finished conversation leaves the sidebar and
-stays searchable. A person's message still needs the mention everywhere, so
-that people can talk to each other in a job's channel, or under a foreman's
-answer, without waking either.
+job is invited into it, and a mention there reaches that job. Everything
+the job's agent writes appears there as it works, with what it ran and
+edited beneath each stretch of it, so the channel reads as the job's
+timeline; reply under any of it, with a mention, to talk about that part.
+Retiring the job archives the channel, so a finished conversation leaves the
+sidebar and stays searchable. A person's message still needs the mention
+everywhere, so that people can talk to each other in a job's channel, or
+under a foreman's answer, without waking either.
 
 **Hearing other apps.** Where an app posts what you want acted on — the
 GitHub app announcing issues and pull requests, an alerting tool — invite

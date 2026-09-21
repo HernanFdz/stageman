@@ -49,8 +49,10 @@ first.
   bound to a workspace, and since
   `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`
   it is rendered and read here as pure functions — every command a turn
-  runs, every line said to the agent, what every answer means — which the
-  **instance** sequences and the world carries. Nothing outside an adapter
+  runs, every line said to the agent, what every answer means, and since
+  `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`
+  what the agent says and does as it goes — which the **instance**
+  sequences and the world carries. Nothing outside an adapter
   may be specific to one agent.
 - **channel** — the contract every channel is spoken on, and the adapters
   that implement it: what is sent to a platform, what its answers mean, what
