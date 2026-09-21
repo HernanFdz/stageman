@@ -68,6 +68,9 @@ const ARCHIVE: &str = "https://slack.com/api/conversations.archive";
 /// Where Slack takes a reaction.
 const REACT: &str = "https://slack.com/api/reactions.add";
 
+/// Where Slack takes an edit to a message.
+const UPDATE_MESSAGE: &str = "https://slack.com/api/chat.update";
+
 /// The most a room's name may be, in characters.
 const NAME_AT_MOST: usize = 80;
 
@@ -758,6 +761,19 @@ pub fn post(speaking: &Speaking, room: &str, text: &str, thread: Option<&str>) -
     telling(POST_MESSAGE, speaking, posting)
 }
 
+/// Renders editing one message this instance posted, in place, as
+/// Markdown: how a message of the transcript grows, per
+/// `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`.
+/// The platform answers as it answers a post, naming the message, so
+/// [`posted`] reads the answer.
+pub fn update(speaking: &Speaking, room: &str, message: &str, text: &str) -> Request {
+    let mut editing = serde_json::Map::new();
+    editing.insert("channel".to_owned(), room.into());
+    editing.insert("ts".to_owned(), message.into());
+    editing.insert("markdown_text".to_owned(), text.into());
+    telling(UPDATE_MESSAGE, speaking, editing)
+}
+
 /// What a request asks, if it is one this module rendered.
 pub fn call(request: &Request) -> Option<Call> {
     if request.method != "POST" {
@@ -774,7 +790,8 @@ pub fn call(request: &Request) -> Option<Call> {
                 channel: Channel::Slack,
             });
         }
-        POST_MESSAGE | CREATE_ROOM | SET_PURPOSE | SET_TOPIC | INVITE | ARCHIVE | REACT => {}
+        POST_MESSAGE | UPDATE_MESSAGE | CREATE_ROOM | SET_PURPOSE | SET_TOPIC | INVITE
+        | ARCHIVE | REACT => {}
         _ => return None,
     }
     let told: Told = serde_json::from_slice(request.body.as_deref()?).ok()?;
@@ -808,6 +825,12 @@ pub fn call(request: &Request) -> Option<Call> {
             room: told.channel?,
             message: told.timestamp?,
             reaction: reaction_of(&told.name?)?,
+        },
+        UPDATE_MESSAGE => Call::Update {
+            channel,
+            room: told.channel?,
+            message: told.ts?,
+            text: told.markdown_text?,
         },
         _ => Call::Post {
             channel,
@@ -857,6 +880,8 @@ pub fn posted(status: u16, body: &[u8]) -> Result<String, ChannelError> {
 /// carries, each present only where its request sends it.
 #[derive(serde::Deserialize)]
 struct Told {
+    /// The message an edit names.
+    ts: Option<String>,
     channel: Option<String>,
     markdown_text: Option<String>,
     thread_ts: Option<String>,

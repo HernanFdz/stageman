@@ -36,6 +36,7 @@ mod requests;
 mod snapshot;
 mod sweep;
 mod tools;
+mod transcript;
 mod tunnel;
 mod turns;
 mod views;
@@ -133,6 +134,13 @@ enum Timer {
     Reconnecting {
         /// Whose.
         project: ProjectId,
+    },
+    /// A message of a turn's transcript, grown by editing if it has grown.
+    Growing {
+        /// Whose turn.
+        speaker: vocabulary::Speaker,
+        /// Which of its messages.
+        run: u64,
     },
 }
 
@@ -520,6 +528,9 @@ pub struct Running {
     immediate: Vec<Effect>,
     /// What each room is being posted, one request in flight at a time.
     posting: BTreeMap<stageman_core::Room, channel::Posting>,
+    /// Messages of transcripts whose turns have ended, until each has been
+    /// sent as it last read.
+    finishing: BTreeMap<(vocabulary::Speaker, u64), transcript::Open>,
     /// The wakes asked for that have not gone off, and what each was for.
     timers: BTreeMap<EffectId, Timer>,
     /// Every project whose channel is being listened to, and where its
@@ -603,6 +614,7 @@ impl Running {
             deferred: VecDeque::new(),
             immediate: Vec::new(),
             posting: BTreeMap::new(),
+            finishing: BTreeMap::new(),
             timers: BTreeMap::new(),
             listeners: BTreeMap::new(),
             sockets: BTreeMap::new(),
@@ -942,6 +954,7 @@ impl Running {
                 effects.push(settling);
             }
             Some(Timer::Reconnecting { project }) => self.try_again(project, effects),
+            Some(Timer::Growing { speaker, run }) => self.grow(speaker, run),
             None => tracing::warn!("woken for a timer this instance did not set; ignored"),
         }
     }

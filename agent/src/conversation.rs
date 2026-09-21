@@ -36,7 +36,7 @@ use agent_client_protocol::schema::v1::{
     SelectedPermissionOutcome, SessionConfigId, SessionConfigOption, SessionConfigOptionValue,
     SessionConfigSelectOption, SessionConfigValueId, SessionId, SessionInfo, SessionNotification,
     SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, TextContent,
-    ToolCall, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+    ToolCall, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
 };
 // The envelope is the protocol library's too: its versioned message, its
 // request, its response and its notification, which the library itself
@@ -194,12 +194,25 @@ pub enum Exchange {
 pub enum Noticed {
     /// A piece of the agent's own text.
     Said(String),
+    /// A piece of the agent's reasoning, where an adapter carries any.
+    Thought(String),
     /// A tool call began.
     Called {
+        /// The adapter's identifier for it, which its progress names.
+        id: String,
         /// What the adapter calls it, which for a command is the command.
         title: String,
         /// What kind of thing it does, as the protocol classifies tools.
         kind: ToolKind,
+    },
+    /// A tool call was refined or ended: a better title, a status, or both.
+    CallChanged {
+        /// Which call.
+        id: String,
+        /// What it is now called, when the adapter said.
+        title: Option<String>,
+        /// Where it has got to, when the adapter said.
+        status: Option<ToolCallStatus>,
     },
 }
 
@@ -370,11 +383,11 @@ impl Conversation {
     }
 
     /// Something the agent said unasked: its message text is kept as the
-    /// answer and noticed as narration, and a tool call beginning is noticed
-    /// as working. Everything else it reports on the same stream — its plans,
-    /// its usage, a tool call's progress — is let go, until something posts
-    /// it. Its reasoning would be noticed too, and the pinned adapter was
-    /// measured to send none.
+    /// answer and noticed as narration; a tool call beginning, its progress,
+    /// and its reasoning are noticed as working. Everything else it reports
+    /// on the same stream — its plans, its usage — is let go. The pinned
+    /// adapter was measured to send no reasoning at all, so that arm waits
+    /// for one that does.
     fn noted(&mut self, method: &str, params: serde_json::Value) {
         if !SessionNotification::matches_method(method) {
             return;
@@ -389,9 +402,20 @@ impl Conversation {
                     self.noticed.push(Noticed::Said(said.text));
                 }
             }
+            SessionUpdate::AgentThoughtChunk(chunk) => {
+                if let ContentBlock::Text(thought) = chunk.content {
+                    self.noticed.push(Noticed::Thought(thought.text));
+                }
+            }
             SessionUpdate::ToolCall(call) => self.noticed.push(Noticed::Called {
+                id: call.tool_call_id.0.to_string(),
                 title: call.title,
                 kind: call.kind,
+            }),
+            SessionUpdate::ToolCallUpdate(update) => self.noticed.push(Noticed::CallChanged {
+                id: update.tool_call_id.0.to_string(),
+                title: update.fields.title,
+                status: update.fields.status,
             }),
             _ => {}
         }
@@ -1017,6 +1041,44 @@ impl Heard {
         }
     }
 
+    /// A tool call refined or ended, as the pinned adapter reports one: a
+    /// better title, a status, or both.
+    #[must_use]
+    pub fn call_changed(
+        session: &str,
+        id: &str,
+        title: Option<&str>,
+        status: Option<ToolCallStatus>,
+    ) -> Self {
+        let fields = ToolCallUpdateFields::new()
+            .title(title.map(str::to_owned))
+            .status(status);
+        let notified = SessionNotification::new(
+            SessionId::new(session),
+            SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(id.to_owned(), fields)),
+        );
+        Self::Notified {
+            method: notified.method().to_owned(),
+            params: value(&notified),
+        }
+    }
+
+    /// A piece of the agent's reasoning, as an adapter that carries any
+    /// would send it.
+    #[must_use]
+    pub fn thought(session: &str, text: &str) -> Self {
+        let notified = SessionNotification::new(
+            SessionId::new(session),
+            SessionUpdate::AgentThoughtChunk(ContentChunk::new(ContentBlock::Text(
+                TextContent::new(text.to_owned()),
+            ))),
+        );
+        Self::Notified {
+            method: notified.method().to_owned(),
+            params: value(&notified),
+        }
+    }
+
     /// The agent asking permission, offering the options named, each
     /// allowing or rejecting.
     #[must_use]
@@ -1082,7 +1144,7 @@ fn advertising(options: &[(&str, &str)]) -> Vec<SessionConfigOption> {
 mod tests {
     use super::{Conversation, Exchange, Heard, Noticed, Opening, Said};
     use crate::{AgentError, StopReason, Tools, declaration};
-    use agent_client_protocol::schema::v1::{RequestId, ToolKind};
+    use agent_client_protocol::schema::v1::{RequestId, ToolCallStatus, ToolKind};
     use stageman_core::{Agent, ClaudeEffort, ClaudeModel, Kit, Secret};
 
     fn tools() -> Tools {
@@ -1143,9 +1205,19 @@ mod tests {
         assert!(conversation.noticed().is_empty(), "nothing yet");
 
         continuing(&mut conversation, &Heard::said("sess-1", "Looking"));
+        continuing(&mut conversation, &Heard::thought("sess-1", "tests first"));
         continuing(
             &mut conversation,
             &Heard::called("sess-1", "call-1", "cargo test"),
+        );
+        continuing(
+            &mut conversation,
+            &Heard::call_changed(
+                "sess-1",
+                "call-1",
+                Some("cargo test --all"),
+                Some(ToolCallStatus::Completed),
+            ),
         );
         continuing(&mut conversation, &Heard::said("sess-1", " around."));
 
@@ -1153,9 +1225,16 @@ mod tests {
             conversation.noticed(),
             vec![
                 Noticed::Said("Looking".to_owned()),
+                Noticed::Thought("tests first".to_owned()),
                 Noticed::Called {
+                    id: "call-1".to_owned(),
                     title: "cargo test".to_owned(),
                     kind: ToolKind::Execute,
+                },
+                Noticed::CallChanged {
+                    id: "call-1".to_owned(),
+                    title: Some("cargo test --all".to_owned()),
+                    status: Some(ToolCallStatus::Completed),
                 },
                 Noticed::Said(" around.".to_owned()),
             ]

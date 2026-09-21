@@ -170,6 +170,22 @@ pub fn post(
     }
 }
 
+/// Renders editing one message this instance posted, in place: how a
+/// message of the transcript grows. Answered as a post is, so [`posted`]
+/// reads the answer.
+#[must_use]
+pub fn update(
+    channel: Channel,
+    speaking: &Speaking,
+    room: &str,
+    message: &str,
+    text: &str,
+) -> Request {
+    match channel {
+        Channel::Slack => slack::update(speaking, room, message, text),
+    }
+}
+
 /// Cuts a text into the pieces a channel will accept as posts, in order,
 /// which for a text short enough is the one piece it already is.
 #[must_use]
@@ -401,6 +417,17 @@ pub enum Call {
         /// In which thread, if any.
         thread: Option<String>,
     },
+    /// One message edited in place.
+    Update {
+        /// Which channel it goes to.
+        channel: Channel,
+        /// Which room on it.
+        room: String,
+        /// Which message.
+        message: String,
+        /// What it now says.
+        text: String,
+    },
     /// A room created.
     CreateRoom {
         /// Which channel.
@@ -496,7 +523,7 @@ mod tests {
     use super::{
         Call, ChannelError, Identity, Incoming, Reaction, acknowledgement, archive, create_room,
         decode, done, identity, invite, mention, open_socket, pieces, post, posted, react,
-        room_created, room_link, room_name, set_purpose, set_topic, socket_url, who_am_i,
+        room_created, room_link, room_name, set_purpose, set_topic, socket_url, update, who_am_i,
     };
     use stageman_core::{Channel, JobId, Secret, Speaking, Uuid};
 
@@ -777,6 +804,36 @@ mod tests {
         assert!(long.ends_with("--3fa85f64"), "{long}");
         assert_eq!(room_link(Channel::Slack, "C0C1VNX9AA2"), "<#C0C1VNX9AA2>");
         assert_eq!(mention(Channel::Slack, "U0HUMAN"), "<@U0HUMAN>");
+    }
+
+    /// An edit reads back as what it asked, and is answered as a post is.
+    #[test]
+    fn an_edit_reads_back_as_what_it_asked() {
+        let edited = update(
+            Channel::Slack,
+            &speaking(),
+            ROOM,
+            "1788000000.000001",
+            "grown",
+        );
+        assert_eq!(
+            Call::parse(&edited),
+            Some(Call::Update {
+                channel: Channel::Slack,
+                room: ROOM.to_owned(),
+                message: "1788000000.000001".to_owned(),
+                text: "grown".to_owned(),
+            })
+        );
+        assert_eq!(
+            posted(
+                Channel::Slack,
+                200,
+                br#"{"ok":true,"ts":"1788000000.000001"}"#
+            )
+            .expect("accepted"),
+            "1788000000.000001"
+        );
     }
 
     /// A text a post can carry is one piece; a longer one continues in the

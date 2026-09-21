@@ -15,6 +15,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 
+use stageman_agent::ToolCallStatus;
 use stageman_agent::{Answer, Command, Heard, Label, Said, StopReason};
 use stageman_channel::{Call, Reaction};
 use stageman_core::{
@@ -86,7 +87,7 @@ struct Adapter {
     outcome: Result<Answer, String>,
     /// What it says and does before ending, when a transcript was scripted
     /// for this turn; otherwise it says the outcome's text in one piece.
-    narrates: Option<Vec<Utterance>>,
+    narrates: Option<(Vec<Utterance>, u64)>,
     /// Which conversation this is, in the record of them.
     talk: usize,
 }
@@ -97,8 +98,14 @@ struct Adapter {
 pub enum Utterance {
     /// A piece of its own text.
     Says(&'static str),
+    /// A piece of its reasoning.
+    Thinks(&'static str),
     /// A tool call beginning, under this title.
     Calls(&'static str),
+    /// The last call under this title ending well.
+    Done(&'static str),
+    /// The last call under this title ending badly.
+    Fails(&'static str),
 }
 
 /// One conversation the instance opened, as the simulation saw it.
@@ -145,6 +152,39 @@ fn defaults() -> Vec<(String, String)> {
         .into_iter()
         .map(|option| (option.to_owned(), "default".to_owned()))
         .collect()
+}
+
+/// One scripted utterance, as the line the agent would send for it. A call
+/// is remembered under its title, so that its ending can name it.
+fn uttered(
+    session: &str,
+    n: usize,
+    utterance: &Utterance,
+    calls: &mut Vec<(&'static str, String)>,
+) -> Heard {
+    match utterance {
+        Utterance::Says(text) => Heard::said(session, text),
+        Utterance::Thinks(text) => Heard::thought(session, text),
+        Utterance::Calls(title) => {
+            let call = format!("call-{n}");
+            calls.push((title, call.clone()));
+            Heard::called(session, &call, title)
+        }
+        Utterance::Done(title) | Utterance::Fails(title) => {
+            let status = if matches!(utterance, Utterance::Done(_)) {
+                ToolCallStatus::Completed
+            } else {
+                ToolCallStatus::Failed
+            };
+            let call = calls
+                .iter()
+                .rev()
+                .find(|(named, _)| named == title)
+                .map(|(_, call)| call.clone())
+                .expect("a call under that title was scripted");
+            Heard::call_changed(session, &call, None, Some(status))
+        }
+    }
 }
 
 /// Options as the constructors take them.
@@ -228,7 +268,9 @@ pub struct Simulation {
     posts: Vec<(Place, String)>,
     /// What the next turns say and do before ending, front first, for the
     /// turns a scenario scripts a transcript for.
-    transcripts: VecDeque<Vec<Utterance>>,
+    transcripts: VecDeque<(Vec<Utterance>, u64)>,
+    /// Every edit made to a post, by the message's identifier, in order.
+    edits: Vec<(String, String)>,
     /// Rooms made so far, so each is named apart.
     rooms_made: u32,
     /// Every room made: its identifier, and the name asked for.
@@ -530,6 +572,7 @@ impl Simulation {
             trace: Vec::new(),
             posts: Vec::new(),
             transcripts: VecDeque::new(),
+            edits: Vec::new(),
             rooms_made: 0,
             rooms: Vec::new(),
             described: Vec::new(),
@@ -923,7 +966,19 @@ impl Simulation {
     /// Scripts what the next turn's agent says and does before it ends, in
     /// order, instead of saying its outcome's text in one piece.
     pub fn next_turn_narrates(&mut self, script: Vec<Utterance>) {
-        self.transcripts.push_back(script);
+        self.transcripts.push_back((script, 0));
+    }
+
+    /// Scripts what the next turn's agent says and does, each utterance this
+    /// many milliseconds after the previous, so that pacing has time to
+    /// come round between them.
+    pub fn next_turn_narrates_over(&mut self, script: Vec<Utterance>, apart: u64) {
+        self.transcripts.push_back((script, apart));
+    }
+
+    /// Every edit made to a post, by the message's identifier, in order.
+    pub fn edits(&self) -> &[(String, String)] {
+        &self.edits
     }
 
     /// Every post made, with where in the trace it was asked for.
@@ -1364,19 +1419,19 @@ impl Simulation {
         let narrates = adapter.narrates.clone();
         match adapter.outcome.clone() {
             Ok(answer) => {
-                // What it says and does, as scripted, or the outcome's text
-                // in one piece: either way before the answer that ends it.
+                // What it says and does, as scripted and as far apart as
+                // scripted, or the outcome's text in one piece: either way
+                // before the answer that ends it.
+                let mut ends_at = at;
                 match narrates {
-                    Some(script) => {
+                    Some((script, apart)) => {
+                        let mut calls: Vec<(&'static str, String)> = Vec::new();
                         for (n, utterance) in script.iter().enumerate() {
-                            let line = match utterance {
-                                Utterance::Says(text) => Heard::said(&session, text),
-                                Utterance::Calls(title) => {
-                                    Heard::called(&session, &format!("call-{n}"), title)
-                                }
-                            };
+                            let when = at + u64::try_from(n).expect("a short script") * apart;
+                            ends_at = when;
+                            let line = uttered(&session, n, utterance, &mut calls);
                             self.schedule(
-                                at,
+                                when,
                                 Event::Line {
                                     id,
                                     line: line.line(),
@@ -1393,7 +1448,7 @@ impl Simulation {
                     ),
                 }
                 self.schedule(
-                    at,
+                    ends_at,
                     Event::Line {
                         id,
                         line: Heard::prompted(request, answer.stop_reason).line(),
@@ -1746,6 +1801,22 @@ impl Simulation {
         }
     }
 
+    /// Takes an edit to a post: the post reads as edited, and the platform
+    /// answers naming the message again, or says it knows no such message.
+    fn edited(&mut self, message: &str, text: String) -> String {
+        let index = message
+            .strip_prefix("1788000000.9")
+            .and_then(|digits| digits.parse::<usize>().ok());
+        match index.and_then(|index| self.posts.get_mut(index)) {
+            Some((_, posted)) => {
+                posted.clone_from(&text);
+                self.edits.push((message.to_owned(), text));
+                format!(r#"{{"ok":true,"ts":"{message}"}}"#)
+            }
+            None => r#"{"ok":false,"error":"message_not_found"}"#.to_owned(),
+        }
+    }
+
     /// Answers a request to a platform as the real one was measured to,
     /// recognising what it asks through the channel crate's own inverse.
     ///
@@ -1795,6 +1866,9 @@ impl Simulation {
                 };
                 answered(body)
             }
+            // An edit to a post this simulation took: the post reads as
+            // edited, and the platform answers naming the message again.
+            Some(Call::Update { message, text, .. }) => answered(self.edited(&message, text)),
             // A room made, named as the platform names it: by number, in the
             // order made, unless the next one was scripted to be refused.
             Some(Call::CreateRoom { name, .. }) => {

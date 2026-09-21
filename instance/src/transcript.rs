@@ -1,0 +1,555 @@
+//! What a turn posts as it happens — the transcript of
+//! `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`
+//! — and how each of its messages grows.
+//!
+//! A job's agent is read as it works. Its text is narration, posted one
+//! message per contiguous run; what it does between two runs is working,
+//! posted as one burst listing each tool call and, where an adapter carries
+//! any, each thought. Either kind is posted when it opens, grown in place by
+//! editing as it continues — paced, so that a busy agent stays inside the
+//! platform's budget for edits — and closed when the other kind begins or
+//! the turn ends. A message that would pass the platform's limit is closed
+//! at it and continued in the next.
+//!
+//! Held per turn and never kept: a restart begins with nothing open, and
+//! whatever was growing stays as it was last sent.
+
+use std::time::Duration;
+
+use stageman_agent::{Noticed, ToolCallStatus, ToolKind};
+
+use crate::turns::speaking_for;
+use crate::vocabulary::Speaker;
+use crate::{Effect, Running, Timer};
+
+/// How often a growing message is edited, at most: often enough to read as
+/// it happens, and well inside the platform's budget for edits.
+pub const PACE: Duration = Duration::from_secs(2);
+
+/// One entry of a burst of working.
+#[derive(Clone, PartialEq, Eq, serde::Serialize)]
+pub enum Entry {
+    /// A tool call, with where it has got to.
+    Call {
+        /// The adapter's identifier for it.
+        id: String,
+        /// What kind of thing it does.
+        kind: ToolKind,
+        /// What the adapter calls it.
+        title: String,
+        /// Where it has got to, once the adapter said.
+        status: Option<ToolCallStatus>,
+    },
+    /// A thought, where an adapter carries any.
+    Thought(String),
+}
+
+/// What a message of the transcript holds.
+#[derive(Clone, PartialEq, Eq, serde::Serialize)]
+pub enum Body {
+    /// The agent's own text.
+    Narration(String),
+    /// What it did between two runs of narration.
+    Working(Vec<Entry>),
+}
+
+impl Body {
+    /// The message as it should read now.
+    fn text(&self) -> String {
+        match self {
+            Self::Narration(text) => text.clone(),
+            Self::Working(entries) => entries
+                .iter()
+                .map(|entry| match entry {
+                    Entry::Call {
+                        kind,
+                        title,
+                        status,
+                        ..
+                    } => stageman_foreman::working_line(*kind, title, *status),
+                    Entry::Thought(text) => stageman_foreman::thought_line(text),
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }
+    }
+
+    /// Whether a call in it has not ended, as far as the adapter has said.
+    fn has_a_call_running(&self) -> bool {
+        match self {
+            Self::Narration(_) => false,
+            Self::Working(entries) => entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    Entry::Call {
+                        status: None | Some(ToolCallStatus::Pending | ToolCallStatus::InProgress),
+                        ..
+                    }
+                )
+            }),
+        }
+    }
+}
+
+/// Where a message of the transcript has got to.
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize)]
+enum Standing {
+    /// More may be added to it.
+    Growing,
+    /// Nothing more will be added to it.
+    Closed,
+    /// The post that opened it was refused, so it cannot grow and is let
+    /// go.
+    Lost,
+}
+
+/// One message of the transcript, from its opening to its last edit.
+#[derive(Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Open {
+    /// Which, in the order its turn opened them.
+    run: u64,
+    /// What it holds.
+    body: Body,
+    /// The text as last sent to the platform, posted or edited.
+    sent: String,
+    /// The platform's identifier for it, once the post that opened it is
+    /// answered.
+    message: Option<String>,
+    /// Whether a post or an edit of it is waiting to be answered.
+    awaiting: bool,
+    /// Whether a wake to grow it is set.
+    pacing: bool,
+    /// Where it has got to.
+    standing: Standing,
+}
+
+impl Open {
+    /// Whether it was let go of.
+    const fn lost(&self) -> bool {
+        matches!(self.standing, Standing::Lost)
+    }
+
+    /// Whether nothing more will be added to it.
+    const fn closed(&self) -> bool {
+        matches!(self.standing, Standing::Closed | Standing::Lost)
+    }
+
+    /// Whether it is as sent and nothing about it is in flight.
+    fn settled(&self) -> bool {
+        !self.awaiting && !self.pacing && (self.lost() || self.body.text() == self.sent)
+    }
+
+    /// Whether it needs nothing more while its turn runs: settled, closed,
+    /// and with no call still to end, whose ending would change it.
+    fn done(&self) -> bool {
+        self.closed() && self.settled() && (self.lost() || !self.body.has_a_call_running())
+    }
+}
+
+/// What one piece of the transcript did to a turn's messages.
+#[derive(Default)]
+struct Change {
+    /// A message closed, to be sent as it finally reads.
+    closed: Option<u64>,
+    /// A message opened, to be posted.
+    opened: Option<u64>,
+    /// A message that grew or changed, to be grown when its pace allows.
+    grew: Option<u64>,
+}
+
+/// What one turn is posting: the message being added to, and those closed
+/// but not yet done with.
+#[derive(Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct Transcript {
+    /// The next message's number.
+    next: u64,
+    /// The message being added to, if any.
+    open: Option<Open>,
+    /// Messages closed but not done: an answer still to come, a call still
+    /// to end.
+    closing: Vec<Open>,
+}
+
+impl Transcript {
+    /// Nothing open and nothing closing: what a turn starts with.
+    pub const fn new() -> Self {
+        Self {
+            next: 0,
+            open: None,
+            closing: Vec::new(),
+        }
+    }
+
+    /// Whether this holds the message numbered.
+    fn has(&self, run: u64) -> bool {
+        self.open.as_ref().is_some_and(|open| open.run == run)
+            || self.closing.iter().any(|open| open.run == run)
+    }
+
+    /// The message numbered, open or closing.
+    fn find(&mut self, run: u64) -> Option<&mut Open> {
+        if self.open.as_ref().is_some_and(|open| open.run == run) {
+            return self.open.as_mut();
+        }
+        self.closing.iter_mut().find(|open| open.run == run)
+    }
+
+    /// Closes the open message, if there is one, and says which.
+    fn close(&mut self) -> Option<u64> {
+        let mut open = self.open.take()?;
+        if !open.lost() {
+            open.standing = Standing::Closed;
+        }
+        let run = open.run;
+        self.closing.push(open);
+        Some(run)
+    }
+
+    /// Opens a message, and says which.
+    fn begin(&mut self, body: Body) -> u64 {
+        let run = self.next;
+        // A turn opens a message per run of narration or working; coming
+        // round is not a case.
+        self.next = self.next.wrapping_add(1); // CLAMP-OK: messages per turn never come round.
+        self.open = Some(Open {
+            run,
+            body,
+            sent: String::new(),
+            message: None,
+            awaiting: false,
+            pacing: false,
+            standing: Standing::Growing,
+        });
+        run
+    }
+
+    /// The agent said something: onto the narration it is in, or a new one.
+    fn said(&mut self, text: String) -> Change {
+        if let Some(open) = &mut self.open
+            && let Body::Narration(narration) = &mut open.body
+        {
+            narration.push_str(&text);
+            return Change {
+                grew: Some(open.run),
+                ..Change::default()
+            };
+        }
+        let closed = self.close();
+        let opened = self.begin(Body::Narration(text));
+        Change {
+            closed,
+            opened: Some(opened),
+            ..Change::default()
+        }
+    }
+
+    /// The agent did something: onto the burst it is in, or a new one. A
+    /// thought following a thought continues it.
+    fn worked(&mut self, entry: Entry) -> Change {
+        if let Some(open) = &mut self.open
+            && let Body::Working(entries) = &mut open.body
+        {
+            match (entries.last_mut(), entry) {
+                (Some(Entry::Thought(thought)), Entry::Thought(more)) => thought.push_str(&more),
+                (_, entry) => entries.push(entry),
+            }
+            return Change {
+                grew: Some(open.run),
+                ..Change::default()
+            };
+        }
+        let closed = self.close();
+        let opened = self.begin(Body::Working(vec![entry]));
+        Change {
+            closed,
+            opened: Some(opened),
+            ..Change::default()
+        }
+    }
+
+    /// A call was refined or ended, wherever its line is.
+    fn call_changed(
+        &mut self,
+        id: &str,
+        title: Option<String>,
+        status: Option<ToolCallStatus>,
+    ) -> Change {
+        for open in self.open.iter_mut().chain(self.closing.iter_mut()) {
+            let Body::Working(entries) = &mut open.body else {
+                continue;
+            };
+            for entry in entries.iter_mut() {
+                if let Entry::Call {
+                    id: called,
+                    title: named,
+                    status: state,
+                    ..
+                } = entry
+                    && called == id
+                {
+                    if let Some(title) = title {
+                        *named = title;
+                    }
+                    if status.is_some() {
+                        *state = status;
+                    }
+                    return Change {
+                        grew: Some(open.run),
+                        ..Change::default()
+                    };
+                }
+            }
+        }
+        Change::default()
+    }
+
+    /// Closes the open message at the platform's limit when it would pass
+    /// it, continuing in a new one: narration cut where the channel cuts
+    /// it, and a burst at its last entry.
+    fn fit(&mut self, pieces: impl Fn(&str) -> Vec<String>) -> Change {
+        let Some(open) = &mut self.open else {
+            return Change::default();
+        };
+        let mut cut = pieces(&open.body.text()).into_iter();
+        let (Some(first), Some(second)) = (cut.next(), cut.next()) else {
+            return Change::default();
+        };
+        let rest = match &mut open.body {
+            Body::Narration(text) => {
+                *text = first;
+                Body::Narration(
+                    std::iter::once(second)
+                        .chain(cut)
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                )
+            }
+            Body::Working(entries) => {
+                if entries.len() < 2 {
+                    return Change::default();
+                }
+                let Some(last) = entries.pop() else {
+                    return Change::default();
+                };
+                Body::Working(vec![last])
+            }
+        };
+        let closed = self.close();
+        let opened = self.begin(rest);
+        Change {
+            closed,
+            opened: Some(opened),
+            ..Change::default()
+        }
+    }
+
+    /// Lets go of what is done with.
+    fn prune(&mut self) {
+        self.closing.retain(|open| !open.done());
+    }
+}
+
+/// What tending a message decided to do about it.
+enum Tending {
+    /// Nothing, for now.
+    Nothing,
+    /// Post it, opening it on the platform.
+    Post(String),
+    /// Edit it to read as it now does.
+    Edit {
+        /// The platform's identifier for it.
+        message: String,
+        /// What it now says.
+        text: String,
+    },
+    /// Wake later and look again.
+    Pace,
+}
+
+impl Running {
+    /// Something a turn's agent said or did, onto the message it is growing
+    /// or a new one; and whatever that closed, opened or changed, sent.
+    ///
+    /// A foreman's is let go: the room 0067 gives it is not built, which is
+    /// the one place that record is not yet true.
+    pub fn noticed(&mut self, speaker: Speaker, noticed: Noticed) {
+        let Speaker::Job(job) = speaker else {
+            return;
+        };
+        let Some((_, root)) = speaking_for(&self.state, job) else {
+            return;
+        };
+        let channel = root.room.channel;
+        let Some(turn) = self.turns.get_mut(&speaker) else {
+            return;
+        };
+        let change = match noticed {
+            Noticed::Said(text) => turn.transcript.said(text),
+            Noticed::Thought(text) => turn.transcript.worked(Entry::Thought(text)),
+            Noticed::Called { id, title, kind } => turn.transcript.worked(Entry::Call {
+                id,
+                kind,
+                title,
+                status: None,
+            }),
+            Noticed::CallChanged { id, title, status } => {
+                turn.transcript.call_changed(&id, title, status)
+            }
+        };
+        let overflow = turn
+            .transcript
+            .fit(|text| stageman_channel::pieces(channel, text));
+        // What closed is sent as it finally reads; what opened is posted,
+        // in the order opened, so that the chain lands them in order; what
+        // grew is grown at its pace.
+        for run in [change.closed, overflow.closed].into_iter().flatten() {
+            self.tend(speaker, run);
+        }
+        for run in [change.opened, overflow.opened].into_iter().flatten() {
+            self.tend(speaker, run);
+        }
+        if let Some(run) = change.grew {
+            self.tend(speaker, run);
+        }
+        self.prune(speaker);
+    }
+
+    /// A turn ended: its open message closes, and what is not yet sent as
+    /// it reads is kept until it is, since the answers to come will find
+    /// no turn.
+    pub fn finish(&mut self, speaker: Speaker, mut transcript: Transcript) {
+        transcript.close();
+        let runs: Vec<u64> = transcript.closing.iter().map(|open| open.run).collect();
+        for open in transcript.closing.drain(..) {
+            self.finishing.insert((speaker, open.run), open);
+        }
+        for run in runs {
+            self.tend(speaker, run);
+        }
+        self.prune(speaker);
+    }
+
+    /// The platform answered the post that opened a message: it can grow
+    /// now, or it never will.
+    pub fn run_posted(&mut self, speaker: Speaker, run: u64, outcome: Result<String, String>) {
+        if let Some(open) = self.find_run(speaker, run) {
+            open.awaiting = false;
+            match outcome {
+                Ok(message) => open.message = Some(message),
+                Err(why) => {
+                    tracing::warn!(%why, "a message of the transcript could not be posted");
+                    open.standing = Standing::Lost;
+                }
+            }
+        }
+        self.tend(speaker, run);
+        self.prune(speaker);
+    }
+
+    /// The platform answered an edit of a message.
+    pub fn run_grown(&mut self, speaker: Speaker, run: u64, outcome: Result<(), String>) {
+        if let Some(open) = self.find_run(speaker, run) {
+            open.awaiting = false;
+            if let Err(why) = outcome {
+                tracing::warn!(%why, "a message of the transcript could not be grown");
+                open.standing = Standing::Lost;
+            }
+        }
+        self.tend(speaker, run);
+        self.prune(speaker);
+    }
+
+    /// The pace came round for a message.
+    pub fn grow(&mut self, speaker: Speaker, run: u64) {
+        if let Some(open) = self.find_run(speaker, run) {
+            open.pacing = false;
+        }
+        self.tend(speaker, run);
+        self.prune(speaker);
+    }
+
+    /// The message numbered, in its turn or among those finishing.
+    fn find_run(&mut self, speaker: Speaker, run: u64) -> Option<&mut Open> {
+        let in_turn = self
+            .turns
+            .get(&speaker)
+            .is_some_and(|turn| turn.transcript.has(run));
+        if in_turn {
+            self.turns.get_mut(&speaker)?.transcript.find(run)
+        } else {
+            self.finishing.get_mut(&(speaker, run))
+        }
+    }
+
+    /// Does what a message needs: posts it if it is not yet on the platform
+    /// and has something to say; edits it if it is closed and reads
+    /// differently from what was sent; waits a pace otherwise, so that a
+    /// growing message is edited at most that often. Nothing while an
+    /// answer is awaited, since the answer looks again.
+    fn tend(&mut self, speaker: Speaker, run: u64) {
+        let Speaker::Job(job) = speaker else {
+            return;
+        };
+        let Some((speaking, place)) = speaking_for(&self.state, job) else {
+            return;
+        };
+        let tending = {
+            let Some(open) = self.find_run(speaker, run) else {
+                return;
+            };
+            if open.lost() || open.awaiting {
+                Tending::Nothing
+            } else {
+                let text = open.body.text();
+                match &open.message {
+                    None if text.trim().is_empty() => {
+                        // Nothing to post yet; and nothing ever, if closed.
+                        if open.closed() {
+                            open.standing = Standing::Lost;
+                        }
+                        Tending::Nothing
+                    }
+                    None => {
+                        open.sent.clone_from(&text);
+                        open.awaiting = true;
+                        Tending::Post(text)
+                    }
+                    Some(_) if text == open.sent => Tending::Nothing,
+                    Some(message) if open.closed() => {
+                        let message = message.clone();
+                        open.sent.clone_from(&text);
+                        open.awaiting = true;
+                        Tending::Edit { message, text }
+                    }
+                    Some(_) if open.pacing => Tending::Nothing,
+                    Some(_) => {
+                        open.pacing = true;
+                        Tending::Pace
+                    }
+                }
+            }
+        };
+        match tending {
+            Tending::Nothing => {}
+            Tending::Post(text) => self.transcribed(&speaking, &place, &text, speaker, run),
+            Tending::Edit { message, text } => {
+                self.grow_message(&speaking, &place, &message, &text, speaker, run);
+            }
+            Tending::Pace => {
+                let id = self.effect_id();
+                self.timers.insert(id, Timer::Growing { speaker, run });
+                self.immediate.push(Effect::Wake { id, after: PACE });
+            }
+        }
+    }
+
+    /// Lets go of what a turn is done with, and of finished messages sent
+    /// as they last read.
+    fn prune(&mut self, speaker: Speaker) {
+        if let Some(turn) = self.turns.get_mut(&speaker) {
+            turn.transcript.prune();
+        }
+        self.finishing
+            .retain(|(whose, _), open| *whose != speaker || !open.settled());
+    }
+}

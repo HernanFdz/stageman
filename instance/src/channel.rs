@@ -17,6 +17,7 @@ use std::time::Duration;
 use stageman_core::{Channel, JobId, Place, ProjectId, Room, Speaking, Thread};
 use stageman_vocabulary::{Bytes, Effect as Generic, EffectId, RequestId, Responded};
 
+use crate::vocabulary::Speaker;
 use crate::{Effect, Running};
 
 /// How long a channel is given to answer a request before the request is
@@ -88,6 +89,13 @@ pub enum Purpose {
     Keeping(Keeping),
     /// A question a listener asks before it can read anything.
     Question(Question),
+    /// A message of a turn's transcript, grown by editing.
+    Growing {
+        /// Whose turn.
+        speaker: Speaker,
+        /// Which of its messages.
+        run: u64,
+    },
 }
 
 /// Where a job came from, when a person's message is what started it.
@@ -114,10 +122,16 @@ pub enum Post {
         /// Which call, as the world holds it open.
         request: RequestId,
     },
-    /// A run of an agent's narration, posted as it happened. Its failure is
-    /// said and changes nothing, like a notice's: what a person must see is
-    /// what the tool's answer guarantees.
-    Narration,
+    /// A message of a turn's transcript, opened: its answer names the
+    /// message, which is what lets it grow. Its failure is said and changes
+    /// nothing, like a notice's: what a person must see is what the tool's
+    /// answer guarantees.
+    Transcript {
+        /// Whose turn.
+        speaker: Speaker,
+        /// Which of its messages.
+        run: u64,
+    },
 }
 
 /// Something done to a room that changes nothing here: its failure is said
@@ -264,10 +278,50 @@ impl Running {
         self.spoken(speaking, place, text, Post::Notice, true);
     }
 
-    /// Posts one piece of an agent's narration at a place, at the step's
+    /// Opens one message of a turn's transcript at a place, at the step's
     /// end: it changes no record, so it waits for no write.
-    pub fn narrated(&mut self, speaking: &Speaking, place: &Place, text: &str) {
-        self.spoken(speaking, place, text, Post::Narration, false);
+    pub fn transcribed(
+        &mut self,
+        speaking: &Speaking,
+        place: &Place,
+        text: &str,
+        speaker: Speaker,
+        run: u64,
+    ) {
+        self.spoken(
+            speaking,
+            place,
+            text,
+            Post::Transcript { speaker, run },
+            false,
+        );
+    }
+
+    /// Grows one message of a turn's transcript by editing it in place, at
+    /// the step's end. Not in the room's chain: it names a message already
+    /// there, so it cannot land out of order with a post.
+    pub fn grow_message(
+        &mut self,
+        speaking: &Speaking,
+        place: &Place,
+        message: &str,
+        text: &str,
+        speaker: Speaker,
+        run: u64,
+    ) {
+        let channel = place.room.channel;
+        let rendered = stageman_channel::update(channel, speaking, &place.room.id, message, text);
+        let id = self.effect_id();
+        self.sent.insert(
+            id,
+            Sent {
+                channel,
+                purpose: Purpose::Growing { speaker, run },
+                room: None,
+            },
+        );
+        let effect = request(id, rendered);
+        self.immediate.push(effect);
     }
 
     /// Makes the room a job's conversation happens in, once the job's
@@ -474,6 +528,17 @@ impl Running {
             Purpose::Question(question) => {
                 self.questioned(sent.channel, question, responded, at, effects);
             }
+            Purpose::Growing { speaker, run } => {
+                let outcome = match responded {
+                    Responded::Answered { status, body, .. } => {
+                        stageman_channel::posted(sent.channel, *status, body.as_slice())
+                            .map(|_| ())
+                            .map_err(|why| why.to_string())
+                    }
+                    Responded::Failed(why) => Err(unreachable(why)),
+                };
+                self.run_grown(speaker, run, outcome);
+            }
         }
     }
 
@@ -486,11 +551,7 @@ impl Running {
                     tracing::warn!(%why, "the room could not be spoken to");
                 }
             }
-            Post::Narration => {
-                if let Err(why) = outcome {
-                    tracing::warn!(%why, "a run of narration could not be posted");
-                }
-            }
+            Post::Transcript { speaker, run } => self.run_posted(*speaker, *run, outcome),
             Post::Saying { request } => self.posted(*request, outcome.map(|_| ())),
         }
     }
@@ -523,6 +584,7 @@ impl Running {
             Purpose::Question(
                 Question::Introducing { project } | Question::Locating { project },
             ) => self.unasked(project, effects),
+            Purpose::Growing { speaker, run } => self.run_grown(speaker, run, Err(never())),
         }
     }
 }

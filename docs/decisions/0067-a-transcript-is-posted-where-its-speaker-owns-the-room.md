@@ -2,9 +2,10 @@
 
 ## Status
 
-Accepted. Nothing below is built yet; this record exists so that the shape is
-settled before it is, as
-`docs/decisions/0029-a-reply-is-routed-by-its-thread.md` was. Since
+Accepted. Written before any of it was built, as
+`docs/decisions/0029-a-reply-is-routed-by-its-thread.md` was. Built for a
+job's room: narration and bursts, grown in place and paced. The foreman's
+room, the notices, and the tool's target are not yet. Since
 `docs/decisions/0069-a-message-reaches-a-working-job.md` a second
 notice at the root says when a message reached a turn while it ran.
 

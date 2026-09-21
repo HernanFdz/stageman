@@ -23,6 +23,7 @@
 //! the credential invariant and `docs/conventions.md` §4 for why prompts are
 //! held to a test.
 
+use stageman_agent::{ToolCallStatus, ToolKind};
 use stageman_core::{ProjectId, VariableName, Waiting};
 
 /// What every foreman's container is named for.
@@ -485,6 +486,54 @@ that is fixed."
     )
 }
 
+/// One line of a burst of working: a tool call as a person reads it, marked
+/// with where it has got to.
+///
+/// Composed here because every text this system posts is, and asserted whole
+/// below — see
+/// `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`.
+/// The kind is the protocol's classification of tools, said as what the
+/// agent did; the title is the adapter's, which for a command is the
+/// command. A call not yet ended, or one whose ending the adapter has not
+/// classified, reads as still running.
+#[must_use]
+pub fn working_line(kind: ToolKind, title: &str, status: Option<ToolCallStatus>) -> String {
+    let mark = match status {
+        Some(ToolCallStatus::Completed) => "✅",
+        Some(ToolCallStatus::Failed) => "❌",
+        _ => "⏳",
+    };
+    let did = match kind {
+        ToolKind::Read => "read",
+        ToolKind::Edit => "edited",
+        ToolKind::Delete => "deleted",
+        ToolKind::Move => "moved",
+        ToolKind::Search => "searched",
+        ToolKind::Execute => "ran",
+        ToolKind::Think => "thought about",
+        ToolKind::Fetch => "fetched",
+        _ => "did",
+    };
+    format!("{mark} {did} `{title}`")
+}
+
+/// A thought in a burst of working, as a quoted line, where an adapter
+/// carries any: the agent's reasoning, told apart from what it did.
+#[must_use]
+pub fn thought_line(text: &str) -> String {
+    text.lines()
+        .enumerate()
+        .map(|(n, line)| {
+            if n == 0 {
+                format!("> 💭 {line}")
+            } else {
+                format!("> {line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// The instruction a job begins from.
 ///
 /// Self-contained by necessity: an agent in a fresh container knows nothing
@@ -895,6 +944,51 @@ here is between people._"
         assert!(
             read < asking,
             "being read must come first, or it reads as a special case of asking: {prompt}"
+        );
+    }
+
+    /// The lines a burst is built from, asserted whole, per
+    /// `docs/conventions.md` §4: a person reads them in a room, and nothing
+    /// else would notice them changing.
+    #[test]
+    fn the_working_lines_read_exactly_as_written() {
+        use stageman_agent::{ToolCallStatus, ToolKind};
+
+        assert_eq!(
+            super::working_line(ToolKind::Execute, "cargo test", None),
+            "⏳ ran `cargo test`"
+        );
+        assert_eq!(
+            super::working_line(
+                ToolKind::Execute,
+                "cargo test",
+                Some(ToolCallStatus::InProgress)
+            ),
+            "⏳ ran `cargo test`"
+        );
+        assert_eq!(
+            super::working_line(
+                ToolKind::Execute,
+                "cargo test",
+                Some(ToolCallStatus::Completed)
+            ),
+            "✅ ran `cargo test`"
+        );
+        assert_eq!(
+            super::working_line(ToolKind::Edit, "src/lib.rs", Some(ToolCallStatus::Failed)),
+            "❌ edited `src/lib.rs`"
+        );
+        assert_eq!(
+            super::working_line(ToolKind::Read, "README.md", Some(ToolCallStatus::Completed)),
+            "✅ read `README.md`"
+        );
+        assert_eq!(
+            super::working_line(ToolKind::Other, "something", None),
+            "⏳ did `something`"
+        );
+        assert_eq!(
+            super::thought_line("The tests first.\nThen the fix."),
+            "> 💭 The tests first.\n> Then the fix."
         );
     }
 

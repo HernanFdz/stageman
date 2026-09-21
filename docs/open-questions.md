@@ -329,13 +329,11 @@ Intended next steps, in order, each with its reason. Written as intentions, not
 progress: "next X, because Y" — never "X is 60% done", which is both derivable
 and wrong within a day.
 
-- Next, the rest of the transcript per
-  `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`.
-  A job's narration is posted one message per run, when the run closes, and
-  is not yet grown by editing as the run continues; growth and the bursts of
-  working come together, because they are one mechanism, and the foreman's
-  room after them, because until it exists a foreman's narration is let go.
-  Each is a scenario of its own.
+- Next, the rest of
+  `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`:
+  the foreman's room first, because until it exists a foreman's transcript
+  is let go; then the notice that says why a turn started, the signpost,
+  and the tool's target. Each is a scenario of its own.
 
 - Then show a mention its thread per
   `docs/decisions/0068-a-mention-is-shown-its-thread.md`,

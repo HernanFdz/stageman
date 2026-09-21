@@ -29,7 +29,7 @@
 use std::collections::BTreeMap;
 
 use stageman_agent::{
-    AgentError, Answer, Command, Conversation, Exchange, Noticed, Opening, StopReason, Tools,
+    AgentError, Answer, Command, Conversation, Exchange, Opening, StopReason, Tools,
 };
 use stageman_core::{
     Agent, Channel, JobId, Kit, Place, Platform, Progress, Project, Role, Secret, Speaking, State,
@@ -37,6 +37,7 @@ use stageman_core::{
 };
 use stageman_vocabulary::{Effect as Generic, EffectId, Ended, Finished};
 
+use crate::transcript::Transcript;
 use crate::vocabulary::Speaker;
 use crate::{Asked, Effect, Running, complaint};
 
@@ -191,11 +192,10 @@ pub struct Turn {
     run: Run,
     /// Which answer it is waiting on.
     stage: Stage,
-    /// The run of narration the agent is in the middle of: what it has said
-    /// since it last did something, posted when it next does or when the
-    /// turn ends — see
+    /// What this turn is posting as it happens, and how each message of it
+    /// grows — see
     /// `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`.
-    narration: String,
+    pub(crate) transcript: Transcript,
 }
 
 impl Turn {
@@ -207,7 +207,7 @@ impl Turn {
             notify: false,
             stage: Self::first_stage(&run),
             run,
-            narration: String::new(),
+            transcript: Transcript::new(),
         }
     }
 
@@ -219,7 +219,7 @@ impl Turn {
             notify: true,
             stage: Self::first_stage(&run),
             run,
-            narration: String::new(),
+            transcript: Transcript::new(),
         }
     }
 
@@ -664,15 +664,9 @@ impl Running {
             return;
         };
         let exchange = conversation.heard(line);
-        // What the agent said goes on the run it is in; what it did closes
-        // the run, which is posted once this turn is let go of below.
-        let mut closed = Vec::new();
-        for noticed in conversation.noticed() {
-            match noticed {
-                Noticed::Said(text) => turn.narration.push_str(&text),
-                Noticed::Called { .. } => closed.push(std::mem::take(&mut turn.narration)),
-            }
-        }
+        // What the agent said and did, posted once this turn is let go of
+        // below.
+        let noticed = conversation.noticed();
         match exchange {
             Exchange::Continue(lines) => {
                 for line in lines {
@@ -685,31 +679,8 @@ impl Running {
                 effects.push(Generic::Close { id: process });
             }
         }
-        for run in closed {
-            self.narrate(speaker, &run);
-        }
-    }
-
-    /// Posts one run of a speaker's narration at the root of the room it
-    /// owns, in the pieces the channel accepts, behind whatever that room is
-    /// already being posted.
-    ///
-    /// A job's room is its own. A foreman has none yet — the room 0067 gives
-    /// it is not built — so its narration is let go until it does, which is
-    /// the one place that record is not yet true.
-    fn narrate(&mut self, speaker: Speaker, run: &str) {
-        if run.trim().is_empty() {
-            return;
-        }
-        let Speaker::Job(job) = speaker else {
-            tracing::debug!("a foreman's narration has nowhere to go yet; let go");
-            return;
-        };
-        let Some((speaking, root)) = speaking_for(&self.state, job) else {
-            return;
-        };
-        for piece in stageman_channel::pieces(root.room.channel, run) {
-            self.narrated(&speaking, &root, &piece);
+        for noticed in noticed {
+            self.noticed(speaker, noticed);
         }
     }
 
@@ -759,8 +730,8 @@ impl Running {
         self.warrants.retain(|_, known| known.speaker != speaker);
         // Whatever the agent said last is posted before anything said about
         // the turn's end, since both go to the same room in turn.
-        let last = std::mem::take(&mut turn.narration);
-        self.narrate(speaker, &last);
+        let transcript = std::mem::take(&mut turn.transcript);
+        self.finish(speaker, transcript);
         let job = match speaker {
             Speaker::Foreman(project) => {
                 // Whether there is a container to rest: a resumed turn was
