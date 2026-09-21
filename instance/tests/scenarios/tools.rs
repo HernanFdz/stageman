@@ -442,22 +442,65 @@ fn starting_is_refused_to_a_job_and_for_a_kit_the_project_does_not_offer() {
     assert!(text_of(refused).contains("serves no tool called \"start_job\""));
 }
 
-/// Saying posts in the thread the warrant names, and the agent is told
-/// whether it was heard only once the platform has answered.
+/// Saying posts under the message named, or at the root of the speaker's
+/// own room when none is; the agent is told what was posted, by the
+/// identifier it may name later, only once the platform has answered.
 #[test]
-fn saying_posts_in_the_warrants_thread_and_reports_a_failure_to_the_agent() {
+fn saying_posts_where_it_is_told_to_and_reports_a_failure_to_the_agent() {
     let (mut world, mut instance, warrant) = with_a_foreman_working();
 
+    let asked0 = world.calls(
+        155,
+        &warrant,
+        &call(
+            "say",
+            serde_json::json!({"message": "On it.", "to": "C0123456789/1788000000.000001"}),
+        ),
+    );
     let asked1 = world.calls(
         160,
         &warrant,
-        &call("say", serde_json::json!({"message": "On it."})),
+        &call("say", serde_json::json!({"message": "Thinking aloud."})),
     );
     world.run_until(&mut instance, 200);
+    let answer = world.tool_answer(asked0).expect("answered");
+    assert!(!is_error(answer));
+    assert!(
+        text_of(answer).starts_with("C0123456789/"),
+        "the identifier of what was posted: {}",
+        text_of(answer)
+    );
+    assert!(world.posts().contains(&(in_thread(1), "On it.".to_owned())));
     let answer = world.tool_answer(asked1).expect("answered");
     assert!(!is_error(answer));
-    assert_eq!(text_of(answer), "said");
-    assert!(world.posts().contains(&(in_thread(1), "On it.".to_owned())));
+    assert!(
+        text_of(answer).starts_with("C-job-001/"),
+        "posted in the foreman's own room: {}",
+        text_of(answer)
+    );
+    assert!(
+        world
+            .posts()
+            .contains(&(in_room(1), "Thinking aloud.".to_owned())),
+        "{:?}",
+        world.posts()
+    );
+    let asked = world.calls(
+        205,
+        &warrant,
+        &call(
+            "say",
+            serde_json::json!({"message": "Elsewhere.", "to": "not-a-message"}),
+        ),
+    );
+    world.run_until(&mut instance, 208);
+    let refused = world.tool_answer(asked).expect("answered");
+    assert!(is_error(refused));
+    assert!(
+        text_of(refused).contains("not a message as it was shown to you"),
+        "{}",
+        text_of(refused)
+    );
 
     world.next_post_fails("channel_not_found");
     let asked2 = world.calls(

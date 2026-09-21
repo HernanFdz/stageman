@@ -23,10 +23,10 @@ fn a_job_with_a_room(world: &mut Simulation) -> (stageman_instance::Instance, Jo
     (instance, idle)
 }
 
-fn say(message: &str) -> serde_json::Value {
+fn say(message: &str, to: &str) -> serde_json::Value {
     serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-        "params": {"name": "say", "arguments": {"message": message}},
+        "params": {"name": "say", "arguments": {"message": message, "to": to}},
     })
 }
 
@@ -88,7 +88,8 @@ fn a_thread_the_job_never_answered_in_is_signposted() {
     );
 }
 
-/// A thread the agent answered in through the tool is not signposted.
+/// A thread the agent answered in through the tool, naming the message, is
+/// not signposted.
 #[test]
 fn a_thread_the_job_answered_in_is_not_signposted() {
     let mut world = Simulation::new();
@@ -97,7 +98,7 @@ fn a_thread_the_job_answered_in_is_not_signposted() {
     world.says_in_rooms_thread(100, 1, "1788000000.500000", "use postgres");
     world.run_until(&mut instance, 150);
     let warrant = world.warrants().last().expect("the turn's warrant").clone();
-    world.calls(160, &warrant, &say("On it."));
+    world.calls(160, &warrant, &say("On it.", "C-job-001/1788000000.500000"));
     world.run_until(&mut instance, 5_000);
 
     let asked_in = Place {
@@ -117,6 +118,33 @@ fn a_thread_the_job_answered_in_is_not_signposted() {
             .iter()
             .any(|(place, text)| *place == asked_in && text.starts_with("↩️")),
         "no signpost where the answer already is: {:?}",
+        world.posts()
+    );
+}
+
+/// A job may reply only in its own room, whatever message it names.
+#[test]
+fn a_job_may_reply_only_in_its_own_room() {
+    let mut world = Simulation::new();
+    let (mut instance, _) = a_job_with_a_room(&mut world);
+
+    world.says_in_room(100, 1, "go on");
+    world.run_until(&mut instance, 150);
+    let warrant = world.warrants().last().expect("the turn's warrant").clone();
+    let asked = world.calls(160, &warrant, &say("Psst.", "C0OTHER/1788000000.000001"));
+    world.run_until(&mut instance, 200);
+
+    let (status, body) = world.tool_answer(asked).expect("answered");
+    assert_eq!(*status, 200);
+    let text = body
+        .as_ref()
+        .and_then(|body| body.pointer("/result/content/0/text"))
+        .and_then(serde_json::Value::as_str)
+        .expect("text");
+    assert_eq!(text, "a job may reply only in its own room");
+    assert!(
+        !world.posts().iter().any(|(_, said)| said == "Psst."),
+        "{:?}",
         world.posts()
     );
 }

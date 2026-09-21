@@ -2,11 +2,9 @@
 
 ## Status
 
-Accepted. Written before any of it was built, as
-`docs/decisions/0029-a-reply-is-routed-by-its-thread.md` was. Built: narration
-and bursts, grown in place and paced, in a job's room and in the foreman's,
-which is made before its first turn; the notice that says why a turn
-started, and the signpost. The tool's target is not yet. Since
+Accepted and built, in five steps after it was written, as
+`docs/decisions/0029-a-reply-is-routed-by-its-thread.md` was written before
+its code. Since
 `docs/decisions/0069-a-message-reaches-a-working-job.md` a second
 notice at the root says when a message reached a turn while it ran.
 

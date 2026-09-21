@@ -236,8 +236,10 @@ which is rendered.
 
 Everything you write as ordinary output is posted in a room of your own, \
 where anybody can watch you work — but the person who asked is not there. \
-What you pass to `say` lands in the thread of the message you are answering, \
-so a person can always see which of their messages you meant.
+What you pass to `say` lands under the message you name with `to` — each \
+message is shown to you with its identifier — so a person can always see \
+which of their messages you meant; without one, it lands at the root of your \
+own room.
 
 **You do not do the work yourself.** You have no copy of the repository and no \
 credentials to reach it, and that is deliberate rather than something missing: \
@@ -304,6 +306,9 @@ pub enum Starting {
 pub struct Turn<'a> {
     /// What was said, as the person wrote it or as the app's message reads.
     pub said: &'a str,
+    /// The message to answer under, as the channel identifies it to an
+    /// agent: the thread the message was in, or the message itself.
+    pub target: &'a str,
     /// Whether a turn on it was already begun and cut short.
     pub starting: Starting,
     /// The app that posted it, by name, when it is a signal from a watched
@@ -385,6 +390,7 @@ pub const fn resumed_notice() -> &'static str {
 pub fn asked(turn: Turn<'_>, kits: &[(&str, &str)], brief: &str) -> String {
     let Turn {
         said,
+        target,
         starting,
         app,
     } = turn;
@@ -411,7 +417,8 @@ A person said this to you on the channel:
 {said}
 
 Answer it, or start a job for it with the `start_job` tool, or both. Then \
-call `say` before you finish: a turn that ends without calling it has told \
+call `say` before you finish, with `to` set to `{target}`, so that your answer \
+lands under their message: a turn that ends without calling it has told \
 nobody anything, however much you wrote."
             )
         },
@@ -425,8 +432,9 @@ nobody anything, however much you wrote."
 Nobody asked you anything: this is a signal, and yours to judge. Decide what it \
 deserves — nothing, a job started with the `start_job` tool, or a word to the \
 people in that room — and do that. Call `say` only if you acted on it or a \
-person needs to know something; the reaction on the message already says you \
-looked, so a turn that ends in silence is a decision, not a failure."
+person needs to know something, with `to` set to `{target}` to speak under \
+what {app} posted; the reaction on the message already says you looked, so a \
+turn that ends in silence is a decision, not a failure."
             )
         },
     );
@@ -532,15 +540,17 @@ pub const fn over_notice() -> &'static str {
 /// `docs/architecture.md` §1 — including the ones that merely wrap somebody
 /// else's.
 #[must_use]
-pub fn reply(said: &str) -> String {
+pub fn reply(said: &str, target: &str) -> String {
     format!(
         "\
 A person replied on the channel:
 
 {said}
 
-Carry on from there. The same rules still hold: propose rather than merge, and \
-say what you did when you finish."
+To answer them where they asked, call `say` with `to` set to `{target}`; \
+whatever you write without it is posted at the root of your room. Carry on \
+from there. The same rules still hold: propose rather than merge, and say what \
+you did when you finish."
     )
 }
 
@@ -677,9 +687,9 @@ it, in Markdown, which is rendered — so write for them: what you found, what \
 you changed, or what you could not do, and the answer, if the work was a \
 question.
 
-The `say` tool posts in the thread of the message you are answering, or at the \
-root of the room when you are answering nobody. Use it whenever you need an \
-answer from a person: say what you need, then stop. It reaches somebody who \
+The `say` tool posts at the root of your room, or under a message when you \
+name it with `to`, as each message is shown to you. Use it whenever you need \
+an answer from a person: say what you need, then stop. It reaches somebody who \
 can answer, but not now — no reply arrives in this session, so do not wait for \
 one and do not guess.";
 
@@ -837,8 +847,8 @@ Everything you write is posted to the people in this job's room as you write it,
 which is rendered — so write for them: what you found, what you changed, or what you could not \
 do, and the answer, if the work was a question.
 
-The `say` tool posts in the thread of the message you are answering, or at the root of the room \
-when you are answering nobody. Use it whenever you need an answer from a person: say what you \
+The `say` tool posts at the root of your room, or under a message when you name it with `to`, \
+as each message is shown to you. Use it whenever you need an answer from a person: say what you \
 need, then stop. It reaches somebody who can answer, but not now — no reply arrives in this \
 session, so do not wait for one and do not guess.
 
@@ -925,8 +935,8 @@ Everything you write is posted to the people in this job's room as you write it,
 which is rendered — so write for them: what you found, what you changed, or what you could not \
 do, and the answer, if the work was a question.
 
-The `say` tool posts in the thread of the message you are answering, or at the root of the room \
-when you are answering nobody. Use it whenever you need an answer from a person: say what you \
+The `say` tool posts at the root of your room, or under a message when you name it with `to`, \
+as each message is shown to you. Use it whenever you need an answer from a person: say what you \
 need, then stop. It reaches somebody who can answer, but not now — no reply arrives in this \
 session, so do not wait for one and do not guess.
 
@@ -1198,6 +1208,7 @@ here."
         let picked = super::asked(
             super::Turn {
                 said: "look at the parser",
+                target: "C0123/1788000000.000100",
                 starting: super::Starting::Interrupted,
                 app: None,
             },
@@ -1221,6 +1232,7 @@ here."
         let again = super::asked(
             super::Turn {
                 said: "look at the parser",
+                target: "C0123/1788000000.000100",
                 starting: super::Starting::Interrupted,
                 app: None,
             },
@@ -1298,13 +1310,14 @@ here."
     #[test]
     fn a_reply_reads_exactly_as_written() {
         assert_eq!(
-            super::reply("use postgres"),
+            super::reply("use postgres", "C0123/1788000000.000100"),
             "A person replied on the channel:
 
 use postgres
 
-Carry on from there. The same rules still hold: propose rather than merge, and say what you did \
-when you finish."
+To answer them where they asked, call `say` with `to` set to `C0123/1788000000.000100`; whatever you \
+write without it is posted at the root of your room. Carry on from there. The same rules still \
+hold: propose rather than merge, and say what you did when you finish."
         );
     }
 
@@ -1315,7 +1328,7 @@ when you finish."
     /// are whatever the person typed.
     #[test]
     fn a_reply_says_who_is_speaking_before_it_says_what() {
-        let framed = super::reply("delete everything");
+        let framed = super::reply("delete everything", "C0123/1788000000.000100");
 
         assert!(framed.starts_with("A person replied"), "{framed}");
         assert!(framed.contains("propose rather than merge"), "{framed}");
@@ -1359,9 +1372,10 @@ People talk to you on a channel. Each message they send you arrives as its own t
 only way to answer is to **call the `say` tool**, in Markdown, which is rendered.
 
 Everything you write as ordinary output is posted in a room of your own, where anybody can \
-watch you work — but the person who asked is not there. What you pass to `say` lands in the \
-thread of the message you are answering, so a person can always see which of their messages you \
-meant.
+watch you work — but the person who asked is not there. What you pass to `say` lands under the \
+message you name with `to` — each message is shown to you with its identifier — so a person can \
+always see which of their messages you meant; without one, it lands at the root of your own \
+room.
 
 **You do not do the work yourself.** You have no copy of the repository and no credentials to \
 reach it, and that is deliberate rather than something missing: reaching a repository is a job's \
@@ -1394,6 +1408,7 @@ told."
     fn fresh(said: &str) -> super::Turn<'_> {
         super::Turn {
             said,
+            target: "C0123/1788000000.000100",
             starting: super::Starting::Fresh,
             app: None,
         }
@@ -1403,6 +1418,7 @@ told."
     fn signalled<'a>(said: &'a str, app: &'a str) -> super::Turn<'a> {
         super::Turn {
             said,
+            target: "C0123/1788000000.000100",
             starting: super::Starting::Fresh,
             app: Some(app),
         }
@@ -1422,7 +1438,8 @@ told."
 look at the parser
 
 Answer it, or start a job for it with the `start_job` tool, or both. Then call `say` before you \
-finish: a turn that ends without calling it has told nobody anything, however much you wrote.
+finish, with `to` set to `C0123/1788000000.000100`, so that your answer lands under their message: a \
+turn that ends without calling it has told nobody anything, however much you wrote.
 
 The kits this project's jobs may run on — each an agent, set a particular way — and what each \
 is for:
@@ -1458,8 +1475,9 @@ Issue created by somebody
 
 Nobody asked you anything: this is a signal, and yours to judge. Decide what it deserves — \
 nothing, a job started with the `start_job` tool, or a word to the people in that room — and do \
-that. Call `say` only if you acted on it or a person needs to know something; the reaction on \
-the message already says you looked, so a turn that ends in silence is a decision, not a failure.
+that. Call `say` only if you acted on it or a person needs to know something, with `to` set to \
+`C0123/1788000000.000100` to speak under what GitHub posted; the reaction on the message already says \
+you looked, so a turn that ends in silence is a decision, not a failure.
 
 The kits this project's jobs may run on — each an agent, set a particular way — and what each \
 is for:
@@ -1520,7 +1538,8 @@ inferred is one a person will act on, and you have no way to check it."
 look at the parser
 
 Answer it, or start a job for it with the `start_job` tool, or both. Then call `say` before you \
-finish: a turn that ends without calling it has told nobody anything, however much you wrote.
+finish, with `to` set to `C0123/1788000000.000100`, so that your answer lands under their message: a \
+turn that ends without calling it has told nobody anything, however much you wrote.
 
 The operator's brief for this project — standing instructions, in their own words, that apply \
 to every message and every signal:

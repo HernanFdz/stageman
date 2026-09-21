@@ -597,7 +597,7 @@ impl Running {
                     }
                     Responded::Failed(why) => Err(unreachable(why)),
                 };
-                self.answered(&post, outcome);
+                self.answered(&post, sent.channel, sent.room.as_ref(), outcome);
                 if let Some(room) = &sent.room {
                     self.next_post(room);
                 }
@@ -653,7 +653,13 @@ impl Running {
 
     /// What follows from a channel's answer to a post, given why it was
     /// posted.
-    fn answered(&mut self, post: &Post, outcome: Result<String, String>) {
+    fn answered(
+        &mut self,
+        post: &Post,
+        channel: Channel,
+        room: Option<&Room>,
+        outcome: Result<String, String>,
+    ) {
         match post {
             Post::Notice => {
                 if let Err(why) = outcome {
@@ -661,7 +667,17 @@ impl Running {
                 }
             }
             Post::Transcript { speaker, run } => self.run_posted(*speaker, *run, outcome),
-            Post::Saying { request } => self.posted(*request, outcome.map(|_| ())),
+            // Answered with the identifier of what was posted, as the agent
+            // may name it later.
+            Post::Saying { request } => {
+                let named = outcome.map(|message| {
+                    room.map_or_else(
+                        || message.clone(),
+                        |room| stageman_channel::reference(channel, &room.id, &message),
+                    )
+                });
+                self.posted(*request, named);
+            }
         }
     }
 
@@ -681,7 +697,7 @@ impl Running {
         let never = || "the record it waited on could not be written".to_owned();
         match sent.purpose {
             Purpose::Post(post) => {
-                self.answered(&post, Err(never()));
+                self.answered(&post, sent.channel, sent.room.as_ref(), Err(never()));
                 if let Some(room) = &sent.room {
                     self.next_post(room);
                 }

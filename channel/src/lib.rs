@@ -333,6 +333,29 @@ pub fn room_link(channel: Channel, room: &str) -> String {
     }
 }
 
+/// The identifier a message is shown to an agent with, and the one it names
+/// a message by.
+///
+/// The room and the message as one, so that a reply can go into a room its
+/// speaker does not own and a thread shown in an earlier turn can be named
+/// in a later one — see
+/// `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`.
+#[must_use]
+pub fn reference(channel: Channel, room: &str, message: &str) -> String {
+    match channel {
+        Channel::Slack => slack::reference(room, message),
+    }
+}
+
+/// What an identifier an agent named means: the room and the message, if
+/// it is one this crate renders.
+#[must_use]
+pub fn referenced(channel: Channel, reference: &str) -> Option<(String, String)> {
+    match channel {
+        Channel::Slack => slack::referenced(reference),
+    }
+}
+
 /// A link to one message in a room, as a person can open it, from where
 /// the channel said its workspace is: the message's own, or its place in a
 /// thread when it is a reply.
@@ -554,8 +577,8 @@ mod tests {
     use super::{
         Call, ChannelError, Identity, Incoming, Reaction, acknowledgement, archive, create_room,
         decode, done, foreman_room_name, identity, invite, mention, open_socket, permalink, pieces,
-        post, posted, react, room_created, room_link, room_name, set_purpose, set_topic,
-        socket_url, update, who_am_i,
+        post, posted, react, reference, referenced, room_created, room_link, room_name,
+        set_purpose, set_topic, socket_url, update, who_am_i,
     };
     use stageman_core::{Channel, JobId, ProjectId, Secret, Speaking, Uuid};
 
@@ -845,6 +868,21 @@ mod tests {
         );
         assert_eq!(room_link(Channel::Slack, "C0C1VNX9AA2"), "<#C0C1VNX9AA2>");
         assert_eq!(mention(Channel::Slack, "U0HUMAN"), "<@U0HUMAN>");
+    }
+
+    /// An identifier shown to an agent reads back as the room and the
+    /// message it names, and anything else is nothing.
+    #[test]
+    fn a_reference_reads_back_as_the_room_and_the_message() {
+        let shown = reference(Channel::Slack, ROOM, "1788000000.000100");
+        assert_eq!(shown, "C0123456789/1788000000.000100");
+        assert_eq!(
+            referenced(Channel::Slack, &shown),
+            Some((ROOM.to_owned(), "1788000000.000100".to_owned()))
+        );
+        assert_eq!(referenced(Channel::Slack, "1788000000.000100"), None);
+        assert_eq!(referenced(Channel::Slack, "/1788000000.000100"), None);
+        assert_eq!(referenced(Channel::Slack, "C0123456789/"), None);
     }
 
     /// A link to a message is the workspace's address, the room and the

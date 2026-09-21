@@ -104,6 +104,13 @@ impl Running {
             thread: message.thread.clone(),
         };
         let said = message.text.as_str();
+        // The thread to answer under, as the agent is shown it: the one the
+        // reply was in, or the reply itself.
+        let target = stageman_channel::reference(
+            channel,
+            &message.room,
+            message.thread.as_deref().unwrap_or(&message.id),
+        );
         match accepting(&mut self.state, job) {
             Accepted::Taken => {
                 // `accepting` wrote the state; this is the one writer that
@@ -137,7 +144,7 @@ impl Running {
                         kit,
                         warrant,
                         tools: self.tools.clone(),
-                        text: stageman_foreman::reply(said),
+                        text: stageman_foreman::reply(said, &target),
                     }),
                 );
                 self.defer(first);

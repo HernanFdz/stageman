@@ -393,9 +393,15 @@ impl Running {
             .map(|(name, description)| (name.as_str(), description.as_str()))
             .collect();
         let brief = brief_of(&self.state, project);
+        let target = stageman_channel::reference(
+            errand.thread.channel,
+            &errand.thread.room,
+            &errand.thread.id,
+        );
         stageman_foreman::asked(
             stageman_foreman::Turn {
                 said: &errand.said,
+                target: &target,
                 starting,
                 app: errand.app.as_deref(),
             },

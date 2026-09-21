@@ -380,6 +380,22 @@ pub fn identity(status: u16, body: &[u8]) -> Result<Identity, ChannelError> {
     })
 }
 
+/// The identifier a message is shown to an agent with: the room and the
+/// message's own identifier, joined by a slash, which neither contains.
+pub fn reference(room: &str, message: &str) -> String {
+    format!("{room}/{message}")
+}
+
+/// What an identifier an agent named means, if it is one [`reference`]
+/// renders: both parts present, and nothing else.
+pub fn referenced(reference: &str) -> Option<(String, String)> {
+    let (room, message) = reference.trim().split_once('/')?;
+    if room.is_empty() || message.is_empty() || message.contains('/') {
+        return None;
+    }
+    Some((room.to_owned(), message.to_owned()))
+}
+
 /// A link to one message, as Slack spells one — measured on 2026-09-21
 /// against a real workspace, through the platform's own permalink call: the
 /// workspace's address, the room, and the message's identifier with its
