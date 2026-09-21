@@ -88,12 +88,55 @@ impl Running {
     ///
     /// A taken reply is a turn, and the turn waits for the record that the
     /// job is working to land: the record before the container, as
-    /// everywhere. A refusal changes nothing, so the notice of it is said at
-    /// once. The turn speaks where the reply was said, in the thread if it
-    /// was in one; the root of the room is told why the turn started, with
-    /// a link to the reply, and told when it ended, because both are about
-    /// the job rather than part of the exchange.
+    /// everywhere. A reply in a thread is shown that thread first, per
+    /// `docs/decisions/0068-a-mention-is-shown-its-thread.md`, and the
+    /// read waits for the same record, so that a turn never starts on the
+    /// strength of a reply that is not on the disk either way; one at the
+    /// root has nothing to be shown. A refusal changes nothing, so the
+    /// notice of it is said at once.
     fn replied(&mut self, project: ProjectId, job: JobId, channel: Channel, message: &Message) {
+        match accepting(&mut self.state, job) {
+            Accepted::Taken => {
+                // `accepting` wrote the state; this is the one writer that
+                // does not go through `record`, so it says so itself.
+                self.dirty = true;
+                let reading = message.thread.as_deref().is_some_and(|thread| {
+                    self.read_thread(
+                        Speaker::Job(job),
+                        crate::threads::Pending::Job {
+                            job,
+                            message: message.clone(),
+                        },
+                        &message.room,
+                        thread,
+                    )
+                });
+                if !reading {
+                    self.resume_job(project, job, channel, message);
+                }
+            }
+            Accepted::Busy => self.notice(job, stageman_foreman::busy_notice()),
+            Accepted::Over => self.notice(job, stageman_foreman::over_notice()),
+            Accepted::Unknown => {
+                tracing::warn!(%job, "a reply for a job this instance does not have");
+            }
+        }
+    }
+
+    /// Puts a job back to work on a reply, once whatever it was to be shown
+    /// of its thread is in hand. The turn speaks where the reply was said,
+    /// in the thread if it was in one; the root of the room is told why the
+    /// turn started, with a link to the reply, and told when it ended,
+    /// because both are about the job rather than part of the exchange.
+    /// The turn waits for every write in flight — the record that the job
+    /// is working among them, when it has not landed yet.
+    pub fn resume_job(
+        &mut self,
+        project: ProjectId,
+        job: JobId,
+        channel: Channel,
+        message: &Message,
+    ) {
         // Answered where it was said: in the thread the person asked in, or
         // at the root of the room.
         let place = Place {
@@ -111,50 +154,40 @@ impl Running {
             &message.room,
             message.thread.as_deref().unwrap_or(&message.id),
         );
-        match accepting(&mut self.state, job) {
-            Accepted::Taken => {
-                // `accepting` wrote the state; this is the one writer that
-                // does not go through `record`, so it says so itself.
-                self.dirty = true;
-                let Some((_, kit)) = self.recorded(job) else {
-                    return;
-                };
-                let link = self.permalink(
-                    project,
-                    channel,
-                    &message.room,
-                    &message.id,
-                    message.thread.as_deref(),
-                );
-                self.notice(
-                    job,
-                    &stageman_foreman::turn_notice(&stageman_foreman::Because::Message(
-                        link.as_deref(),
-                    )),
-                );
-                let speaker = Speaker::Job(job);
-                let warrant = self.warrant(speaker, Some(place), None);
-                // Resuming starts the container, which publishes its tunnel
-                // on a fresh port.
-                self.forget_tunnel(job);
-                let first = self.turn(
-                    speaker,
-                    Turn::noticed(Run::Resume {
-                        container: stageman_job::container(job),
-                        kit,
-                        warrant,
-                        tools: self.tools.clone(),
-                        text: stageman_foreman::reply(said, &target),
-                    }),
-                );
-                self.defer(first);
-            }
-            Accepted::Busy => self.notice(job, stageman_foreman::busy_notice()),
-            Accepted::Over => self.notice(job, stageman_foreman::over_notice()),
-            Accepted::Unknown => {
-                tracing::warn!(%job, "a reply for a job this instance does not have");
-            }
-        }
+        let speaker = Speaker::Job(job);
+        // A job's session is resumed, so it remembers what it was shown.
+        let context = self
+            .thread_taken(speaker)
+            .and_then(|read| crate::threads::thread_context(&read, channel, false, &message.id));
+        let Some((_, kit)) = self.recorded(job) else {
+            return;
+        };
+        let link = self.permalink(
+            project,
+            channel,
+            &message.room,
+            &message.id,
+            message.thread.as_deref(),
+        );
+        self.notice(
+            job,
+            &stageman_foreman::turn_notice(&stageman_foreman::Because::Message(link.as_deref())),
+        );
+        let warrant = self.warrant(speaker, Some(place), None);
+        // Resuming starts the container, which publishes its tunnel
+        // on a fresh port.
+        self.forget_tunnel(job);
+        let first = self.turn(
+            speaker,
+            Turn::noticed(Run::Resume {
+                container: stageman_job::container(job),
+                kit,
+                warrant,
+                tools: self.tools.clone(),
+                text: stageman_foreman::reply(said, &target, context.as_deref()),
+            }),
+        );
+        self.after_writes(first);
     }
 
     /// Says something at the root of a job's room, if it has one, once

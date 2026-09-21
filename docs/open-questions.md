@@ -329,11 +329,6 @@ Intended next steps, in order, each with its reason. Written as intentions, not
 progress: "next X, because Y" — never "X is 60% done", which is both derivable
 and wrong within a day.
 
-- Then show a mention its thread per
-  `docs/decisions/0068-a-mention-is-shown-its-thread.md`,
-  after narration is posted, because the frame names each message by the
-  identifier 0067 introduces.
-
 - Then let a message reach a working job per
   `docs/decisions/0069-a-message-reaches-a-working-job.md`,
   because the notice that says it landed and the frame it lands with are

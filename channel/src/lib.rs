@@ -189,6 +189,41 @@ pub fn update(
     }
 }
 
+/// Renders asking a channel for a thread: its parent and its most recent
+/// replies, up to `at_most`, with the credential that speaks.
+#[must_use]
+pub fn replies(
+    channel: Channel,
+    speaking: &Speaking,
+    room: &str,
+    thread: &str,
+    at_most: usize,
+) -> Request {
+    match channel {
+        Channel::Slack => slack::replies(speaking, room, thread, at_most),
+    }
+}
+
+/// What the platform's answer to [`replies`] means: the thread's messages,
+/// oldest first, decoded as a frame's are given who this instance is, and
+/// whether older ones were left out.
+///
+/// # Errors
+///
+/// Fails if the status was not a success, if the body cannot be read, or if
+/// the channel refused.
+pub fn thread_read(
+    channel: Channel,
+    status: u16,
+    body: &[u8],
+    room: &str,
+    us: &Identity,
+) -> Result<(Vec<Message>, bool), ChannelError> {
+    match channel {
+        Channel::Slack => slack::thread_read(status, body, room, us),
+    }
+}
+
 /// Cuts a text into the pieces a channel will accept as posts, in order,
 /// which for a text short enough is the one piece it already is.
 #[must_use]
@@ -471,6 +506,17 @@ pub enum Call {
         /// In which thread, if any.
         thread: Option<String>,
     },
+    /// A thread asked for: its parent and its most recent replies.
+    Replies {
+        /// Which channel.
+        channel: Channel,
+        /// Which room.
+        room: String,
+        /// Which thread, by its parent.
+        thread: String,
+        /// How many replies at most.
+        at_most: usize,
+    },
     /// One message edited in place.
     Update {
         /// Which channel it goes to.
@@ -577,8 +623,8 @@ mod tests {
     use super::{
         Call, ChannelError, Identity, Incoming, Reaction, acknowledgement, archive, create_room,
         decode, done, foreman_room_name, identity, invite, mention, open_socket, permalink, pieces,
-        post, posted, react, reference, referenced, room_created, room_link, room_name,
-        set_purpose, set_topic, socket_url, update, who_am_i,
+        post, posted, react, reference, referenced, replies, room_created, room_link, room_name,
+        set_purpose, set_topic, socket_url, thread_read, update, who_am_i,
     };
     use stageman_core::{Channel, JobId, ProjectId, Secret, Speaking, Uuid};
 
@@ -868,6 +914,68 @@ mod tests {
         );
         assert_eq!(room_link(Channel::Slack, "C0C1VNX9AA2"), "<#C0C1VNX9AA2>");
         assert_eq!(mention(Channel::Slack, "U0HUMAN"), "<@U0HUMAN>");
+    }
+
+    /// A thread asked for reads back as what it asked, and its answer is
+    /// read as a frame's messages are: a person's, this instance's own and
+    /// another app's told apart by identifier, and whether older replies
+    /// were left out.
+    #[test]
+    fn a_thread_reads_back_and_its_answer_is_read() {
+        let asked = replies(Channel::Slack, &speaking(), ROOM, "1788000000.000100", 50);
+        assert_eq!(asked.method, "GET");
+        assert_eq!(
+            asked.headers.get("authorization").map(String::as_str),
+            Some("Bearer xoxb-not-a-real-token")
+        );
+        assert_eq!(
+            Call::parse(&asked),
+            Some(Call::Replies {
+                channel: Channel::Slack,
+                room: ROOM.to_owned(),
+                thread: "1788000000.000100".to_owned(),
+                at_most: 50,
+            })
+        );
+
+        let us = Identity {
+            user: "U0BOT".to_owned(),
+            bot: "B0SELF".to_owned(),
+            url: "https://example.slack.com/".to_owned(),
+        };
+        let body = br##"{"ok":true,"has_more":true,"messages":[
+            {"type":"message","user":"U0HUMAN","text":"Which database?","ts":"1788000000.000100","thread_ts":"1788000000.000100","reply_count":3},
+            {"type":"message","user":"U0BOT","bot_id":"B0SELF","text":"Two options.","ts":"1788000000.000200","thread_ts":"1788000000.000100"},
+            {"type":"message","user":"U0GITHUB","bot_id":"B0OTHER","bot_profile":{"name":"GitHub"},"text":"","ts":"1788000000.000300","thread_ts":"1788000000.000100","attachments":[{"pretext":"Issue closed","title":"#9 Done"}]}
+        ]}"##;
+        let (messages, longer) =
+            thread_read(Channel::Slack, 200, body, ROOM, &us).expect("a thread read");
+        assert!(longer, "older replies were left out");
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].user.as_deref(), Some("U0HUMAN"));
+        assert!(!messages[0].from_us && messages[0].app.is_none());
+        assert_eq!(messages[0].room, ROOM);
+        assert_eq!(messages[0].thread.as_deref(), Some("1788000000.000100"));
+        assert!(
+            messages[1].from_us,
+            "this instance's own, by its bot identifier"
+        );
+        assert_eq!(messages[2].app.as_deref(), Some("GitHub"));
+        assert!(messages[2].text.contains("#9 Done"), "{}", messages[2].text);
+        assert!(matches!(
+            thread_read(
+                Channel::Slack,
+                200,
+                br#"{"ok":false,"error":"thread_not_found"}"#,
+                ROOM,
+                &us
+            ),
+            Err(ChannelError::Refused(ref why)) if why == "thread_not_found"
+        ));
+        assert!(matches!(
+            thread_read(Channel::Slack, 500, b"", ROOM, &us),
+            Err(ChannelError::Unreachable(_))
+        ));
     }
 
     /// An identifier shown to an agent reads back as the room and the

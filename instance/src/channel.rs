@@ -101,6 +101,13 @@ pub enum Purpose {
         /// Which of its messages.
         run: u64,
     },
+    /// A thread being read, for the turn a message in it starts.
+    Reading {
+        /// Whose turn.
+        speaker: Speaker,
+        /// Which room the thread is in, which its messages do not say.
+        room: String,
+    },
 }
 
 /// Where a job came from, when a person's message is what started it.
@@ -546,6 +553,40 @@ impl Running {
             )
     }
 
+    /// Asks the platform for a thread, once the record that the message in
+    /// it is in hand has landed: a read whose answer is routed back to the
+    /// turn that waits on it.
+    pub fn ask_for_thread(
+        &mut self,
+        speaker: Speaker,
+        channel: Channel,
+        speaking: &Speaking,
+        room: &str,
+        thread: &str,
+    ) {
+        let rendered = stageman_channel::replies(
+            channel,
+            speaking,
+            room,
+            thread,
+            crate::threads::THREAD_AT_MOST,
+        );
+        let id = self.effect_id();
+        self.sent.insert(
+            id,
+            Sent {
+                channel,
+                purpose: Purpose::Reading {
+                    speaker,
+                    room: room.to_owned(),
+                },
+                room: None,
+            },
+        );
+        let request = request(id, rendered);
+        self.defer(request);
+    }
+
     /// A link to a message on a project's channel, once its listener has
     /// been told where the workspace is; none until then, which a notice
     /// says without a link.
@@ -648,6 +689,34 @@ impl Running {
                 };
                 self.run_grown(speaker, run, outcome);
             }
+            Purpose::Reading { speaker, room } => {
+                // Read as a frame is, given who this instance is on the
+                // channel, which its listener was told before it could hear
+                // the message this is for.
+                let us = match speaker {
+                    Speaker::Foreman(project) => Some(project),
+                    Speaker::Job(job) => self.state.project_of(job),
+                }
+                .and_then(|project| self.listeners.get(&project))
+                .and_then(|listener| listener.us.clone());
+                let outcome = match (responded, us) {
+                    (Responded::Answered { status, body, .. }, Some(us)) => {
+                        stageman_channel::thread_read(
+                            sent.channel,
+                            *status,
+                            body.as_slice(),
+                            &room,
+                            &us,
+                        )
+                        .map_err(|why| why.to_string())
+                    }
+                    (Responded::Answered { .. }, None) => {
+                        Err("nobody has said who this instance is on the channel".to_owned())
+                    }
+                    (Responded::Failed(why), _) => Err(unreachable(why)),
+                };
+                self.thread_read_back(speaker, outcome);
+            }
         }
     }
 
@@ -713,6 +782,7 @@ impl Running {
                 Question::Introducing { project } | Question::Locating { project },
             ) => self.unasked(project, effects),
             Purpose::Growing { speaker, run } => self.run_grown(speaker, run, Err(never())),
+            Purpose::Reading { speaker, .. } => self.thread_unasked(speaker),
         }
     }
 }

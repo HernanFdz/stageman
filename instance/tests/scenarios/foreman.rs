@@ -220,6 +220,7 @@ fn a_foreman_interrupted_mid_turn_is_picked_up_on_waking() {
         stageman_foreman::Turn {
             said: "look at the parser",
             target: "C0123456789/1788000000.000001",
+            thread: None,
             starting: Starting::Interrupted,
             app: None,
         },

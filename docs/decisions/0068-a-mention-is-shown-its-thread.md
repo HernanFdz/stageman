@@ -2,8 +2,8 @@
 
 ## Status
 
-Accepted. Nothing below is built yet; this record exists so that the shape is
-settled before it is.
+Accepted and built. The read is made once the record that the message is in
+hand has landed, the way every request that follows a record is.
 
 Amends `docs/decisions/0031-a-mention-is-what-makes-it-ours.md` and
 `docs/decisions/0060-a-binding-is-a-workspace.md` in one respect: what a
@@ -130,6 +130,19 @@ scope the manifest does not grant, which 0063 already declined for a room's
 name; the markup is what a mention's own text already carries, and it renders
 as a name wherever the agent repeats it.
 
+**A message without a mention, said in a thread while a turn runs there, can
+go unshown.** Nothing that mentions the agent is affected: a mention is
+received whenever it is said, which is
+`docs/decisions/0069-a-message-reaches-a-working-job.md`. This is about what
+a later mention is shown as context, and nothing else. The thread is read
+when the turn starts and "since this instance last posted" starts from a post
+made when it ends, so a message without a mention that lands between the two
+is on the far side of the line the next time, and stays there for as long as
+the session lasts. The window is one turn long and the parent is shown every
+time, which is why it is accepted rather than closed; closing it means
+deriving from the previous mention instead of from the previous post, which
+the revisit below names.
+
 **The frame is snapshot-tested**, as every text this project composes is; a
 thread's messages are quoted inside it and are not this project's.
 
@@ -139,8 +152,11 @@ thread's messages are quoted inside it and are not this project's.
 frame.
 
 **Revisit if** threads longer than the cap turn out to be where questions get
-asked, which wants paging; if root mentions keep arriving that assume the
-room's discussion was read, which wants the on-demand tool above; if a
-project's people object to untagged messages being shown, which wants a
-per-project switch; or if the platform starts carrying the thread on the
-event, which retires the fetch.
+asked, which wants paging; if what people said while a turn ran turns out to
+be what the next question is about, which wants everything since the previous
+mention rather than since the previous post — still derived, since a mention
+is recognisable in a fetched thread by its markup; if root mentions keep
+arriving that assume the room's discussion was read, which wants the
+on-demand tool above; if a project's people object to untagged messages being
+shown, which wants a per-project switch; or if the platform starts carrying
+the thread on the event, which retires the fetch.

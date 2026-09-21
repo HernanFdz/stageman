@@ -271,6 +271,11 @@ pub struct Simulation {
     transcripts: VecDeque<(Vec<Utterance>, u64)>,
     /// Every edit made to a post, by the message's identifier, in order.
     edits: Vec<(String, String)>,
+    /// Every message the platform holds, as it would give one back in a
+    /// thread: what people and apps said in frames, and what was posted.
+    said: Vec<serde_json::Value>,
+    /// Why the next thread reads are refused, front first.
+    thread_failures: VecDeque<String>,
     /// Rooms made so far, so each is named apart.
     rooms_made: u32,
     /// Every room made: its identifier, and the name asked for.
@@ -596,6 +601,8 @@ impl Simulation {
             posts: Vec::new(),
             transcripts: VecDeque::new(),
             edits: Vec::new(),
+            said: Vec::new(),
+            thread_failures: VecDeque::new(),
             rooms_made: 0,
             rooms: Vec::new(),
             described: Vec::new(),
@@ -1824,6 +1831,87 @@ impl Simulation {
         }
     }
 
+    /// Takes a post, unless the next one was scripted to be refused:
+    /// numbered as the platform numbers one, remembered as the platform
+    /// would give it back in a thread — this instance's own, by its
+    /// identifiers — and kept as what was posted where. What the platform
+    /// answers either way.
+    fn posted(&mut self, place: Place, text: String) -> String {
+        if let Some(error) = self.post_failures.pop_front() {
+            return format!(r#"{{"ok":false,"error":"{error}"}}"#);
+        }
+        let identifier = format!("1788000000.9{:05}", self.posts.len());
+        let mut held = serde_json::Map::new();
+        held.insert("type".to_owned(), "message".into());
+        held.insert("ts".to_owned(), identifier.clone().into());
+        held.insert("channel".to_owned(), place.room.id.clone().into());
+        held.insert("user".to_owned(), "U0BOT".into());
+        held.insert("bot_id".to_owned(), "B0SELF".into());
+        held.insert("text".to_owned(), text.clone().into());
+        if let Some(thread) = &place.thread {
+            held.insert("thread_ts".to_owned(), thread.clone().into());
+        }
+        self.said.push(serde_json::Value::Object(held));
+        self.posts.push((place, text));
+        format!(r#"{{"ok":true,"ts":"{identifier}"}}"#)
+    }
+
+    /// A thread as the platform gives it back, or the scripted refusal.
+    fn thread_of(&mut self, room: &str, thread: &str, at_most: usize) -> String {
+        if let Some(error) = self.thread_failures.pop_front() {
+            return format!(r#"{{"ok":false,"error":"{error}"}}"#);
+        }
+        let field = |held: &serde_json::Value, name: &str| {
+            held.get(name)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        };
+        let in_room: Vec<&serde_json::Value> = self
+            .said
+            .iter()
+            .filter(|held| field(held, "channel").as_deref() == Some(room))
+            .collect();
+        let parent = in_room
+            .iter()
+            .find(|held| field(held, "ts").as_deref() == Some(thread))
+            .copied();
+        let replies: Vec<&serde_json::Value> = in_room
+            .iter()
+            .filter(|held| {
+                field(held, "thread_ts").as_deref() == Some(thread)
+                    && field(held, "ts").as_deref() != Some(thread)
+            })
+            .copied()
+            .collect();
+        let has_more = replies.len() > at_most;
+        let recent: Vec<&serde_json::Value> =
+            replies.iter().rev().take(at_most).rev().copied().collect();
+        let messages: Vec<&serde_json::Value> = parent.into_iter().chain(recent).collect();
+        serde_json::json!({"ok": true, "has_more": has_more, "messages": messages}).to_string()
+    }
+
+    /// Scripts the platform to refuse the next thread asked for.
+    pub fn next_thread_read_fails(&mut self, why: &str) {
+        self.thread_failures.push_back(why.to_owned());
+    }
+
+    /// Somebody saying something without mentioning this instance, at the
+    /// root of a room or in a thread of it: dropped by the reader, and
+    /// remembered by the platform.
+    pub fn person_says(&mut self, at: Now, room: &str, id: &str, thread: Option<&str>, text: &str) {
+        let socket = self.live_socket();
+        let event = self.frame_on(socket, at, room, id, thread, text, Spoken::Plain);
+        self.schedule(at, event);
+    }
+
+    /// Something this instance said once, heard back as its own: what the
+    /// platform remembers of it in a thread.
+    pub fn we_said(&mut self, at: Now, room: &str, id: &str, thread: Option<&str>, text: &str) {
+        let socket = self.live_socket();
+        let event = self.frame_on(socket, at, room, id, thread, text, Spoken::Ours);
+        self.schedule(at, event);
+    }
+
     /// Takes an edit to a post: the post reads as edited, and the platform
     /// answers naming the message again, or says it knows no such message.
     fn edited(&mut self, message: &str, text: String) -> String {
@@ -1876,22 +1964,25 @@ impl Simulation {
                 text,
                 thread,
             }) => {
-                let body = if let Some(error) = self.post_failures.pop_front() {
-                    format!(r#"{{"ok":false,"error":"{error}"}}"#)
-                } else {
-                    let place = Place {
-                        room: Room { channel, id: room },
-                        thread,
-                    };
-                    let identifier = format!("1788000000.9{:05}", self.posts.len());
-                    self.posts.push((place, text));
-                    format!(r#"{{"ok":true,"ts":"{identifier}"}}"#)
+                let place = Place {
+                    room: Room { channel, id: room },
+                    thread,
                 };
-                answered(body)
+                answered(self.posted(place, text))
             }
             // An edit to a post this simulation took: the post reads as
             // edited, and the platform answers naming the message again.
             Some(Call::Update { message, text, .. }) => answered(self.edited(&message, text)),
+            // A thread given back as measured: its parent, then its most
+            // recent replies up to the limit, oldest first, and whether
+            // older ones were left out — unless the next read was scripted
+            // to be refused.
+            Some(Call::Replies {
+                room,
+                thread,
+                at_most,
+                ..
+            }) => answered(self.thread_of(&room, &thread, at_most)),
             // A room made, named as the platform names it: by number, in the
             // order made, unless the next one was scripted to be refused.
             Some(Call::CreateRoom { name, .. }) => {
@@ -2061,6 +2152,26 @@ impl Simulation {
             Spoken::Plain => ("message", r#""user":"U0HUMAN""#),
             Spoken::Ours => ("message", r#""bot_id":"B0SELF","user":"U0BOT""#),
         };
+        // Remembered as the platform would give it back in a thread, by the
+        // same identifiers the frame carries.
+        let mut held = serde_json::Map::new();
+        held.insert("type".to_owned(), "message".into());
+        held.insert("ts".to_owned(), id.into());
+        held.insert("channel".to_owned(), room.into());
+        held.insert("text".to_owned(), text.into());
+        if let Some(thread) = in_thread {
+            held.insert("thread_ts".to_owned(), thread.into());
+        }
+        match spoken {
+            Spoken::Mention | Spoken::Plain => {
+                held.insert("user".to_owned(), "U0HUMAN".into());
+            }
+            Spoken::Ours => {
+                held.insert("user".to_owned(), "U0BOT".into());
+                held.insert("bot_id".to_owned(), "B0SELF".into());
+            }
+        }
+        self.said.push(serde_json::Value::Object(held));
         let text = serde_json::Value::String(text.to_owned()).to_string();
         Event::Frame {
             id: socket,
@@ -2128,6 +2239,9 @@ impl Simulation {
             "attachments".to_owned(),
             serde_json::Value::Array(vec![serde_json::Value::Object(card)]),
         );
+        // Remembered as the platform would give it back in a thread: the
+        // event itself, which is what a thread's messages are shaped like.
+        self.said.push(serde_json::Value::Object(event.clone()));
         Event::Frame {
             id: socket,
             text: serde_json::json!({

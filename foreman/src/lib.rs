@@ -309,6 +309,9 @@ pub struct Turn<'a> {
     /// The message to answer under, as the channel identifies it to an
     /// agent: the thread the message was in, or the message itself.
     pub target: &'a str,
+    /// What the turn is shown of the thread the message was said in, when
+    /// it was in one: composed by [`thread_shown`], or [`thread_unread`].
+    pub thread: Option<&'a str>,
     /// Whether a turn on it was already begun and cut short.
     pub starting: Starting,
     /// The app that posted it, by name, when it is a signal from a watched
@@ -391,6 +394,7 @@ pub fn asked(turn: Turn<'_>, kits: &[(&str, &str)], brief: &str) -> String {
     let Turn {
         said,
         target,
+        thread,
         starting,
         app,
     } = turn;
@@ -407,6 +411,8 @@ pub fn asked(turn: Turn<'_>, kits: &[(&str, &str)], brief: &str) -> String {
         Starting::Fresh => String::new(),
         Starting::Interrupted => format!("{INTERRUPTION}\n\n"),
     };
+    // Before the message, so that it reads as what the message follows.
+    let context = thread.map_or_else(String::new, |shown| format!("{shown}\n\n"));
 
     let framed = app.map_or_else(
         || {
@@ -453,7 +459,7 @@ words, that apply to every message and every signal:\n\n{}",
 
     format!(
         "\
-{interruption}{framed}{briefed}
+{interruption}{context}{framed}{briefed}
 
 The kits this project's jobs may run on — each an agent, set a particular way — \
 and what each is for:
@@ -540,10 +546,12 @@ pub const fn over_notice() -> &'static str {
 /// `docs/architecture.md` §1 — including the ones that merely wrap somebody
 /// else's.
 #[must_use]
-pub fn reply(said: &str, target: &str) -> String {
+pub fn reply(said: &str, target: &str, thread: Option<&str>) -> String {
+    // Before the reply, so that it reads as what the reply follows.
+    let context = thread.map_or_else(String::new, |shown| format!("{shown}\n\n"));
     format!(
         "\
-A person replied on the channel:
+{context}A person replied on the channel:
 
 {said}
 
@@ -552,6 +560,72 @@ whatever you write without it is posted at the root of your room. Carry on \
 from there. The same rules still hold: propose rather than merge, and say what \
 you did when you finish."
     )
+}
+
+/// Who said one message of a thread, as an agent is told.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Voice<'a> {
+    /// A person, by the channel's own mention of them.
+    Person(&'a str),
+    /// This instance: the agent's own earlier words, or a notice of its.
+    Us,
+    /// Another app, by the name the platform gives it.
+    App(&'a str),
+}
+
+/// One message of a thread, as an agent is shown it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shown<'a> {
+    /// The identifier the agent would name it by.
+    pub id: &'a str,
+    /// Who said it.
+    pub voice: Voice<'a>,
+    /// What was said.
+    pub text: &'a str,
+}
+
+/// What a turn is told of the thread its message was said in.
+///
+/// Said before the message itself: what came before, oldest first, each
+/// entry with who said it and its identifier — see
+/// `docs/decisions/0068-a-mention-is-shown-its-thread.md`. Since the agent
+/// last spoke there when its session remembers what came before, and from
+/// the start when it does not; and told when the thread was longer than
+/// what is shown.
+#[must_use]
+pub fn thread_shown(shown: &[Shown<'_>], since_us: bool, longer: bool) -> String {
+    let lead = if since_us {
+        "This was said in a thread. What was said there since you last spoke in it — its first \
+         message, then the rest — oldest first, each with who said it and its identifier:"
+    } else {
+        "This was said in a thread. What was said there before it, oldest first, each with who \
+         said it and its identifier:"
+    };
+    let entries = shown
+        .iter()
+        .map(|entry| {
+            let who = match entry.voice {
+                Voice::Person(mention) => mention,
+                Voice::Us => "You",
+                Voice::App(app) => app,
+            };
+            format!("{who} ({}):\n{}", entry.id, entry.text)
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let tail = if longer {
+        "\n\nThe thread is longer than this: only its most recent messages are shown."
+    } else {
+        ""
+    };
+    format!("{lead}\n\n{entries}{tail}")
+}
+
+/// What a turn is told when the thread its message was said in could not
+/// be read: that it was not, so that nothing is assumed about it.
+#[must_use]
+pub const fn thread_unread() -> &'static str {
+    "This was said in a thread that could not be read, so what came before it is not shown."
 }
 
 /// What a thread is told when a foreman's turn could not be taken at all,
@@ -1209,6 +1283,7 @@ here."
             super::Turn {
                 said: "look at the parser",
                 target: "C0123/1788000000.000100",
+                thread: None,
                 starting: super::Starting::Interrupted,
                 app: None,
             },
@@ -1233,6 +1308,7 @@ here."
             super::Turn {
                 said: "look at the parser",
                 target: "C0123/1788000000.000100",
+                thread: None,
                 starting: super::Starting::Interrupted,
                 app: None,
             },
@@ -1310,7 +1386,7 @@ here."
     #[test]
     fn a_reply_reads_exactly_as_written() {
         assert_eq!(
-            super::reply("use postgres", "C0123/1788000000.000100"),
+            super::reply("use postgres", "C0123/1788000000.000100", None),
             "A person replied on the channel:
 
 use postgres
@@ -1321,6 +1397,78 @@ hold: propose rather than merge, and say what you did when you finish."
         );
     }
 
+    /// What a turn is shown of its thread, asserted whole: who said each
+    /// message, its identifier, both leads, and the note that the thread
+    /// was longer. A reply or a message with a thread reads the thread
+    /// first, and the frame after it is the one without.
+    #[test]
+    fn a_thread_shown_reads_exactly_as_written() {
+        let shown = [
+            super::Shown {
+                id: "C0123/1788000000.000100",
+                voice: super::Voice::Person("<@U0HUMAN>"),
+                text: "Which database?",
+            },
+            super::Shown {
+                id: "C0123/1788000000.000200",
+                voice: super::Voice::Us,
+                text: "Two options.\nPostgres or SQLite.",
+            },
+            super::Shown {
+                id: "C0123/1788000000.000300",
+                voice: super::Voice::App("GitHub"),
+                text: "#9 Done",
+            },
+        ];
+        assert_eq!(
+            super::thread_shown(&shown, false, false),
+            "This was said in a thread. What was said there before it, oldest first, each with who \
+said it and its identifier:
+
+<@U0HUMAN> (C0123/1788000000.000100):
+Which database?
+
+You (C0123/1788000000.000200):
+Two options.
+Postgres or SQLite.
+
+GitHub (C0123/1788000000.000300):
+#9 Done"
+        );
+        assert_eq!(
+            super::thread_shown(&shown[..1], true, true),
+            "This was said in a thread. What was said there since you last spoke in it — its first \
+message, then the rest — oldest first, each with who said it and its identifier:
+
+<@U0HUMAN> (C0123/1788000000.000100):
+Which database?
+
+The thread is longer than this: only its most recent messages are shown."
+        );
+        assert_eq!(
+            super::thread_unread(),
+            "This was said in a thread that could not be read, so what came before it is not shown."
+        );
+
+        let bare = super::reply("go with that", "C0123/1788000000.000100", None);
+        let framed = super::reply(
+            "go with that",
+            "C0123/1788000000.000100",
+            Some(super::thread_unread()),
+        );
+        assert_eq!(framed, format!("{}\n\n{bare}", super::thread_unread()));
+        let bare = super::asked(fresh("go with that"), &[], "");
+        let framed = super::asked(
+            super::Turn {
+                thread: Some(super::thread_unread()),
+                ..fresh("go with that")
+            },
+            &[],
+            "",
+        );
+        assert_eq!(framed, format!("{}\n\n{bare}", super::thread_unread()));
+    }
+
     /// A reply is framed as somebody speaking, not as a fresh instruction.
     ///
     /// An agent picking up a session hours later cannot otherwise tell a
@@ -1328,7 +1476,7 @@ hold: propose rather than merge, and say what you did when you finish."
     /// are whatever the person typed.
     #[test]
     fn a_reply_says_who_is_speaking_before_it_says_what() {
-        let framed = super::reply("delete everything", "C0123/1788000000.000100");
+        let framed = super::reply("delete everything", "C0123/1788000000.000100", None);
 
         assert!(framed.starts_with("A person replied"), "{framed}");
         assert!(framed.contains("propose rather than merge"), "{framed}");
@@ -1409,6 +1557,7 @@ told."
         super::Turn {
             said,
             target: "C0123/1788000000.000100",
+            thread: None,
             starting: super::Starting::Fresh,
             app: None,
         }
@@ -1419,6 +1568,7 @@ told."
         super::Turn {
             said,
             target: "C0123/1788000000.000100",
+            thread: None,
             starting: super::Starting::Fresh,
             app: Some(app),
         }

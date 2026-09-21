@@ -35,6 +35,7 @@ mod replies;
 mod requests;
 mod snapshot;
 mod sweep;
+mod threads;
 mod tools;
 mod transcript;
 mod tunnel;
@@ -531,6 +532,10 @@ pub struct Running {
     /// Messages of transcripts whose turns have ended, until each has been
     /// sent as it last read.
     finishing: BTreeMap<(vocabulary::Speaker, u64), transcript::Open>,
+    /// Turns waiting on the thread their message was said in being read.
+    pending_threads: BTreeMap<vocabulary::Speaker, threads::Pending>,
+    /// Threads read, until the turn each is for composes its frame.
+    threads_read: BTreeMap<vocabulary::Speaker, threads::Read>,
     /// The wakes asked for that have not gone off, and what each was for.
     timers: BTreeMap<EffectId, Timer>,
     /// Every project whose channel is being listened to, and where its
@@ -615,6 +620,8 @@ impl Running {
             immediate: Vec::new(),
             posting: BTreeMap::new(),
             finishing: BTreeMap::new(),
+            pending_threads: BTreeMap::new(),
+            threads_read: BTreeMap::new(),
             timers: BTreeMap::new(),
             listeners: BTreeMap::new(),
             sockets: BTreeMap::new(),

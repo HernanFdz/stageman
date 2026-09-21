@@ -171,7 +171,41 @@ impl Running {
             self.create_foreman_room(project, *channel, &speaking, &name);
             return;
         }
+        if self.reading_thread_first(project) {
+            return;
+        }
         self.inspect_before_turning(project);
+    }
+
+    /// Whether the message in hand was said in a thread that has not been
+    /// read for it, asking for the thread if so — per
+    /// `docs/decisions/0068-a-mention-is-shown-its-thread.md`, before the
+    /// container is looked at. A read already in flight is left to start
+    /// the turn when it is answered.
+    fn reading_thread_first(&mut self, project: ProjectId) -> bool {
+        let speaker = Speaker::Foreman(project);
+        if self.pending_threads.contains_key(&speaker) {
+            return true;
+        }
+        if self.threads_read.contains_key(&speaker) {
+            return false;
+        }
+        let Some(errand) = waiting_on(&self.state, project) else {
+            return false;
+        };
+        let in_thread = errand
+            .message
+            .as_deref()
+            .is_some_and(|message| message != errand.thread.id);
+        if !in_thread {
+            return false;
+        }
+        self.read_thread(
+            speaker,
+            crate::threads::Pending::Foreman { project },
+            &errand.thread.room,
+            &errand.thread.id,
+        )
     }
 
     /// The platform answered about the foreman's room: recorded, described
@@ -217,6 +251,9 @@ impl Running {
                 tracing::warn!(%project, %why, "the foreman's room could not be made");
             }
         }
+        if self.reading_thread_first(project) {
+            return;
+        }
         self.inspect_before_turning(project);
     }
 
@@ -224,7 +261,7 @@ impl Running {
     ///
     /// Held back behind whatever this step changed, so that a turn never
     /// starts on the strength of an inbox that is not on the disk.
-    fn inspect_before_turning(&mut self, project: ProjectId) {
+    pub(crate) fn inspect_before_turning(&mut self, project: ProjectId) {
         let container = stageman_foreman::container(project);
         let looking = self.ask(
             &Command::Label {
@@ -255,6 +292,9 @@ impl Running {
             return;
         };
         let speaker = Speaker::Foreman(project);
+        // Taken whether or not a turn follows, so that nothing read for one
+        // message is shown to the next.
+        let read = self.thread_taken(speaker);
         if self.turns.contains_key(&speaker) {
             tracing::debug!(%project, "the foreman is already working; ignored");
             return;
@@ -286,7 +326,17 @@ impl Running {
             Starting::Fresh
         };
         self.notice_turn(project, &errand, starting);
-        let asked = self.asked_of(project, &errand, starting);
+        // A session that is continued remembers what it was shown, so it is
+        // shown the thread since it last spoke there; one begun is shown all
+        // of it.
+        let remembers = present && keeps(agent, handout.agent());
+        let context = match (&read, errand.message.as_deref()) {
+            (Some(read), Some(message)) => {
+                crate::threads::thread_context(read, errand.thread.channel, !remembers, message)
+            }
+            _ => None,
+        };
+        let asked = self.asked_of(project, &errand, starting, context.as_deref());
         let warrant = self.warrant(
             speaker,
             Some(errand.thread.clone().into()),
@@ -386,7 +436,13 @@ impl Running {
     /// What a foreman's turn on an errand is told: the message or the
     /// signal, framed as whose it is; the brief; and the kits — the last two
     /// said every turn, because a session outlives the edits to them.
-    fn asked_of(&self, project: ProjectId, errand: &Errand, starting: Starting) -> String {
+    fn asked_of(
+        &self,
+        project: ProjectId,
+        errand: &Errand,
+        starting: Starting,
+        thread: Option<&str>,
+    ) -> String {
         let kits = kits_offered(&self.state, project);
         let kits: Vec<(&str, &str)> = kits
             .iter()
@@ -402,6 +458,7 @@ impl Running {
             stageman_foreman::Turn {
                 said: &errand.said,
                 target: &target,
+                thread,
                 starting,
                 app: errand.app.as_deref(),
             },
