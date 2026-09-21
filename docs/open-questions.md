@@ -358,6 +358,11 @@ and wrong within a day.
   scenario of its own, and the layout can be read from the first before the
   second is built.
 
+- Then show a mention its thread per
+  `docs/decisions/0068-a-mention-is-shown-its-thread.md`,
+  after narration is posted, because the frame names each message by the
+  identifier 0067 introduces.
+
 - Next, make the container tests a recorder, because what they check is what
   the pinned runtime and the pinned agent actually do, which is a recording
   rather than a test. A recipe runs reality, captures what it prints and how

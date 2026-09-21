@@ -101,6 +101,10 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   It is the whole of what makes a person's message ours: nothing without one
   is read, in a thread or at the root — see
   `docs/decisions/0031-a-mention-is-what-makes-it-ours.md`. Since
+  `docs/decisions/0068-a-mention-is-shown-its-thread.md`
+  the thread a mention was said in is *shown* to the turn it starts,
+  untagged messages included, which is a different thing from being read:
+  nothing there wakes anybody or costs a turn. Since
   `docs/decisions/0060-a-binding-is-a-workspace.md` the platform's own
   mention event is what is read, in every room the app has been invited to,
   so a mention is also what makes a person's message *arrive* at all. Worth a
@@ -158,6 +162,8 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   framed as the app's rather than as a person's. It waits in the inbox like
   any message and is gone once the turn ends; nothing keeps a signal after
   it has been judged, which is the sense in which it is still not an entity.
+  Since `docs/decisions/0068-a-mention-is-shown-its-thread.md` a
+  signal that follows an earlier message is shown that thread too.
 - **job** — one agent, in one isolated workspace, on one project, from kickoff
   to completion. A job happens once, and there is no retry: a second attempt is
   a new job with its own workspace. It may, however, outlive the process
@@ -242,6 +248,9 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   more than one. Since `docs/decisions/0060-a-binding-is-a-workspace.md` a
   person can go on talking to the foreman in the thread it answered in,
   because each message there is its own turn and the session remembers.
+  Since `docs/decisions/0068-a-mention-is-shown-its-thread.md`
+  a mention in a thread is shown the thread: its parent, and everything
+  said there since this instance last spoke in it.
 
   A job's room is named `<project>--<title>--<8 hex of the job id>`, and
   only the last part is load-bearing: an archived room keeps its name for

@@ -11,7 +11,10 @@ than being answered with a fixed sentence. The mention itself, and its being
 required inside a job's thread, stand — for people. Since
 `docs/decisions/0063-another-app-is-heard-in-a-watched-room.md` another
 app's message in a watched room is read with no mention at all, which is
-the one reading this record's rule does not govern.
+the one reading this record's rule does not govern. Since
+`docs/decisions/0068-a-mention-is-shown-its-thread.md`
+the thread a mention was said in is shown to the turn it starts, untagged
+messages included; what is *read* to wake anybody is unchanged.
 
 ## Context
 

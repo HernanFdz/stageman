@@ -12,7 +12,9 @@ that says a message was received. What the foreman is told to make of a
 signal is `docs/decisions/0064-a-project-has-a-brief.md`. Since
 `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`
 an agent's words are posted only in the room its speaker owns, so the
-silence this record decides for a signal holds by construction.
+silence this record decides for a signal holds by construction. Since
+`docs/decisions/0068-a-mention-is-shown-its-thread.md`
+a signal in a thread is shown the thread it follows.
 
 Every claim below about what the platform does was measured on 2026-09-15
 against a real workspace, with the GitHub app subscribed to a repository and
