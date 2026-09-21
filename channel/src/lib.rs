@@ -38,6 +38,9 @@ pub struct Identity {
     pub user: String,
     /// What a post made with this instance's credential carries.
     pub bot: String,
+    /// Where the workspace is, as an address a person can open: what a link
+    /// to a message starts from.
+    pub url: String,
 }
 
 /// One message heard on a channel, as decoded.
@@ -330,6 +333,22 @@ pub fn room_link(channel: Channel, room: &str) -> String {
     }
 }
 
+/// A link to one message in a room, as a person can open it, from where
+/// the channel said its workspace is: the message's own, or its place in a
+/// thread when it is a reply.
+#[must_use]
+pub fn permalink(
+    channel: Channel,
+    us: &Identity,
+    room: &str,
+    message: &str,
+    thread: Option<&str>,
+) -> String {
+    match channel {
+        Channel::Slack => slack::permalink(us, room, message, thread),
+    }
+}
+
 /// A mention of somebody, as the channel renders one inside a message.
 #[must_use]
 pub fn mention(channel: Channel, user: &str) -> String {
@@ -534,9 +553,9 @@ pub enum ChannelError {
 mod tests {
     use super::{
         Call, ChannelError, Identity, Incoming, Reaction, acknowledgement, archive, create_room,
-        decode, done, foreman_room_name, identity, invite, mention, open_socket, pieces, post,
-        posted, react, room_created, room_link, room_name, set_purpose, set_topic, socket_url,
-        update, who_am_i,
+        decode, done, foreman_room_name, identity, invite, mention, open_socket, permalink, pieces,
+        post, posted, react, room_created, room_link, room_name, set_purpose, set_topic,
+        socket_url, update, who_am_i,
     };
     use stageman_core::{Channel, JobId, ProjectId, Secret, Speaking, Uuid};
 
@@ -626,12 +645,12 @@ mod tests {
             identity(
                 Channel::Slack,
                 200,
-                br#"{"ok":true,"user_id":"U0BOT","bot_id":"B0SELF"}"#
+                br#"{"ok":true,"user_id":"U0BOT","bot_id":"B0SELF","url":"https://example.slack.com/"}"#
             )
             .expect("told"),
             Identity {
                 user: "U0BOT".to_owned(),
-                bot: "B0SELF".to_owned(),
+                bot: "B0SELF".to_owned(), url: "https://example.slack.com/".to_owned(),
             }
         );
         assert!(matches!(
@@ -674,6 +693,7 @@ mod tests {
         let us = Identity {
             user: "U0BOT".to_owned(),
             bot: "B0SELF".to_owned(),
+            url: "https://example.slack.com/".to_owned(),
         };
         let heard = decode(
             Channel::Slack,
@@ -825,6 +845,44 @@ mod tests {
         );
         assert_eq!(room_link(Channel::Slack, "C0C1VNX9AA2"), "<#C0C1VNX9AA2>");
         assert_eq!(mention(Channel::Slack, "U0HUMAN"), "<@U0HUMAN>");
+    }
+
+    /// A link to a message is the workspace's address, the room and the
+    /// message's digits; a reply's names its thread as well. As measured on
+    /// 2026-09-21 against a real workspace.
+    #[test]
+    fn a_link_to_a_message_reads_as_the_platform_spells_one() {
+        let us = Identity {
+            user: "U0BOT".to_owned(),
+            bot: "B0SELF".to_owned(),
+            url: "https://example.slack.com/".to_owned(),
+        };
+        assert_eq!(
+            permalink(Channel::Slack, &us, ROOM, "1788000000.000100", None),
+            "https://example.slack.com/archives/C0123456789/p1788000000000100"
+        );
+        assert_eq!(
+            permalink(
+                Channel::Slack,
+                &us,
+                ROOM,
+                "1788000000.000200",
+                Some("1788000000.000100")
+            ),
+            "https://example.slack.com/archives/C0123456789/p1788000000000200\
+             ?thread_ts=1788000000.000100&cid=C0123456789"
+        );
+        assert_eq!(
+            permalink(
+                Channel::Slack,
+                &us,
+                ROOM,
+                "1788000000.000100",
+                Some("1788000000.000100")
+            ),
+            "https://example.slack.com/archives/C0123456789/p1788000000000100",
+            "a thread's parent is linked as itself"
+        );
     }
 
     /// An edit reads back as what it asked, and is answered as a post is.

@@ -17,6 +17,7 @@ mod dashboard;
 mod foreman;
 mod foreman_room;
 mod listening;
+mod notices;
 mod replies;
 mod signals;
 mod simulation;

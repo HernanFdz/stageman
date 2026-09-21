@@ -376,6 +376,28 @@ pub fn thread(n: u32) -> Thread {
     }
 }
 
+/// What identifies a person's message at the root of a job's room, as the
+/// simulation numbers one.
+pub const SAID_IN_ROOM: &str = "1788000099.000004";
+
+/// What identifies a person's message in a thread of a job's room, as the
+/// simulation numbers one.
+pub const SAID_IN_ROOMS_THREAD: &str = "1788000099.000005";
+
+/// Who this instance is on the simulated platform, as the platform answers.
+pub fn us() -> stageman_channel::Identity {
+    stageman_channel::Identity {
+        user: "U0BOT".to_owned(),
+        bot: "B0SELF".to_owned(),
+        url: "https://example.slack.com/".to_owned(),
+    }
+}
+
+/// A link to a message in a room, as the notices spell one.
+pub fn link_to(room: &str, message: &str, thread: Option<&str>) -> String {
+    stageman_channel::permalink(Channel::Slack, &us(), room, message, thread)
+}
+
 /// A job's room, named by number: the n-th room the platform made.
 pub fn room(n: u32) -> Room {
     Room {
@@ -1915,7 +1937,7 @@ impl Simulation {
                 let body = if let Some(error) = self.listen_failures.pop_front() {
                     format!(r#"{{"ok":false,"error":"{error}"}}"#)
                 } else if matches!(question, Call::WhoAmI { .. }) {
-                    r#"{"ok":true,"user_id":"U0BOT","bot_id":"B0SELF"}"#.to_owned()
+                    r#"{"ok":true,"user_id":"U0BOT","bot_id":"B0SELF","url":"https://example.slack.com/"}"#.to_owned()
                 } else {
                     self.streams_opened += 1;
                     format!(

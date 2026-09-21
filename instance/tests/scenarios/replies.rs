@@ -3,7 +3,8 @@
 use stageman_channel::Reaction;
 
 use crate::simulation::{
-    CHANNEL, Simulation, Spoken, in_room, job, room, seed, watching_a_channel,
+    CHANNEL, SAID_IN_ROOM, SAID_IN_ROOMS_THREAD, Simulation, Spoken, in_room, job, link_to, room,
+    seed, watching_a_channel,
 };
 use stageman_core::{JobId, Outcome, Place, Progress, State, Waiting};
 
@@ -51,13 +52,17 @@ fn a_reply_to_an_idle_job_resumes_it_after_the_record_lands() {
     assert_eq!(
         world.posts(),
         [
+            (
+                in_room(1),
+                format!("▶️ Handling {}.", link_to(&room(1).id, SAID_IN_ROOM, None))
+            ),
             (in_room(1), "done".to_owned()),
             (
                 in_room(1),
                 stageman_foreman::stopped_notice(&Waiting::Silent, None, "<@U0BOT>")
             ),
         ],
-        "what the agent said is posted at the root, and the room is told once, when the turn ends"
+        "why the turn started, what the agent said, and that it ended, at the root in order"
     );
 }
 
@@ -121,7 +126,14 @@ fn a_reply_to_a_working_job_is_refused_and_said_so() {
 
     assert_eq!(
         world.posts(),
-        [(in_room(1), stageman_foreman::busy_notice().to_owned())]
+        [
+            (
+                in_room(1),
+                stageman_foreman::turn_notice(&stageman_foreman::Because::Restart(None))
+            ),
+            (in_room(1), stageman_foreman::busy_notice().to_owned()),
+        ],
+        "waking said why it put the job back to work, and the reply is refused"
     );
     assert_eq!(progress_of(instance.state(), working), Progress::Working);
     assert_eq!(
@@ -154,10 +166,12 @@ fn two_replies_arriving_together_resume_one_turn() {
     let runs = world.talks();
     assert_eq!(runs.len(), 1, "{runs:?}");
     assert!(runs.first().expect("one").was_told("first"));
-    assert_eq!(
-        world.posts().first().map(|(_, text)| text.as_str()),
-        Some(stageman_foreman::busy_notice()),
-        "the second was refused and told"
+    assert!(
+        world
+            .posts()
+            .contains(&(in_room(1), stageman_foreman::busy_notice().to_owned())),
+        "the second was refused and told: {:?}",
+        world.posts()
     );
 }
 
@@ -231,14 +245,28 @@ fn a_mention_in_a_thread_of_a_jobs_room_is_answered_there_and_noticed_at_the_roo
     assert_eq!(
         world.posts(),
         [
+            (
+                in_room(1),
+                format!(
+                    "▶️ Handling {}.",
+                    link_to(&room(1).id, SAID_IN_ROOMS_THREAD, Some("1788000000.500000"))
+                )
+            ),
             (in_room(1), "done".to_owned()),
             (
                 in_room(1),
                 stageman_foreman::stopped_notice(&Waiting::Silent, None, "<@U0BOT>")
             ),
+            (
+                Place {
+                    room: room(1),
+                    thread: Some("1788000000.500000".to_owned()),
+                },
+                stageman_foreman::answered_elsewhere_notice("<#C-job-001>")
+            ),
         ],
-        "what the agent said and the notice both go to the root of its room, whatever thread \
-         the exchange was in"
+        "why it started, what the agent said and that it ended go to the root, whatever thread \
+         the exchange was in; the thread that got no answer is signposted there"
     );
 }
 
@@ -261,12 +289,14 @@ fn a_mention_in_a_thread_belonging_to_no_job_reaches_the_foreman() {
     world.says_in(100, 7, "hello?");
     world.run_until(&mut instance, 5_000);
 
+    let in_threads: Vec<_> = world
+        .posts()
+        .iter()
+        .filter(|(place, _)| place.thread.is_some())
+        .collect();
     assert!(
-        world
-            .posts()
-            .iter()
-            .all(|(place, _)| place.thread.is_none()),
-        "nothing in the thread on the instance's behalf: {:?}",
+        in_threads.len() == 1 && in_threads[0].1.starts_with("↩️"),
+        "the thread is only signposted, since the simulated foreman answers nowhere: {:?}",
         world.posts()
     );
     assert_eq!(

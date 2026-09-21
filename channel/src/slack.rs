@@ -367,10 +367,30 @@ pub fn identity(status: u16, body: &[u8]) -> Result<Identity, ChannelError> {
         .get("bot_id")
         .and_then(serde_json::Value::as_str)
         .ok_or(ChannelError::NotABot)?;
+    // Where the workspace is, which every answer to this question carries
+    // and a link to a message starts from.
+    let url = told
+        .get("url")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(ChannelError::NoAnswer)?;
     Ok(Identity {
         user: user.to_owned(),
         bot: bot.to_owned(),
+        url: url.to_owned(),
     })
+}
+
+/// A link to one message, as Slack spells one — measured on 2026-09-21
+/// against a real workspace, through the platform's own permalink call: the
+/// workspace's address, the room, and the message's identifier with its
+/// dot removed; and for a reply, the thread it is in and the room again.
+pub fn permalink(us: &Identity, room: &str, message: &str, thread: Option<&str>) -> String {
+    let digits: String = message.chars().filter(|c| *c != '.').collect();
+    let base = format!("{}/archives/{room}/p{digits}", us.url.trim_end_matches('/'));
+    match thread {
+        Some(parent) if parent != message => format!("{base}?thread_ts={parent}&cid={room}"),
+        _ => base,
+    }
 }
 
 /// Where to connect, from the answer to [`open_socket`].
@@ -924,6 +944,7 @@ mod tests {
         Identity {
             user: "U0BOT".to_owned(),
             bot: "B0SELF".to_owned(),
+            url: "https://example.slack.com/".to_owned(),
         }
     }
 
@@ -1349,10 +1370,10 @@ alerts
     #[test]
     fn who_this_instance_is_needs_a_bot_token() {
         assert_eq!(
-            identity(200, br#"{"ok":true,"user_id":"U0BOT","bot_id":"B0SELF"}"#).expect("a bot"),
+            identity(200, br#"{"ok":true,"user_id":"U0BOT","bot_id":"B0SELF","url":"https://example.slack.com/"}"#).expect("a bot"),
             Identity {
                 user: "U0BOT".to_owned(),
-                bot: "B0SELF".to_owned(),
+                bot: "B0SELF".to_owned(), url: "https://example.slack.com/".to_owned(),
             }
         );
         assert!(matches!(

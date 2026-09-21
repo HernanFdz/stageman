@@ -285,6 +285,7 @@ impl Running {
         } else {
             Starting::Fresh
         };
+        self.notice_turn(project, &errand, starting);
         let asked = self.asked_of(project, &errand, starting);
         let warrant = self.warrant(
             speaker,
@@ -351,6 +352,37 @@ impl Running {
         effects.push(first);
     }
 
+    /// Says at the root of the foreman's room why a turn is starting, with
+    /// a link to what started it, before anything the agent says — see
+    /// `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`.
+    /// Nothing without a room.
+    fn notice_turn(&mut self, project: ProjectId, errand: &Errand, starting: Starting) {
+        let Some((speaking, room)) = self.state.projects.get(&project).and_then(|watched| {
+            let room = watched.foreman_room.clone()?;
+            Some((watched.channels.get(&room.channel)?.speaking(), room))
+        }) else {
+            return;
+        };
+        let thread = &errand.thread;
+        let link = errand.message.as_deref().and_then(|message| {
+            let parent = (thread.id != message).then_some(thread.id.as_str());
+            self.permalink(project, thread.channel, &thread.room, message, parent)
+        });
+        let because = match (starting, errand.app.as_deref()) {
+            (Starting::Interrupted, _) => stageman_foreman::Because::Restart(link.as_deref()),
+            (Starting::Fresh, Some(app)) => stageman_foreman::Because::Signal {
+                app,
+                link: link.as_deref(),
+            },
+            (Starting::Fresh, None) => stageman_foreman::Because::Message(link.as_deref()),
+        };
+        self.say(
+            &speaking,
+            &Place::root(room),
+            &stageman_foreman::turn_notice(&because),
+        );
+    }
+
     /// What a foreman's turn on an errand is told: the message or the
     /// signal, framed as whose it is; the brief; and the kits — the last two
     /// said every turn, because a session outlives the edits to them.
@@ -383,20 +415,35 @@ impl Running {
         project: ProjectId,
         outcome: Result<stageman_agent::Answer, String>,
         made: bool,
+        spoke_in_place: bool,
         effects: &mut Vec<Effect>,
     ) {
         match outcome {
             Ok(_) => {
-                if let Some(errand) = waiting_on(&self.state, project)
-                    && let Some(message) = errand.message
-                {
-                    self.react_in(
-                        project,
-                        errand.thread.channel,
-                        &errand.thread.room,
-                        &message,
-                        Reaction::Done,
-                    );
+                if let Some(errand) = waiting_on(&self.state, project) {
+                    if let Some(message) = &errand.message {
+                        self.react_in(
+                            project,
+                            errand.thread.channel,
+                            &errand.thread.room,
+                            message,
+                            Reaction::Done,
+                        );
+                    }
+                    // A person answered nowhere is told where the foreman's
+                    // notes went: the signpost of 0067. Never under a signal,
+                    // where silence is the decision 0063 keeps.
+                    if errand.app.is_none() && !spoke_in_place {
+                        let room = self.state.projects.get(&project).and_then(|watched| {
+                            let room = watched.foreman_room.as_ref()?;
+                            Some(stageman_channel::room_link(room.channel, &room.id))
+                        });
+                        self.notice_in(
+                            project,
+                            &errand.thread,
+                            &stageman_foreman::handled_elsewhere_notice(room.as_deref()),
+                        );
+                    }
                 }
             }
             Err(why) => {

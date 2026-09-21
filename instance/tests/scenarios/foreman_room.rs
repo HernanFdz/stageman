@@ -2,8 +2,11 @@
 //! where its transcript is posted — see
 //! `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`.
 
-use crate::simulation::{Simulation, Utterance, in_room, project, room, seed, watching_a_channel};
-use stageman_core::Room;
+use crate::simulation::{
+    CHANNEL, SAID_IN_ROOM, Simulation, Utterance, in_room, in_thread, link_to, project, room, seed,
+    thread, watching_a_channel,
+};
+use stageman_core::{Place, Room};
 
 /// The room a foreman's transcript goes to, once made: the first room the
 /// simulation makes.
@@ -62,10 +65,18 @@ fn the_first_message_makes_the_foremans_room_before_it_turns() {
                 in_room(1),
                 stageman_foreman::foreman_room_opening("example", "<@U0BOT>")
             ),
+            (
+                in_room(1),
+                format!("▶️ Handling {}.", link_to(CHANNEL, &thread(1).id, None))
+            ),
             (in_room(1), "done".to_owned()),
+            (
+                in_thread(1),
+                stageman_foreman::handled_elsewhere_notice(Some("<#C-job-001>"))
+            ),
         ],
-        "the opening, then what the foreman said, at the root of its room; nothing in the \
-         person's thread, since the simulated foreman never calls the tool"
+        "the opening, why the turn started, and what the foreman said, at the root of its \
+         room; the person's thread signposted, since the simulated foreman never calls the tool"
     );
 }
 
@@ -115,7 +126,14 @@ fn a_room_that_cannot_be_made_does_not_stop_the_turn() {
             .is_some_and(|watched| watched.foreman_room.is_none()),
         "nothing recorded"
     );
-    assert!(world.posts().is_empty(), "{:?}", world.posts());
+    assert_eq!(
+        world.posts(),
+        [(
+            in_thread(1),
+            stageman_foreman::handled_elsewhere_notice(None)
+        )],
+        "signposted with nowhere to point"
+    );
 }
 
 /// A person's mention in the foreman's own room reaches the foreman, as a
@@ -133,11 +151,23 @@ fn a_mention_in_the_foremans_room_reaches_the_foreman() {
     world.run_until(&mut instance, 12_000);
 
     assert_eq!(world.talks().len(), 2, "{:?}", world.shape());
-    assert_eq!(
-        world.posts().last(),
-        Some(&(in_room(1), "Reading it back.".to_owned())),
+    assert!(
+        world
+            .posts()
+            .contains(&(in_room(1), "Reading it back.".to_owned())),
         "the second turn's transcript, in the same room: {:?}",
         world.posts()
+    );
+    assert_eq!(
+        world.posts().last(),
+        Some(&(
+            Place {
+                room: room(1),
+                thread: Some(SAID_IN_ROOM.to_owned()),
+            },
+            stageman_foreman::handled_elsewhere_notice(Some("<#C-job-001>"))
+        )),
+        "and the question's thread signposted, since the simulated foreman answers nowhere"
     );
     assert_eq!(
         world.rooms().len(),

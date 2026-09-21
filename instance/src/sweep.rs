@@ -318,6 +318,12 @@ impl Running {
             };
             let speaker = Speaker::Job(*job);
             let warrant = self.warrant(speaker, room.map(Place::root), None);
+            // The room is told why a turn is starting in it, since what the
+            // agent says next is about something: the restart.
+            self.notice(
+                *job,
+                &stageman_foreman::turn_notice(&stageman_foreman::Because::Restart(None)),
+            );
             let first = self.turn(
                 speaker,
                 Turn::quiet(Run::Resume {

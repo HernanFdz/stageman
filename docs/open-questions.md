@@ -329,10 +329,11 @@ Intended next steps, in order, each with its reason. Written as intentions, not
 progress: "next X, because Y" — never "X is 60% done", which is both derivable
 and wrong within a day.
 
-- Next, the rest of
+- Next, the last of
   `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`:
-  the notice that says why a turn started, the signpost, and the tool's
-  target, each a scenario of its own.
+  the tool's target, so that a job or a foreman can reply into a thread by
+  naming the message, and every message an agent is shown carries its
+  identifier.
 
 - Then show a mention its thread per
   `docs/decisions/0068-a-mention-is-shown-its-thread.md`,

@@ -223,6 +223,19 @@ impl Running {
             text,
             place.thread.as_deref(),
         );
+        // A turn answered where it was asked: what says the signpost of 0067
+        // is not needed, whether the post is the agent's or this instance's.
+        let answered: Vec<Speaker> = self
+            .warrants
+            .values()
+            .filter(|warranted| warranted.place.as_ref() == Some(place))
+            .map(|warranted| warranted.speaker)
+            .collect();
+        for speaker in answered {
+            if let Some(turn) = self.turns.get_mut(&speaker) {
+                turn.spoke_in_place = true;
+            }
+        }
         let id = self.effect_id();
         self.sent.insert(
             id,
@@ -531,6 +544,24 @@ impl Running {
                 || "@stageman".to_owned(),
                 |us| stageman_channel::mention(channel, &us.user),
             )
+    }
+
+    /// A link to a message on a project's channel, once its listener has
+    /// been told where the workspace is; none until then, which a notice
+    /// says without a link.
+    #[must_use]
+    pub fn permalink(
+        &self,
+        project: ProjectId,
+        channel: Channel,
+        room: &str,
+        message: &str,
+        thread: Option<&str>,
+    ) -> Option<String> {
+        self.listeners
+            .get(&project)
+            .and_then(|listener| listener.us.as_ref())
+            .map(|us| stageman_channel::permalink(channel, us, room, message, thread))
     }
 
     /// Posts on an agent's behalf, with the tool call held open until the

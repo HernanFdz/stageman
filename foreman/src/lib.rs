@@ -134,6 +134,61 @@ pub fn started_notice(link: &str) -> String {
     format!("Started a job for this: {link}.")
 }
 
+/// Why a turn started, as the notice at the root of a room says it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Because<'a> {
+    /// A person's message, linked when the channel can link it.
+    Message(Option<&'a str>),
+    /// Another app's post in a watched room, by the app's name.
+    Signal {
+        /// The app, as the platform names it.
+        app: &'a str,
+        /// A link to what it posted, when the channel can link it.
+        link: Option<&'a str>,
+    },
+    /// This process restarted with a turn in hand, linked to what the turn
+    /// was on when the channel can link it.
+    Restart(Option<&'a str>),
+}
+
+/// What the root of a room is told when a turn starts there.
+///
+/// Why, with a link to what started it. Posted by the instance before
+/// anything the agent says, so that what follows is about something — see
+/// `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`.
+#[must_use]
+pub fn turn_notice(because: &Because<'_>) -> String {
+    match because {
+        Because::Message(Some(link)) => format!("▶️ Handling {link}."),
+        Because::Message(None) => "▶️ Handling a message.".to_owned(),
+        Because::Signal {
+            app,
+            link: Some(link),
+        } => format!("▶️ Judging what {app} posted: {link}."),
+        Because::Signal { app, link: None } => format!("▶️ Judging what {app} posted."),
+        Because::Restart(Some(link)) => format!("▶️ Picking up {link} again after a restart."),
+        Because::Restart(None) => "▶️ Picking up again after a restart.".to_owned(),
+    }
+}
+
+/// What a thread is told when the job it asked in answered elsewhere: at the
+/// root of its room, where its transcript goes. The signpost of 0067, for
+/// the turn that missed the tool call.
+#[must_use]
+pub fn answered_elsewhere_notice(room: &str) -> String {
+    format!("↩️ Answered at the root of {room}.")
+}
+
+/// What a thread is told when the foreman handled the message without
+/// answering there: where its notes went, when it has a room to link.
+#[must_use]
+pub fn handled_elsewhere_notice(room: Option<&str>) -> String {
+    room.map_or_else(
+        || "↩️ Handled without answering here.".to_owned(),
+        |room| format!("↩️ Handled without answering here; its notes are in {room}."),
+    )
+}
+
 /// What a foreman's room is for, as the sidebar shows it beside the name.
 #[must_use]
 pub fn foreman_room_purpose(project: &str) -> String {
@@ -926,6 +981,54 @@ here is between people._"
         assert_eq!(
             super::started_notice("<#C0C1VNX9AA2>"),
             "Started a job for this: <#C0C1VNX9AA2>."
+        );
+        assert_eq!(
+            super::turn_notice(&super::Because::Message(Some(
+                "https://example.slack.com/archives/C0123/p1788000000000100"
+            ))),
+            "▶️ Handling https://example.slack.com/archives/C0123/p1788000000000100."
+        );
+        assert_eq!(
+            super::turn_notice(&super::Because::Message(None)),
+            "▶️ Handling a message."
+        );
+        assert_eq!(
+            super::turn_notice(&super::Because::Signal {
+                app: "GitHub",
+                link: Some("https://example.slack.com/archives/C0123/p1788000000000100"),
+            }),
+            "▶️ Judging what GitHub posted: \
+             https://example.slack.com/archives/C0123/p1788000000000100."
+        );
+        assert_eq!(
+            super::turn_notice(&super::Because::Signal {
+                app: "GitHub",
+                link: None,
+            }),
+            "▶️ Judging what GitHub posted."
+        );
+        assert_eq!(
+            super::turn_notice(&super::Because::Restart(Some(
+                "https://example.slack.com/archives/C0123/p1788000000000100"
+            ))),
+            "▶️ Picking up https://example.slack.com/archives/C0123/p1788000000000100 again \
+             after a restart."
+        );
+        assert_eq!(
+            super::turn_notice(&super::Because::Restart(None)),
+            "▶️ Picking up again after a restart."
+        );
+        assert_eq!(
+            super::answered_elsewhere_notice("<#C0C1VNX9AA2>"),
+            "↩️ Answered at the root of <#C0C1VNX9AA2>."
+        );
+        assert_eq!(
+            super::handled_elsewhere_notice(Some("<#C0C1VNX9AA2>")),
+            "↩️ Handled without answering here; its notes are in <#C0C1VNX9AA2>."
+        );
+        assert_eq!(
+            super::handled_elsewhere_notice(None),
+            "↩️ Handled without answering here."
         );
         assert_eq!(
             super::foreman_room_purpose("aviary"),

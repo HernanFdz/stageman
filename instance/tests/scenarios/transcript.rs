@@ -3,7 +3,9 @@
 //! place — run against the simulated world. See
 //! `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`.
 
-use crate::simulation::{Simulation, Utterance, in_room, job, seed, watching_a_channel};
+use crate::simulation::{
+    SAID_IN_ROOM, Simulation, Utterance, in_room, job, link_to, room, seed, watching_a_channel,
+};
 use stageman_core::{JobId, Progress, Waiting};
 
 /// An idle job with a room, ready to be put back to work by a reply at the
@@ -38,6 +40,11 @@ fn the_notice() -> String {
     stageman_foreman::stopped_notice(&Waiting::Silent, None, "<@U0BOT>")
 }
 
+/// What the root is told first: why the turn started, linking the reply.
+fn the_start() -> String {
+    format!("▶️ Handling {}.", link_to(&room(1).id, SAID_IN_ROOM, None))
+}
+
 /// Each run of narration is one message and each run of working one
 /// burst, at the root in the order they happened, with the notice that the
 /// turn ended after all of it. A run of narration that grew after its post
@@ -60,6 +67,7 @@ fn narration_and_working_are_posted_per_run_at_the_root_in_order() {
     assert_eq!(
         root_reads(&world),
         [
+            the_start(),
             "Looking at the parser.".to_owned(),
             "⏳ ran `cargo test`\n⏳ ran `cargo test -- --nocapture`".to_owned(),
             "Fixed the flaky assertion.".to_owned(),
@@ -86,7 +94,7 @@ fn a_message_is_opened_only_after_the_previous_post_is_answered() {
 
     let posts = world.post_calls();
     let answered = world.responded_at();
-    assert_eq!(posts.len(), 5, "{posts:?}");
+    assert_eq!(posts.len(), 6, "{posts:?}");
     for pair in posts.windows(2) {
         let (before, after) = (pair[0].0, pair[1].0);
         assert!(
@@ -116,9 +124,13 @@ fn a_long_run_continues_in_a_second_post() {
     world.run_until(&mut instance, 5_000);
 
     let posts = root_reads(&world);
-    assert_eq!(posts.len(), 3, "two pieces and the notice: {posts:?}");
-    assert!(posts[0].chars().count() <= 12_000);
-    assert_eq!(format!("{}\n{}", posts[0], posts[1]), long);
+    assert_eq!(
+        posts.len(),
+        4,
+        "the start, two pieces and the notice: {posts:?}"
+    );
+    assert!(posts[1].chars().count() <= 12_000);
+    assert_eq!(format!("{}\n{}", posts[1], posts[2]), long);
 }
 
 /// A burst grows in place: a call ending marks its line, a call beginning
@@ -145,6 +157,7 @@ fn a_burst_grows_in_place_as_calls_begin_and_end() {
     assert_eq!(
         root_reads(&world),
         [
+            the_start(),
             "Running the tests.".to_owned(),
             "✅ ran `cargo test`\n❌ ran `cargo build`".to_owned(),
             "Red.".to_owned(),
@@ -176,7 +189,7 @@ fn growth_is_paced() {
 
     assert_eq!(
         root_reads(&world),
-        ["abcdefghijkl".to_owned(), the_notice()],
+        [the_start(), "abcdefghijkl".to_owned(), the_notice()],
         "one message, read whole"
     );
     assert!(
@@ -204,6 +217,7 @@ fn a_call_ending_after_its_burst_closed_still_marks_the_line() {
     assert_eq!(
         root_reads(&world),
         [
+            the_start(),
             "✅ ran `cargo test`".to_owned(),
             "Meanwhile, the docs.".to_owned(),
             the_notice(),
@@ -229,6 +243,7 @@ fn a_thought_is_a_quoted_line_in_the_burst() {
     assert_eq!(
         root_reads(&world),
         [
+            the_start(),
             "> 💭 The tests first.\n⏳ ran `ls`".to_owned(),
             the_notice()
         ]

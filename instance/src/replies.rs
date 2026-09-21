@@ -67,16 +67,7 @@ impl Running {
         match self.state.recipient(project, channel, &arriving) {
             Recipient::Job(job) => {
                 tracing::info!(%job, "handing a reply to the job whose room it is in");
-                // Answered where it was said: in the thread the person asked
-                // in, or at the root of the room.
-                let place = Place {
-                    room: Room {
-                        channel,
-                        id: message.room.clone(),
-                    },
-                    thread: message.thread.clone(),
-                };
-                self.replied(job, &message.text, place);
+                self.replied(project, job, channel, message);
             }
             Recipient::Foreman(project) => {
                 if let Some(app) = &message.app {
@@ -99,9 +90,20 @@ impl Running {
     /// job is working to land: the record before the container, as
     /// everywhere. A refusal changes nothing, so the notice of it is said at
     /// once. The turn speaks where the reply was said, in the thread if it
-    /// was in one; the notice that it ended goes to the root of the room,
-    /// because it is about the job rather than part of the exchange.
-    fn replied(&mut self, job: JobId, said: &str, place: Place) {
+    /// was in one; the root of the room is told why the turn started, with
+    /// a link to the reply, and told when it ended, because both are about
+    /// the job rather than part of the exchange.
+    fn replied(&mut self, project: ProjectId, job: JobId, channel: Channel, message: &Message) {
+        // Answered where it was said: in the thread the person asked in, or
+        // at the root of the room.
+        let place = Place {
+            room: Room {
+                channel,
+                id: message.room.clone(),
+            },
+            thread: message.thread.clone(),
+        };
+        let said = message.text.as_str();
         match accepting(&mut self.state, job) {
             Accepted::Taken => {
                 // `accepting` wrote the state; this is the one writer that
@@ -110,6 +112,19 @@ impl Running {
                 let Some((_, kit)) = self.recorded(job) else {
                     return;
                 };
+                let link = self.permalink(
+                    project,
+                    channel,
+                    &message.room,
+                    &message.id,
+                    message.thread.as_deref(),
+                );
+                self.notice(
+                    job,
+                    &stageman_foreman::turn_notice(&stageman_foreman::Because::Message(
+                        link.as_deref(),
+                    )),
+                );
                 let speaker = Speaker::Job(job);
                 let warrant = self.warrant(speaker, Some(place), None);
                 // Resuming starts the container, which publishes its tunnel
@@ -138,7 +153,7 @@ impl Running {
     /// Says something at the root of a job's room, if it has one, once
     /// whatever this step changed is on the disk — which for a refusal is
     /// nothing, so it goes at once.
-    fn notice(&mut self, job: JobId, text: &str) {
+    pub(crate) fn notice(&mut self, job: JobId, text: &str) {
         if let Some((speaking, place)) = speaking_for(&self.state, job) {
             self.say(&speaking, &place, text);
         }

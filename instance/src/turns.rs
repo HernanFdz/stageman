@@ -178,6 +178,10 @@ pub struct Turn {
     pub stopping: bool,
     /// What the agent said about why it is stopping, if it has said.
     pub claimed: Option<Waiting>,
+    /// Whether anything was posted where this turn was asked, by the agent
+    /// through the tool or by this instance: what decides whether the
+    /// thread is signposted to where the answer went when the turn ends.
+    pub spoke_in_place: bool,
     /// Whether the root of the job's room is told when this turn ends.
     ///
     /// A turn a person caused is; one waking put back to work is not, since
@@ -204,6 +208,7 @@ impl Turn {
         Self {
             stopping: false,
             claimed: None,
+            spoke_in_place: false,
             notify: false,
             stage: Self::first_stage(&run),
             run,
@@ -216,6 +221,7 @@ impl Turn {
         Self {
             stopping: false,
             claimed: None,
+            spoke_in_place: false,
             notify: true,
             stage: Self::first_stage(&run),
             run,
@@ -727,6 +733,13 @@ impl Running {
         if let Some(process) = turn.process() {
             self.talking.remove(&process);
         }
+        // Where the turn was asked, before its warrant goes: what the
+        // signpost below is said in.
+        let asked_in = self
+            .warrants
+            .values()
+            .find(|known| known.speaker == speaker)
+            .and_then(|known| known.place.clone());
         self.warrants.retain(|_, known| known.speaker != speaker);
         // Whatever the agent said last is posted before anything said about
         // the turn's end, since both go to the same room in turn.
@@ -745,7 +758,7 @@ impl Running {
                         | Stage::Talking { .. }
                         | Stage::Closing { .. }
                 );
-                self.foreman_ended(project, outcome, made, effects);
+                self.foreman_ended(project, outcome, made, turn.spoke_in_place, effects);
                 return;
             }
             Speaker::Job(job) => job,
@@ -797,6 +810,22 @@ impl Running {
                 &speaking,
                 &root,
                 &stageman_foreman::stopped_notice(&waiting, asked_by.as_deref(), &mention),
+            );
+        }
+
+        // A thread the job was asked in and never answered in is told where
+        // the answer went: the root, where its transcript goes. The signpost
+        // of 0067, for the turn that missed the tool call.
+        if let Some(place) = asked_in
+            && place.thread.is_some()
+            && !turn.spoke_in_place
+            && let Some((speaking, _)) = speaking_for(&self.state, job)
+        {
+            let link = stageman_channel::room_link(place.room.channel, &place.room.id);
+            self.say(
+                &speaking,
+                &place,
+                &stageman_foreman::answered_elsewhere_notice(&link),
             );
         }
     }
