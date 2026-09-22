@@ -36,8 +36,10 @@ const BY_HAND: &str = "started by hand from the dashboard";
 /// What a person can ask.
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Request {
-    /// The instance screen.
+    /// The line at the foot of every page: this machine, and this build.
     Instance,
+    /// The first page.
+    Home,
     /// Every agent, whether or not it is configured.
     Agents,
     /// Give an agent a credential, or replace the one it has.
@@ -111,6 +113,7 @@ impl fmt::Debug for Request {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Instance => f.write_str("Instance"),
+            Self::Home => f.write_str("Home"),
             Self::Agents => f.write_str("Agents"),
             Self::Configure { agent, .. } => f
                 .debug_struct("Configure")
@@ -163,8 +166,10 @@ impl fmt::Debug for Request {
 /// What a person is answered.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Response {
-    /// The instance screen.
+    /// The line at the foot of every page.
     Instance(stageman_wire::Instance),
+    /// The first page.
+    Home(stageman_wire::Home),
     /// The agents screen.
     Agents(Vec<stageman_wire::Agent>),
     /// The projects screen.
@@ -179,9 +184,15 @@ impl Running {
     /// Answers a request, once whatever it changed is on the disk.
     pub fn requested(&mut self, id: RequestId, request: Request, effects: &mut Vec<Effect>) {
         let answered = match request {
-            Request::Instance => Ok(Response::Instance(views::overview(
+            Request::Instance => Ok(Response::Instance(views::instance(
                 &self.state,
                 &self.runtime.display().to_string(),
+                &self.domain,
+            ))),
+            Request::Home => Ok(Response::Home(views::home(
+                &self.state,
+                &self.domain,
+                self.serving,
             ))),
             Request::Agents => Ok(Response::Agents(views::listed(&self.state))),
             Request::Configure { agent, credential } => self.configure(&agent, &credential),
@@ -1106,6 +1117,7 @@ mod tests {
 
         let named = [
             (Request::Instance, "Instance"),
+            (Request::Home, "Home"),
             (Request::Agents, "Agents"),
             (Request::Projects, "Projects"),
             (

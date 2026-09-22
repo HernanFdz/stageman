@@ -708,7 +708,7 @@ fn the_route_the_page_reads_through_answers_on_its_own() {
     written(&snapshot, &watched);
 
     let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
-    let answer = running.get("/api/instance");
+    let answer = running.get("/api/home");
 
     assert!(answer.contains("200 OK"), "{answer}");
     assert!(answer.contains("aviary"), "{answer}");
@@ -731,7 +731,11 @@ fn nothing_served_carries_a_credential() {
 
     let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
 
-    for served in [running.get("/"), running.get("/api/instance")] {
+    for served in [
+        running.get("/"),
+        running.get("/api/home"),
+        running.get("/api/instance"),
+    ] {
         for secret in [
             VARIABLE_VALUE,
             "not-a-real-credential",
@@ -836,10 +840,48 @@ fn the_dashboard_counts_working_jobs_rather_than_all_of_them() {
     written(&snapshot, &state);
 
     let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
-    let answer = running.get("/api/instance");
+    let answer = running.get("/api/home");
 
     assert!(answer.contains(r#""working":0"#), "{answer}");
     assert!(answer.contains(r#""jobs":2"#), "{answer}");
+}
+
+/// The first page arrives with its three regions and the projects on it.
+///
+/// The fixture's two jobs are idle and have no container, so the waking
+/// sweep retires them as lost before anything serves a page — which is why
+/// nothing needs a person here, and why the count of jobs is still two. What
+/// goes under *needs you* is pinned where a job can be idle without a
+/// runtime, in the instance's own tests; this checks the page and the route
+/// agree about the instance a binary actually started from.
+#[test]
+fn the_first_page_arrives_with_its_regions_and_the_projects() {
+    let (_kept, snapshot) = scratch();
+    let mut state = watching("aviary", "https://example.invalid/aviary");
+    let project = state.projects.values_mut().next().expect("the project");
+    project.jobs.insert(
+        JobId::from_uuid(uuid::Uuid::from_u128(1)),
+        job(Progress::Idle(Waiting::Silent)),
+    );
+    project.jobs.insert(
+        JobId::from_uuid(uuid::Uuid::from_u128(2)),
+        job(Progress::Idle(Waiting::Failed(
+            "it did not work".to_owned(),
+        ))),
+    );
+    written(&snapshot, &state);
+
+    let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
+
+    let home = running.get("/api/home");
+    assert!(home.contains(r#""needs_you":[]"#), "{home}");
+    assert!(home.contains(r#""working":[]"#), "{home}");
+    assert!(home.contains(r#""jobs":2"#), "{home}");
+
+    let page = running.get("/");
+    for region in ["Needs you", "Working now", "Projects", "aviary"] {
+        assert!(page.contains(region), "no {region} on the page: {page}");
+    }
 }
 
 /// An agent a project still names cannot be forgotten.

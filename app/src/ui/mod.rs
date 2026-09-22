@@ -26,6 +26,7 @@ mod modal_ui;
 mod skeleton_ui;
 mod theme_ui;
 mod tooltip_ui;
+mod when_ui;
 
 pub use badge_ui::{Badge, BadgeTone};
 pub use button_ui::{Button, ButtonVariant};
@@ -37,3 +38,4 @@ pub use modal_ui::Modal;
 pub use skeleton_ui::Skeleton;
 pub use theme_ui::{SCRIPT as THEME_SCRIPT, Theme, ThemeToggle};
 pub use tooltip_ui::Tooltip;
+pub use when_ui::When;

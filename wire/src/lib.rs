@@ -37,8 +37,9 @@ pub struct Agent {
 
 // -------------------------------------------------------------- instance
 
-/// One instance, as much of it as a page is allowed to know: counts and
-/// names, and nothing that could be a credential.
+/// One instance, as the line at the foot of every page shows it: this
+/// machine and this build. Counts and names, and nothing that could be a
+/// credential.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Instance {
     /// Where this machine's container runtime was found. A path rather
@@ -48,8 +49,37 @@ pub struct Instance {
     /// How many agents are configured. A count and not a list, because an
     /// agent's configuration is a credential.
     pub agents: usize,
-    /// The projects this instance watches.
+    /// The domain the dashboard answers at and jobs are shown under.
+    pub domain: String,
+    /// Which build this is, as the startup block says it.
+    pub version: String,
+}
+
+// ------------------------------------------------------------------ home
+
+/// What the first page shows: the idle jobs of every project, the working
+/// ones, and the projects — see
+/// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Home {
+    /// Every idle job, longest waiting first: the ones a person does
+    /// something about, which is what *idle* means.
+    pub needs_you: Vec<ProjectJob>,
+    /// Every working job, newest first.
+    pub working: Vec<ProjectJob>,
+    /// Every project.
     pub projects: Vec<Project>,
+}
+
+/// One job beside the project it belongs to, for a list that spans projects.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectJob {
+    /// The project, by identifier.
+    pub project: String,
+    /// The project, by name.
+    pub project_name: String,
+    /// The job.
+    pub job: Job,
 }
 
 // -------------------------------------------------------------- projects
@@ -90,6 +120,8 @@ pub struct Project {
     /// The room its foreman's transcript is posted in, by the platform's
     /// identifier, once one has been made.
     pub foreman_room: Option<String>,
+    /// Whether its foreman is on a message right now.
+    pub attending: bool,
     /// How many of its jobs are still running.
     pub working: usize,
     /// How many jobs it has had, running or finished.
@@ -424,6 +456,25 @@ impl Standing {
     #[must_use]
     pub const fn is_over(&self) -> bool {
         matches!(self, Self::Done | Self::Discarded | Self::Lost)
+    }
+
+    /// What a person does about a job here, as one word, where there is
+    /// something to do — and nothing for a job that is working or over.
+    ///
+    /// The verb the first page puts beside a job, per
+    /// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`;
+    /// the readings it answers are 0052's, and *look* is the honest word for
+    /// a job that stopped without saying why.
+    #[must_use]
+    pub const fn asks(&self) -> Option<&'static str> {
+        match self {
+            Self::Asked => Some("Answer"),
+            Self::Proposed => Some("Review"),
+            Self::Failed { .. } => Some("Fix"),
+            Self::Paused => Some("Resume"),
+            Self::Idle => Some("Look"),
+            Self::Working | Self::Done | Self::Discarded | Self::Lost => None,
+        }
     }
 }
 
@@ -927,6 +978,35 @@ mod tests {
         assert_eq!(over, ["done", "discarded", "lost"]);
     }
 
+    /// Exactly the idle standings ask something of a person, and no two ask
+    /// the same thing: a verb shared by two readings would be a reading
+    /// nobody could act on differently.
+    #[test]
+    fn only_an_idle_job_asks_something_and_each_asks_its_own() {
+        let every = [
+            Standing::Working,
+            Standing::Asked,
+            Standing::Proposed,
+            Standing::Paused,
+            Standing::Idle,
+            Standing::Failed {
+                why: "it did not work".to_owned(),
+            },
+            Standing::Done,
+            Standing::Discarded,
+            Standing::Lost,
+        ];
+        let asking: Vec<&str> = every.iter().filter_map(Standing::asks).collect();
+        assert_eq!(asking, ["Answer", "Review", "Resume", "Look", "Fix"]);
+        for standing in &every {
+            assert_eq!(
+                standing.asks().is_some(),
+                !standing.is_over() && *standing != Standing::Working,
+                "{standing:?}"
+            );
+        }
+    }
+
     /// A refusal an operator can fix must not read as a server fault.
     #[test]
     fn a_refusal_is_not_reported_as_a_fault() {
@@ -979,6 +1059,7 @@ mod tests {
             brief: String::new(),
             watched: Vec::new(),
             foreman_room: None,
+            attending: false,
             working: 0,
             jobs: 3,
         };

@@ -819,6 +819,13 @@ justify is usually obsolete.
   one whose colour has no token yet, and the token is the fix. The three
   state colours are chosen per theme rather than tinted from one.
 
+- **A script the page evaluates sends its answer and never returns it.** The
+  framework wraps what it evaluates in a function that closes the script's
+  channel after it, so a `return` at the top level skips the close: the
+  channel leaks, and Firefox reports code after a return on every page that
+  did it. The answer goes through the channel the wrapper hands the script,
+  and the Rust side receives it, which is the same length and reads the same.
+
 - **Motion is a transition, honours the reduced-motion preference, and needs
   no library.** What moves: hover and focus, a panel or a popover entering
   and leaving, the mark that says working, and a row arriving once a page is

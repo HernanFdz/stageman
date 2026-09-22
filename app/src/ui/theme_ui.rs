@@ -36,7 +36,13 @@ pub const SCRIPT: &str = r#"(function () {
 })();"#;
 
 /// What the control asks the browser, once the page is awake.
-const ASKING: &str = r#"return window.stagemanTheme ? window.stagemanTheme.chosen() : "system";"#;
+///
+/// Sent through the channel rather than returned, and that is a rule rather
+/// than a style — see `docs/conventions.md` §3: the framework closes the
+/// channel after the script, so a `return` skips the close, leaks the
+/// channel, and has Firefox warn about unreachable code on every page.
+const ASKING: &str =
+    r#"dioxus.send(window.stagemanTheme ? window.stagemanTheme.chosen() : "system");"#;
 
 /// The three ways the look can be chosen.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
@@ -119,7 +125,8 @@ pub fn ThemeToggle() -> Element {
             // On the server there is no evaluator and this is an error, which
             // leaves the default: the server does not know, and the script
             // decides.
-            if let Ok(spelling) = document::eval(ASKING).join::<String>().await
+            let mut asked = document::eval(ASKING);
+            if let Ok(spelling) = asked.recv::<String>().await
                 && let Some(chosen) = Theme::spelled(&spelling)
             {
                 theme.set(chosen);
@@ -161,6 +168,10 @@ mod tests {
     fn the_script_and_the_control_agree() {
         assert!(SCRIPT.contains("window.stagemanTheme = {"), "{SCRIPT}");
         assert!(ASKING.contains("window.stagemanTheme.chosen()"), "{ASKING}");
+        assert!(
+            ASKING.starts_with("dioxus.send(") && !ASKING.contains("return"),
+            "an answer is sent, never returned: {ASKING}"
+        );
         assert!(
             SCRIPT.contains(r#"classList.toggle("dark""#),
             "the class the dark tokens hang off: {SCRIPT}"

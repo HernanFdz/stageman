@@ -7,8 +7,8 @@
 //! deciding it deliberately is the point.
 
 use stageman_core::{
-    Agent, Channel, ClaudeEffort, ClaudeModel, Inconsistent, Kit, Outcome, Platform, Progress,
-    Project, ProjectId, State, Waiting,
+    Agent, Attending, Channel, ClaudeEffort, ClaudeModel, Inconsistent, Job, JobId, Kit, Outcome,
+    Platform, Progress, Project, ProjectId, State, Waiting,
 };
 use stageman_wire::{Choice, Fitted, KitDraft, ModelChoice, Refusal, Shape, Standing};
 
@@ -276,6 +276,7 @@ pub fn projected(id: ProjectId, project: &Project) -> stageman_wire::Project {
         brief: project.brief.clone(),
         watched: project.watched.iter().map(|room| room.id.clone()).collect(),
         foreman_room: project.foreman_room.as_ref().map(|room| room.id.clone()),
+        attending: !matches!(project.attending, Attending::Idle),
         working: project
             .jobs
             .values()
@@ -351,20 +352,7 @@ pub fn working(
     let mut jobs: Vec<stageman_wire::Job> = watched
         .jobs
         .iter()
-        .map(|(id, job)| stageman_wire::Job {
-            id: id.to_string(),
-            kit: described(job.kit()),
-            reported: job
-                .reported
-                .iter()
-                .map(|(option, value)| (option.clone(), value.clone()))
-                .collect(),
-            reason: job.reason.clone(),
-            kickoff: job.kickoff.clone(),
-            created_at: job.created_at.to_string(),
-            standing: standing(&job.progress),
-            tunnel: address(domain, *id, serving),
-        })
+        .map(|(id, job)| job_view(*id, job, domain, serving))
         .collect();
     jobs.sort_by(|one, other| other.created_at.cmp(&one.created_at));
 
@@ -383,12 +371,63 @@ pub fn working(
     })
 }
 
-/// What the instance screen shows.
-pub fn overview(state: &State, runtime: &str) -> stageman_wire::Instance {
+/// One job, as a page sees it.
+fn job_view(id: JobId, job: &Job, domain: &Domain, serving: u16) -> stageman_wire::Job {
+    stageman_wire::Job {
+        id: id.to_string(),
+        kit: described(job.kit()),
+        reported: job
+            .reported
+            .iter()
+            .map(|(option, value)| (option.clone(), value.clone()))
+            .collect(),
+        reason: job.reason.clone(),
+        kickoff: job.kickoff.clone(),
+        created_at: job.created_at.to_string(),
+        standing: standing(&job.progress),
+        tunnel: address(domain, id, serving),
+    }
+}
+
+/// The first page: every idle job, longest waiting first, then every
+/// working one, newest first, then the projects — see
+/// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+///
+/// Ordered by when each job was made, until the moment a standing changed is
+/// recorded: the record asks for it, and it arrives with the job's page.
+pub fn home(state: &State, domain: &Domain, serving: u16) -> stageman_wire::Home {
+    let mut needs_you = Vec::new();
+    let mut working = Vec::new();
+    for (project_id, project) in &state.projects {
+        for (id, job) in &project.jobs {
+            let placed = || stageman_wire::ProjectJob {
+                project: project_id.to_string(),
+                project_name: project.name.clone(),
+                job: job_view(*id, job, domain, serving),
+            };
+            match &job.progress {
+                Progress::Idle(_) => needs_you.push(placed()),
+                Progress::Working => working.push(placed()),
+                Progress::Retired(_) => {}
+            }
+        }
+    }
+    needs_you.sort_by(|one, other| one.job.created_at.cmp(&other.job.created_at));
+    working.sort_by(|one, other| other.job.created_at.cmp(&one.job.created_at));
+    stageman_wire::Home {
+        needs_you,
+        working,
+        projects: watching(state),
+    }
+}
+
+/// The line at the foot of every page: this machine, and this build.
+pub fn instance(state: &State, runtime: &str, domain: &Domain) -> stageman_wire::Instance {
     stageman_wire::Instance {
         container_runtime: runtime.to_owned(),
         agents: state.agents.len(),
-        projects: watching(state),
+        domain: domain.to_string(),
+        version: crate::release::described(),
     }
 }
 
@@ -662,6 +701,63 @@ mod tests {
         assert_eq!(shown.working, 1);
         assert_eq!(shown.jobs, 3);
         assert_eq!(shown.name, "aviary");
+    }
+
+    /// The first page lists what a person does something about, longest
+    /// waiting first; then what is working, newest first; and never what is
+    /// over. The partition is the domain's own outer state, so this is the
+    /// one place it is turned into an order.
+    #[test]
+    fn the_first_page_partitions_jobs_by_what_the_system_does_with_them() {
+        let mut state = watching("aviary");
+        let watched = state
+            .projects
+            .get_mut(&ProjectId::from_uuid(Uuid::nil()))
+            .expect("the project");
+        for (which, second, progress) in [
+            (1_u128, 30_i64, Progress::Idle(Waiting::Proposed)),
+            (2, 10, Progress::Idle(Waiting::Asked)),
+            (3, 20, Progress::Working),
+            (4, 40, Progress::Working),
+            (5, 50, Progress::Retired(Outcome::Done)),
+        ] {
+            let mut job = Job::new(
+                Kit::defaults(Agent::Claude),
+                "because".to_owned(),
+                "do the thing".to_owned(),
+                Timestamp::from_second(second).expect("a time"),
+            );
+            job.progress = progress;
+            watched
+                .jobs
+                .insert(JobId::from_uuid(Uuid::from_u128(which)), job);
+        }
+        let domain = Domain::parse("example.com").expect("a domain");
+
+        let shown = super::home(&state, &domain, 8080);
+
+        let named = |placed: &[stageman_wire::ProjectJob]| {
+            placed
+                .iter()
+                .map(|placed| placed.job.id.clone())
+                .collect::<Vec<_>>()
+        };
+        let id = |which: u128| JobId::from_uuid(Uuid::from_u128(which)).to_string();
+        assert_eq!(
+            named(&shown.needs_you),
+            [id(2), id(1)],
+            "longest waiting first"
+        );
+        assert_eq!(named(&shown.working), [id(4), id(3)], "newest first");
+        assert_eq!(shown.projects.len(), 1);
+        assert!(
+            shown
+                .needs_you
+                .iter()
+                .chain(&shown.working)
+                .all(|placed| placed.project_name == "aviary"),
+            "every job says which project it is on"
+        );
     }
 
     /// The brief crosses as written, and the watched rooms cross as the

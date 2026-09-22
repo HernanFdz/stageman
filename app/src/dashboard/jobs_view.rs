@@ -19,7 +19,7 @@ use stageman_instance::{Request, Response};
 
 use super::error::{DashboardError, DashboardResult};
 use crate::ui::{
-    Badge, BadgeTone, Button, ButtonVariant, Card, EmptyState, Icon, Modal, Skeleton, Tooltip,
+    Badge, BadgeTone, Button, ButtonVariant, Card, EmptyState, Icon, Modal, Skeleton, Tooltip, When,
 };
 
 pub use stageman_wire::{Ending, Job, Offered, Standing, Working};
@@ -287,8 +287,9 @@ fn RanJob(
             div { class: "flex items-baseline gap-3",
                 Badge { tone: job.standing.tone(), "{job.standing.label()}" }
                 span { class: "text-sm", "{job.reason}" }
-                span { class: "ml-auto shrink-0 font-mono text-xs text-faint-foreground",
-                    "{job.kit} · {job.created_at}"
+                span { class: "ml-auto flex shrink-0 items-baseline gap-2 font-mono text-xs text-faint-foreground",
+                    "{job.kit}"
+                    When { at: job.created_at.clone() }
                 }
             }
             if let Standing::Failed { why } = &job.standing {

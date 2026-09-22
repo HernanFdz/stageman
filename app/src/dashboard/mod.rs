@@ -36,9 +36,10 @@
 
 pub(crate) mod agents_view;
 mod error;
-mod instance_view;
+mod home_view;
 mod jobs_view;
 mod projects_view;
+mod status_view;
 
 use dioxus::prelude::*;
 
@@ -46,9 +47,10 @@ use crate::ui::{THEME_SCRIPT, ThemeToggle};
 
 pub use agents_view::{Agent, AgentsView};
 pub use error::{DashboardError, DashboardResult};
-pub use instance_view::{Instance, InstanceView};
+pub use home_view::{Home, HomeView, ProjectJob};
 pub use jobs_view::{Job, ProjectJobsView, Standing, Working};
 pub use projects_view::{Choice, Fitted, KitDraft, ModelChoice, Project, ProjectsView, Shape};
+pub use status_view::{Instance, Status};
 
 /// The dashboard's stylesheet.
 ///
@@ -96,7 +98,7 @@ const FAVICON: Asset = asset!("/assets/favicon.svg");
 pub enum Route {
     #[layout(Shell)]
         #[route("/")]
-        InstanceView {},
+        HomeView {},
 
         #[route("/agents")]
         AgentsView {},
@@ -140,19 +142,29 @@ pub fn Shell() -> Element {
         // `docs/decisions/0072-the-dashboard-has-a-dark-theme.md`.
         document::Script { "{THEME_SCRIPT}" }
         document::Stylesheet { href: STYLESHEET }
-        div { class: "min-h-screen bg-background font-sans text-foreground",
+        // A column as tall as the window, so the status line sits at its
+        // foot whatever a page's height, rather than wherever the contents
+        // happened to end.
+        div { class: "flex min-h-screen flex-col bg-background font-sans text-foreground",
             header { class: "border-b border-border bg-surface",
                 div { class: "mx-auto flex max-w-5xl items-baseline gap-6 px-6 py-4",
                     span { class: "text-base font-semibold tracking-tight", "stageman" }
+                    // In the order
+                    // `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`
+                    // gives: agents last, and still here, because they are
+                    // the first step on a new instance.
                     nav { class: "flex items-baseline gap-4 text-sm",
-                        NavLink { to: Route::InstanceView {}, "Instance" }
-                        NavLink { to: Route::AgentsView {}, "Agents" }
+                        NavLink { to: Route::HomeView {}, "Home" }
                         NavLink { to: Route::ProjectsView {}, "Projects" }
+                        NavLink { to: Route::AgentsView {}, "Agents" }
                     }
                     div { class: "ml-auto self-center", ThemeToggle {} }
                 }
             }
-            main { class: "mx-auto max-w-5xl px-6 py-6", Outlet::<Route> {} }
+            main { class: "mx-auto w-full max-w-5xl flex-1 px-6 py-6", Outlet::<Route> {} }
+            // The machine and the build, under every page rather than on one
+            // of their own — see the same record.
+            Status {}
         }
     }
 }

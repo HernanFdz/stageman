@@ -102,12 +102,20 @@ fn the_instance_screen_counts_what_it_may_and_never_a_credential() {
     let written = count(&sim, "-> Write");
 
     let Response::Instance(shown) = ask(&mut sim, &mut instance, 1, Request::Instance) else {
-        panic!("the instance screen");
+        panic!("the status line");
     };
     // The first candidate on the platform every scenario is played on.
     assert_eq!(shown.container_runtime, "/usr/bin/docker");
     assert_eq!(shown.agents, 1);
+    assert!(!shown.domain.is_empty() && !shown.version.is_empty());
+    let served = serde_json::to_string(&shown).expect("it serialises");
+    assert!(!served.contains("agent-token"), "{served}");
+
+    let Response::Home(shown) = ask(&mut sim, &mut instance, 2, Request::Home) else {
+        panic!("the first page");
+    };
     assert_eq!(shown.projects.len(), 1);
+    assert!(shown.needs_you.is_empty() && shown.working.is_empty());
     let served = serde_json::to_string(&shown).expect("it serialises");
     assert!(!served.contains("agent-token"), "{served}");
     assert_eq!(count(&sim, "-> Write"), written, "a read writes nothing");

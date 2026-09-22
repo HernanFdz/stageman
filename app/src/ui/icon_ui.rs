@@ -14,8 +14,8 @@
 
 use dioxus::prelude::*;
 use lucide_dioxus::{
-    Bot, Check, CircleCheck, CircleOff, CircleX, ExternalLink, Eye, EyeOff, Info, LoaderCircle,
-    Moon, Pencil, Plus, Square, Sun, SunMoon, Trash2, X,
+    Bot, Check, CircleCheck, CircleOff, CircleX, ExternalLink, Eye, EyeOff, HardHat, Info,
+    LoaderCircle, Moon, Pencil, Plus, Square, Sun, SunMoon, Trash2, X,
 };
 
 /// A concept a screen can point at, and nothing about how it is drawn.
@@ -62,6 +62,8 @@ pub enum Icon {
     Info,
     /// An agent nothing here has a mark for.
     Agent,
+    /// The foreman: the one that reads what a person says and decides.
+    Foreman,
 }
 
 impl Icon {
@@ -89,6 +91,7 @@ impl Icon {
         Self::ThemeDark,
         Self::Info,
         Self::Agent,
+        Self::Foreman,
     ];
 
     /// Drawn at `size` pixels, in the current text colour.
@@ -125,6 +128,9 @@ impl Icon {
             Self::ThemeDark => rsx! { Moon { size, class } },
             Self::Info => rsx! { Info { size, class } },
             Self::Agent => rsx! { Bot { size, class } },
+            // A hat, because the word is a role and the hat is what the role
+            // wears — see `docs/conventions.md` §2 on why it is a foreman.
+            Self::Foreman => rsx! { HardHat { size, class } },
         }
     }
 }
