@@ -15,6 +15,7 @@ use stageman_instance::{Request, Response};
 
 use super::error::DashboardResult;
 use super::jobs_view::Toned as _;
+use super::live::Live;
 use crate::ui::{Badge, BadgeTone, Card, EmptyState, Icon, Skeleton, Tooltip, When};
 
 pub use stageman_wire::{Home, Project, ProjectJob};
@@ -46,7 +47,11 @@ pub async fn home() -> DashboardResult<Home> {
 /// hydrated client agrees with the HTML it hydrated.
 #[component]
 pub fn HomeView() -> Element {
-    let reading = use_server_future(home)?;
+    let live = use_context::<Live>();
+    let reading = use_server_future(move || {
+        let _ = live.follow();
+        home()
+    })?;
 
     rsx! {
         match reading.cloned() {

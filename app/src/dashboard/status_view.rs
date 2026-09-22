@@ -11,6 +11,7 @@ use dioxus::prelude::*;
 use stageman_instance::{Request, Response};
 
 use super::error::DashboardResult;
+use super::live::Live;
 
 pub use stageman_wire::Instance;
 
@@ -35,7 +36,11 @@ pub async fn instance() -> DashboardResult<Instance> {
 /// page above it already reports the instance being unreadable.
 #[component]
 pub fn Status() -> Element {
-    let reading = use_server_future(instance)?;
+    let live = use_context::<Live>();
+    let reading = use_server_future(move || {
+        let _ = live.follow();
+        instance()
+    })?;
     let Some(Ok(shown)) = reading.cloned() else {
         return VNode::empty();
     };

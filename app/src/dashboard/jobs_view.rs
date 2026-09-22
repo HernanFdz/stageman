@@ -18,6 +18,7 @@ use dioxus::prelude::*;
 use stageman_instance::{Request, Response};
 
 use super::error::{DashboardError, DashboardResult};
+use super::live::Live;
 use crate::ui::{
     Badge, BadgeTone, Button, ButtonVariant, Card, EmptyState, Icon, Modal, Skeleton, Tooltip, When,
 };
@@ -136,7 +137,11 @@ pub fn ProjectJobsView(project: String) -> Element {
     // without it this resource keeps its first identifier when the route
     // changes, and the screen shows another project's jobs while claiming to
     // be this one.
-    let mut reading = use_server_future(use_reactive!(|project| jobs(project)))?;
+    let live = use_context::<Live>();
+    let mut reading = use_server_future(use_reactive!(|project| {
+        let _ = live.follow();
+        jobs(project)
+    }))?;
     let mut failure = use_signal(|| None::<DashboardError>);
     let mut starting = use_signal(|| false);
     let mut draft = use_signal(Wanted::default);

@@ -17,6 +17,7 @@ use stageman_instance::{Request, Response};
 
 use super::agents_view::Agent;
 use super::error::{DashboardError, DashboardResult};
+use super::live::Live;
 use crate::ui::{
     Badge, BadgeTone, Button, ButtonVariant, Card, EmptyState, Icon, Modal, Skeleton, Tooltip,
 };
@@ -169,7 +170,11 @@ pub async fn forget(project: String) -> DashboardResult<Watching> {
 /// The projects screen.
 #[component]
 pub fn ProjectsView() -> Element {
-    let mut reading = use_server_future(projects)?;
+    let live = use_context::<Live>();
+    let mut reading = use_server_future(move || {
+        let _ = live.follow();
+        projects()
+    })?;
     let mut failure = use_signal(|| None::<DashboardError>);
     // What the form is open for, if it is open at all. One signal rather than
     // a flag per purpose — see [`Filling`].

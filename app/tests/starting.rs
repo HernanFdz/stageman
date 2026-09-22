@@ -136,6 +136,16 @@ impl Serving {
         ))
     }
 
+    /// Opens a `GET` and hands back the socket with only the request sent,
+    /// for a response that does not end: the caller reads what it waits for.
+    fn opened(&self, path: &str) -> TcpStream {
+        let mut connection = TcpStream::connect(&self.address).expect("the dashboard accepts");
+        connection
+            .write_all(format!("GET {path} HTTP/1.1\r\nHost: {}\r\n\r\n", self.address).as_bytes())
+            .expect("the request is sent");
+        connection
+    }
+
     /// Writes a request and reads everything the server says back.
     fn request(&self, request: &str) -> String {
         let mut connection = TcpStream::connect(&self.address).expect("the dashboard accepts");
@@ -157,6 +167,27 @@ impl Serving {
         assert!(!response.is_empty(), "the connection closed saying nothing");
         String::from_utf8_lossy(&response).into_owned()
     }
+}
+
+/// Reads from an open response until `needle` has arrived, or gives up
+/// after the same patience a start is given.
+fn until(connection: &mut TcpStream, needle: &str) -> String {
+    connection
+        .set_read_timeout(Some(PATIENCE))
+        .expect("a timeout is set");
+    let mut seen = Vec::new();
+    let mut chunk = [0_u8; 4096];
+    while !String::from_utf8_lossy(&seen).contains(needle) {
+        match connection.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => seen.extend_from_slice(chunk.get(..read).unwrap_or_default()),
+            Err(failure) => panic!(
+                "waiting for {needle:?}: {failure}; seen so far: {}",
+                String::from_utf8_lossy(&seen)
+            ),
+        }
+    }
+    String::from_utf8_lossy(&seen).into_owned()
 }
 
 impl Drop for Serving {
@@ -929,6 +960,41 @@ fn a_credential_is_taken_once_and_never_returned() {
             "a credential reached the browser: {served}"
         );
     }
+}
+
+/// A page learns of change from a tick: a write that lands is told to every
+/// open stream, and nothing is told while nothing lands — see
+/// `docs/decisions/0071-a-page-learns-of-change-from-a-tick.md`.
+///
+/// Through the binary, because the stream crosses the forwarder the instance
+/// puts in front of the framework, and a forwarder that buffered it would
+/// deliver no tick, ever.
+#[test]
+fn a_write_that_lands_is_told_to_an_open_page_as_a_tick() {
+    let (_kept, snapshot) = scratch();
+    let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
+
+    let mut ticks = running.opened("/api/ticks");
+    // The head and the opening frame arrive at once, and then nothing: no
+    // write has landed since the stream was opened.
+    let opening = until(&mut ticks, "open");
+    assert!(opening.contains("200 OK"), "{opening}");
+    assert!(
+        !opening.contains("tick"),
+        "a tick before any write: {opening}"
+    );
+
+    let saved = running.post(
+        "/api/agents/configure",
+        r#"{"agent":"claude","credential":"sk-not-a-real-token"}"#,
+    );
+    assert!(saved.contains("200 OK"), "{saved}");
+
+    let heard = until(&mut ticks, "tick");
+    assert!(
+        heard.contains("tick"),
+        "the write that landed was not told: {heard}"
+    );
 }
 
 /// The navigation says which screen you are on.

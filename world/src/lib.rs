@@ -73,6 +73,12 @@ pub struct World<A: App> {
     /// What makes requests. One for the process, so that a connection to a
     /// place asked of twice is kept between the two.
     client: reqwest::Client,
+    /// Told each time a write has landed, and told nothing else: the tick a
+    /// page is made live with — see
+    /// `docs/decisions/0071-a-page-learns-of-change-from-a-tick.md`. A watch
+    /// rather than a queue, so that writes landing while a follower is busy
+    /// collapse into one, which is a property of the channel and not a rule.
+    written: tokio::sync::watch::Sender<()>,
 }
 
 /// A socket, as far as the loop needs to reach it.
@@ -110,9 +116,19 @@ impl<A: App> World<A> {
                 open: parking_lot::Mutex::new(BTreeMap::new()),
                 sockets: parking_lot::Mutex::new(BTreeMap::new()),
                 client: reqwest::Client::new(),
+                written: tokio::sync::watch::channel(()).0,
             }),
             receiving,
         )
+    }
+
+    /// Whoever wants to know when a write has landed.
+    ///
+    /// The receiver has seen everything up to now: what it is told is what
+    /// lands after it was made, and never what landed before.
+    #[must_use]
+    pub fn written(&self) -> tokio::sync::watch::Receiver<()> {
+        self.written.subscribe()
     }
 
     /// Sends a line to a process kept open, if it still is.
@@ -275,6 +291,9 @@ async fn perform<A: App, P: Perform<A>>(
                     .await
                     .unwrap_or_else(|why| Err(why.to_string()));
             world.send(Event::Written { id, outcome });
+            // Landed or refused, the file is what it is now, and whoever
+            // follows the writes reads it either way.
+            world.written.send_replace(());
         }
         Effect::Run {
             id,
@@ -1195,6 +1214,47 @@ mod tests {
         assert!(
             read(&directory).is_err(),
             "a file that cannot be read is not an absent one"
+        );
+    }
+
+    /// A write that landed is told to whoever follows the world's writes,
+    /// which is what a page's tick is made of; nothing is told before it.
+    #[tokio::test]
+    async fn a_write_that_landed_is_told_to_whoever_follows() {
+        let scratch = tempfile::tempdir().expect("a temporary directory");
+        let (world, mut events) = World::<Nothing>::new();
+        let mut following = world.written();
+        assert!(
+            !following.has_changed().expect("the world is here"),
+            "nothing has landed yet"
+        );
+
+        answering(
+            &world,
+            Effect::Write {
+                id: EffectId(1),
+                path: scratch.path().join("file"),
+                bytes: Bytes::new(b"contents".to_vec()),
+                private: false,
+            },
+        )
+        .await;
+
+        match next(&mut events).await {
+            Event::Written { id, outcome } => {
+                assert_eq!(id, EffectId(1));
+                assert!(outcome.is_ok(), "{outcome:?}");
+            }
+            other => panic!("expected the write's answer: {}", other.kind()),
+        }
+        assert!(
+            following.has_changed().expect("the world is here"),
+            "the write that landed was told"
+        );
+        following.changed().await.expect("the world is here");
+        assert!(
+            !following.has_changed().expect("the world is here"),
+            "and told once"
         );
     }
 

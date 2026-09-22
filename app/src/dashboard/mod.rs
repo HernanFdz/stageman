@@ -38,6 +38,7 @@ pub(crate) mod agents_view;
 mod error;
 mod home_view;
 mod jobs_view;
+mod live;
 mod projects_view;
 mod status_view;
 
@@ -49,6 +50,7 @@ pub use agents_view::{Agent, AgentsView};
 pub use error::{DashboardError, DashboardResult};
 pub use home_view::{Home, HomeView, ProjectJob};
 pub use jobs_view::{Job, ProjectJobsView, Standing, Working};
+pub use live::{Live, LiveMark};
 pub use projects_view::{Choice, Fitted, KitDraft, ModelChoice, Project, ProjectsView, Shape};
 pub use status_view::{Instance, Status};
 
@@ -128,9 +130,14 @@ pub fn Dashboard() -> Element {
 ///
 /// Holds the stylesheet as well as the navigation, so that a screen is only
 /// ever its own contents and no view has to remember to bring the page with
-/// it.
+/// it. It is also what keeps a page live: the stream of ticks is opened here,
+/// once, and every screen's read follows it — see
+/// `docs/decisions/0071-a-page-learns-of-change-from-a-tick.md`.
 #[component]
 pub fn Shell() -> Element {
+    let live = use_context_provider(Live::new);
+    live::use_live(live);
+
     rsx! {
         document::Link { rel: "icon", r#type: "image/svg+xml", href: FAVICON }
         // Told to the browser as well as decided by the script below, so that
@@ -158,7 +165,10 @@ pub fn Shell() -> Element {
                         NavLink { to: Route::ProjectsView {}, "Projects" }
                         NavLink { to: Route::AgentsView {}, "Agents" }
                     }
-                    div { class: "ml-auto self-center", ThemeToggle {} }
+                    div { class: "ml-auto flex items-center gap-4 self-center",
+                        LiveMark { live }
+                        ThemeToggle {}
+                    }
                 }
             }
             main { class: "mx-auto w-full max-w-5xl flex-1 px-6 py-6", Outlet::<Route> {} }
