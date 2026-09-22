@@ -182,7 +182,7 @@ fn growth_is_paced() {
         .into_iter()
         .map(Utterance::Says)
         .collect();
-    world.next_turn_narrates_over(pieces, 200);
+    world.next_turn_narrates_over(pieces, 400);
 
     world.says_in_room(100, 1, "go on");
     world.run_until(&mut instance, 20_000);
@@ -193,8 +193,9 @@ fn growth_is_paced() {
         "one message, read whole"
     );
     assert!(
-        world.edits().len() <= 3,
-        "twelve pieces over two seconds are a couple of edits and the last, not twelve: {:?}",
+        (2..=3).contains(&world.edits().len()),
+        "twelve pieces over four seconds are an edit at the pace and the last, not twelve \
+         and not one: {:?}",
         world.edits()
     );
 }
@@ -247,5 +248,27 @@ fn a_thought_is_a_quoted_line_in_the_burst() {
             "> 💭 The tests first.\n⏳ ran `ls`".to_owned(),
             the_notice()
         ]
+    );
+}
+
+/// A run of narration with nothing in it yet is not posted: the message
+/// waits for something to say, and what it then says is posted whole.
+#[test]
+fn an_empty_run_of_narration_is_not_posted() {
+    let mut world = Simulation::new();
+    let (mut instance, _) = a_job_replied_to(&mut world);
+    world.next_turn_narrates_over(vec![Utterance::Says(""), Utterance::Says("Hello.")], 100);
+
+    world.says_in_room(100, 1, "go on");
+    world.run_until(&mut instance, 5_000);
+
+    assert_eq!(
+        root_reads(&world),
+        [the_start(), "Hello.".to_owned(), the_notice()]
+    );
+    assert!(
+        !world.posts().iter().any(|(_, text)| text.trim().is_empty()),
+        "nothing empty was posted: {:?}",
+        world.posts()
     );
 }

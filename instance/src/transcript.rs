@@ -384,6 +384,10 @@ impl Transcript {
     }
 
     /// Lets go of what is done with.
+    ///
+    /// Skipped by mutation testing: it frees what nothing will ask about
+    /// again, so keeping it changes what is held and nothing that is said.
+    #[mutants::skip]
     fn prune(&mut self) {
         self.closing.retain(|open| !open.done());
     }
@@ -523,12 +527,14 @@ impl Running {
         self.prune(speaker);
     }
 
-    /// The pace came round for a message.
+    /// The pace came round for a message: it is edited to read as it now
+    /// does, if that differs from what was sent, whether or not it is still
+    /// growing. That is what pacing paces.
     pub fn grow(&mut self, speaker: Speaker, run: u64) {
         if let Some(open) = self.find_run(speaker, run) {
             open.pacing = false;
         }
-        self.tend(speaker, run);
+        self.tend_after(speaker, run, true);
         self.prune(speaker);
     }
 
@@ -546,11 +552,17 @@ impl Running {
     }
 
     /// Does what a message needs: posts it if it is not yet on the platform
-    /// and has something to say; edits it if it is closed and reads
-    /// differently from what was sent; waits a pace otherwise, so that a
-    /// growing message is edited at most that often. Nothing while an
-    /// answer is awaited, since the answer looks again.
+    /// and has something to say; edits it if it reads differently from what
+    /// was sent and is closed, or its pace has come round; waits a pace
+    /// otherwise, so that a growing message is edited at most that often.
+    /// Nothing while an answer is awaited, since the answer looks again.
     fn tend(&mut self, speaker: Speaker, run: u64) {
+        self.tend_after(speaker, run, false);
+    }
+
+    /// [`Running::tend`], saying whether the message's pace has come round,
+    /// which is when a message still growing is edited.
+    fn tend_after(&mut self, speaker: Speaker, run: u64, paced: bool) {
         let Some((speaking, place)) = self.transcript_place(speaker) else {
             return;
         };
@@ -576,7 +588,7 @@ impl Running {
                         Tending::Post(text)
                     }
                     Some(_) if text == open.sent => Tending::Nothing,
-                    Some(message) if open.closed() => {
+                    Some(message) if open.closed() || paced => {
                         let message = message.clone();
                         open.sent.clone_from(&text);
                         open.awaiting = true;
@@ -606,6 +618,10 @@ impl Running {
 
     /// Lets go of what a turn is done with, and of finished messages sent
     /// as they last read.
+    ///
+    /// Skipped by mutation testing for the reason the transcript's own is:
+    /// what it frees, nothing asks about again.
+    #[mutants::skip]
     fn prune(&mut self, speaker: Speaker) {
         if let Some(turn) = self.turns.get_mut(&speaker) {
             turn.transcript.prune();
@@ -617,7 +633,7 @@ impl Running {
 
 #[cfg(test)]
 mod tests {
-    use super::{Body, Entry};
+    use super::{Body, Entry, Open, Standing, Transcript};
     use stageman_agent::{ToolCallStatus, ToolKind};
 
     fn call(status: Option<ToolCallStatus>, interrupted: bool) -> Entry {
@@ -671,5 +687,209 @@ mod tests {
             body.text(),
             "✅ ran `cargo test`\n⏹️ ran `cargo test` — interrupted"
         );
+    }
+
+    /// A message of the transcript, at some point in its life.
+    fn message(
+        body: Body,
+        sent: &str,
+        message: Option<&str>,
+        awaiting: bool,
+        pacing: bool,
+        standing: Standing,
+    ) -> Open {
+        Open {
+            run: 1,
+            body,
+            sent: sent.to_owned(),
+            message: message.map(str::to_owned),
+            awaiting,
+            pacing,
+            standing,
+        }
+    }
+
+    fn narration(text: &str) -> Body {
+        Body::Narration(text.to_owned())
+    }
+
+    /// A message is settled when it reads as sent with nothing in flight,
+    /// or was let go of; and done when it is also closed and no call in it
+    /// is still to end.
+    #[test]
+    fn a_message_is_settled_and_done_exactly_when() {
+        let as_sent = message(
+            narration("hi"),
+            "hi",
+            Some("m"),
+            false,
+            false,
+            Standing::Growing,
+        );
+        assert!(as_sent.settled());
+        assert!(!as_sent.lost());
+        assert!(!as_sent.closed());
+        assert!(!as_sent.done(), "still growing");
+
+        let differs = message(
+            narration("hi"),
+            "h",
+            Some("m"),
+            false,
+            false,
+            Standing::Closed,
+        );
+        assert!(!differs.settled(), "reads differently from what was sent");
+        let awaited = message(
+            narration("hi"),
+            "hi",
+            Some("m"),
+            true,
+            false,
+            Standing::Closed,
+        );
+        assert!(!awaited.settled(), "an answer is awaited");
+        let paced = message(
+            narration("hi"),
+            "hi",
+            Some("m"),
+            false,
+            true,
+            Standing::Closed,
+        );
+        assert!(!paced.settled(), "a pace is set");
+
+        let lost = message(narration("hi"), "", None, false, false, Standing::Lost);
+        assert!(lost.lost() && lost.closed() && lost.settled() && lost.done());
+        let lost_awaited = message(narration("hi"), "", None, true, false, Standing::Lost);
+        assert!(
+            !lost_awaited.settled(),
+            "even let go of, an answer is awaited"
+        );
+
+        let closed = message(
+            narration("hi"),
+            "hi",
+            Some("m"),
+            false,
+            false,
+            Standing::Closed,
+        );
+        assert!(closed.closed() && !closed.lost() && closed.done());
+
+        let running = message(
+            Body::Working(vec![call(None, false)]),
+            "⏳ ran `cargo test`",
+            Some("m"),
+            false,
+            false,
+            Standing::Closed,
+        );
+        assert!(running.settled() && !running.done(), "a call still to end");
+        let ended = message(
+            Body::Working(vec![call(Some(ToolCallStatus::Completed), false)]),
+            "✅ ran `cargo test`",
+            Some("m"),
+            false,
+            false,
+            Standing::Closed,
+        );
+        assert!(ended.done());
+    }
+
+    /// What each piece of a turn does to its messages: narration onto the
+    /// narration it is in or a new message, working onto the burst it is in
+    /// or a new one, a call's change onto the burst holding it wherever it
+    /// is; and the transcript knows which messages it holds.
+    #[test]
+    fn each_piece_says_what_it_closed_opened_or_grew() {
+        let mut transcript = Transcript::new();
+        assert!(!transcript.has(0));
+
+        let first = transcript.said("Running ".to_owned());
+        assert_eq!(
+            (first.closed, first.opened, first.grew),
+            (None, Some(0), None)
+        );
+        assert!(transcript.has(0) && !transcript.has(1));
+
+        let more = transcript.said("the tests.".to_owned());
+        assert_eq!((more.closed, more.opened, more.grew), (None, None, Some(0)));
+
+        let called = transcript.worked(call(None, false));
+        assert_eq!(
+            (called.closed, called.opened, called.grew),
+            (Some(0), Some(1), None),
+            "a call closes the narration and opens a burst"
+        );
+        let thought = transcript.worked(Entry::Thought("hm".to_owned()));
+        assert_eq!(
+            (thought.closed, thought.opened, thought.grew),
+            (None, None, Some(1))
+        );
+
+        let said = transcript.said("Red.".to_owned());
+        assert_eq!(
+            (said.closed, said.opened, said.grew),
+            (Some(1), Some(2), None)
+        );
+        assert!(transcript.has(1), "closing, not gone");
+
+        let ended = transcript.call_changed("call-1", None, Some(ToolCallStatus::Completed));
+        assert_eq!(
+            (ended.closed, ended.opened, ended.grew),
+            (None, None, Some(1)),
+            "the burst holding the call grew, though closed"
+        );
+        let unknown = transcript.call_changed("call-9", None, Some(ToolCallStatus::Completed));
+        assert_eq!(
+            (unknown.closed, unknown.opened, unknown.grew),
+            (None, None, None)
+        );
+    }
+
+    /// A message past the platform's limit is closed and continued: a
+    /// narration cut where the channel cuts it, a burst at its last entry
+    /// when it has more than one, and a burst of one entry left as it is.
+    #[test]
+    fn a_message_past_the_limit_is_closed_and_continued() {
+        let at_five = |text: &str| {
+            if text.chars().count() > 5 {
+                let (head, tail) = text.split_at(5);
+                vec![head.to_owned(), tail.to_owned()]
+            } else {
+                vec![text.to_owned()]
+            }
+        };
+        let mut transcript = Transcript::new();
+        let _opened = transcript.said("hello world".to_owned());
+        let cut = transcript.fit(at_five);
+        assert_eq!((cut.closed, cut.opened, cut.grew), (Some(0), Some(1), None));
+        assert_eq!(transcript.closing[0].body.text(), "hello");
+        assert_eq!(
+            transcript.open.as_ref().map(|open| open.body.text()),
+            Some(" world".to_owned())
+        );
+
+        let mut burst = Transcript::new();
+        let _opened = burst.worked(call(None, false));
+        let alone = burst.fit(|_| vec![String::new(), String::new()]);
+        assert_eq!(
+            (alone.closed, alone.opened, alone.grew),
+            (None, None, None),
+            "one entry cannot be split"
+        );
+        let _grew = burst.worked(Entry::Thought("hm".to_owned()));
+        let split = burst.fit(|_| vec![String::new(), String::new()]);
+        assert_eq!(
+            (split.closed, split.opened, split.grew),
+            (Some(0), Some(1), None)
+        );
+        assert_eq!(
+            burst.open.as_ref().map(|open| open.body.text()),
+            Some("> 💭 hm".to_owned()),
+            "the last entry continues in the next message"
+        );
+        assert_eq!(burst.closing[0].body.text(), "⏳ ran `cargo test`");
     }
 }

@@ -1039,8 +1039,8 @@ fn stamped(millis: u64) -> Timestamp {
 
 #[cfg(test)]
 mod tests {
-    use super::{nearby, presented, stamped};
-    use stageman_core::Timestamp;
+    use super::{nearby, presented, say_description, stamped};
+    use stageman_core::{JobId, Timestamp};
     use stageman_vocabulary::Arrival;
 
     /// A request head, as the world hands one over.
@@ -1381,6 +1381,30 @@ mod tests {
         assert_eq!(
             named_kit(&state, ProjectId::from_uuid(Uuid::from_u128(404)), "Claude"),
             None
+        );
+    }
+
+    /// The tool that speaks is described to each speaker as it works for
+    /// them, asserted whole per `docs/conventions.md` §4: what an agent is
+    /// told about its tools is prompt text.
+    #[test]
+    fn the_speaking_tool_is_described_to_each_speaker_exactly() {
+        assert_eq!(
+            say_description(Speaker::Foreman(ProjectId::from_uuid(Uuid::from_u128(1)))),
+            "Say something to the people on this project's channel, in Markdown: it is \
+             rendered, so headings, lists, code, tables and links all show. It posts under \
+             the message you name with `to`, which is how a person is answered where they \
+             asked; without one it posts at the root of your own room, where your ordinary \
+             output already goes and the person who asked is not."
+        );
+        assert_eq!(
+            say_description(Speaker::Job(JobId::from_uuid(Uuid::from_u128(2)))),
+            "Say something to the people in this job's room, in Markdown: it is rendered, \
+             so headings, lists, code, tables and links all show. It posts at the root of \
+             your room, or under a message when you name it with `to`, as each message is \
+             shown to you. Everything you write as ordinary output is posted at the root as \
+             well, so use this to answer in a person's thread, or when you need an answer \
+             from a person."
         );
     }
 }

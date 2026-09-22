@@ -2099,6 +2099,7 @@ impl Simulation {
             headers: [("content-type".to_owned(), "application/json".to_owned())].into(),
             body: body.into(),
         };
+        let edited = matches!(Call::parse(&request), Some(Call::Update { .. }));
         let responded = match Call::parse(&request) {
             Some(Call::Post {
                 channel,
@@ -2182,14 +2183,13 @@ impl Simulation {
             }
             None => Responded::Failed("the simulation does not know this request".to_owned()),
         };
-        self.schedule(
-            self.now,
-            Event::Responded {
-                id,
-                responded,
-                at: self.now,
-            },
-        );
+        // An edit is answered a tick later, as a line, a write and a probe
+        // are: it takes time in the real world, and an instance that edited
+        // again the moment it was answered would then run out of time rather
+        // than hang, which a scenario can see. Everything else is answered
+        // at once, which is what the scenarios' timings were written to.
+        let at = if edited { self.now + 1 } else { self.now };
+        self.schedule(at, Event::Responded { id, responded, at });
     }
 
     /// Opens a socket the instance asked for: the platform greets on it at

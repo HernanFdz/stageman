@@ -98,23 +98,39 @@ const POST_AT_MOST: usize = 12_000;
 pub fn pieces(text: &str) -> Vec<String> {
     let mut pieces = Vec::new();
     let mut rest = text;
-    while rest.chars().count() > POST_AT_MOST {
-        let limit = rest
-            .char_indices()
-            .nth(POST_AT_MOST)
-            .map_or(rest.len(), |(at, _)| at);
-        let cut = rest
-            .char_indices()
-            .take_while(|(at, _)| *at < limit)
-            .filter(|(at, c)| *c == '\n' && *at >= limit / 2)
-            .last()
-            .map_or(limit, |(at, _)| at);
+    while let Some(cut) = cut_point(rest) {
+        // Progress, whatever the cut point says: a loop that could stand
+        // still would hang under a fault rather than fail, and a hang is
+        // what no test can see.
+        if cut == 0 {
+            break;
+        }
         let (piece, remaining) = rest.split_at(cut);
         pieces.push(piece.to_owned());
         rest = remaining.strip_prefix('\n').unwrap_or(remaining);
     }
     pieces.push(rest.to_owned());
     pieces
+}
+
+/// Where a text longer than a post is cut, in bytes: at the last line end
+/// in the second half of what a post holds, and at the post's length
+/// otherwise. Nothing for a text a post carries whole.
+fn cut_point(rest: &str) -> Option<usize> {
+    if rest.chars().count() <= POST_AT_MOST {
+        return None;
+    }
+    let limit = rest
+        .char_indices()
+        .nth(POST_AT_MOST)
+        .map_or(rest.len(), |(at, _)| at);
+    let cut = rest
+        .char_indices()
+        .take_while(|(at, _)| *at < limit)
+        .filter(|(at, c)| *c == '\n' && *at >= limit / 2)
+        .last()
+        .map_or(limit, |(at, _)| at);
+    Some(cut)
 }
 
 /// How much of a project's name a room's name carries, at most.

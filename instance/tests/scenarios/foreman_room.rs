@@ -3,10 +3,11 @@
 //! `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`.
 
 use crate::simulation::{
-    CHANNEL, SAID_IN_ROOM, Simulation, Utterance, in_room, in_thread, link_to, project, room, seed,
-    thread, watching_a_channel,
+    CHANNEL, SAID_IN_ROOM, Simulation, Utterance, in_room, in_thread, link_to, project, request,
+    room, seed, thread, watching_a_channel,
 };
 use stageman_core::{Place, Room};
+use stageman_instance::Request;
 
 /// The room a foreman's transcript goes to, once made: the first room the
 /// simulation makes.
@@ -175,4 +176,33 @@ fn a_mention_in_the_foremans_room_reaches_the_foreman() {
         "and no second room: {:?}",
         world.rooms()
     );
+}
+
+/// Forgetting the project archives its foreman's room, before the record
+/// that names it goes.
+#[test]
+fn forgetting_the_project_archives_the_foremans_room() {
+    let mut world = Simulation::new();
+    world.holding(&watching_a_channel(&[]));
+    let mut instance = world.wake(seed(1));
+    world.says_at_root(100, 1, "look at the parser");
+    world.run_until(&mut instance, 5_000);
+    assert_eq!(world.rooms().len(), 1, "{:?}", world.rooms());
+
+    for effect in instance.step(request(
+        7,
+        Request::Forget {
+            project: project().to_string(),
+        },
+    )) {
+        world.perform(effect);
+    }
+    world.run_until(&mut instance, 6_000);
+
+    assert_eq!(
+        world.archived(),
+        [the_foremans_room().id],
+        "the foreman's room, and nothing else to archive"
+    );
+    assert!(instance.state().projects.is_empty());
 }

@@ -184,6 +184,15 @@ fn a_fresh_foreman_is_shown_the_whole_thread() {
     world.run_until(&mut instance, 10);
     let parent = thread(7).id;
     world.person_says(20, CHANNEL, &parent, None, "Should we bump the toolchain?");
+    // An earlier mention this instance answered: what a session that
+    // remembered would be shown from, and a fresh one is shown before.
+    world.person_says(
+        25,
+        CHANNEL,
+        "1788000000.000069",
+        Some(&parent),
+        "<@U0BOT> well, should we?",
+    );
     world.we_said(30, CHANNEL, "1788000000.000070", Some(&parent), "Not yet.");
     world.person_says(
         40,
@@ -209,6 +218,19 @@ fn a_fresh_foreman_is_shown_the_whole_thread() {
     assert!(
         run.was_told("<@U0HUMAN> (C0123456789/1788000000.000007):\nShould we bump the toolchain?"),
         "{run:?}"
+    );
+    assert!(
+        !run.was_told("from the last message you were given"),
+        "everything, not what followed the mention it once answered: {run:?}"
+    );
+    let link = crate::simulation::link_to(CHANNEL, "1788000099.000001", Some(&parent));
+    assert!(
+        world.posts().contains(&(
+            stageman_core::Place::root(room(1)),
+            format!("▶️ Handling {link}.")
+        )),
+        "noticed with a link into the thread: {:?}",
+        world.posts()
     );
     assert!(
         run.was_told("You (C0123456789/1788000000.000070):\nNot yet."),

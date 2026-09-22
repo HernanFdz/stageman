@@ -965,6 +965,7 @@ mod tests {
         let body = br##"{"ok":true,"has_more":true,"messages":[
             {"type":"message","user":"U0HUMAN","text":"<@U0BOT> which database?","ts":"1788000000.000100","thread_ts":"1788000000.000100","reply_count":3},
             {"type":"message","user":"U0BOT","bot_id":"B0SELF","text":"Two options, <@U0BOT> said.","ts":"1788000000.000200","thread_ts":"1788000000.000100"},
+            {"type":"message","user":"U0BOT","text":"As a user alone.","ts":"1788000000.000250","thread_ts":"1788000000.000100"},
             {"type":"message","user":"U0GITHUB","bot_id":"B0OTHER","bot_profile":{"name":"GitHub"},"text":"","ts":"1788000000.000300","thread_ts":"1788000000.000100","attachments":[{"pretext":"Issue closed for <@U0BOT>","title":"#9 Done"}]}
         ]}"##;
         let ThreadRead {
@@ -973,7 +974,7 @@ mod tests {
             longer,
         } = thread_read(Channel::Slack, 200, body, ROOM, &us).expect("a thread read");
         assert!(longer, "older replies were left out");
-        assert_eq!(messages.len(), 3);
+        assert_eq!(messages.len(), 4);
         assert_eq!(
             mentioning.iter().map(String::as_str).collect::<Vec<_>>(),
             vec!["1788000000.000100"],
@@ -987,8 +988,12 @@ mod tests {
             messages[1].from_us,
             "this instance's own, by its bot identifier"
         );
-        assert_eq!(messages[2].app.as_deref(), Some("GitHub"));
-        assert!(messages[2].text.contains("#9 Done"), "{}", messages[2].text);
+        assert!(
+            messages[2].from_us && messages[2].app.is_none(),
+            "this instance's own, by its user alone"
+        );
+        assert_eq!(messages[3].app.as_deref(), Some("GitHub"));
+        assert!(messages[3].text.contains("#9 Done"), "{}", messages[3].text);
         assert!(matches!(
             thread_read(
                 Channel::Slack,
@@ -1129,5 +1134,39 @@ mod tests {
         let mut bodiless = post(Channel::Slack, &speaking(), ROOM, "x", None);
         bodiless.body = None;
         assert_eq!(Call::parse(&bodiless), None);
+    }
+
+    /// The cutter's boundaries, each pinned: a text exactly as long as a
+    /// post is one piece; a line end just past the limit is not where the
+    /// cut goes, the last one inside the post's second half is; and a line
+    /// end in the first half is passed over for a cut at a character.
+    #[test]
+    fn a_text_is_cut_at_its_boundaries_exactly() {
+        let exactly = "z".repeat(12_000);
+        assert_eq!(pieces(Channel::Slack, &exactly), vec![exactly.clone()]);
+
+        let just_past = format!(
+            "{}\n{}\n{}",
+            "a".repeat(8_000),
+            "b".repeat(3_999),
+            "c".repeat(50)
+        );
+        assert_eq!(
+            pieces(Channel::Slack, &just_past),
+            vec![
+                "a".repeat(8_000),
+                format!("{}\n{}", "b".repeat(3_999), "c".repeat(50)),
+            ],
+            "cut at the line end inside the post, not at the one just past it"
+        );
+
+        let early = format!("{}\n{}", "a".repeat(100), "b".repeat(12_000));
+        let cut = pieces(Channel::Slack, &early);
+        assert_eq!(cut.len(), 2);
+        assert_eq!(
+            cut[0].chars().count(),
+            12_000,
+            "a line end in the first half is not where a post is cut"
+        );
     }
 }

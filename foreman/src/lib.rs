@@ -1310,6 +1310,15 @@ it; anything else said here is between people._"
             super::interrupted_line(ToolKind::Execute, "cargo test"),
             "⏹️ ran `cargo test` — interrupted"
         );
+        for (kind, line) in [
+            (ToolKind::Delete, "⏳ deleted `old.rs`"),
+            (ToolKind::Move, "⏳ moved `old.rs`"),
+            (ToolKind::Search, "⏳ searched `old.rs`"),
+            (ToolKind::Think, "⏳ thought about `old.rs`"),
+            (ToolKind::Fetch, "⏳ fetched `old.rs`"),
+        ] {
+            assert_eq!(super::working_line(kind, "old.rs", None), line);
+        }
         assert_eq!(
             super::thought_line("The tests first.\nThen the fix."),
             "> 💭 The tests first.\n> Then the fix."
