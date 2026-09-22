@@ -41,9 +41,28 @@ pub enum Entry {
         title: String,
         /// Where it has got to, once the adapter said.
         status: Option<ToolCallStatus>,
+        /// Whether a message landed while it ran, in which case the adapter
+        /// was measured to send no ending for it — see
+        /// `docs/decisions/0069-a-message-reaches-a-working-job.md`.
+        interrupted: bool,
     },
     /// A thought, where an adapter carries any.
     Thought(String),
+}
+
+impl Entry {
+    /// Whether this is a call that has not ended, as far as the adapter has
+    /// said, and that no message cut short.
+    const fn is_running(&self) -> bool {
+        matches!(
+            self,
+            Self::Call {
+                status: None | Some(ToolCallStatus::Pending | ToolCallStatus::InProgress),
+                interrupted: false,
+                ..
+            }
+        )
+    }
 }
 
 /// What a message of the transcript holds.
@@ -66,6 +85,12 @@ impl Body {
                     Entry::Call {
                         kind,
                         title,
+                        interrupted: true,
+                        ..
+                    } => stageman_foreman::interrupted_line(*kind, title),
+                    Entry::Call {
+                        kind,
+                        title,
                         status,
                         ..
                     } => stageman_foreman::working_line(*kind, title, *status),
@@ -80,15 +105,7 @@ impl Body {
     fn has_a_call_running(&self) -> bool {
         match self {
             Self::Narration(_) => false,
-            Self::Working(entries) => entries.iter().any(|entry| {
-                matches!(
-                    entry,
-                    Entry::Call {
-                        status: None | Some(ToolCallStatus::Pending | ToolCallStatus::InProgress),
-                        ..
-                    }
-                )
-            }),
+            Self::Working(entries) => entries.iter().any(Entry::is_running),
         }
     }
 }
@@ -269,6 +286,27 @@ impl Transcript {
         }
     }
 
+    /// A message landed in the turn: every call still running is marked
+    /// interrupted, since no ending will arrive for it. Which messages grew.
+    fn interrupt_running(&mut self) -> Vec<u64> {
+        let mut grew = Vec::new();
+        for open in self.open.iter_mut().chain(self.closing.iter_mut()) {
+            let Body::Working(entries) = &mut open.body else {
+                continue;
+            };
+            for entry in entries.iter_mut() {
+                if entry.is_running()
+                    && let Entry::Call { interrupted, .. } = entry
+                {
+                    *interrupted = true;
+                    grew.push(open.run);
+                }
+            }
+        }
+        grew.dedup();
+        grew
+    }
+
     /// A call was refined or ended, wherever its line is.
     fn call_changed(
         &mut self,
@@ -404,6 +442,7 @@ impl Running {
                 kind,
                 title,
                 status: None,
+                interrupted: false,
             }),
             Noticed::CallChanged { id, title, status } => {
                 turn.transcript.call_changed(&id, title, status)
@@ -425,6 +464,18 @@ impl Running {
             self.tend(speaker, run);
         }
         self.prune(speaker);
+    }
+
+    /// A message landed in a speaker's turn: every tool call still running
+    /// in its transcript is marked interrupted, and the messages that
+    /// changed are grown.
+    pub fn calls_interrupted(&mut self, speaker: Speaker) {
+        let Some(turn) = self.turns.get_mut(&speaker) else {
+            return;
+        };
+        for run in turn.transcript.interrupt_running() {
+            self.tend(speaker, run);
+        }
     }
 
     /// A turn ended: its open message closes, and what is not yet sent as
@@ -561,5 +612,64 @@ impl Running {
         }
         self.finishing
             .retain(|(whose, _), open| *whose != speaker || !open.settled());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Body, Entry};
+    use stageman_agent::{ToolCallStatus, ToolKind};
+
+    fn call(status: Option<ToolCallStatus>, interrupted: bool) -> Entry {
+        Entry::Call {
+            id: "call-1".to_owned(),
+            kind: ToolKind::Execute,
+            title: "cargo test".to_owned(),
+            status,
+            interrupted,
+        }
+    }
+
+    /// A call is running until the adapter says it ended, or a message
+    /// interrupted it; a thought and narration never are.
+    #[test]
+    fn a_call_runs_until_it_ended_or_was_interrupted() {
+        assert!(call(None, false).is_running());
+        assert!(call(Some(ToolCallStatus::Pending), false).is_running());
+        assert!(call(Some(ToolCallStatus::InProgress), false).is_running());
+        assert!(!call(Some(ToolCallStatus::Completed), false).is_running());
+        assert!(!call(Some(ToolCallStatus::Failed), false).is_running());
+        assert!(
+            !call(None, true).is_running(),
+            "interrupted: no ending will come"
+        );
+        assert!(!Entry::Thought("hm".to_owned()).is_running());
+
+        assert!(!Body::Narration("text".to_owned()).has_a_call_running());
+        assert!(!Body::Working(vec![Entry::Thought("hm".to_owned())]).has_a_call_running());
+        assert!(
+            Body::Working(vec![
+                call(Some(ToolCallStatus::Completed), false),
+                call(None, false)
+            ])
+            .has_a_call_running()
+        );
+        assert!(
+            !Body::Working(vec![call(Some(ToolCallStatus::Completed), false)]).has_a_call_running()
+        );
+    }
+
+    /// An interrupted call reads as such, and a completed one beside it as
+    /// it did.
+    #[test]
+    fn an_interrupted_call_reads_as_interrupted() {
+        let body = Body::Working(vec![
+            call(Some(ToolCallStatus::Completed), false),
+            call(None, true),
+        ]);
+        assert_eq!(
+            body.text(),
+            "✅ ran `cargo test`\n⏹️ ran `cargo test` — interrupted"
+        );
     }
 }

@@ -143,6 +143,12 @@ enum Timer {
         /// Which of its messages.
         run: u64,
     },
+    /// The bound on a cancelled turn ending by itself, after which its
+    /// process is closed.
+    Cancelling {
+        /// Whose turn.
+        speaker: vocabulary::Speaker,
+    },
 }
 
 /// How often the instance asks which containers still deserve to be up.
@@ -237,6 +243,18 @@ impl Instance {
         match &self.stage {
             Stage::Booting(_) => Vec::new(),
             Stage::Awake(running) => running.turns.keys().copied().collect(),
+        }
+    }
+
+    /// Whose turns are waiting on the thread their message was said in
+    /// being read, once it is awake: a turn about to be registered, with a
+    /// question about the speaker in flight — see
+    /// `docs/decisions/0068-a-mention-is-shown-its-thread.md`.
+    #[must_use]
+    pub fn reading_for(&self) -> Vec<Speaker> {
+        match &self.stage {
+            Stage::Booting(_) => Vec::new(),
+            Stage::Awake(running) => running.pending_threads.keys().copied().collect(),
         }
     }
 
@@ -532,6 +550,12 @@ pub struct Running {
     /// Messages of transcripts whose turns have ended, until each has been
     /// sent as it last read.
     finishing: BTreeMap<(vocabulary::Speaker, u64), transcript::Open>,
+    /// Jobs a person asked to stop while they were working with no turn
+    /// registered — their thread being read, their room being made — until
+    /// the turn is, when the stop takes effect. Held and never kept, as
+    /// `docs/decisions/0053-a-job-is-stopped-or-retired-by-a-person.md`
+    /// decides for a stop.
+    stops_held: BTreeSet<JobId>,
     /// Turns waiting on the thread their message was said in being read.
     pending_threads: BTreeMap<vocabulary::Speaker, threads::Pending>,
     /// Threads read, until the turn each is for composes its frame.
@@ -620,6 +644,7 @@ impl Running {
             immediate: Vec::new(),
             posting: BTreeMap::new(),
             finishing: BTreeMap::new(),
+            stops_held: BTreeSet::new(),
             pending_threads: BTreeMap::new(),
             threads_read: BTreeMap::new(),
             timers: BTreeMap::new(),
@@ -962,6 +987,7 @@ impl Running {
             }
             Some(Timer::Reconnecting { project }) => self.try_again(project, effects),
             Some(Timer::Growing { speaker, run }) => self.grow(speaker, run),
+            Some(Timer::Cancelling { speaker }) => self.cancel_overdue(speaker, effects),
             None => tracing::warn!("woken for a timer this instance did not set; ignored"),
         }
     }

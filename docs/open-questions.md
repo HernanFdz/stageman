@@ -329,12 +329,6 @@ Intended next steps, in order, each with its reason. Written as intentions, not
 progress: "next X, because Y" — never "X is 60% done", which is both derivable
 and wrong within a day.
 
-- Then let a message reach a working job per
-  `docs/decisions/0069-a-message-reaches-a-working-job.md`,
-  because the notice that says it landed and the frame it lands with are
-  0067's and 0068's, and the inbox it waits in is the foreman's shape
-  already built.
-
 - Next, make the container tests a recorder, because what they check is what
   the pinned runtime and the pinned agent actually do, which is a recording
   rather than a test. A recipe runs reality, captures what it prints and how

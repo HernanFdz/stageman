@@ -453,6 +453,16 @@ impl Running {
             .ok_or_else(|| Refusal::UnknownJob { id: job.to_owned() })?;
         if self.stop_turn(Speaker::Job(named), effects) {
             tracing::info!(job = %named, "asked to stop a job");
+        } else if self
+            .state
+            .job(named)
+            .is_some_and(|recorded| recorded.progress == Progress::Working)
+        {
+            // Working with no turn registered: its thread is being read, or
+            // its room made. The stop is held until the turn is registered,
+            // and takes effect then.
+            tracing::info!(job = %named, "asked to stop a job whose turn is not yet registered");
+            self.stops_held.insert(named);
         } else {
             tracing::debug!(job = %named, "asked to stop a job with no turn in it");
         }

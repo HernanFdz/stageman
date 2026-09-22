@@ -39,7 +39,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
-pub use conversation::{Conversation, Exchange, Heard, Noticed, Opening, Said};
+pub use conversation::{Conversation, Exchange, Heard, Noticed, Opening, Said, Steered};
 
 use agent_client_protocol::schema::v1::{
     HttpHeader, McpServer, McpServerHttp, SessionConfigKind, SessionConfigOption,

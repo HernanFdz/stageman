@@ -16,6 +16,7 @@ mod channel;
 mod dashboard;
 mod foreman;
 mod foreman_room;
+mod inbox;
 mod listening;
 mod notices;
 mod replies;

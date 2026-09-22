@@ -29,14 +29,15 @@ use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 
 use agent_client_protocol::schema::v1::{
-    ContentBlock, ContentChunk, InitializeRequest, InitializeResponse, ListSessionsRequest,
-    ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, McpServer, NewSessionRequest,
-    NewSessionResponse, PermissionOption, PermissionOptionId, PermissionOptionKind, PromptRequest,
-    PromptResponse, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionConfigId, SessionConfigOption, SessionConfigOptionValue,
-    SessionConfigSelectOption, SessionConfigValueId, SessionId, SessionInfo, SessionNotification,
-    SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, TextContent,
-    ToolCall, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+    CancelNotification, ContentBlock, ContentChunk, InitializeRequest, InitializeResponse,
+    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, McpServer,
+    NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOptionId,
+    PermissionOptionKind, PromptRequest, PromptResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
+    SessionConfigId, SessionConfigOption, SessionConfigOptionValue, SessionConfigSelectOption,
+    SessionConfigValueId, SessionId, SessionInfo, SessionNotification, SessionUpdate,
+    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, TextContent, ToolCall,
+    ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
 };
 // The envelope is the protocol library's too: its versioned message, its
 // request, its response and its notification, which the library itself
@@ -116,6 +117,24 @@ pub enum Said {
         session: String,
         /// What the agent is told.
         text: String,
+    },
+    /// Hands a message to the turn in progress, refusing to start one: the
+    /// adapter's extension, measured on 2026-09-21 — see
+    /// `docs/decisions/0069-a-message-reaches-a-working-job.md`.
+    Steer {
+        /// The request's identifier.
+        id: i64,
+        /// Which session.
+        session: String,
+        /// What the agent is told.
+        text: String,
+    },
+    /// Asks the turn in progress to stop, as the protocol spells it: a
+    /// notification, which the prompt in flight answers by ending as
+    /// cancelled.
+    Cancel {
+        /// Which session.
+        session: String,
     },
     /// Answers the agent's own request for permission: the option chosen,
     /// or none, which cancels.
@@ -216,6 +235,22 @@ pub enum Noticed {
     },
 }
 
+/// What became of a message handed to the turn in progress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum Steered {
+    /// The adapter took it into the running turn.
+    Landed,
+    /// The adapter did not: no turn was running by then, or it refused. The
+    /// message waits for whoever handed it over to deliver it another way.
+    Waits,
+}
+
+/// The method of the adapter's extension that hands a message to a running
+/// turn. Not in the specification, so the protocol library does not spell
+/// it: its name carries the prefix the protocol reserves for such things,
+/// and whether an adapter serves it is read at the handshake.
+const STEERING: &str = "_session/steering";
+
 /// Where the conversation has got to.
 #[derive(Clone, PartialEq, Eq, serde::Serialize)]
 enum Stage {
@@ -268,6 +303,14 @@ pub struct Conversation {
     advertised: Vec<SessionConfigOption>,
     /// What the session reported each setting to be, after being set.
     reported: BTreeMap<String, String>,
+    /// Whether the adapter said, at the handshake, that a running turn can
+    /// be handed a message.
+    steerable: bool,
+    /// The message being handed over, by its request's identifier, until
+    /// the adapter says what became of it: one at a time.
+    steering: Option<i64>,
+    /// What became of the last message handed over, until taken.
+    steered: Option<Steered>,
 }
 
 impl Conversation {
@@ -290,6 +333,9 @@ impl Conversation {
             noticed: Vec::new(),
             advertised: Vec::new(),
             reported: BTreeMap::new(),
+            steerable: false,
+            steering: None,
+            steered: None,
         };
         let asked = conversation.mint();
         conversation.stage = Stage::Initialising { asked };
@@ -314,6 +360,62 @@ impl Conversation {
     #[must_use]
     pub const fn is_over(&self) -> bool {
         matches!(self.stage, Stage::Over)
+    }
+
+    /// Whether a message could be handed to the turn in progress now: the
+    /// adapter said it serves that, the question has been put and not yet
+    /// answered, and nothing else is being handed over.
+    #[must_use]
+    pub const fn can_steer(&self) -> bool {
+        self.steerable && self.steering.is_none() && matches!(self.stage, Stage::Prompting { .. })
+    }
+
+    /// Hands a message to the turn in progress, and says what to send — or
+    /// nothing, when [`Conversation::can_steer`] says it cannot be. What
+    /// became of it is read off [`Conversation::steered`] once the adapter
+    /// has answered.
+    ///
+    /// Never a second prompt: the pinned adapter was measured to queue one
+    /// and to lose the first turn's answer without a word.
+    pub fn steer(&mut self, text: &str) -> Option<Vec<String>> {
+        if !self.can_steer() {
+            return None;
+        }
+        let Stage::Prompting { session, .. } = &self.stage else {
+            return None;
+        };
+        let session = session.clone();
+        let id = self.mint();
+        self.steering = Some(id);
+        Some(vec![
+            Said::Steer {
+                id,
+                session,
+                text: text.to_owned(),
+            }
+            .line(),
+        ])
+    }
+
+    /// Takes what became of the last message handed over, once.
+    pub const fn steered(&mut self) -> Option<Steered> {
+        self.steered.take()
+    }
+
+    /// What to send to ask the turn in progress to stop, or nothing when no
+    /// question is waiting on an answer: the prompt in flight then ends as
+    /// cancelled, and the session survives it.
+    #[must_use]
+    pub fn cancel(&self) -> Option<Vec<String>> {
+        let Stage::Prompting { session, .. } = &self.stage else {
+            return None;
+        };
+        Some(vec![
+            Said::Cancel {
+                session: session.clone(),
+            }
+            .line(),
+        ])
     }
 
     /// One line from the agent, and what it leads to.
@@ -456,11 +558,16 @@ impl Conversation {
 
     /// The agent answered something this side asked.
     fn answered(&mut self, id: &RequestId, result: serde_json::Value) -> Exchange {
+        if self.steering.map(RequestId::Number).as_ref() == Some(id) {
+            self.steer_answered(&result);
+            return Exchange::Continue(Vec::new());
+        }
         if !self.waiting_on(id) {
             return Exchange::Continue(Vec::new());
         }
         match std::mem::replace(&mut self.stage, Stage::Over) {
             Stage::Initialising { .. } => {
+                self.steerable = advertises_steering(&result);
                 let asked = self.mint();
                 match self.opening {
                     Opening::Fresh => {
@@ -556,11 +663,31 @@ impl Conversation {
         }
     }
 
+    /// The adapter said what became of a message handed to the turn:
+    /// injected, or anything else — a turn that had ended by then, in the
+    /// adapter's own words, or an answer this cannot read — which waits.
+    fn steer_answered(&mut self, result: &serde_json::Value) {
+        let landed = result.get("outcome").and_then(serde_json::Value::as_str) == Some("injected");
+        self.steering = None;
+        self.steered = Some(if landed {
+            Steered::Landed
+        } else {
+            Steered::Waits
+        });
+    }
+
     /// The agent refused something this side asked.
     ///
     /// A refused setting is this crate's failure, in the adapter's own words;
     /// anything else refused is the protocol's.
     fn refused_by(&mut self, id: &RequestId, error: Error) -> Exchange {
+        if self.steering.map(RequestId::Number).as_ref() == Some(id) {
+            // A message the adapter would not take is not the conversation's
+            // failure: it waits, and the turn goes on.
+            self.steering = None;
+            self.steered = Some(Steered::Waits);
+            return Exchange::Continue(Vec::new());
+        }
         if !self.waiting_on(id) {
             return Exchange::Continue(Vec::new());
         }
@@ -635,6 +762,16 @@ impl Conversation {
             })
         }
     }
+}
+
+/// Whether a handshake's answer says a running turn can be handed a
+/// message: said beside the capabilities and outside the specification, so
+/// read off the answer as it arrived; an adapter that says nothing cannot.
+fn advertises_steering(handshake: &serde_json::Value) -> bool {
+    handshake
+        .pointer("/_meta/steering/supported")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
 }
 
 /// Which of the options a permission request offers to choose: the first
@@ -798,6 +935,25 @@ impl Said {
                     vec![ContentBlock::Text(TextContent::new(text.clone()))],
                 ),
             ),
+            Self::Steer { id, session, text } => line(&Request {
+                id: RequestId::Number(*id),
+                method: STEERING.into(),
+                // Always with the behaviour that refuses to start a turn: an
+                // idle session steered without it was measured to start one
+                // nobody asked for.
+                params: Some(serde_json::json!({
+                    "sessionId": session,
+                    "prompt": [value(&ContentBlock::Text(TextContent::new(text.clone())))],
+                    "_meta": {"steering": {"idleBehavior": "promptRequired"}},
+                })),
+            }),
+            Self::Cancel { session } => {
+                let cancelling = CancelNotification::new(SessionId::new(session.as_str()));
+                line(&Notification {
+                    method: cancelling.method().into(),
+                    params: Some(value(&cancelling)),
+                })
+            }
             Self::Permitted { id, option } => {
                 let outcome =
                     option
@@ -864,6 +1020,20 @@ impl Said {
                         session: prompting.session_id.0.to_string(),
                         text: prompted(&prompting.prompt),
                     })
+                } else if method == STEERING {
+                    // Only as this side says it: refusing to start a turn.
+                    let refuses = params
+                        .pointer("/_meta/steering/idleBehavior")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("promptRequired");
+                    let session = params.get("sessionId")?.as_str()?.to_owned();
+                    let blocks: Vec<ContentBlock> =
+                        serde_json::from_value(params.get("prompt")?.clone()).ok()?;
+                    refuses.then(|| Self::Steer {
+                        id,
+                        session,
+                        text: prompted(&blocks),
+                    })
                 } else {
                     None
                 }
@@ -891,7 +1061,17 @@ impl Said {
                     .to_owned();
                 Some(Self::Unserved { id, method })
             }
-            RawJsonRpcMessage::Notification(_) => None,
+            RawJsonRpcMessage::Notification(notification) => {
+                let method: &str = &notification.method;
+                if !CancelNotification::matches_method(method) {
+                    return None;
+                }
+                let cancelling: CancelNotification =
+                    serde_json::from_value(parameters(notification.params)).ok()?;
+                Some(Self::Cancel {
+                    session: cancelling.session_id.0.to_string(),
+                })
+            }
         }
     }
 }
@@ -945,12 +1125,45 @@ impl Heard {
         }
     }
 
-    /// The handshake, answered.
+    /// The handshake, answered as the pinned adapter was measured to: saying
+    /// beside its capabilities that a running turn can be handed a message.
     #[must_use]
     pub fn initialized(id: i64) -> Self {
+        let mut result = value(&InitializeResponse::new(ProtocolVersion::V1));
+        if let serde_json::Value::Object(answered) = &mut result {
+            answered.insert(
+                "_meta".to_owned(),
+                serde_json::json!({"steering": {"supported": true}}),
+            );
+        }
+        Self::Answered {
+            id: id.into(),
+            result,
+        }
+    }
+
+    /// The handshake, answered by an adapter that says nothing about
+    /// handing a running turn a message: one that cannot.
+    #[must_use]
+    pub fn initialized_unsteerable(id: i64) -> Self {
         Self::Answered {
             id: id.into(),
             result: value(&InitializeResponse::new(ProtocolVersion::V1)),
+        }
+    }
+
+    /// A message handed to a turn, answered as measured: injected into the
+    /// running turn, or refused because none was running.
+    #[must_use]
+    pub fn steered(id: i64, landed: bool) -> Self {
+        let result = if landed {
+            serde_json::json!({"outcome": "injected"})
+        } else {
+            serde_json::json!({"outcome": "promptRequired", "reason": "noRunningTurn"})
+        };
+        Self::Answered {
+            id: id.into(),
+            result,
         }
     }
 
@@ -1142,8 +1355,9 @@ fn advertising(options: &[(&str, &str)]) -> Vec<SessionConfigOption> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Conversation, Exchange, Heard, Noticed, Opening, Said};
+    use super::{Conversation, Exchange, Heard, Noticed, Opening, Said, Steered};
     use crate::{AgentError, StopReason, Tools, declaration};
+    use agent_client_protocol::Error;
     use agent_client_protocol::schema::v1::{RequestId, ToolCallStatus, ToolKind};
     use stageman_core::{Agent, ClaudeEffort, ClaudeModel, Kit, Secret};
 
@@ -1745,6 +1959,14 @@ mod tests {
                 session: "sess-9".to_owned(),
                 text: "Fix the build.".to_owned(),
             },
+            Said::Steer {
+                id: 9,
+                session: "sess-9".to_owned(),
+                text: "Use Postgres.".to_owned(),
+            },
+            Said::Cancel {
+                session: "sess-9".to_owned(),
+            },
             Said::Permitted {
                 id: RequestId::Number(7),
                 option: Some("allow-once".to_owned()),
@@ -1764,11 +1986,8 @@ mod tests {
             assert!(Said::parse(&line) == Some(said), "{line}");
         }
         assert!(
-            Said::parse(
-                r#"{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"x"}}"#
-            )
-            .is_none(),
-            "a notification is nothing this side says"
+            Said::parse(r#"{"jsonrpc":"2.0","method":"session/update","params":{}}"#).is_none(),
+            "a notification this side never sends"
         );
         assert!(
             Said::parse(r#"{"jsonrpc":"2.0","id":1,"method":"session/fork","params":{}}"#)
@@ -1806,12 +2025,158 @@ mod tests {
         assert_eq!(Said::Initialize { id: 1 }.presented(), None);
     }
 
+    /// A steer and a cancel cross the pipe as measured, to the letter: the
+    /// extension's method, the prompt as content blocks, and the behaviour
+    /// that refuses to start a turn; and the protocol's own notification. A
+    /// steer that could start a turn is nothing this side says.
+    #[test]
+    fn a_steer_and_a_cancel_cross_the_pipe_as_measured() {
+        assert_eq!(
+            Said::Steer {
+                id: 9,
+                session: "sess-9".to_owned(),
+                text: "Use Postgres.".to_owned(),
+            }
+            .line(),
+            r#"{"jsonrpc":"2.0","id":9,"method":"_session/steering","params":{"sessionId":"sess-9","prompt":[{"type":"text","text":"Use Postgres."}],"_meta":{"steering":{"idleBehavior":"promptRequired"}}}}"#
+        );
+        assert_eq!(
+            Said::Cancel {
+                session: "sess-9".to_owned(),
+            }
+            .line(),
+            r#"{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"sess-9"}}"#
+        );
+        assert!(
+            Said::parse(
+                r#"{"jsonrpc":"2.0","id":1,"method":"_session/steering","params":{"sessionId":"x","prompt":[{"type":"text","text":"hi"}]}}"#
+            )
+            .is_none(),
+            "a steer that could start a turn is nothing this side says"
+        );
+    }
+
+    /// A conversation brought as far as its question being put, by an
+    /// adapter that can be steered or one that cannot.
+    fn prompting(steerable: bool) -> Conversation {
+        let (mut conversation, _) =
+            Conversation::begin(Opening::Fresh, None, Kit::defaults(Agent::Claude), "hello");
+        let handshake = if steerable {
+            Heard::initialized(1)
+        } else {
+            Heard::initialized_unsteerable(1)
+        };
+        drop(continuing(&mut conversation, &handshake));
+        drop(continuing(
+            &mut conversation,
+            &Heard::session_made(2, "sess-1", DEFAULTS),
+        ));
+        for asked in 3..=5 {
+            drop(continuing(&mut conversation, &Heard::set(asked, DEFAULTS)));
+        }
+        assert_eq!(conversation.waiting_for(), "an answer");
+        conversation
+    }
+
+    /// A message is handed to a running turn one at a time, and what became
+    /// of it is taken once: landed when the adapter says injected, and
+    /// waiting for anything else, a refusal included. The turn goes on
+    /// either way, and its answer is still its own.
+    #[test]
+    fn a_running_turn_is_handed_a_message_one_at_a_time() {
+        let mut conversation = prompting(true);
+        assert!(conversation.can_steer());
+        let sent = conversation.steer("Use Postgres.").expect("it can be");
+        assert!(
+            said(&sent)
+                == [Said::Steer {
+                    id: 7,
+                    session: "sess-1".to_owned(),
+                    text: "Use Postgres.".to_owned(),
+                }]
+        );
+        assert!(!conversation.can_steer(), "one at a time");
+        assert!(conversation.steer("And SQLite?").is_none());
+        assert_eq!(conversation.steered(), None, "not answered yet");
+
+        assert!(continuing(&mut conversation, &Heard::steered(7, true)).is_empty());
+        assert_eq!(conversation.steered(), Some(Steered::Landed));
+        assert_eq!(conversation.steered(), None, "taken once");
+
+        let sent = conversation.steer("And SQLite?").expect("the next can be");
+        assert!(matches!(
+            said(&sent).as_slice(),
+            [Said::Steer { id: 8, .. }]
+        ));
+        assert!(continuing(&mut conversation, &Heard::steered(8, false)).is_empty());
+        assert_eq!(conversation.steered(), Some(Steered::Waits));
+
+        let sent = conversation.steer("Anyone?").expect("and the next");
+        assert!(matches!(
+            said(&sent).as_slice(),
+            [Said::Steer { id: 9, .. }]
+        ));
+        let refusal = Heard::Refused {
+            id: RequestId::Number(9),
+            error: Error::method_not_found(),
+        };
+        assert!(continuing(&mut conversation, &refusal).is_empty());
+        assert_eq!(conversation.steered(), Some(Steered::Waits));
+        assert!(!conversation.is_over(), "a refused steer ends nothing");
+
+        let answer = over(&mut conversation, &Heard::prompted(6, StopReason::EndTurn))
+            .expect("over")
+            .expect("with an answer");
+        assert_eq!(answer.stop_reason, StopReason::EndTurn);
+        assert!(!conversation.can_steer(), "nothing is running any more");
+        assert!(conversation.steer("Too late.").is_none());
+    }
+
+    /// Nothing is handed to an adapter that did not say it can take it, or
+    /// to a conversation whose question has not been put.
+    #[test]
+    fn nothing_is_handed_to_a_turn_that_cannot_take_it() {
+        let mut unsteerable = prompting(false);
+        assert!(!unsteerable.can_steer());
+        assert!(unsteerable.steer("Use Postgres.").is_none());
+
+        let (mut early, _) =
+            Conversation::begin(Opening::Fresh, None, Kit::defaults(Agent::Claude), "hello");
+        drop(continuing(&mut early, &Heard::initialized(1)));
+        assert!(!early.can_steer(), "no question has been put");
+        assert!(early.steer("Use Postgres.").is_none());
+        assert!(early.cancel().is_none(), "and there is nothing to cancel");
+    }
+
+    /// A cancel is the protocol's own notification, said only while a
+    /// question waits on its answer, and the turn it cancels ends with an
+    /// answer saying so rather than with a failure.
+    #[test]
+    fn a_cancel_ends_the_turn_as_cancelled() {
+        let conversation = &mut prompting(true);
+        let sent = conversation.cancel().expect("a question is waiting");
+        assert!(
+            said(&sent)
+                == [Said::Cancel {
+                    session: "sess-1".to_owned(),
+                }]
+        );
+        let answer = over(conversation, &Heard::prompted(6, StopReason::Cancelled))
+            .expect("over")
+            .expect("with an answer");
+        assert_eq!(answer.stop_reason, StopReason::Cancelled);
+        assert!(conversation.cancel().is_none(), "nothing left to cancel");
+    }
+
     /// Every line an agent says reads back as itself, and the constructors
     /// render the shapes the pinned adapter was measured to send.
     #[test]
     fn every_line_the_agent_says_reads_back_as_itself() {
         let every = [
             Heard::initialized(1),
+            Heard::initialized_unsteerable(1),
+            Heard::steered(7, true),
+            Heard::steered(7, false),
             Heard::session_made(2, "sess-1", &[("model", "default")]),
             Heard::sessions(2, &["sess-1"]),
             Heard::loaded(3, &[]),

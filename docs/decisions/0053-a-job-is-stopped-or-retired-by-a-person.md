@@ -11,7 +11,9 @@ states these two acts write, and on
 what a removed container lets go of. Since
 `docs/decisions/0069-a-message-reaches-a-working-job.md` a person's
 stop of a working job is a cancel the agent answers rather than a closed
-process, with the same outcome.
+process, with the same outcome; a stop that finds the job working with no
+turn registered yet is held in memory until the turn is; and what a stop
+does with messages the job had not yet been given is that record's.
 
 ## Context
 

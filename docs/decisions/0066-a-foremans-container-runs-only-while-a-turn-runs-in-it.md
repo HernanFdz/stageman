@@ -122,7 +122,9 @@ delay.
 of every scenario, once the instance is awake and has swept: no container of
 this instance's that it has listed or made is running with nothing in it — no
 turn in flight for it, no message waiting for its foreman, nothing answering
-on its tunnel, and no question about it in flight. The check fails on the
+on its tunnel, and no question about it in flight (since
+`docs/decisions/0069-a-message-reaches-a-working-job.md`, a thread being
+read for a job's next turn is one). The check fails on the
 state this record fixes, which is the argument for having it. What it does not
 check is the other half of the bar, that nothing is left the instance cannot
 name; that half is the waking sweep's, and its scenario pins it.

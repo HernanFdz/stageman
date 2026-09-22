@@ -524,6 +524,22 @@ fn saying_posts_where_it_is_told_to_and_reports_a_failure_to_the_agent() {
     let empty = world.tool_answer(asked3).expect("answered");
     assert!(is_error(empty));
     assert_eq!(text_of(empty), "nothing was said, so nothing was posted");
+
+    // Answered where it was asked, so the thread is not signposted to the
+    // foreman's room when the turn ends: what a post through the tool
+    // counts as, for the speaker asked there.
+    world.run_until(&mut instance, 5_000);
+    assert_eq!(
+        world
+            .posts()
+            .iter()
+            .filter(|(place, _)| *place == in_thread(1))
+            .map(|(_, text)| text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["On it."],
+        "nothing but the answer in the thread: {:?}",
+        world.posts()
+    );
 }
 
 /// A job's claim about why it is stopping is read when its turn ends, and

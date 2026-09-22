@@ -279,9 +279,10 @@ nobody is a wish.
   the platform's warning arrived in. Scenarios pin both, and the gap an
   unscheduled close leaves.
 
-  Order is kept by the same shape. A foreman's inbox promises arrival order,
-  and one socket's frames arrive as events on one channel, in the order they
-  were read, to an instance that steps them one at a time.
+  Order is kept by the same shape. An inbox promises arrival order, a
+  foreman's and a job's, and one socket's frames arrive as events on one
+  channel, in the order they were read, to an instance that steps them one
+  at a time.
 - **No job blocks on a terminal.** A job that needs a human emits the question
   on a channel and stays alive. It never writes to standard output expecting an
   answer on standard input, because nobody is watching that terminal — that is

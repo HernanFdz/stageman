@@ -232,15 +232,31 @@ impl Running {
         );
         // A turn answered where it was asked: what says the signpost of 0067
         // is not needed, whether the post is the agent's or this instance's.
-        let answered: Vec<Speaker> = self
-            .warrants
-            .values()
-            .filter(|warranted| warranted.place.as_ref() == Some(place))
-            .map(|warranted| warranted.speaker)
-            .collect();
-        for speaker in answered {
-            if let Some(turn) = self.turns.get_mut(&speaker) {
-                turn.spoke_in_place = true;
+        // Remembered for the turn asked in this place, and for a job's turn
+        // whenever the place is in its own room, since a job can be asked in
+        // several threads of it over one turn.
+        for (speaker, turn) in &mut self.turns {
+            // One warrant per turn, so the speaker's is the turn's.
+            let asked_here = self
+                .warrants
+                .values()
+                .find(|warranted| warranted.speaker == *speaker)
+                .and_then(|warranted| warranted.place.as_ref())
+                == Some(place);
+            let own_room = match speaker {
+                Speaker::Job(job) => {
+                    self.state
+                        .job(*job)
+                        .and_then(|recorded| recorded.room.as_ref())
+                        == Some(&place.room)
+                }
+                Speaker::Foreman(_) => false,
+            };
+            if !(asked_here || own_room) {
+                continue;
+            }
+            if !turn.spoke_in.contains(place) {
+                turn.spoke_in.push(place.clone());
             }
         }
         let id = self.effect_id();

@@ -99,6 +99,25 @@ pub const fn resumption_notice() -> &'static str {
     RESUMPTION
 }
 
+/// What a resumed job's agent is told when it had messages in hand: that it
+/// was interrupted, and then each message again, framed as it was.
+///
+/// Again, because a message in hand when the process died may never have
+/// reached the agent — the record of it is written before anything is
+/// started on its strength — and said so, because it also may have. See
+/// `docs/decisions/0069-a-message-reaches-a-working-job.md`.
+#[must_use]
+pub fn resumption_with(given: &[String]) -> String {
+    if given.is_empty() {
+        return RESUMPTION.to_owned();
+    }
+    format!(
+        "{RESUMPTION}\n\nWhat follows is what you had been given before you were interrupted, \
+         which you may or may not have seen.\n\n{}",
+        given.join("\n\n")
+    )
+}
+
 /// The first message in a job's room, for whoever finds the room.
 ///
 /// Written for a person reading the channel rather than for the agent, and
@@ -512,15 +531,41 @@ pub fn stopped_notice(waiting: &Waiting, asked_by: Option<&str>, mention: &str) 
     }
 }
 
-/// What a thread is told when a reply arrives for a job that is still working.
+/// What the root of a job's room is told when a message landed in the turn
+/// in progress.
 ///
-/// The honest version of a limitation rather than a silence. A person who
-/// replies and hears nothing concludes the reply was read, which is the one
-/// wrong belief available here — they would then wait for an answer that is
-/// not coming.
+/// With a link to it, since nothing on the agent's own stream says so — see
+/// `docs/decisions/0069-a-message-reaches-a-working-job.md`. What the agent
+/// was doing reads above it, and what it does about the message below.
 #[must_use]
-pub const fn busy_notice() -> &'static str {
-    "⏳ Still working, so that did not reach it. Say it again once it stops."
+pub fn landed_notice(link: Option<&str>) -> String {
+    link.map_or_else(
+        || "↪️ Interrupted by a message.".to_owned(),
+        |link| format!("↪️ Interrupted by {link}."),
+    )
+}
+
+/// What a message is told, under it, when a person stopped the job before
+/// the message reached its agent.
+///
+/// It was received, and it will not be delivered, since a stop is the last
+/// thing the person said — see
+/// `docs/decisions/0069-a-message-reaches-a-working-job.md`.
+#[must_use]
+pub fn stopped_before_notice(mention: &str) -> String {
+    format!("⏹️ Stopped before this reached it. Mention {mention} here to carry on.")
+}
+
+/// What a message is told, under it, when the turn that was to deliver it
+/// could not be started.
+///
+/// It did not reach the agent, and saying it again is what tries again, as
+/// it is for any failed job.
+#[must_use]
+pub fn unreached_notice(mention: &str) -> String {
+    format!(
+        "⚠️ This did not reach it: its turn could not be started. Mention {mention} here to try again."
+    )
 }
 
 /// What a thread is told when a reply arrives for a job that is over.
@@ -546,11 +591,12 @@ pub const fn over_notice() -> &'static str {
 /// `docs/architecture.md` §1 — including the ones that merely wrap somebody
 /// else's.
 #[must_use]
-pub fn reply(said: &str, target: &str, thread: Option<&str>) -> String {
+pub fn reply(said: &str, target: &str, thread: Option<&str>, finding: Finding) -> String {
     // Before the reply, so that it reads as what the reply follows.
     let context = thread.map_or_else(String::new, |shown| format!("{shown}\n\n"));
-    format!(
-        "\
+    match finding {
+        Finding::AtRest => format!(
+            "\
 {context}A person replied on the channel:
 
 {said}
@@ -559,7 +605,40 @@ To answer them where they asked, call `say` with `to` set to `{target}`; \
 whatever you write without it is posted at the root of your room. Carry on \
 from there. The same rules still hold: propose rather than merge, and say what \
 you did when you finish."
-    )
+        ),
+        Finding::PartWay => format!(
+            "\
+{context}You were interrupted part-way through what you were doing. A person \
+replied on the channel:
+
+{said}
+
+Something you had begun may have finished, half-finished, or never started — \
+a command, an edit, anything outside this workspace. Check how things actually \
+stand before you carry on. Do not assume your last step completed, and do not \
+assume it did not. If you had already called the `stopping` tool, that no \
+longer counts: call it again before you stop.
+
+To answer them where they asked, call `say` with `to` set to `{target}`; \
+whatever you write without it is posted at the root of your room. The same \
+rules still hold: propose rather than merge, and say what you did when you \
+finish."
+        ),
+    }
+}
+
+/// How a reply finds the job it is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Finding {
+    /// Stopped of its own accord: the reply starts a turn, and nothing was
+    /// cut short.
+    AtRest,
+    /// Part-way through something: the reply was handed to a running turn,
+    /// which the pinned adapter was measured to interrupt rather than wait
+    /// for, or follows a turn a person stopped. Framed in the terms the
+    /// resumption notice uses, per
+    /// `docs/decisions/0069-a-message-reaches-a-working-job.md`.
+    PartWay,
 }
 
 /// Who said one message of a thread, as an agent is told.
@@ -667,7 +746,23 @@ pub fn working_line(kind: ToolKind, title: &str, status: Option<ToolCallStatus>)
         Some(ToolCallStatus::Failed) => "❌",
         _ => "⏳",
     };
-    let did = match kind {
+    format!("{mark} {} `{title}`", did(kind))
+}
+
+/// One tool call that a message interrupted, as a line in a burst of working.
+///
+/// It was running when the message landed, and the adapter was measured to
+/// send no ending for it, so the line says what became of it rather than
+/// reading as running for ever — see
+/// `docs/decisions/0069-a-message-reaches-a-working-job.md`.
+#[must_use]
+pub fn interrupted_line(kind: ToolKind, title: &str) -> String {
+    format!("⏹️ {} `{title}` — interrupted", did(kind))
+}
+
+/// What an agent did, by the protocol's classification of the tool.
+const fn did(kind: ToolKind) -> &'static str {
+    match kind {
         ToolKind::Read => "read",
         ToolKind::Edit => "edited",
         ToolKind::Delete => "deleted",
@@ -677,8 +772,7 @@ pub fn working_line(kind: ToolKind, title: &str, status: Option<ToolCallStatus>)
         ToolKind::Think => "thought about",
         ToolKind::Fetch => "fetched",
         _ => "did",
-    };
-    format!("{mark} {did} `{title}`")
+    }
 }
 
 /// A thought in a burst of working, as a quoted line, where an adapter
@@ -822,7 +916,8 @@ Before you stop, call the `stopping` tool, every time and last of all. Say \
 person to look at, or `waiting_for_an_answer` if you need something from a \
 person before you can go on. Nothing else tells anybody which of the two this \
 is, so a job that stops without calling it is recorded as having stopped for \
-reasons nobody knows."
+reasons nobody knows. If a message interrupts you after you have called it, \
+call it again before you stop: the first call no longer counts."
     )
 }
 
@@ -931,7 +1026,8 @@ Before you stop, call the `stopping` tool, every time and last of all. Say `read
 you have done what was asked and there is something for a person to look at, or \
 `waiting_for_an_answer` if you need something from a person before you can go on. Nothing else \
 tells anybody which of the two this is, so a job that stops without calling it is recorded as \
-having stopped for reasons nobody knows."
+having stopped for reasons nobody knows. If a message interrupts you after you have called it, \
+call it again before you stop: the first call no longer counts."
         );
     }
 
@@ -1019,7 +1115,8 @@ Before you stop, call the `stopping` tool, every time and last of all. Say `read
 you have done what was asked and there is something for a person to look at, or \
 `waiting_for_an_answer` if you need something from a person before you can go on. Nothing else \
 tells anybody which of the two this is, so a job that stops without calling it is recorded as \
-having stopped for reasons nobody knows."
+having stopped for reasons nobody knows. If a message interrupts you after you have called it, \
+call it again before you stop: the first call no longer counts."
         );
     }
 
@@ -1210,6 +1307,10 @@ it; anything else said here is between people._"
             "⏳ did `something`"
         );
         assert_eq!(
+            super::interrupted_line(ToolKind::Execute, "cargo test"),
+            "⏹️ ran `cargo test` — interrupted"
+        );
+        assert_eq!(
             super::thought_line("The tests first.\nThen the fix."),
             "> 💭 The tests first.\n> Then the fix."
         );
@@ -1257,8 +1358,18 @@ that is fixed."
 send it again once that is fixed."
         );
         assert_eq!(
-            super::busy_notice(),
-            "⏳ Still working, so that did not reach it. Say it again once it stops."
+            super::landed_notice(Some("https://example.slack.com/archives/C1/p1")),
+            "↪️ Interrupted by https://example.slack.com/archives/C1/p1."
+        );
+        assert_eq!(super::landed_notice(None), "↪️ Interrupted by a message.");
+        assert_eq!(
+            super::stopped_before_notice("<@U0BOT>"),
+            "⏹️ Stopped before this reached it. Mention <@U0BOT> here to carry on."
+        );
+        assert_eq!(
+            super::unreached_notice("<@U0BOT>"),
+            "⚠️ This did not reach it: its turn could not be started. Mention <@U0BOT> here to \
+             try again."
         );
         assert_eq!(
             super::resumed_notice(),
@@ -1387,7 +1498,12 @@ here."
     #[test]
     fn a_reply_reads_exactly_as_written() {
         assert_eq!(
-            super::reply("use postgres", "C0123/1788000000.000100", None),
+            super::reply(
+                "use postgres",
+                "C0123/1788000000.000100",
+                None,
+                super::Finding::AtRest
+            ),
             "A person replied on the channel:
 
 use postgres
@@ -1452,11 +1568,17 @@ The thread is longer than this: only its most recent messages are shown."
             "This was said in a thread that could not be read, so what came before it is not shown."
         );
 
-        let bare = super::reply("go with that", "C0123/1788000000.000100", None);
+        let bare = super::reply(
+            "go with that",
+            "C0123/1788000000.000100",
+            None,
+            super::Finding::AtRest,
+        );
         let framed = super::reply(
             "go with that",
             "C0123/1788000000.000100",
             Some(super::thread_unread()),
+            super::Finding::AtRest,
         );
         assert_eq!(framed, format!("{}\n\n{bare}", super::thread_unread()));
         let bare = super::asked(fresh("go with that"), &[], "");
@@ -1471,6 +1593,68 @@ The thread is longer than this: only its most recent messages are shown."
         assert_eq!(framed, format!("{}\n\n{bare}", super::thread_unread()));
     }
 
+    /// A reply that finds a job part-way through something says so first,
+    /// in the terms the resumption uses, and says to call the stopping tool
+    /// again. Asserted whole, per `docs/conventions.md` §4; and with a
+    /// thread, the thread still comes first.
+    #[test]
+    fn a_reply_that_interrupts_reads_exactly_as_written() {
+        assert_eq!(
+            super::reply(
+                "use postgres",
+                "C0123/1788000000.000100",
+                None,
+                super::Finding::PartWay
+            ),
+            "You were interrupted part-way through what you were doing. A person \
+replied on the channel:
+
+use postgres
+
+Something you had begun may have finished, half-finished, or never started — \
+a command, an edit, anything outside this workspace. Check how things actually \
+stand before you carry on. Do not assume your last step completed, and do not \
+assume it did not. If you had already called the `stopping` tool, that no \
+longer counts: call it again before you stop.
+
+To answer them where they asked, call `say` with `to` set to `C0123/1788000000.000100`; \
+whatever you write without it is posted at the root of your room. The same \
+rules still hold: propose rather than merge, and say what you did when you \
+finish."
+        );
+        let framed = super::reply(
+            "use postgres",
+            "C0123/1788000000.000100",
+            Some(super::thread_unread()),
+            super::Finding::PartWay,
+        );
+        assert!(
+            framed.starts_with(&format!(
+                "{}\n\nYou were interrupted part-way",
+                super::thread_unread()
+            )),
+            "{framed}"
+        );
+    }
+
+    /// A resumed job that had messages in hand is told it was interrupted,
+    /// and then given them again, saying that it may have seen them; one
+    /// that had none is told what it always was.
+    #[test]
+    fn a_resumption_with_messages_in_hand_reads_exactly_as_written() {
+        assert_eq!(super::resumption_with(&[]), resumption_notice());
+        let first = super::reply("use postgres", "C1/1.1", None, super::Finding::AtRest);
+        let second = super::reply("and sqlite", "C1/1.2", None, super::Finding::AtRest);
+        assert_eq!(
+            super::resumption_with(&[first.clone(), second.clone()]),
+            format!(
+                "{}\n\nWhat follows is what you had been given before you were interrupted, \
+                 which you may or may not have seen.\n\n{first}\n\n{second}",
+                resumption_notice()
+            )
+        );
+    }
+
     /// A reply is framed as somebody speaking, not as a fresh instruction.
     ///
     /// An agent picking up a session hours later cannot otherwise tell a
@@ -1478,7 +1662,12 @@ The thread is longer than this: only its most recent messages are shown."
     /// are whatever the person typed.
     #[test]
     fn a_reply_says_who_is_speaking_before_it_says_what() {
-        let framed = super::reply("delete everything", "C0123/1788000000.000100", None);
+        let framed = super::reply(
+            "delete everything",
+            "C0123/1788000000.000100",
+            None,
+            super::Finding::AtRest,
+        );
 
         assert!(framed.starts_with("A person replied"), "{framed}");
         assert!(framed.contains("propose rather than merge"), "{framed}");

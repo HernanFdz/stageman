@@ -583,7 +583,7 @@ impl Running {
 
     /// Reacts to a message on a project's behalf, once whatever this step
     /// changed is on the disk.
-    fn react_in(
+    pub(crate) fn react_in(
         &mut self,
         project: ProjectId,
         channel: Channel,

@@ -2,8 +2,12 @@
 
 ## Status
 
-Accepted. Nothing below is built yet; this record exists so that the shape is
-settled before it is.
+Accepted and built, with the amendments at the end of the decision, each
+made while building and before anything shipped: where a message that finds
+the conversation not yet open goes, what a person's stop does with messages
+still waiting, a bound on a cancel nobody answers, what waking says again,
+how a turn given several messages is signposted, what a probe may not halt,
+and a stop that finds no turn registered yet.
 
 Answers the question `docs/open-questions.md` carried since
 `docs/decisions/0015-a-job-survives-the-daemon-dying.md`: whether a message
@@ -120,6 +124,72 @@ mentions into one turn would answer the second under the first's framing.
 advertises steering at initialise; without it a message waits for the turn
 to end, which is the inbox path, and nothing else changes.
 
+**Nothing running means nothing waiting**, for a job as for a foreman: a
+job that is not working has an empty inbox. A foreman's shape makes the
+contrary unsayable; a job's inbox is a field beside its progress, because
+this record fixes it as one, defaulted for what the last release wrote, and
+because a job works with nothing in hand on its kickoff turn and on a
+resume, where a foreman never does. So the rule is kept by every transition
+below and checked by the simulation after every step, rather than by the
+type — and a file in which a job that is not working holds messages, which
+this version never writes, opens with them dropped and a line saying so.
+
+### Amended while building
+
+**A message that finds the conversation not yet open is handed over the
+moment it opens**, rather than waiting for the turn's end as first written:
+a message sent while the container starts would otherwise sit behind the
+whole first turn. It waits only for a conversation the adapter will not
+take one into — none open, one being handed over already, one the adapter
+declined — and the turn's end delivers what waits by starting the next
+turn on it at once, whichever way the turn ended: a failed turn is tried
+again by the next message, as a reply tries a failed job again.
+
+**A person's stop tells every message still waiting, under it, that it will
+not be delivered**, and the job holds nothing after: a stop is the last
+thing the person said, and a paused job with messages waiting would be a
+job that was not stopped. What the turn had been given is not told
+anything, since it reached the agent; it gets no check mark either, because
+a stopped turn handled nothing. A turn that could not be started tells its
+messages the same, under each, so that the next mention is what tries
+again. Rejected: **keeping them waiting through a stop.** It contradicts
+the rule above, and a message delivered by a resume nobody asked for is the
+surprise a stop exists to prevent.
+
+**A cancel nobody answers within a bound closes the process after all**,
+which is what a stop was before this record. The pinned adapter was
+measured to answer at once; the bound is for one that does not.
+
+**A stop that finds the job working with no turn registered is held and
+takes effect when the turn is** — the window is one platform round trip,
+while the thread a threaded message was said in is read per
+`docs/decisions/0068-a-mention-is-shown-its-thread.md`, or while the room
+is made — and it is held in memory and never written, as 0053 decides for a
+stop.
+
+**Waking says again what the turn had in hand**, after the notice that it
+was interrupted and framed as something the agent may or may not have seen:
+the record of a message is written before it is handed over, so a message
+in hand when the process died may never have reached the agent, and may
+have. Its thread is not read again, since what the agent was shown of it
+when the message was given, it remembers. Nothing is reacted to again.
+
+**A thread a turn was asked in is signposted per message given**, not per
+turn: a turn can be given messages from several threads, and each thread
+the agent answered in is left alone while each it did not is told where the
+answer went.
+
+**Nothing stops between queued messages, and a probe does not halt a
+container a new turn needs.** A turn's end starts the next turn without
+probing the container, as 0066 decides for a foreman draining its inbox;
+and a probe already in flight when a message starts a turn does not halt
+the container on finding its tunnel silent, which closes for a job the race
+0066 admits: with messages arriving whenever they are said, that race would
+have been the common path.
+
+**"Always received" means a job that is not over.** A retired job still
+refuses, with the notice that says so, since nothing can be given to it.
+
 Rejected: **steering alone, with no inbox.** It works exactly when a
 conversation is open, and a job spends much of its life with none: idle,
 starting its container and session, closing, dead with the daemon, or
@@ -149,7 +219,9 @@ foreman's turn does takes long enough to be worth interrupting.
 ## Consequences
 
 **The busy notice goes.** A message to a working job is received and
-delivered, and a person sees the eyes reaction rather than a refusal.
+delivered, and a person sees the eyes reaction rather than a refusal. Two
+notices come: one under a message a stop left undelivered, and one under a
+message whose turn could not be started.
 
 **Two prompts change**: the reply frame gains its interruption form, and the
 paragraph about saying why a job stops says to say it again after an
@@ -171,6 +243,12 @@ and it is a cost: the adapter's steering pre-empts and does not wait.
 does not spell it, so the conversation renders the request itself, and a pin
 bump re-measures it; the capability check is what keeps a bump that removes
 it from breaking anything but the immediacy.
+
+**The simulation's oracle checks the rule.** A job that is not working with
+a message in its inbox fails every scenario at that step, beside the
+container check 0066 gave it; and a thread being read for a job's next turn
+counts as a question about it in flight, for the one step between a turn's
+end and the next turn's registration.
 
 **Reversing** is the refusal back, the inbox field ignored, and two prompt
 paragraphs; a message already in an inbox is delivered or dropped on

@@ -14,9 +14,18 @@
 //!
 //! Every wait but the conversation is a command run once and answered by
 //! its end; the conversation is lines in and lines out, and one end. A
-//! person stopping a turn closes its process if it is talking, and otherwise
-//! takes effect at the next step: a build cannot be interrupted, and a
-//! container half-created is one nothing can name.
+//! person stopping a turn cancels its prompt if one is open — the protocol's
+//! own notification, which the agent answers and its session survives, per
+//! `docs/decisions/0069-a-message-reaches-a-working-job.md` — closes its
+//! process if it is talking and no prompt is open yet, and otherwise takes
+//! effect at the next step: a build cannot be interrupted, and a container
+//! half-created is one nothing can name. A cancel nobody answers within a
+//! bound closes the process after all.
+//!
+//! A message for a job whose turn is talking is handed to it by steering,
+//! one at a time, from the inbox the job keeps; what the adapter answers
+//! decides whether it landed or waits for the turn's end — see the same
+//! record, and `crate::replies` for the inbox.
 //!
 //! **One build at a time per image, for as long as this process lives.**
 //! Two turns starting together would otherwise both find their image absent
@@ -27,19 +36,27 @@
 //! left. This used to be a lock in the world; it is held state here.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use stageman_agent::{
-    AgentError, Answer, Command, Conversation, Exchange, Opening, StopReason, Tools,
+    AgentError, Answer, Command, Conversation, Exchange, Opening, Steered, StopReason, Tools,
 };
+use stageman_channel::Reaction;
 use stageman_core::{
-    Agent, Channel, JobId, Kit, Place, Platform, Progress, Project, Role, Secret, Speaking, State,
-    Waiting,
+    Agent, Channel, JobId, Kit, Place, Platform, Progress, Project, ProjectId, Role, Secret,
+    Speaking, State, Waiting,
 };
+use stageman_foreman::Finding;
 use stageman_vocabulary::{Effect as Generic, EffectId, Ended, Finished};
 
 use crate::transcript::Transcript;
 use crate::vocabulary::Speaker;
-use crate::{Asked, Effect, Running, complaint};
+use crate::{Asked, Effect, Running, Timer, complaint};
+
+/// How long a cancelled turn is given to end before its process is closed
+/// after all: generous against an agent mid-call, since a cancel that the
+/// adapter answers is answered at once.
+const CANCEL_WITHIN: Duration = Duration::from_secs(30);
 
 /// Whether a turn begins a session or continues the one its container
 /// holds, and everything the container is started with.
@@ -167,6 +184,20 @@ pub enum Stage {
     },
 }
 
+/// Whether a message can be handed to a turn now: one at a time, and none
+/// after the adapter has declined one.
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum Delivery {
+    /// Nothing is being handed over.
+    Open,
+    /// A message is being handed over, and the adapter has not yet said what
+    /// became of it.
+    InFlight,
+    /// The adapter declined one, so no more are handed to this turn and its
+    /// end delivers what waits.
+    Declined,
+}
+
 /// One turn in flight: what it can be told, and what it has said.
 ///
 /// Both per turn rather than per job, which is why this is a fresh value each
@@ -178,10 +209,16 @@ pub struct Turn {
     pub stopping: bool,
     /// What the agent said about why it is stopping, if it has said.
     pub claimed: Option<Waiting>,
-    /// Whether anything was posted where this turn was asked, by the agent
-    /// through the tool or by this instance: what decides whether the
-    /// thread is signposted to where the answer went when the turn ends.
-    pub spoke_in_place: bool,
+    /// Where anything was posted during this turn, by the agent through the
+    /// tool or by this instance, among the places it could have been asked
+    /// in: what decides whether a thread it was asked in is signposted to
+    /// where the answer went when the turn ends. A list rather than a flag
+    /// since `docs/decisions/0069-a-message-reaches-a-working-job.md`,
+    /// because a turn can be given messages from several threads.
+    pub spoke_in: Vec<Place>,
+    /// Whether a message can be handed to this turn now — see
+    /// `docs/decisions/0069-a-message-reaches-a-working-job.md`.
+    pub delivery: Delivery,
     /// Whether the root of the job's room is told when this turn ends.
     ///
     /// A turn a person caused is; one waking put back to work is not, since
@@ -208,7 +245,8 @@ impl Turn {
         Self {
             stopping: false,
             claimed: None,
-            spoke_in_place: false,
+            spoke_in: Vec::new(),
+            delivery: Delivery::Open,
             notify: false,
             stage: Self::first_stage(&run),
             run,
@@ -221,12 +259,36 @@ impl Turn {
         Self {
             stopping: false,
             claimed: None,
-            spoke_in_place: false,
+            spoke_in: Vec::new(),
+            delivery: Delivery::Open,
             notify: true,
             stage: Self::first_stage(&run),
             run,
             transcript: Transcript::new(),
         }
+    }
+
+    /// Whether a message could be handed to this turn now: it is talking,
+    /// and the conversation says a message can be handed over.
+    pub fn can_steer(&self) -> bool {
+        match &self.stage {
+            Stage::Talking { conversation, .. } => conversation.can_steer(),
+            _ => false,
+        }
+    }
+
+    /// Hands a message to this turn's conversation: the process to send to
+    /// and the lines to send, or nothing when it cannot be handed over now.
+    pub fn steer(&mut self, text: &str) -> Option<(EffectId, Vec<String>)> {
+        let Stage::Talking {
+            process,
+            conversation,
+        } = &mut self.stage
+        else {
+            return None;
+        };
+        let lines = conversation.steer(text)?;
+        Some((*process, lines))
     }
 
     /// What a turn waits on first: whether its image is there, for one that
@@ -378,7 +440,17 @@ impl Running {
     /// answer has something to mark. What is answered with is the first
     /// command of the run — whether the image is there, or the container
     /// started — and the caller decides whether that waits for a write.
-    pub fn turn(&mut self, speaker: Speaker, turn: Turn) -> Effect {
+    pub fn turn(&mut self, speaker: Speaker, mut turn: Turn) -> Effect {
+        // A stop asked for while the job was working with no turn registered
+        // — its thread being read, its room being made — takes effect now:
+        // the turn ends at its first step, as one stopped before talking
+        // does.
+        if let Speaker::Job(job) = speaker
+            && self.stops_held.remove(&job)
+        {
+            tracing::info!(%job, "a stop asked for before its turn was registered takes effect");
+            turn.stopping = true;
+        }
         let first = match &turn.run {
             Run::Begin { agent, role, .. } => self.ask(
                 &Command::Present {
@@ -400,20 +472,58 @@ impl Running {
     /// A person asked for a speaker's turn to stop. Whether there was one.
     ///
     /// **Asking rather than killing** is what stopping means for the agent:
-    /// its process is closed, which closes the pipe it speaks on and ends
-    /// it, and the container carries on because the agent is no longer what
-    /// it runs — see
-    /// `docs/decisions/0053-a-job-is-stopped-or-retired-by-a-person.md`. A
-    /// turn that is not yet talking stops at its next step instead.
+    /// the prompt in flight is cancelled, which the agent answers by ending
+    /// its turn and its session survives, so that the next message finds it
+    /// remembering where it was — see
+    /// `docs/decisions/0053-a-job-is-stopped-or-retired-by-a-person.md` and
+    /// `docs/decisions/0069-a-message-reaches-a-working-job.md`. A cancel
+    /// nobody answers within a bound closes the process after all,
+    /// which is what a stop was before that record. A turn talking with no
+    /// prompt open yet has nothing to cancel and is closed; one not yet
+    /// talking stops at its next step instead.
     pub fn stop_turn(&mut self, speaker: Speaker, effects: &mut Vec<Effect>) -> bool {
         let Some(turn) = self.turns.get_mut(&speaker) else {
             return false;
         };
         turn.stopping = true;
-        if let Stage::Talking { process, .. } = turn.stage {
-            effects.push(Generic::Close { id: process });
+        let Stage::Talking {
+            process,
+            conversation,
+        } = &turn.stage
+        else {
+            return true;
+        };
+        let process = *process;
+        match conversation.cancel() {
+            Some(lines) => {
+                for line in lines {
+                    effects.push(Generic::Send { id: process, line });
+                }
+                let id = self.effect_id();
+                self.timers.insert(id, Timer::Cancelling { speaker });
+                effects.push(Effect::Wake {
+                    id,
+                    after: CANCEL_WITHIN,
+                });
+            }
+            None => effects.push(Generic::Close { id: process }),
         }
         true
+    }
+
+    /// A cancel's bound went off: a turn still talking, and still stopping,
+    /// is closed the way a stop closed it before it was a cancel.
+    pub fn cancel_overdue(&mut self, speaker: Speaker, effects: &mut Vec<Effect>) {
+        if let Some(turn) = self.turns.get(&speaker)
+            && turn.stopping
+            && let Stage::Talking { process, .. } = &turn.stage
+        {
+            tracing::warn!(
+                ?speaker,
+                "the agent did not answer the cancel, so its process is closed"
+            );
+            effects.push(Generic::Close { id: *process });
+        }
     }
 
     /// Whether a turn was stopped before this step, in which case it ends
@@ -671,8 +781,10 @@ impl Running {
         };
         let exchange = conversation.heard(line);
         // What the agent said and did, posted once this turn is let go of
-        // below.
+        // below; and what became of a message handed to it, if this line
+        // said.
         let noticed = conversation.noticed();
+        let steered = conversation.steered();
         match exchange {
             Exchange::Continue(lines) => {
                 for line in lines {
@@ -688,6 +800,67 @@ impl Running {
         for noticed in noticed {
             self.noticed(speaker, noticed);
         }
+        if let Some(steered) = steered {
+            self.steered(speaker, steered);
+        }
+        // A message that waited for the conversation to open is handed over
+        // the moment it can be: this line may be the one that opened it.
+        if let Speaker::Job(job) = speaker
+            && let Some((project, channel)) = self.bound(job)
+        {
+            self.try_deliver(project, job, channel);
+        }
+    }
+
+    /// The adapter said what became of a message handed to a turn.
+    ///
+    /// Landed: the root is told, with a link, since nothing on the agent's
+    /// own stream says so; the claim the agent had made no longer holds, as
+    /// `docs/decisions/0055-a-job-says-why-it-stopped.md` amended; a call
+    /// still running is marked interrupted; and the next message waiting, if
+    /// any, is handed over. Not taken — the turn had ended by then, or the
+    /// adapter refused — and the message waits again, for the turn's end to
+    /// deliver; nothing more is handed to this turn, since the answer says
+    /// it would not take it.
+    fn steered(&mut self, speaker: Speaker, steered: Steered) {
+        let Speaker::Job(job) = speaker else {
+            return;
+        };
+        let Some(turn) = self.turns.get_mut(&speaker) else {
+            return;
+        };
+        turn.delivery = Delivery::Open;
+        match steered {
+            Steered::Landed => {
+                turn.claimed = None;
+                let Some((project, channel)) = self.bound(job) else {
+                    return;
+                };
+                let link = self
+                    .state
+                    .job(job)
+                    .and_then(|recorded| recorded.inbox.given.last())
+                    .and_then(|errand| self.addressed(project, channel, errand).2);
+                self.notice(job, &stageman_foreman::landed_notice(link.as_deref()));
+                self.calls_interrupted(speaker);
+                self.try_deliver(project, job, channel);
+            }
+            Steered::Waits => {
+                turn.delivery = Delivery::Declined;
+                if let Some(recorded) = self.state.job_mut(job) {
+                    recorded.inbox.hand_back();
+                    self.dirty = true;
+                }
+            }
+        }
+    }
+
+    /// The project a job belongs to and the channel its room is on, when it
+    /// has one: what addressing anything about the job needs.
+    pub(crate) fn bound(&self, job: JobId) -> Option<(ProjectId, Channel)> {
+        let project = self.state.project_of(job)?;
+        let channel = self.state.job(job)?.room.as_ref()?.channel;
+        Some((project, channel))
     }
 
     /// A turn's agent process ended, on its own or because it was closed.
@@ -733,8 +906,10 @@ impl Running {
         if let Some(process) = turn.process() {
             self.talking.remove(&process);
         }
-        // Where the turn was asked, before its warrant goes: what the
-        // signpost below is said in.
+        // Where the turn was asked, before its warrant goes: what decides a
+        // foreman's signpost. A job's is decided per message given, below,
+        // since a kickoff or a waking turn was asked at the root, which no
+        // signpost is for.
         let asked_in = self
             .warrants
             .values()
@@ -758,19 +933,34 @@ impl Running {
                         | Stage::Talking { .. }
                         | Stage::Closing { .. }
                 );
-                self.foreman_ended(project, outcome, made, turn.spoke_in_place, effects);
+                let spoke_in_place = asked_in
+                    .as_ref()
+                    .is_some_and(|place| turn.spoke_in.contains(place));
+                self.foreman_ended(project, outcome, made, spoke_in_place, effects);
                 return;
             }
             Speaker::Job(job) => job,
         };
+        self.job_ended(job, &turn, outcome, effects);
+    }
 
+    /// What a job's turn ending means: what is recorded, what the inbox is
+    /// left holding, whether the container is probed, and what the room is
+    /// told.
+    fn job_ended(
+        &mut self,
+        job: JobId,
+        turn: &Turn,
+        outcome: Result<Answer, String>,
+        effects: &mut Vec<Effect>,
+    ) {
         let progress = if turn.stopping {
             Progress::Idle(Waiting::Paused)
         } else {
             match outcome {
                 Ok(answer) => {
                     self.noted(job, answer.reported.clone());
-                    self::outcome(&answer, turn.claimed)
+                    self::outcome(&answer, turn.claimed.clone())
                 }
                 Err(why) => Progress::Idle(Waiting::Failed(why)),
             }
@@ -780,12 +970,35 @@ impl Running {
             Progress::Idle(waiting) => Some(waiting.clone()),
             Progress::Working | Progress::Retired(_) => None,
         };
+        // Whether the turn handled what it was given: neither a stopped turn
+        // nor a failed one did, and neither gets the check mark.
+        let handled = !turn.stopping && !matches!(progress, Progress::Idle(Waiting::Failed(_)));
         self.record(job, progress);
 
+        // What the turn was given is finished with, per 0069. A message
+        // handed over and not yet answered for is not known to have landed,
+        // so it waits again first; and whether the next one waiting starts
+        // a turn at once is decided before the probe, which it spares.
+        let given = self.state.job_mut(job).map_or_else(Vec::new, |recorded| {
+            if turn.delivery == Delivery::InFlight {
+                recorded.inbox.hand_back();
+            }
+            recorded.inbox.finish()
+        });
+        let next = !turn.stopping
+            && self
+                .state
+                .job(job)
+                .is_some_and(|recorded| recorded.inbox.next().is_some());
+
         // The container is asked whether it is still showing something, at
-        // one of the three moments 0043 names. Inward-facing, so it need not
-        // wait for the record to land.
-        self.probe(job, effects);
+        // one of the three moments 0043 names — unless the next message
+        // starts a turn in it at once, in which case nothing stops between
+        // the two, as 0066 decides for a foreman draining its inbox.
+        // Inward-facing, so it need not wait for the record to land.
+        if !next {
+            self.probe(job, effects);
+        }
 
         // Said whichever way it went, with the reading the agent gave and
         // the one thing the agent cannot say, which is that a mention now
@@ -813,20 +1026,82 @@ impl Running {
             );
         }
 
-        // A thread the job was asked in and never answered in is told where
-        // the answer went: the root, where its transcript goes. The signpost
-        // of 0067, for the turn that missed the tool call.
-        if let Some(place) = asked_in
-            && place.thread.is_some()
-            && !turn.spoke_in_place
-            && let Some((speaking, _)) = speaking_for(&self.state, job)
-        {
-            let link = stageman_channel::room_link(place.room.channel, &place.room.id);
-            self.say(
-                &speaking,
-                &place,
-                &stageman_foreman::answered_elsewhere_notice(&link),
-            );
+        self.given_finished(job, turn, handled, &given, next);
+    }
+
+    /// What follows for the messages a job's turn was given, and for those
+    /// still waiting: the check mark on each the turn handled; the signpost
+    /// in each thread it was asked in and never answered in; what a stop
+    /// tells the rest; and the next turn, on the next message, at once.
+    fn given_finished(
+        &mut self,
+        job: JobId,
+        turn: &Turn,
+        handled: bool,
+        given: &[stageman_core::Errand],
+        next: bool,
+    ) {
+        let Some((project, channel)) = self.bound(job) else {
+            return;
+        };
+        let Some((speaking, _)) = speaking_for(&self.state, job) else {
+            return;
+        };
+        for errand in given {
+            let (place, _, _) = self.addressed(project, channel, errand);
+            // Each message the turn handled gets the check mark, as a
+            // foreman's do; it waits for the record, as the reaction does.
+            if handled && let Some(message) = &errand.message {
+                self.react_in(
+                    project,
+                    channel,
+                    &errand.thread.room,
+                    message,
+                    Reaction::Done,
+                );
+            }
+            // A thread the job was asked in and never answered in is told
+            // where the answer went: the root, where its transcript goes.
+            // The signpost of 0067, for the turn that missed the tool call.
+            if place.thread.is_some() && !turn.spoke_in.contains(&place) {
+                let link = stageman_channel::room_link(place.room.channel, &place.room.id);
+                self.say(
+                    &speaking,
+                    &place,
+                    &stageman_foreman::answered_elsewhere_notice(&link),
+                );
+            }
+        }
+
+        // A stop is the last thing the person said: every message still
+        // waiting is told, under it, that it will not be delivered, and
+        // nothing waits for a job that is not working.
+        if turn.stopping {
+            let stopped = self
+                .state
+                .job_mut(job)
+                .map_or_else(Vec::new, |recorded| recorded.inbox.drain());
+            let mention = self.own_mention(project, channel);
+            for errand in &stopped {
+                self.say(
+                    &speaking,
+                    &under(channel, errand),
+                    &stageman_foreman::stopped_before_notice(&mention),
+                );
+            }
+            return;
+        }
+        // The next message waiting starts the next turn at once, whichever
+        // way this one ended: a turn that failed is tried again by the next
+        // message, as a reply does for a failed job. In hand and working
+        // first, as receiving does for a message that finds the job idle.
+        if next {
+            if let Some(recorded) = self.state.job_mut(job) {
+                recorded.inbox.give();
+                recorded.progress = Progress::Working;
+                self.dirty = true;
+            }
+            self.start_given(project, job, channel, Finding::AtRest);
         }
     }
 
@@ -841,14 +1116,49 @@ impl Running {
     pub fn abandoned(&mut self, speaker: Speaker) {
         self.turns.remove(&speaker);
         self.warrants.retain(|_, known| known.speaker != speaker);
-        if let Speaker::Job(job) = speaker {
-            self.record(
-                job,
-                Progress::Idle(Waiting::Failed(
-                    "the instance could not be written, so the turn was not started".to_owned(),
-                )),
+        let Speaker::Job(job) = speaker else {
+            return;
+        };
+        self.stops_held.remove(&job);
+        self.record(
+            job,
+            Progress::Idle(Waiting::Failed(
+                "the instance could not be written, so the turn was not started".to_owned(),
+            )),
+        );
+        // Every message the turn was to deliver is told, under it, that it
+        // did not reach the agent, since nothing else will deliver it: the
+        // job is idle again, and the next mention is what tries again.
+        let unreached = self
+            .state
+            .job_mut(job)
+            .map_or_else(Vec::new, |recorded| recorded.inbox.drain());
+        let Some((project, channel)) = self.bound(job) else {
+            return;
+        };
+        let Some((speaking, _)) = speaking_for(&self.state, job) else {
+            return;
+        };
+        let mention = self.own_mention(project, channel);
+        for errand in &unreached {
+            self.say(
+                &speaking,
+                &under(channel, errand),
+                &stageman_foreman::unreached_notice(&mention),
             );
         }
+    }
+}
+
+/// The thread under a message, where a notice about that message alone is
+/// said: the thread it was in, or one under it when it was at the root.
+fn under(channel: Channel, errand: &stageman_core::Errand) -> Place {
+    Place {
+        room: stageman_core::Room {
+            channel,
+            id: errand.thread.room.clone(),
+        },
+        thread: Some(errand.thread.id.clone()),
     }
 }
 

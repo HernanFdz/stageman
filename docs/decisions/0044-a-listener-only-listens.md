@@ -127,7 +127,10 @@ the reading task, and everything after them is already guarded by the recipient
 that owns it — a foreman's loop is driven only by the arrival that found it
 idle, and a second reply to a working job is refused rather than admitted. What
 changes is that those guards now do work they were written for and never had to
-perform.
+perform. (Since
+`docs/decisions/0069-a-message-reaches-a-working-job.md` a second reply to a
+working job is admitted into its inbox rather than refused, in the same step
+it arrives; the guard is the inbox, and the ordering promise is unchanged.)
 
 **A refresh costs nothing, and an unscheduled ending still costs something.**
 There is no way to overlap a connection nobody warned about, so the gap is

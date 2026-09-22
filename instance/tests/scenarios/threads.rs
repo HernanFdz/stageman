@@ -130,6 +130,7 @@ fn a_mention_in_a_thread_is_shown_everything_from_the_last_message_it_was_given(
                 "<@U0BOT> go with that",
                 "C-job-001/1788000000.500000",
                 Some(&stageman_foreman::thread_shown(&shown, true, false)),
+                stageman_foreman::Finding::AtRest,
             )
             .as_str()
         )

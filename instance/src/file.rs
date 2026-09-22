@@ -8,7 +8,8 @@
 use rand::Rng as _;
 use rand::rngs::StdRng;
 use stageman_core::{
-    Inconsistent, InstanceId, Key, NONCE_LEN, Nonce, OpenError, SealError, Snapshot, State,
+    Inconsistent, InstanceId, Key, NONCE_LEN, Nonce, OpenError, Progress, SealError, Snapshot,
+    State,
 };
 
 /// The file could not be opened.
@@ -39,7 +40,25 @@ pub fn opened(bytes: Option<&[u8]>, key: &Key) -> Result<(State, Option<Instance
     // Read before opening, because opening consumes the snapshot and this is
     // the one thing on it the state does not carry.
     let named = snapshot.instance;
-    let state = snapshot.open(key).map_err(LoadError::Open)?;
+    let mut state = snapshot.open(key).map_err(LoadError::Open)?;
+    // Nothing running means nothing waiting: a job not working with messages
+    // in its inbox is a shape this version never writes, and carrying it
+    // would mean inventing a turn to deliver them. Dropped with a line, as
+    // `docs/conventions.md` §4 permits for a message in hand.
+    for (job, recorded) in state
+        .projects
+        .values_mut()
+        .flat_map(|project| project.jobs.iter_mut())
+    {
+        if recorded.progress != Progress::Working && !recorded.inbox.is_empty() {
+            let dropped = recorded.inbox.drain().len();
+            tracing::warn!(
+                %job,
+                dropped,
+                "a job that is not working held messages, which are dropped"
+            );
+        }
+    }
     Ok((state, named))
 }
 

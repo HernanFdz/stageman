@@ -317,6 +317,35 @@ impl Running {
                 continue;
             };
             let speaker = Speaker::Job(*job);
+            // What the turn had been given is said again, after the notice
+            // that it was interrupted, as something it may or may not have
+            // seen: the record of it was written before anything was handed
+            // over, so a message in hand may never have reached the agent —
+            // see `docs/decisions/0069-a-message-reaches-a-working-job.md`.
+            // Its thread is not read again: what the agent was shown of it
+            // when the message was given, it remembers.
+            let given: Vec<String> = self
+                .bound(*job)
+                .and_then(|(project, channel)| {
+                    let recorded = self.state.job(*job)?;
+                    Some(
+                        recorded
+                            .inbox
+                            .given
+                            .iter()
+                            .map(|errand| {
+                                let (_, target, _) = self.addressed(project, channel, errand);
+                                stageman_foreman::reply(
+                                    &errand.said,
+                                    &target,
+                                    None,
+                                    stageman_foreman::Finding::AtRest,
+                                )
+                            })
+                            .collect(),
+                    )
+                })
+                .unwrap_or_default();
             let warrant = self.warrant(speaker, room.map(Place::root), None);
             // The room is told why a turn is starting in it, since what the
             // agent says next is about something: the restart.
@@ -331,7 +360,7 @@ impl Running {
                     kit,
                     warrant,
                     tools: self.tools.clone(),
-                    text: stageman_foreman::resumption_notice().to_owned(),
+                    text: stageman_foreman::resumption_with(&given),
                 }),
             );
             effects.push(first);

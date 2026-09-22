@@ -90,6 +90,10 @@ struct Adapter {
     narrates: Option<(Vec<Utterance>, u64)>,
     /// Which conversation this is, in the record of them.
     talk: usize,
+    /// The prompt in flight, by its request, and when its scripted answer
+    /// lands: what a message handed to the turn is measured against, and
+    /// what a cancel ends early.
+    prompt: Option<(i64, Now)>,
 }
 
 /// One thing a scripted agent says or does while answering, in the order
@@ -124,6 +128,12 @@ pub struct Talk {
     pub opened_at: usize,
     /// Where in the trace its end was delivered, once it was.
     pub ended_at: Option<usize>,
+    /// Every message handed to the turn that the adapter took, in order:
+    /// what the agent was told mid-turn, as the pinned adapter was measured
+    /// to take it and never echo it.
+    pub steered: Vec<String>,
+    /// Whether the prompt was cancelled, which ends it as cancelled.
+    pub cancelled: bool,
 }
 
 impl Talk {
@@ -276,6 +286,14 @@ pub struct Simulation {
     said: Vec<serde_json::Value>,
     /// Why the next thread reads are refused, front first.
     thread_failures: VecDeque<String>,
+    /// Whether the adapters say at the handshake that a running turn can be
+    /// handed a message, as the pinned adapter was measured to.
+    steerable: bool,
+    /// How many of the next messages handed to a turn the adapter declines.
+    steers_declined: u32,
+    /// How many of the next cancels the adapter ignores: a turn that goes
+    /// on as if nothing was said.
+    cancels_ignored: u32,
     /// Rooms made so far, so each is named apart.
     rooms_made: u32,
     /// Every room made: its identifier, and the name asked for.
@@ -603,6 +621,9 @@ impl Simulation {
             edits: Vec::new(),
             said: Vec::new(),
             thread_failures: VecDeque::new(),
+            steerable: true,
+            steers_declined: 0,
+            cancels_ignored: 0,
             rooms_made: 0,
             rooms: Vec::new(),
             described: Vec::new(),
@@ -1006,6 +1027,23 @@ impl Simulation {
         self.transcripts.push_back((script, apart));
     }
 
+    /// Scripts the adapters to say nothing at the handshake about handing a
+    /// running turn a message: an adapter that cannot be steered.
+    pub const fn adapters_unsteerable(&mut self) {
+        self.steerable = false;
+    }
+
+    /// Scripts the adapter to decline the next message handed to a turn.
+    pub const fn next_steer_declined(&mut self) {
+        self.steers_declined += 1;
+    }
+
+    /// Scripts the adapter to ignore the next cancel: the prompt goes on as
+    /// if nothing was said.
+    pub const fn next_cancel_ignored(&mut self) {
+        self.cancels_ignored += 1;
+    }
+
     /// Every edit made to a post, by the message's identifier, in order.
     pub fn edits(&self) -> &[(String, String)] {
         &self.edits
@@ -1216,10 +1254,27 @@ impl Simulation {
                 "job {job} is working with no container"
             );
         }
+        // Nothing running means nothing waiting: a job that is not working
+        // has an empty inbox, per
+        // `docs/decisions/0069-a-message-reaches-a-working-job.md`, kept by
+        // the instance's transitions rather than by the type.
+        for (job, recorded) in instance
+            .state()
+            .projects
+            .values()
+            .flat_map(|project| project.jobs.iter())
+        {
+            assert!(
+                recorded.progress == Progress::Working || recorded.inbox.is_empty(),
+                "job {job} is not working and holds messages: {:?}",
+                self.trace.iter().rev().take(8).collect::<Vec<_>>()
+            );
+        }
         if instance.swept().is_none() {
             return;
         }
         let turning = instance.turning();
+        let reading = instance.reading_for();
         let asking = instance.asking_about();
         for (name, held) in &self.containers {
             if !held.running || held.instance != Some(this_instance()) || !self.seen.contains(name)
@@ -1235,8 +1290,12 @@ impl Simulation {
                 stageman_job::job_of(name),
                 stageman_foreman::project_of(name),
             ) {
+                // A thread being read for a job's next turn is a question
+                // about it in flight, for the one step between a turn's end
+                // and the next turn's registration.
                 (Some(job), _) => {
                     turning.contains(&stageman_instance::Speaker::Job(job))
+                        || reading.contains(&stageman_instance::Speaker::Job(job))
                         || held.serving
                         || deciding
                 }
@@ -1304,6 +1363,8 @@ impl Simulation {
             warrant: None,
             opened_at: self.trace.len(),
             ended_at: None,
+            steered: Vec::new(),
+            cancelled: false,
         });
         let talk = self.talks.len() - 1;
         self.talking.insert(id, talk);
@@ -1317,6 +1378,7 @@ impl Simulation {
                 outcome,
                 narrates,
                 talk,
+                prompt: None,
             },
         );
     }
@@ -1336,13 +1398,20 @@ impl Simulation {
         let talk = adapter.talk;
         let reply_at = self.now + 1;
         match said {
-            Said::Initialize { id: request } => self.schedule(
-                reply_at,
-                Event::Line {
-                    id,
-                    line: Heard::initialized(request).line(),
-                },
-            ),
+            Said::Initialize { id: request } => {
+                let handshake = if self.steerable {
+                    Heard::initialized(request)
+                } else {
+                    Heard::initialized_unsteerable(request)
+                };
+                self.schedule(
+                    reply_at,
+                    Event::Line {
+                        id,
+                        line: handshake.line(),
+                    },
+                );
+            }
             Said::NewSession { id: request, .. } => {
                 self.session_opened(id, talk, request, None, presented);
             }
@@ -1393,6 +1462,10 @@ impl Simulation {
             Said::Prompt {
                 id: request, text, ..
             } => self.prompted(id, talk, request, text),
+            Said::Steer {
+                id: request, text, ..
+            } => self.steered(id, talk, request, text),
+            Said::Cancel { .. } => self.cancelled(id),
             Said::Permitted { .. } | Said::Unserved { .. } => {}
         }
     }
@@ -1484,6 +1557,9 @@ impl Simulation {
                         line: Heard::prompted(request, answer.stop_reason).line(),
                     },
                 );
+                if let Some(adapter) = self.adapters.get_mut(&id) {
+                    adapter.prompt = Some((request, ends_at));
+                }
             }
             Err(why) => {
                 // The agent dies instead of answering, and its process ends
@@ -1501,6 +1577,72 @@ impl Simulation {
                 );
             }
         }
+    }
+
+    /// A message handed to a turn, answered as the pinned adapter was
+    /// measured to: taken into the prompt in flight, which goes on as
+    /// scripted and ends once; refused when no prompt is in flight, or when
+    /// a scenario scripted the adapter to decline. What was taken is
+    /// remembered on the conversation, since the adapter never echoes it.
+    fn steered(&mut self, id: EffectId, talk: usize, request: i64, text: String) {
+        // One scripted refusal is spent per message handed over.
+        let declined = match self.steers_declined.checked_sub(1) {
+            Some(left) => {
+                self.steers_declined = left;
+                true
+            }
+            None => false,
+        };
+        let Some(adapter) = self.adapters.get(&id) else {
+            return;
+        };
+        let running = adapter
+            .prompt
+            .is_some_and(|(_, ends_at)| ends_at > self.now);
+        let landed = running && !declined;
+        if landed && let Some(talk) = self.talks.get_mut(talk) {
+            talk.steered.push(text);
+        }
+        self.schedule(
+            self.now + 1,
+            Event::Line {
+                id,
+                line: Heard::steered(request, landed).line(),
+            },
+        );
+    }
+
+    /// A cancel, answered as measured: the prompt in flight ends at once as
+    /// cancelled, whatever it had left to say, and the session survives. One
+    /// with no prompt in flight is nothing.
+    fn cancelled(&mut self, id: EffectId) {
+        if let Some(left) = self.cancels_ignored.checked_sub(1) {
+            self.cancels_ignored = left;
+            return;
+        }
+        let Some(adapter) = self.adapters.get_mut(&id) else {
+            return;
+        };
+        let Some((request, ends_at)) = adapter.prompt else {
+            return;
+        };
+        if ends_at <= self.now {
+            return;
+        }
+        adapter.prompt = None;
+        let talk = adapter.talk;
+        self.queue
+            .retain(|_, event| !matches!(event, Event::Line { id: whose, .. } if *whose == id));
+        if let Some(talk) = self.talks.get_mut(talk) {
+            talk.cancelled = true;
+        }
+        self.schedule(
+            self.now + 1,
+            Event::Line {
+                id,
+                line: Heard::prompted(request, StopReason::Cancelled).line(),
+            },
+        );
     }
 
     /// Makes a container: from an image that is there, under a name nothing
@@ -2331,6 +2473,39 @@ impl Simulation {
         self.schedule(at, event);
     }
 
+    /// Somebody mentioning this instance at the root of a job's room, under
+    /// the identifier given: what two messages to one job need, so that
+    /// each is reacted to and linked apart.
+    pub fn says_in_room_as(&mut self, at: Now, n: u32, id: &str, text: &str) {
+        let socket = self.live_socket();
+        let event = self.frame_on(
+            socket,
+            at,
+            &room(n).id,
+            id,
+            None,
+            &format!("<@U0BOT> {text}"),
+            Spoken::Mention,
+        );
+        self.schedule(at, event);
+    }
+
+    /// Somebody mentioning this instance in a thread inside a job's room,
+    /// under the identifier given.
+    pub fn says_in_rooms_thread_as(&mut self, at: Now, n: u32, thread: &str, id: &str, text: &str) {
+        let socket = self.live_socket();
+        let event = self.frame_on(
+            socket,
+            at,
+            &room(n).id,
+            id,
+            Some(thread),
+            &format!("<@U0BOT> {text}"),
+            Spoken::Mention,
+        );
+        self.schedule(at, event);
+    }
+
     /// Somebody mentioning this instance in a thread inside a job's room,
     /// said at an instant.
     pub fn says_in_rooms_thread(&mut self, at: Now, n: u32, thread: &str, text: &str) {
@@ -2481,9 +2656,14 @@ impl Simulation {
                 );
             }
             Effect::Answer { id, answer } => self.answered(id, answer),
+            // Answered a tick later, as a line or a write is: a probe takes
+            // time in the real world, and what arrives in that time is
+            // exactly what the race
+            // `docs/decisions/0069-a-message-reaches-a-working-job.md`
+            // closes is about.
             Effect::Probe { id, port, .. } => {
                 let probed = self.probed(port);
-                self.schedule(self.now, Event::Probed { id, probed });
+                self.schedule(self.now + 1, Event::Probed { id, probed });
             }
             Effect::Request {
                 id,

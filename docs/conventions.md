@@ -82,11 +82,15 @@ Record the near-miss too: the term you rejected, and what it would have implied.
 - **inbox** — the messages waiting for a project's foreman, or for a job
   since `docs/decisions/0069-a-message-reaches-a-working-job.md`, in the
   order they arrived. It exists only while its owner is working: a foreman
-  or a job with nothing to do has nothing waiting, which is a property of
-  the type rather than a rule anybody keeps. A job's is delivered into the
-  turn that is running, by steering, when that turn's conversation is open,
-  and waits otherwise. Not a *queue*, which names the structure instead of
-  what is in it, and would invite a second one somewhere else.
+  or a job with nothing to do has nothing waiting. For a foreman that is a
+  property of the type rather than a rule anybody keeps; for a job, whose
+  inbox is a field beside its progress, it is kept by every transition the
+  instance makes — a turn's end starts the next message's turn at once, a
+  stop tells what was waiting and drops it — and checked by the simulation
+  after every step. A job's is delivered into the turn that is running, by
+  steering, when that turn's conversation is open, and waits otherwise. Not
+  a *queue*, which names the structure instead of what is in it, and would
+  invite a second one somewhere else.
 
   It outlives this process, the way a job does. A message in hand when the
   daemon is killed is still in hand when it starts again, and startup is what
@@ -859,12 +863,14 @@ it lands.
   container of this instance's that it has listed or made is running with
   nothing in it — no turn in flight for it, no message waiting for its
   foreman or for it, nothing answering on its tunnel, and no question about
-  it in flight. The other half, that nothing is left the instance cannot name,
-  is the waking sweep's, pinned by its scenario rather than by the oracle. The
-  container tests are what tie the simulated runtime to the real one, and both
-  are needed: the simulation reaches the crash between two steps that no
-  container test can, and the container test reaches the proxy that no
-  simulation would have imagined.
+  it in flight; and, since
+  `docs/decisions/0069-a-message-reaches-a-working-job.md`, no job that is
+  not working holds a message. The other half, that nothing is left the
+  instance cannot name, is the waking sweep's, pinned by its scenario rather
+  than by the oracle. The container tests are what tie the simulated runtime
+  to the real one, and both are needed: the simulation reaches the crash
+  between two steps that no container test can, and the container test
+  reaches the proxy that no simulation would have imagined.
 - **What a snapshot must still open is what the last release wrote, and
   nothing older.** Compatibility is a window of one tag, not a growing pile:
   when a released version exists, a schema change carries a bridge from *that*

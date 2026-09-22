@@ -12,13 +12,15 @@
 //! that cannot be read does not stop the turn: the frame says so instead.
 //!
 //! Held and never kept: a fetch in flight when this process dies is asked
-//! again by the next start, which finds the message still in hand.
+//! again by the next start for a foreman, which finds the message still in
+//! hand; a job's messages in hand are said again without one, per
+//! `docs/decisions/0069-a-message-reaches-a-working-job.md`.
 
 use std::collections::BTreeSet;
 
 use stageman_channel::{Message, ThreadRead};
 use stageman_core::{Channel, JobId, ProjectId};
-use stageman_foreman::{Shown, Voice};
+use stageman_foreman::{Finding, Shown, Voice};
 
 use crate::Running;
 use crate::vocabulary::Speaker;
@@ -30,12 +32,19 @@ pub const THREAD_AT_MOST: usize = 50;
 /// What waits on a thread being read: the turn to start once it is.
 #[derive(Clone, PartialEq, Eq)]
 pub enum Pending {
-    /// A job's reply, to be delivered once its thread is read.
+    /// A job's message in hand, to start its turn once the thread is read.
     Job {
         /// Whose turn.
         job: JobId,
-        /// The reply, as heard.
-        message: Message,
+        /// How the message found the job.
+        finding: Finding,
+    },
+    /// A job's message in hand, to be handed to its running turn once the
+    /// thread is read — see
+    /// `docs/decisions/0069-a-message-reaches-a-working-job.md`.
+    Steer {
+        /// Whose turn.
+        job: JobId,
     },
     /// A foreman's message, in hand in its inbox.
     Foreman {
@@ -204,13 +213,14 @@ impl Running {
         };
         self.threads_read.insert(speaker, read);
         match self.pending_threads.remove(&speaker) {
-            Some(Pending::Job { job, message }) => {
-                let bound = self.state.project_of(job).and_then(|project| {
-                    let channel = self.state.projects.get(&project)?.channels.keys().next()?;
-                    Some((project, *channel))
-                });
-                if let Some((project, channel)) = bound {
-                    self.resume_job(project, job, channel, &message);
+            Some(Pending::Job { job, finding }) => {
+                if let Some((project, channel)) = self.bound(job) {
+                    self.resume_job(project, job, channel, finding);
+                }
+            }
+            Some(Pending::Steer { job }) => {
+                if let Some((project, channel)) = self.bound(job) {
+                    self.steer_given(project, job, channel);
                 }
             }
             Some(Pending::Foreman { project }) => self.inspect_before_turning(project),
@@ -220,11 +230,21 @@ impl Running {
 
     /// The record that a message is in hand was never written, so the
     /// thread it was in is not asked for and the turn does not start: a
-    /// job's is failed as a turn never started is, and a foreman's message
-    /// stays in hand for the next start to find.
+    /// job's is failed as a turn never started is, a message that was to
+    /// be handed to a running turn waits again for that turn's end, and a
+    /// foreman's message stays in hand for the next start to find.
     pub fn thread_unasked(&mut self, speaker: Speaker) {
         match self.pending_threads.remove(&speaker) {
             Some(Pending::Job { .. }) => self.abandoned(speaker),
+            Some(Pending::Steer { job }) => {
+                if let Some(turn) = self.turns.get_mut(&speaker) {
+                    turn.delivery = crate::turns::Delivery::Open;
+                }
+                if let Some(recorded) = self.state.job_mut(job) {
+                    recorded.inbox.hand_back();
+                    self.dirty = true;
+                }
+            }
             Some(Pending::Foreman { .. }) => {
                 tracing::warn!(
                     "the foreman's turn is not started, since its message is not on the disk"

@@ -798,6 +798,104 @@ pub struct Job {
     /// it is defaulted.
     #[serde(default)]
     pub reported: BTreeMap<String, String>,
+    /// The messages it has been sent and has not finished with — see
+    /// `docs/decisions/0069-a-message-reaches-a-working-job.md`. Kept with
+    /// the record, so that a message in hand when this process dies is
+    /// still in hand when it starts again. Empty for every job the last
+    /// release wrote, which is why it is defaulted.
+    #[serde(default)]
+    pub inbox: Inbox,
+}
+
+/// The messages a job has been sent and has not finished with.
+///
+/// The shape `docs/decisions/0045-a-foremans-turn-survives-the-daemon-dying.md`
+/// gave a foreman, widened in the one way a job needs: what is in hand is
+/// plural, because a message handed to a running turn joins the one that
+/// started it, and both are finished with when that turn ends. Everything
+/// not yet given waits in the order it arrived, which is the only order that
+/// makes sense to give it in.
+///
+/// **Nothing running means nothing waiting**, for a job as for a foreman: a
+/// job that is not working has an empty inbox. A foreman's shape makes the
+/// contrary unsayable; this is a field beside the job's progress instead,
+/// because `docs/decisions/0069-a-message-reaches-a-working-job.md` fixed it
+/// as one, defaulted for what the last release wrote, and because a job
+/// works with nothing in hand — on its kickoff turn, and on a resume — where
+/// a foreman never does. So the rule is kept by every transition the
+/// instance makes and checked by the simulation after every step, rather
+/// than by the type; see `docs/conventions.md` §2. What a turn's end, a
+/// person's stop and a turn that never started each do with what is here is
+/// that record's.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Inbox {
+    /// What the turn in flight has been given: the message that started it,
+    /// and every one handed to it since.
+    #[serde(default)]
+    pub given: Vec<Errand>,
+    /// What has not been given yet, front first.
+    #[serde(default)]
+    pub waiting: std::collections::VecDeque<Errand>,
+}
+
+impl Inbox {
+    /// An inbox with nothing in it.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            given: Vec::new(),
+            waiting: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// Takes a message, behind whatever already waits.
+    pub fn receive(&mut self, errand: Errand) {
+        self.waiting.push_back(errand);
+    }
+
+    /// What would be given next, if anything waits.
+    #[must_use]
+    pub fn next(&self) -> Option<&Errand> {
+        self.waiting.front()
+    }
+
+    /// Gives the next message to the turn in flight: it stops waiting and
+    /// is in hand. Answers with it, and with nothing when nothing waited.
+    pub fn give(&mut self) -> Option<&Errand> {
+        let next = self.waiting.pop_front()?;
+        self.given.push(next);
+        self.given.last()
+    }
+
+    /// The turn in flight ended: everything it had been given is finished
+    /// with, and is what this answers with.
+    pub fn finish(&mut self) -> Vec<Errand> {
+        std::mem::take(&mut self.given)
+    }
+
+    /// The last message given was not taken — handed to a running turn that
+    /// had ended by the time it arrived — so it waits again, ahead of
+    /// whatever arrived since.
+    pub fn hand_back(&mut self) {
+        if let Some(errand) = self.given.pop() {
+            self.waiting.push_front(errand);
+        }
+    }
+
+    /// Everything, given and then waiting, in the order it was received:
+    /// what a person's stop, or a turn that never started, has to say
+    /// something about. Leaves nothing.
+    pub fn drain(&mut self) -> Vec<Errand> {
+        let mut all = std::mem::take(&mut self.given);
+        all.extend(std::mem::take(&mut self.waiting));
+        all
+    }
+
+    /// Whether nothing is in hand and nothing waits.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.given.is_empty() && self.waiting.is_empty()
+    }
 }
 
 impl Job {
@@ -818,6 +916,7 @@ impl Job {
             room: None,
             asked_by: None,
             reported: BTreeMap::new(),
+            inbox: Inbox::new(),
         }
     }
 
@@ -1042,7 +1141,8 @@ where
     })
 }
 
-/// One message waiting for, or held by, a project's foreman.
+/// One message waiting for, or held by, a project's foreman — or a job,
+/// since `docs/decisions/0069-a-message-reaches-a-working-job.md`.
 ///
 /// Carries where to answer as well as what was said, because a foreman answers
 /// in the thread its message arrived under — see
@@ -2533,10 +2633,10 @@ pub enum HandoutError {
 mod tests {
     use super::{
         Agent, AgentConfig, Arriving, Attending, BASE64, Channel, ChannelConfig, ClaudeEffort,
-        ClaudeModel, Errand, Handout, HandoutError, Inconsistent, Job, JobId, Key, Kit, KitConfig,
-        KitName, KitNameError, NONCE_LEN, Nonce, OpenError, Outcome, Place, Platform, Progress,
-        Project, ProjectId, Recipient, Room, Secret, Snapshot, State, Taken, Thread, VariableName,
-        VariableNameError, Waiting,
+        ClaudeModel, Errand, Handout, HandoutError, Inbox, Inconsistent, Job, JobId, Key, Kit,
+        KitConfig, KitName, KitNameError, NONCE_LEN, Nonce, OpenError, Outcome, Place, Platform,
+        Progress, Project, ProjectId, Recipient, Room, Secret, Snapshot, State, Taken, Thread,
+        VariableName, VariableNameError, Waiting,
     };
     use base64::Engine as _;
     use jiff::Timestamp;
@@ -3542,6 +3642,7 @@ mod tests {
             "a thread, which is what the last release wrote, is not a room"
         );
         assert_eq!(job.asked_by, None);
+        assert!(job.inbox.is_empty(), "no job had an inbox to write");
         assert_eq!(project.brief, "", "nobody had written one");
         assert!(project.watched.is_empty(), "nothing was watched");
     }
@@ -3590,6 +3691,115 @@ mod tests {
                 .and_then(|errand| errand.app.as_deref()),
             Some("GitHub")
         );
+    }
+
+    /// A job's inbox gives what waits in the order it arrived, keeps what a
+    /// turn was given until that turn ends, hands back the last thing given
+    /// when the turn did not take it, ahead of whatever arrived since, and
+    /// drains in the order received.
+    #[test]
+    fn a_jobs_inbox_gives_in_order_and_hands_back_what_was_not_taken() {
+        let mut inbox = Inbox::new();
+        assert!(inbox.is_empty());
+        assert_eq!(inbox.next(), None);
+        assert_eq!(inbox.give(), None, "nothing waits");
+
+        inbox.receive(errand("first"));
+        inbox.receive(errand("second"));
+        inbox.receive(errand("third"));
+        assert_eq!(inbox.next().map(|next| next.said.as_str()), Some("first"));
+        assert_eq!(inbox.give().map(|given| given.said.as_str()), Some("first"));
+        assert_eq!(
+            inbox.give().map(|given| given.said.as_str()),
+            Some("second")
+        );
+        assert_eq!(inbox.next().map(|next| next.said.as_str()), Some("third"));
+        assert!(!inbox.is_empty());
+        let mut in_hand_only = Inbox::new();
+        in_hand_only.receive(errand("alone"));
+        assert!(in_hand_only.give().is_some());
+        assert!(!in_hand_only.is_empty(), "something in hand is something");
+
+        // The second was not taken: it waits again, ahead of the third, and
+        // the first stays in hand.
+        inbox.hand_back();
+        assert_eq!(
+            inbox
+                .given
+                .iter()
+                .map(|given| given.said.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first"]
+        );
+        assert_eq!(
+            inbox
+                .waiting
+                .iter()
+                .map(|waiting| waiting.said.as_str())
+                .collect::<Vec<_>>(),
+            vec!["second", "third"]
+        );
+
+        // The turn ended: what it was given is finished with, in order.
+        assert!(inbox.give().is_some());
+        let finished = inbox.finish();
+        assert_eq!(
+            finished
+                .iter()
+                .map(|done| done.said.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "second"]
+        );
+        assert!(inbox.given.is_empty());
+        assert_eq!(inbox.next().map(|next| next.said.as_str()), Some("third"));
+        assert!(inbox.finish().is_empty(), "nothing is finished twice");
+
+        // A stop drains everything, given first, and leaves nothing.
+        assert!(inbox.give().is_some());
+        inbox.receive(errand("fourth"));
+        assert_eq!(
+            inbox
+                .drain()
+                .iter()
+                .map(|drained| drained.said.as_str())
+                .collect::<Vec<_>>(),
+            vec!["third", "fourth"]
+        );
+        assert!(inbox.is_empty());
+        inbox.hand_back();
+        assert!(inbox.is_empty(), "nothing to hand back");
+    }
+
+    /// A job's inbox travels through the file whole: what is in hand and
+    /// what waits, in order.
+    #[test]
+    fn a_jobs_inbox_survives_the_file() {
+        let mut state = populated();
+        let job = state
+            .projects
+            .values_mut()
+            .next()
+            .and_then(|project| project.jobs.values_mut().next())
+            .expect("a job");
+        job.inbox.receive(errand("in hand"));
+        job.inbox.receive(errand("waiting"));
+        assert!(job.inbox.give().is_some());
+        let before = job.inbox.clone();
+
+        let mut nonces = counting_nonces();
+        let sealed = state.seal(&key(), &mut nonces).expect("seals");
+        let written = serde_json::to_string(&sealed).expect("encodes");
+        let reopened: Snapshot = serde_json::from_str(&written).expect("parses");
+        let opened = reopened.open(&key()).expect("opens");
+        let job = opened
+            .projects
+            .values()
+            .next()
+            .and_then(|project| project.jobs.values().next())
+            .expect("the job");
+        assert_eq!(job.inbox, before);
+        assert_eq!(job.inbox.given.len(), 1);
+        assert_eq!(job.inbox.waiting.len(), 1);
     }
 
     /// A binding the last release wrote with both credentials comes through
