@@ -1,8 +1,8 @@
-/* The dashboard's stylesheet, compiled by `dx` and served as a static file.
-   Never linked into the binary: `just dev` produces it, `just check`
-   does not need it, and a build without it renders unstyled rather than
-   failing — see
-   `docs/decisions/0025-the-stylesheet-is-fetched-not-linked-into-the-binary.md`. */
+/* The dashboard's stylesheet, compiled by `dx` from this file and referenced
+   as a compile-time asset. A build script guarantees the compiled file exists
+   so that `just check` needs no `dx`; a build without a real one renders
+   unstyled rather than failing — see
+   `docs/decisions/0025-a-build-script-guarantees-the-stylesheet-exists.md`. */
 
 @import "tailwindcss";
 
@@ -43,4 +43,43 @@
     --color-working: #2f6f4e;
     --color-idle: #4a6d8c;
     --color-failed: #a33a2c;
+}
+
+/* The second look: the same names with other values, under one class on the
+   root, so that a component never names a theme — see
+   `docs/decisions/0072-the-dashboard-has-a-dark-theme.md`. The class is put
+   there before the first paint by the script the shell carries, and
+   `color-scheme` tells the browser, so its own controls and scrollbars follow.
+
+   Every token above has a value here, and a token added above without one is
+   a component that turns invisible at night. The three state colours are
+   chosen again rather than tinted: a tint that separates working from idle on
+   white does not on near-black. */
+@layer base {
+    :root {
+        color-scheme: light;
+    }
+
+    :root.dark {
+        color-scheme: dark;
+
+        --color-background: #151412;
+        --color-foreground: #ecebe7;
+
+        --color-surface: #1d1c19;
+        --color-surface-muted: #272521;
+
+        --color-muted-foreground: #a4a09a;
+        --color-faint-foreground: #75716b;
+
+        --color-border: #302e2a;
+        --color-border-strong: #43403a;
+
+        --color-primary: #4f9a70;
+        --color-primary-foreground: #f4faf6;
+
+        --color-working: #6cbd8e;
+        --color-idle: #7ea8cc;
+        --color-failed: #e28174;
+    }
 }

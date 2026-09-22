@@ -920,6 +920,30 @@ fn the_navigation_marks_the_screen_being_looked_at() {
     );
 }
 
+/// The look is chosen before the page paints, by a script the page carries.
+///
+/// The server renders no theme of its own: it does not know what the browser
+/// holds, and a class it guessed would flash — see
+/// `docs/decisions/0072-the-dashboard-has-a-dark-theme.md`. So the page must
+/// carry the script that decides, and must not carry a decision.
+#[test]
+fn the_page_carries_the_theme_script_and_no_theme_of_its_own() {
+    let (_kept, snapshot) = scratch();
+    let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
+
+    let page = running.get("/");
+
+    assert!(page.contains("stagemanTheme"), "no theme script: {page}");
+    assert!(
+        page.contains("prefers-color-scheme"),
+        "the script should follow the system: {page}"
+    );
+    assert!(
+        !page.contains(r#"class="dark""#),
+        "the server decided a theme: {page}"
+    );
+}
+
 /// The opening tag of the link to `href`, and nothing after it.
 ///
 /// Bounded at the tag's own `>` on purpose — see the test above for what

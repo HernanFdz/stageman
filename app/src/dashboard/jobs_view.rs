@@ -14,12 +14,13 @@
 //! finished instruction would route around all of it.
 
 use dioxus::prelude::*;
-use lucide_dioxus::{Check, CircleOff, ExternalLink, Eye, EyeOff, Square, X};
 #[cfg(feature = "server")]
 use stageman_instance::{Request, Response};
 
 use super::error::{DashboardError, DashboardResult};
-use crate::ui::{Badge, BadgeTone, Button, Card, EmptyState, Modal};
+use crate::ui::{
+    Badge, BadgeTone, Button, ButtonVariant, Card, EmptyState, Icon, Modal, Skeleton, Tooltip,
+};
 
 pub use stageman_wire::{Ending, Job, Offered, Standing, Working};
 
@@ -152,10 +153,10 @@ pub fn ProjectJobsView(project: String) -> Element {
                             Badge { "{working.jobs.len()}" }
                         },
                         aside: rsx! {
+                            Tooltip { text: "Start a job",
                             Button {
-                                class: "px-2.5 text-base leading-none",
+                                class: "px-2",
                                 aria_label: "Start a job",
-                                title: "Start a job",
                                 onclick: {
                                     // The first kit the project offers, which
                                     // is the one a select with a single option
@@ -170,7 +171,8 @@ pub fn ProjectJobsView(project: String) -> Element {
                                         starting.set(true);
                                     }
                                 },
-                                "+"
+                                {Icon::Add.draw(16)}
+                            }
                             }
                         },
                         if working.jobs.is_empty() {
@@ -209,10 +211,10 @@ pub fn ProjectJobsView(project: String) -> Element {
                             title: "Start a job",
                             onclose: move |()| starting.set(false),
                             actions: rsx! {
+                                Tooltip { text: "Start",
                                 Button {
-                                    class: "px-2.5 text-base leading-none",
+                                    class: "px-2",
                                     aria_label: "Start",
-                                    title: "Start",
                                     disabled: !draft().is_complete(),
                                     onclick: move |_| {
                                         let identifier = identifier.clone();
@@ -228,7 +230,8 @@ pub fn ProjectJobsView(project: String) -> Element {
                                             }
                                         }
                                     },
-                                    "✓"
+                                    {Icon::Save.draw(16)}
+                                }
                                 }
                             },
                             if let Some(reason) = failure() {
@@ -243,20 +246,18 @@ pub fn ProjectJobsView(project: String) -> Element {
                         p { class: "text-sm text-failed", "{reason}" }
                     }
                 },
-                None => rsx! {
-                    p { class: "text-sm text-muted-foreground", "Reading the project…" }
-                },
+                None => rsx! { Skeleton {} },
             }
         }
     }
 }
 
-/// How every icon-only control on a job row is drawn.
+/// How every icon-only control on a job row is padded.
 ///
-/// Written once because there are now five of them: padded and pulled back, so
-/// the target is bigger than the shape without moving anything around it.
-const CONTROL: &str = "-m-1 rounded p-1 text-muted-foreground hover:text-foreground \
-                       focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary";
+/// Written once because there are five of them: padded and pulled back, so
+/// the target is bigger than the shape without moving anything around it. The
+/// colour and the hover are the ghost button's.
+const CONTROL: &str = "-m-1 p-1";
 
 /// One job, as the list shows it.
 ///
@@ -305,29 +306,22 @@ fn RanJob(
                 }
             }
             // Icons rather than words, because a row of jobs is a list and a
-            // list reads better as shapes. Both carry an accessible name and a
-            // tooltip: an icon-only control with neither is a puzzle, and the
-            // tooltip is the only thing that says which address the second one
-            // goes to.
-            //
-            // The glyphs are deliberately not hidden from assistive technology
-            // and do not need to be. A label on the control replaces whatever
-            // its contents would have computed, so an unnamed drawing inside
-            // one contributes nothing to say twice.
+            // list reads better as shapes. Every control carries an accessible
+            // name, and its tooltip repeats the name for eyes: an icon-only
+            // control with neither is a puzzle, and the tooltip is the only
+            // thing that says which address the second one goes to.
             div { class: "flex items-center gap-1",
-                button {
-                    r#type: "button",
-                    // Padded and pulled back, so the target is bigger than the
-                    // shape without moving anything around it.
-                    class: "-m-1 rounded p-1 text-muted-foreground hover:text-foreground \
-                            focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
-                    onclick: move |_| showing.toggle(),
-                    aria_label: if showing() { "Hide what it was told" } else { "What it was told" },
-                    title: if showing() { "Hide what it was told" } else { "What it was told" },
-                    if showing() {
-                        EyeOff { size: 16, class: "shrink-0" }
-                    } else {
-                        Eye { size: 16, class: "shrink-0" }
+                Tooltip { text: if showing() { "Hide what it was told" } else { "What it was told" },
+                    Button {
+                        variant: ButtonVariant::Ghost,
+                        class: CONTROL,
+                        onclick: move |_| showing.toggle(),
+                        aria_label: if showing() { "Hide what it was told" } else { "What it was told" },
+                        if showing() {
+                            {Icon::Hide.draw(16)}
+                        } else {
+                            {Icon::Reveal.draw(16)}
+                        }
                     }
                 }
                 // In a tab of its own, and told to carry nothing there. What
@@ -338,84 +332,95 @@ fn RanJob(
                 // An arrow leaving a frame rather than an eye, and the
                 // distinction is worth keeping: an eye means *reveal this*, as
                 // the control beside it does, and this one navigates away.
-                a {
-                    class: "-m-1 rounded p-1 text-muted-foreground hover:text-foreground \
-                            focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
-                    href: "{job.tunnel}",
-                    target: "_blank",
-                    rel: "noopener noreferrer",
-                    aria_label: "Look at what it is showing",
-                    title: "Look at what it is showing — {job.tunnel}",
-                    ExternalLink { size: 16, class: "shrink-0" }
+                Tooltip { text: "Look at what it is showing — {job.tunnel}",
+                    a {
+                        class: "{CONTROL} inline-flex items-center rounded-md text-muted-foreground \
+                                hover:bg-surface-muted hover:text-foreground focus-visible:outline-none \
+                                focus-visible:ring-2 focus-visible:ring-primary",
+                        href: "{job.tunnel}",
+                        target: "_blank",
+                        rel: "noopener noreferrer",
+                        aria_label: "Look at what it is showing",
+                        {Icon::Look.draw(16)}
+                    }
                 }
                 // A working job can be stopped, and that is all it can be:
                 // its container is in use and its session is mid-turn.
                 if job.standing == Standing::Working {
-                    button {
-                        r#type: "button",
-                        class: CONTROL,
-                        aria_label: "Stop it",
-                        title: "Stop it — the job keeps everything and can be given more",
-                        onclick: {
-                            let project = project.clone();
-                            let id = job.id.clone();
-                            move |_| {
+                    Tooltip { text: "Stop it — the job keeps everything and can be given more",
+                        Button {
+                            variant: ButtonVariant::Ghost,
+                            class: CONTROL,
+                            aria_label: "Stop it",
+                            onclick: {
                                 let project = project.clone();
-                                let id = id.clone();
-                                async move { onchanged.call(stop(project, id).await) }
-                            }
-                        },
-                        Square { size: 16, class: "shrink-0" }
+                                let id = job.id.clone();
+                                move |_| {
+                                    let project = project.clone();
+                                    let id = id.clone();
+                                    async move { onchanged.call(stop(project, id).await) }
+                                }
+                            },
+                            {Icon::Stop.draw(16)}
+                        }
                     }
                 }
                 // And a job that has stopped can be ended, either way. Two
                 // controls rather than one with a choice behind it, because
                 // the verdict is the whole of what is being recorded.
                 if !over && job.standing != Standing::Working {
-                    button {
-                        r#type: "button",
-                        class: CONTROL,
-                        aria_label: "It is done",
-                        title: "It is done — removes its container and everything in it",
-                        onclick: {
-                            let project = project.clone();
-                            let id = job.id.clone();
-                            move |_| {
+                    Tooltip { text: "It is done — removes its container and everything in it",
+                        Button {
+                            variant: ButtonVariant::Ghost,
+                            class: CONTROL,
+                            aria_label: "It is done",
+                            onclick: {
                                 let project = project.clone();
-                                let id = id.clone();
-                                async move {
-                                    onchanged.call(retire(project, id, Ending::Done).await);
+                                let id = job.id.clone();
+                                move |_| {
+                                    let project = project.clone();
+                                    let id = id.clone();
+                                    async move {
+                                        onchanged.call(retire(project, id, Ending::Done).await);
+                                    }
                                 }
-                            }
-                        },
-                        Check { size: 16, class: "shrink-0" }
+                            },
+                            {Icon::Done.draw(16)}
+                        }
                     }
-                    button {
-                        r#type: "button",
-                        class: CONTROL,
-                        aria_label: "Discard it",
-                        title: "Discard it — removes its container and everything in it",
-                        onclick: {
-                            // Moved rather than cloned: the last control on
-                            // the row is the last thing that wants it.
-                            let project = project;
-                            let id = job.id.clone();
-                            move |_| {
-                                let project = project.clone();
-                                let id = id.clone();
-                                async move {
-                                    onchanged.call(retire(project, id, Ending::Discarded).await);
+                    Tooltip { text: "Discard it — removes its container and everything in it",
+                        Button {
+                            variant: ButtonVariant::Ghost,
+                            class: CONTROL,
+                            aria_label: "Discard it",
+                            onclick: {
+                                // Moved rather than cloned: the last control
+                                // on the row is the last thing that wants it.
+                                let project = project;
+                                let id = job.id.clone();
+                                move |_| {
+                                    let project = project.clone();
+                                    let id = id.clone();
+                                    async move {
+                                        onchanged.call(retire(project, id, Ending::Discarded).await);
+                                    }
                                 }
-                            }
-                        },
-                        X { size: 16, class: "shrink-0" }
+                            },
+                            {Icon::Discard.draw(16)}
+                        }
                     }
                 }
                 if over {
-                    span {
-                        class: "-m-1 p-1 text-faint-foreground",
-                        title: "This job is over — its container and session are gone",
-                        CircleOff { size: 16, class: "shrink-0" }
+                    Tooltip { text: "This job is over — its container and session are gone",
+                        span {
+                            class: "{CONTROL} inline-flex text-faint-foreground",
+                            // Reachable by keyboard, so the tooltip can be
+                            // asked for without a mouse: nothing else on the
+                            // row says what the shape means.
+                            tabindex: "0",
+                            aria_label: "This job is over",
+                            {Icon::Over.draw(16)}
+                        }
                     }
                 }
                 if showing() {

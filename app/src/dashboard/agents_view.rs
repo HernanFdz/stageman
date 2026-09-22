@@ -16,7 +16,7 @@ use dioxus::prelude::*;
 use stageman_instance::{Request, Response};
 
 use super::error::{DashboardError, DashboardResult};
-use crate::ui::{Badge, BadgeTone, Button, ButtonVariant, Card, EmptyState};
+use crate::ui::{Badge, BadgeTone, Button, ButtonVariant, Card, EmptyState, Skeleton};
 
 pub use stageman_wire::Agent;
 
@@ -122,9 +122,7 @@ pub fn AgentsView() -> Element {
                         p { class: "text-sm text-failed", "{reason}" }
                     }
                 },
-                None => rsx! {
-                    p { class: "text-sm text-muted-foreground", "Reading the agents…" }
-                },
+                None => rsx! { Skeleton {} },
             }
         }
     }

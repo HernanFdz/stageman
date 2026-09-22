@@ -14,6 +14,9 @@ pub enum ButtonVariant {
     Secondary,
     /// Something destructive, which should look like it.
     Danger,
+    /// An action drawn as its icon alone, in a row of others: no fill and no
+    /// border, so the row stays a row, and hover to say it can be pressed.
+    Ghost,
 }
 
 impl ButtonVariant {
@@ -25,6 +28,7 @@ impl ButtonVariant {
                 "bg-surface text-foreground border border-border hover:bg-surface-muted"
             }
             Self::Danger => "bg-failed text-primary-foreground hover:bg-failed/90",
+            Self::Ghost => "text-muted-foreground hover:bg-surface-muted hover:text-foreground",
         }
     }
 }
@@ -94,6 +98,7 @@ mod tests {
         ButtonVariant::Primary,
         ButtonVariant::Secondary,
         ButtonVariant::Danger,
+        ButtonVariant::Ghost,
     ];
 
     #[test]

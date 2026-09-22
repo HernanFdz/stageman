@@ -15,6 +15,8 @@
 use dioxus::prelude::*;
 use tw_merge::tw_merge;
 
+use super::{Button, ButtonVariant, Icon, Tooltip};
+
 /// Properties for [`Modal`].
 #[derive(Props, PartialEq, Clone)]
 pub struct ModalProps {
@@ -47,8 +49,12 @@ pub fn Modal(props: ModalProps) -> Element {
 
     rsx! {
         div {
+            // Fades in from a starting style rather than by script, and holds
+            // still under the reduced-motion preference — see
+            // `docs/conventions.md` §3.
             class: "fixed inset-0 z-50 flex items-start justify-center overflow-y-auto \
-                    bg-foreground/20 p-4 sm:p-8",
+                    bg-foreground/20 p-4 sm:p-8 motion-safe:transition-opacity \
+                    motion-safe:duration-150 starting:opacity-0",
             // The backdrop dismisses, which is the convention everywhere and
             // therefore what a reader will try first.
             onclick: move |_| onclose.call(()),
@@ -62,7 +68,8 @@ pub fn Modal(props: ModalProps) -> Element {
                 autofocus: true,
                 class: tw_merge!(
                     "w-full max-w-lg rounded-lg border border-border bg-surface shadow-lg \
-                     focus-visible:outline-none",
+                     focus-visible:outline-none motion-safe:transition motion-safe:duration-150 \
+                     starting:translate-y-1 starting:opacity-0",
                     props.class
                 ),
                 // Without this, a click anywhere inside the panel reaches the
@@ -79,12 +86,14 @@ pub fn Modal(props: ModalProps) -> Element {
                         if let Some(actions) = props.actions {
                             {actions}
                         }
-                        button {
-                            r#type: "button",
-                            class: "text-base leading-none text-muted-foreground hover:text-foreground",
-                            aria_label: "Close",
-                            onclick: move |_| onclose.call(()),
-                            "×"
+                        Tooltip { text: "Close",
+                            Button {
+                                variant: ButtonVariant::Ghost,
+                                class: "-m-1 p-1",
+                                aria_label: "Close",
+                                onclick: move |_| onclose.call(()),
+                                {Icon::Close.draw(16)}
+                            }
                         }
                     }
                 }

@@ -9,7 +9,7 @@ use dioxus::prelude::*;
 use stageman_instance::{Request, Response};
 
 use super::error::DashboardResult;
-use crate::ui::{Badge, BadgeTone, Card, EmptyState};
+use crate::ui::{Badge, BadgeTone, Card, EmptyState, Skeleton};
 
 pub use stageman_wire::Instance;
 
@@ -55,9 +55,7 @@ pub fn InstanceView() -> Element {
             // Unreachable once the future above has resolved, and written out
             // rather than unwrapped because "unreachable" is a claim about
             // somebody else's code.
-            None => rsx! {
-                p { class: "text-sm text-muted-foreground", "Reading the instance…" }
-            },
+            None => rsx! { Skeleton {} },
         }
     }
 }

@@ -291,7 +291,8 @@ is the path stageman prefers.
 
 The dashboard is where you add projects, name the kits each one offers and set
 the credentials each one needs, watch jobs and read their logs, and pause or
-kill one that has gone wrong. A
+kill one that has gone wrong. It follows your system's light or dark look, and
+a control in its header pins either one. A
 single instance manages several projects, and a job belongs to exactly one of
 them: it cannot see another project's repository, credentials or channels.
 

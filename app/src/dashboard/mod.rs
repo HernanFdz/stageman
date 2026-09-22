@@ -42,6 +42,8 @@ mod projects_view;
 
 use dioxus::prelude::*;
 
+use crate::ui::{THEME_SCRIPT, ThemeToggle};
+
 pub use agents_view::{Agent, AgentsView};
 pub use error::{DashboardError, DashboardResult};
 pub use instance_view::{Instance, InstanceView};
@@ -129,6 +131,14 @@ pub fn Dashboard() -> Element {
 pub fn Shell() -> Element {
     rsx! {
         document::Link { rel: "icon", r#type: "image/svg+xml", href: FAVICON }
+        // Told to the browser as well as decided by the script below, so that
+        // its own controls and scrollbars follow the look.
+        document::Meta { name: "color-scheme", content: "light dark" }
+        // Before the stylesheet, so the class the dark tokens hang off is on
+        // the root before the first rule applies, and a dark page is dark from
+        // its first frame — see
+        // `docs/decisions/0072-the-dashboard-has-a-dark-theme.md`.
+        document::Script { "{THEME_SCRIPT}" }
         document::Stylesheet { href: STYLESHEET }
         div { class: "min-h-screen bg-background font-sans text-foreground",
             header { class: "border-b border-border bg-surface",
@@ -139,6 +149,7 @@ pub fn Shell() -> Element {
                         NavLink { to: Route::AgentsView {}, "Agents" }
                         NavLink { to: Route::ProjectsView {}, "Projects" }
                     }
+                    div { class: "ml-auto self-center", ThemeToggle {} }
                 }
             }
             main { class: "mx-auto max-w-5xl px-6 py-6", Outlet::<Route> {} }

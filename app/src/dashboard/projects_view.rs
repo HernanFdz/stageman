@@ -17,7 +17,9 @@ use stageman_instance::{Request, Response};
 
 use super::agents_view::Agent;
 use super::error::{DashboardError, DashboardResult};
-use crate::ui::{Badge, BadgeTone, Button, ButtonVariant, Card, EmptyState, Modal};
+use crate::ui::{
+    Badge, BadgeTone, Button, ButtonVariant, Card, EmptyState, Icon, Modal, Skeleton, Tooltip,
+};
 
 pub use stageman_wire::{
     ChannelDraft, Choice, Draft, Filling, Fitted, KitDraft, ModelChoice, Project, Shape,
@@ -206,15 +208,16 @@ pub fn ProjectsView() -> Element {
                             Badge { "{watching.projects.len()}" }
                         },
                         aside: rsx! {
+                            Tooltip { text: "New project",
                             Button {
-                                // A glyph, because the card's title already
+                                // An icon, because the card's title already
                                 // says what is being added and repeating it on
                                 // the control is the longest thing on the row
                                 // saying the least. Named for anyone not
-                                // looking at it.
-                                class: "px-2.5 text-base leading-none",
+                                // looking at it, and the tooltip repeats the
+                                // name for eyes.
+                                class: "px-2",
                                 aria_label: "New project",
-                                title: "New project",
                                 disabled: watching.available.is_empty(),
                                 onclick: {
                                     // The first configured agent as it comes,
@@ -261,7 +264,8 @@ pub fn ProjectsView() -> Element {
                                         filling.set(Some(Filling::Creating));
                                     }
                                 },
-                                "+"
+                                {Icon::Add.draw(16)}
+                            }
                             }
                         },
                         if watching.projects.is_empty() {
@@ -328,15 +332,15 @@ pub fn ProjectsView() -> Element {
                             title: if open == Filling::Creating { "New project" } else { "Edit project" },
                             onclose: move |()| filling.set(None),
                             actions: rsx! {
+                                Tooltip { text: "Save",
                                 Button {
                                     // Unavailable until pressing it would
                                     // work, which is this screen's whole
                                     // answer to an incomplete form for now —
                                     // per-field messages are the better
                                     // answer and are not this change.
-                                    class: "px-2.5 text-base leading-none",
+                                    class: "px-2",
                                     aria_label: "Save",
-                                    title: "Save",
                                     disabled: !draft().is_complete(&open, &held),
                                     onclick: {
                                         let open = open.clone();
@@ -372,7 +376,8 @@ pub fn ProjectsView() -> Element {
                                             }
                                         }
                                     },
-                                    "✓"
+                                    {Icon::Save.draw(16)}
+                                }
                                 }
                             },
                             // Shown here rather than behind the modal, which is
@@ -399,9 +404,7 @@ pub fn ProjectsView() -> Element {
                         p { class: "text-sm text-failed", "{reason}" }
                     }
                 },
-                None => rsx! {
-                    p { class: "text-sm text-muted-foreground", "Reading the projects…" }
-                },
+                None => rsx! { Skeleton {} },
             }
         }
     }
@@ -481,31 +484,25 @@ fn WatchedProject(project: Project, available: Vec<Agent>, onedit: EventHandler<
                     // one: amending changes what the next job is given and
                     // cannot reach into a container that already exists.
                     //
-                    // A glyph on the same terms as the `+` that adds a project
+                    // An icon on the same terms as the one that adds a project
                     // — the row already says which project this is, so a word
                     // here would be the longest thing on it saying the least.
                     // Named for anyone not looking at it, and named with the
                     // project, because a screen of these reads out as a column
                     // of identical "Edit"s otherwise.
-                    //
-                    // U+270E and deliberately not U+270F, which is the pencil
-                    // most editors offer: that one has an emoji presentation
-                    // and most platforms take it, so it would arrive in colour
-                    // beside the monochrome `×`, `+` and `✓` this dashboard
-                    // already uses. The glyph vocabulary here is text, and one
-                    // emoji in it looks like a mistake rather than a choice.
-                    Button {
-                        // Secondary, because this sits beside a badge on every
-                        // row: the enum's own word for it is "an ordinary
-                        // action sitting beside others", and a solid accent
-                        // repeated down the list would out-shout the one
-                        // primary action the screen has.
-                        variant: ButtonVariant::Secondary,
-                        class: "px-2 py-1 text-sm leading-none",
-                        aria_label: "Edit {project.name}",
-                        title: "Edit",
-                        onclick: move |_| onedit.call(()),
-                        "✎"
+                    Tooltip { text: "Edit",
+                        Button {
+                            // Secondary, because this sits beside a badge on
+                            // every row: the enum's own word for it is "an
+                            // ordinary action sitting beside others", and a
+                            // solid accent repeated down the list would
+                            // out-shout the one primary action the screen has.
+                            variant: ButtonVariant::Secondary,
+                            class: "px-1.5 py-1",
+                            aria_label: "Edit {project.name}",
+                            onclick: move |_| onedit.call(()),
+                            {Icon::Edit.draw(14)}
+                        }
                     }
                 }
             }
@@ -612,15 +609,16 @@ fn ProjectForm(
                                     },
                                 }
                                 // Removing the row is how a kit is taken away.
-                                Button {
-                                    variant: ButtonVariant::Secondary,
-                                    class: "shrink-0 px-2 py-1 text-sm leading-none",
-                                    aria_label: "Remove kit {position + 1}",
-                                    title: "Remove",
-                                    onclick: move |_| {
-                                        draft.with_mut(|draft| { draft.kits.remove(position); });
-                                    },
-                                    "×"
+                                Tooltip { text: "Remove",
+                                    Button {
+                                        variant: ButtonVariant::Secondary,
+                                        class: "shrink-0 px-1.5 py-1",
+                                        aria_label: "Remove kit {position + 1}",
+                                        onclick: move |_| {
+                                            draft.with_mut(|draft| { draft.kits.remove(position); });
+                                        },
+                                        {Icon::Remove.draw(14)}
+                                    }
                                 }
                             }
                             input {
@@ -651,23 +649,24 @@ fn ProjectForm(
                             }
                         }
                     }
-                    Button {
-                        variant: ButtonVariant::Secondary,
-                        class: "self-start px-2.5 py-1 text-sm leading-none",
-                        aria_label: "Add a kit",
-                        title: "Add a kit",
-                        onclick: {
-                            move |_| {
-                                let fitted = starting.clone();
-                                draft.with_mut(|draft| {
-                                    draft.kits.push(KitDraft {
-                                        fitted,
-                                        ..KitDraft::default()
+                    Tooltip { text: "Add a kit", class: "self-start",
+                        Button {
+                            variant: ButtonVariant::Secondary,
+                            class: "px-1.5 py-1",
+                            aria_label: "Add a kit",
+                            onclick: {
+                                move |_| {
+                                    let fitted = starting.clone();
+                                    draft.with_mut(|draft| {
+                                        draft.kits.push(KitDraft {
+                                            fitted,
+                                            ..KitDraft::default()
+                                        });
                                     });
-                                });
-                            }
-                        },
-                        "+"
+                                }
+                            },
+                            {Icon::Add.draw(14)}
+                        }
                     }
                 }
             }
@@ -792,27 +791,29 @@ fn ProjectForm(
                             // Removing the row is how a variable is taken
                             // away: an empty value already means keep, so
                             // absence is the only thing left to mean drop.
-                            Button {
-                                variant: ButtonVariant::Secondary,
-                                class: "shrink-0 px-2 py-1 text-sm leading-none",
-                                aria_label: "Remove variable {position + 1}",
-                                title: "Remove",
-                                onclick: move |_| {
-                                    draft.with_mut(|draft| { draft.variables.remove(position); });
-                                },
-                                "×"
+                            Tooltip { text: "Remove",
+                                Button {
+                                    variant: ButtonVariant::Secondary,
+                                    class: "shrink-0 px-1.5 py-1",
+                                    aria_label: "Remove variable {position + 1}",
+                                    onclick: move |_| {
+                                        draft.with_mut(|draft| { draft.variables.remove(position); });
+                                    },
+                                    {Icon::Remove.draw(14)}
+                                }
                             }
                         }
                     }
-                    Button {
-                        variant: ButtonVariant::Secondary,
-                        class: "self-start px-2.5 py-1 text-sm leading-none",
-                        aria_label: "Add a variable",
-                        title: "Add a variable",
-                        onclick: move |_| {
-                            draft.with_mut(|draft| draft.variables.push(VariableDraft::default()));
-                        },
-                        "+"
+                    Tooltip { text: "Add a variable", class: "self-start",
+                        Button {
+                            variant: ButtonVariant::Secondary,
+                            class: "px-1.5 py-1",
+                            aria_label: "Add a variable",
+                            onclick: move |_| {
+                                draft.with_mut(|draft| draft.variables.push(VariableDraft::default()));
+                            },
+                            {Icon::Add.draw(14)}
+                        }
                     }
                 }
             }
