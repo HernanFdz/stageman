@@ -4,7 +4,10 @@
 
 Accepted. Changes how every message this instance posts is rendered, and
 what each of its own notices says; changes nothing about where they go,
-which `docs/decisions/0061-a-job-has-a-room-of-its-own.md` settles.
+which `docs/decisions/0061-a-job-has-a-room-of-its-own.md` settles. Since
+`docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`
+a post that would pass the platform's limit continues in a second one, which
+amends the consequence below that nothing here splits a message.
 
 Every claim below about what the platform does was measured on 2026-09-15
 against a real workspace.

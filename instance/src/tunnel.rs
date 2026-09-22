@@ -16,6 +16,7 @@ use stageman_core::{JobId, Progress};
 use stageman_vocabulary::{Answer, Arrival, Bytes, Effect as Generic, EffectId, Probed, RequestId};
 
 use crate::Effect;
+use crate::vocabulary::Speaker;
 use crate::{Asked, Command};
 
 /// How long a probe gives a job's tunnel to say something, or to close,
@@ -448,7 +449,19 @@ impl crate::Running {
 
     /// What is done about a job's tunnel, now it is known whether anything
     /// is behind it. Inward-facing, so it waits on no write.
+    ///
+    /// A turn started for the job since the probe was asked — a message
+    /// arriving just after the turn the probe followed ended, which
+    /// `docs/decisions/0069-a-message-reaches-a-working-job.md` makes
+    /// ordinary — needs the container, so a silent tunnel is not halted
+    /// under it: the race
+    /// `docs/decisions/0066-a-foremans-container-runs-only-while-a-turn-runs-in-it.md`
+    /// admits, closed for a job.
     fn tunnel_answered(&mut self, job: JobId, answering: bool, effects: &mut Vec<Effect>) {
+        if !answering && self.turns.contains_key(&Speaker::Job(job)) {
+            tracing::debug!(%job, "its tunnel answers nobody, but a turn has started in it since");
+            return;
+        }
         if !answering {
             // Halted, so the port it was on reaches nothing.
             self.forget_tunnel(job);

@@ -39,7 +39,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
-pub use conversation::{Conversation, Exchange, Heard, Opening, Said};
+pub use conversation::{Conversation, Exchange, Heard, Noticed, Opening, Said, Steered};
 
 use agent_client_protocol::schema::v1::{
     HttpHeader, McpServer, McpServerHttp, SessionConfigKind, SessionConfigOption,
@@ -61,6 +61,8 @@ use tokio::io::AsyncWriteExt as _;
 /// which is the cost without the benefit.
 pub use agent_client_protocol::schema::ProtocolVersion;
 pub use agent_client_protocol::schema::v1::StopReason;
+pub use agent_client_protocol::schema::v1::ToolCallStatus;
+pub use agent_client_protocol::schema::v1::ToolKind;
 
 /// How much of a failed agent's standard error is kept in what is recorded.
 ///
@@ -3222,6 +3224,7 @@ mod tests {
                 attending: stageman_core::Attending::default(),
                 brief: String::new(),
                 watched: std::collections::BTreeSet::new(),
+                foreman_room: None,
             },
         );
         (state, id)
@@ -4290,6 +4293,7 @@ mod tests {
                     attending: stageman_core::Attending::default(),
                     brief: String::new(),
                     watched: std::collections::BTreeSet::new(),
+                    foreman_room: None,
                 },
             );
             let handout = Handout::for_foreman(&state, project).expect("a watched project");

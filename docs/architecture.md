@@ -49,8 +49,10 @@ first.
   bound to a workspace, and since
   `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`
   it is rendered and read here as pure functions — every command a turn
-  runs, every line said to the agent, what every answer means — which the
-  **instance** sequences and the world carries. Nothing outside an adapter
+  runs, every line said to the agent, what every answer means, and since
+  `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`
+  what the agent says and does as it goes — which the **instance**
+  sequences and the world carries. Nothing outside an adapter
   may be specific to one agent.
 - **channel** — the contract every channel is spoken on, and the adapters
   that implement it: what is sent to a platform, what its answers mean, what
@@ -277,9 +279,10 @@ nobody is a wish.
   the platform's warning arrived in. Scenarios pin both, and the gap an
   unscheduled close leaves.
 
-  Order is kept by the same shape. A foreman's inbox promises arrival order,
-  and one socket's frames arrive as events on one channel, in the order they
-  were read, to an instance that steps them one at a time.
+  Order is kept by the same shape. An inbox promises arrival order, a
+  foreman's and a job's, and one socket's frames arrive as events on one
+  channel, in the order they were read, to an instance that steps them one
+  at a time.
 - **No job blocks on a terminal.** A job that needs a human emits the question
   on a channel and stays alive. It never writes to standard output expecting an
   answer on standard input, because nobody is watching that terminal — that is

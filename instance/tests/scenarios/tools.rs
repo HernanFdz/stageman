@@ -324,7 +324,11 @@ fn a_foreman_starts_a_job_whose_room_is_made_before_its_agent_speaks() {
         .job(started)
         .expect("the job is on the record");
     assert_eq!(recorded.reason, "the parser is flaky");
-    assert_eq!(recorded.room, Some(room(1)), "in the room that was made");
+    assert_eq!(
+        recorded.room,
+        Some(room(2)),
+        "in the room that was made for it, after the foreman's own"
+    );
     assert_eq!(
         recorded.asked_by.as_deref(),
         Some("U0HUMAN"),
@@ -333,20 +337,20 @@ fn a_foreman_starts_a_job_whose_room_is_made_before_its_agent_speaks() {
     assert!(
         world
             .rooms()
-            .first()
+            .get(1)
             .is_some_and(|(_, name)| name.starts_with("example--flaky-parser-test--")),
         "named after the project and the title the foreman gave: {:?}",
         world.rooms()
     );
     assert_eq!(
         world.invited(),
-        [(room(1).id, "U0HUMAN".to_owned())],
+        [(room(2).id, "U0HUMAN".to_owned())],
         "and they are invited into it"
     );
     assert!(
         world.posts().contains(&(
             in_thread(1),
-            stageman_foreman::started_notice("<#C-job-001>")
+            stageman_foreman::started_notice("<#C-job-002>")
         )),
         "their thread is told where the job is: {:?}",
         world.posts()
@@ -355,7 +359,7 @@ fn a_foreman_starts_a_job_whose_room_is_made_before_its_agent_speaks() {
         world
             .posts()
             .iter()
-            .any(|(at, text)| *at == in_room(1) && text.contains("Mention <@U0BOT>")),
+            .any(|(at, text)| *at == in_room(2) && text.contains("Mention <@U0BOT>")),
         "the room opens by teaching the mention: {:?}",
         world.posts()
     );
@@ -366,7 +370,7 @@ fn a_foreman_starts_a_job_whose_room_is_made_before_its_agent_speaks() {
     );
     assert!(
         world.posts().iter().any(|(at, text)| {
-            *at == in_room(1)
+            *at == in_room(2)
                 && *text
                     == stageman_foreman::stopped_notice(
                         &Waiting::Silent,
@@ -438,22 +442,65 @@ fn starting_is_refused_to_a_job_and_for_a_kit_the_project_does_not_offer() {
     assert!(text_of(refused).contains("serves no tool called \"start_job\""));
 }
 
-/// Saying posts in the thread the warrant names, and the agent is told
-/// whether it was heard only once the platform has answered.
+/// Saying posts under the message named, or at the root of the speaker's
+/// own room when none is; the agent is told what was posted, by the
+/// identifier it may name later, only once the platform has answered.
 #[test]
-fn saying_posts_in_the_warrants_thread_and_reports_a_failure_to_the_agent() {
+fn saying_posts_where_it_is_told_to_and_reports_a_failure_to_the_agent() {
     let (mut world, mut instance, warrant) = with_a_foreman_working();
 
+    let asked0 = world.calls(
+        155,
+        &warrant,
+        &call(
+            "say",
+            serde_json::json!({"message": "On it.", "to": "C0123456789/1788000000.000001"}),
+        ),
+    );
     let asked1 = world.calls(
         160,
         &warrant,
-        &call("say", serde_json::json!({"message": "On it."})),
+        &call("say", serde_json::json!({"message": "Thinking aloud."})),
     );
     world.run_until(&mut instance, 200);
+    let answer = world.tool_answer(asked0).expect("answered");
+    assert!(!is_error(answer));
+    assert!(
+        text_of(answer).starts_with("C0123456789/"),
+        "the identifier of what was posted: {}",
+        text_of(answer)
+    );
+    assert!(world.posts().contains(&(in_thread(1), "On it.".to_owned())));
     let answer = world.tool_answer(asked1).expect("answered");
     assert!(!is_error(answer));
-    assert_eq!(text_of(answer), "said");
-    assert!(world.posts().contains(&(in_thread(1), "On it.".to_owned())));
+    assert!(
+        text_of(answer).starts_with("C-job-001/"),
+        "posted in the foreman's own room: {}",
+        text_of(answer)
+    );
+    assert!(
+        world
+            .posts()
+            .contains(&(in_room(1), "Thinking aloud.".to_owned())),
+        "{:?}",
+        world.posts()
+    );
+    let asked = world.calls(
+        205,
+        &warrant,
+        &call(
+            "say",
+            serde_json::json!({"message": "Elsewhere.", "to": "not-a-message"}),
+        ),
+    );
+    world.run_until(&mut instance, 208);
+    let refused = world.tool_answer(asked).expect("answered");
+    assert!(is_error(refused));
+    assert!(
+        text_of(refused).contains("not a message as it was shown to you"),
+        "{}",
+        text_of(refused)
+    );
 
     world.next_post_fails("channel_not_found");
     let asked2 = world.calls(
@@ -477,6 +524,22 @@ fn saying_posts_in_the_warrants_thread_and_reports_a_failure_to_the_agent() {
     let empty = world.tool_answer(asked3).expect("answered");
     assert!(is_error(empty));
     assert_eq!(text_of(empty), "nothing was said, so nothing was posted");
+
+    // Answered where it was asked, so the thread is not signposted to the
+    // foreman's room when the turn ends: what a post through the tool
+    // counts as, for the speaker asked there.
+    world.run_until(&mut instance, 5_000);
+    assert_eq!(
+        world
+            .posts()
+            .iter()
+            .filter(|(place, _)| *place == in_thread(1))
+            .map(|(_, text)| text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["On it."],
+        "nothing but the answer in the thread: {:?}",
+        world.posts()
+    );
 }
 
 /// A job's claim about why it is stopping is read when its turn ends, and

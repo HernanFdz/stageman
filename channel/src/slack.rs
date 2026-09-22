@@ -37,9 +37,9 @@
 //! and the identifier it comes back with is what a reply names — see
 //! `docs/decisions/0029-a-reply-is-routed-by-its-thread.md`.
 
-use stageman_core::{Channel, JobId, Secret, Speaking};
+use stageman_core::{Channel, JobId, ProjectId, Secret, Speaking, Uuid};
 
-use crate::{Call, ChannelError, Identity, Incoming, Message, Reaction, Request};
+use crate::{Call, ChannelError, Identity, Incoming, Message, Reaction, Request, ThreadRead};
 
 /// Where Slack takes a message.
 const POST_MESSAGE: &str = "https://slack.com/api/chat.postMessage";
@@ -68,6 +68,12 @@ const ARCHIVE: &str = "https://slack.com/api/conversations.archive";
 /// Where Slack takes a reaction.
 const REACT: &str = "https://slack.com/api/reactions.add";
 
+/// Where Slack takes an edit to a message.
+const UPDATE_MESSAGE: &str = "https://slack.com/api/chat.update";
+
+/// Where Slack gives a thread back: its parent and its replies.
+const REPLIES: &str = "https://slack.com/api/conversations.replies";
+
 /// The most a room's name may be, in characters.
 const NAME_AT_MOST: usize = 80;
 
@@ -78,6 +84,54 @@ const SEPARATOR: &str = "--";
 /// The most a room's purpose or topic may be, in characters: the platform
 /// refuses anything longer outright, so what is sent is cut to fit.
 const DESCRIPTION_AT_MOST: usize = 250;
+
+/// The most a Markdown post may be, in characters, per the platform's
+/// documentation: a longer one is refused outright, so a text that would
+/// pass it is posted in pieces that continue one another — see
+/// `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`.
+const POST_AT_MOST: usize = 12_000;
+
+/// Cuts a text into pieces the platform accepts, in order: each as long as
+/// a post may be, broken at the last line end in its second half where
+/// there is one and at a character otherwise, so that a list or a table is
+/// split between lines when it can be.
+pub fn pieces(text: &str) -> Vec<String> {
+    let mut pieces = Vec::new();
+    let mut rest = text;
+    while let Some(cut) = cut_point(rest) {
+        // Progress, whatever the cut point says: a loop that could stand
+        // still would hang under a fault rather than fail, and a hang is
+        // what no test can see.
+        if cut == 0 {
+            break;
+        }
+        let (piece, remaining) = rest.split_at(cut);
+        pieces.push(piece.to_owned());
+        rest = remaining.strip_prefix('\n').unwrap_or(remaining);
+    }
+    pieces.push(rest.to_owned());
+    pieces
+}
+
+/// Where a text longer than a post is cut, in bytes: at the last line end
+/// in the second half of what a post holds, and at the post's length
+/// otherwise. Nothing for a text a post carries whole.
+fn cut_point(rest: &str) -> Option<usize> {
+    if rest.chars().count() <= POST_AT_MOST {
+        return None;
+    }
+    let limit = rest
+        .char_indices()
+        .nth(POST_AT_MOST)
+        .map_or(rest.len(), |(at, _)| at);
+    let cut = rest
+        .char_indices()
+        .take_while(|(at, _)| *at < limit)
+        .filter(|(at, c)| *c == '\n' && *at >= limit / 2)
+        .last()
+        .map_or(limit, |(at, _)| at);
+    Some(cut)
+}
 
 /// How much of a project's name a room's name carries, at most.
 const PROJECT_AT_MOST: usize = 24;
@@ -225,8 +279,20 @@ pub fn done(status: u16, body: &[u8]) -> Result<(), ChannelError> {
 /// survive creation, and an archived room's name is still taken, which is
 /// why the identifier is the one part always present.
 pub fn room_name(project: &str, title: &str, job: JobId) -> String {
-    let identifier: String = job
-        .as_uuid()
+    named(project, title, job.as_uuid())
+}
+
+/// The name a project's foreman's room is given: `<project>--foreman--<identifier>`,
+/// the project's identifier making it unique for ever, as a job's does a
+/// job's room — see
+/// `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`.
+pub fn foreman_room_name(project: &str, id: ProjectId) -> String {
+    named(project, "foreman", id.as_uuid())
+}
+
+/// A room's name from its three parts, folded to what Slack allows.
+fn named(project: &str, title: &str, identifier: &Uuid) -> String {
+    let identifier: String = identifier
         .simple()
         .to_string()
         .chars()
@@ -320,10 +386,122 @@ pub fn identity(status: u16, body: &[u8]) -> Result<Identity, ChannelError> {
         .get("bot_id")
         .and_then(serde_json::Value::as_str)
         .ok_or(ChannelError::NotABot)?;
+    // Where the workspace is, which every answer to this question carries
+    // and a link to a message starts from.
+    let url = told
+        .get("url")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(ChannelError::NoAnswer)?;
     Ok(Identity {
         user: user.to_owned(),
         bot: bot.to_owned(),
+        url: url.to_owned(),
     })
+}
+
+/// The identifier a message is shown to an agent with: the room and the
+/// message's own identifier, joined by a slash, which neither contains.
+pub fn reference(room: &str, message: &str) -> String {
+    format!("{room}/{message}")
+}
+
+/// What an identifier an agent named means, if it is one [`reference`]
+/// renders: both parts present, and nothing else.
+pub fn referenced(reference: &str) -> Option<(String, String)> {
+    let (room, message) = reference.trim().split_once('/')?;
+    if room.is_empty() || message.is_empty() || message.contains('/') {
+        return None;
+    }
+    Some((room.to_owned(), message.to_owned()))
+}
+
+/// Renders asking for a thread: its parent and its replies, the most recent
+/// `at_most` of them, oldest first, with a flag saying whether older ones
+/// were left out — measured on 2026-09-21 against a real workspace, where a
+/// limit of two gave the parent and the two most recent replies. A read
+/// rather than a change, so it is asked as one, with its arguments in the
+/// address — see `docs/decisions/0068-a-mention-is-shown-its-thread.md`.
+pub fn replies(speaking: &Speaking, room: &str, thread: &str, at_most: usize) -> Request {
+    Request {
+        method: "GET".to_owned(),
+        url: format!("{REPLIES}?channel={room}&ts={thread}&limit={at_most}"),
+        headers: [(
+            "authorization".to_owned(),
+            format!("Bearer {}", speaking.credential.expose()),
+        )]
+        .into(),
+        body: None,
+    }
+}
+
+/// What the platform's answer to [`replies`] means: the thread's messages
+/// as decoded, oldest first, which of them mention this instance, and
+/// whether older ones were left out. Each is read as a frame's message is,
+/// given who this instance is, so that its own words and another app's are
+/// told apart the same way; the room is the one asked, since a thread's
+/// messages do not name it. A mention is a person's message carrying the
+/// markup for this instance: the event that says so when one arrives is not
+/// part of a thread read back.
+pub fn thread_read(
+    status: u16,
+    body: &[u8],
+    room: &str,
+    us: &Identity,
+) -> Result<ThreadRead, ChannelError> {
+    if !(200..300).contains(&status) {
+        return Err(ChannelError::Unreachable(format!(
+            "the channel answered {status}"
+        )));
+    }
+    let told: Fetched = serde_json::from_slice(body)
+        .map_err(|failure| ChannelError::Unreadable(failure.to_string()))?;
+    if !told.ok {
+        return Err(ChannelError::Refused(
+            told.error.unwrap_or_else(|| "no reason given".to_owned()),
+        ));
+    }
+    let messages: Vec<Message> = told
+        .messages
+        .into_iter()
+        .filter_map(|said| said.message_in(room, us))
+        .collect();
+    let named = mention(&us.user);
+    let mentioning = messages
+        .iter()
+        .filter(|message| {
+            !message.from_us && message.app.is_none() && message.text.contains(&named)
+        })
+        .map(|message| message.id.clone())
+        .collect();
+    Ok(ThreadRead {
+        messages,
+        mentioning,
+        longer: told.has_more,
+    })
+}
+
+/// A thread, as the platform gives one back.
+#[derive(serde::Deserialize)]
+struct Fetched {
+    ok: bool,
+    error: Option<String>,
+    #[serde(default)]
+    messages: Vec<Said>,
+    #[serde(default)]
+    has_more: bool,
+}
+
+/// A link to one message, as Slack spells one — measured on 2026-09-21
+/// against a real workspace, through the platform's own permalink call: the
+/// workspace's address, the room, and the message's identifier with its
+/// dot removed; and for a reply, the thread it is in and the room again.
+pub fn permalink(us: &Identity, room: &str, message: &str, thread: Option<&str>) -> String {
+    let digits: String = message.chars().filter(|c| *c != '.').collect();
+    let base = format!("{}/archives/{room}/p{digits}", us.url.trim_end_matches('/'));
+    match thread {
+        Some(parent) if parent != message => format!("{base}?thread_ts={parent}&cid={room}"),
+        _ => base,
+    }
 }
 
 /// Where to connect, from the answer to [`open_socket`].
@@ -502,6 +680,35 @@ struct Said {
 }
 
 impl Said {
+    /// This message as decoded, in the room named, given who this instance
+    /// is: what a frame's message becomes, read from a thread instead — by
+    /// the same rule, so that the words this instance said are its own and
+    /// another app's are the app's, whichever way they arrived. Nothing
+    /// without an identifier, since nothing could name it.
+    fn message_in(self, room: &str, us: &Identity) -> Option<Message> {
+        let ours = self.bot_id.as_deref() == Some(us.bot.as_str())
+            || self.user.as_deref() == Some(us.user.as_str());
+        let app = if ours {
+            None
+        } else {
+            self.bot_id.as_deref().map(|bot| self.app_name(bot))
+        };
+        let (text, user) = if app.is_some() {
+            (self.reading(), None)
+        } else {
+            (self.text, self.user)
+        };
+        Some(Message {
+            room: room.to_owned(),
+            id: self.ts?,
+            thread: self.thread_ts,
+            text,
+            user,
+            from_us: ours,
+            app,
+        })
+    }
+
     /// What the platform calls the app that posted this: its profile's
     /// name, its root's for a broadcast, a classic bot's username, and the
     /// bot identifier when it has none of those.
@@ -726,8 +933,24 @@ pub fn post(speaking: &Speaking, room: &str, text: &str, thread: Option<&str>) -
     telling(POST_MESSAGE, speaking, posting)
 }
 
+/// Renders editing one message this instance posted, in place, as
+/// Markdown: how a message of the transcript grows, per
+/// `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`.
+/// The platform answers as it answers a post, naming the message, so
+/// [`posted`] reads the answer.
+pub fn update(speaking: &Speaking, room: &str, message: &str, text: &str) -> Request {
+    let mut editing = serde_json::Map::new();
+    editing.insert("channel".to_owned(), room.into());
+    editing.insert("ts".to_owned(), message.into());
+    editing.insert("markdown_text".to_owned(), text.into());
+    telling(UPDATE_MESSAGE, speaking, editing)
+}
+
 /// What a request asks, if it is one this module rendered.
 pub fn call(request: &Request) -> Option<Call> {
+    if request.method == "GET" {
+        return read_call(request);
+    }
     if request.method != "POST" {
         return None;
     }
@@ -742,7 +965,8 @@ pub fn call(request: &Request) -> Option<Call> {
                 channel: Channel::Slack,
             });
         }
-        POST_MESSAGE | CREATE_ROOM | SET_PURPOSE | SET_TOPIC | INVITE | ARCHIVE | REACT => {}
+        POST_MESSAGE | UPDATE_MESSAGE | CREATE_ROOM | SET_PURPOSE | SET_TOPIC | INVITE
+        | ARCHIVE | REACT => {}
         _ => return None,
     }
     let told: Told = serde_json::from_slice(request.body.as_deref()?).ok()?;
@@ -777,12 +1001,44 @@ pub fn call(request: &Request) -> Option<Call> {
             message: told.timestamp?,
             reaction: reaction_of(&told.name?)?,
         },
+        UPDATE_MESSAGE => Call::Update {
+            channel,
+            room: told.channel?,
+            message: told.ts?,
+            text: told.markdown_text?,
+        },
         _ => Call::Post {
             channel,
             room: told.channel?,
             text: told.markdown_text?,
             thread: told.thread_ts,
         },
+    })
+}
+
+/// What a read asks, if it is one this module renders: a thread, by the
+/// arguments in its address.
+fn read_call(request: &Request) -> Option<Call> {
+    let (url, query) = request.url.split_once('?')?;
+    if url != REPLIES {
+        return None;
+    }
+    let mut room = None;
+    let mut thread = None;
+    let mut at_most = None;
+    for pair in query.split('&') {
+        match pair.split_once('=') {
+            Some(("channel", value)) => room = Some(value.to_owned()),
+            Some(("ts", value)) => thread = Some(value.to_owned()),
+            Some(("limit", value)) => at_most = value.parse().ok(),
+            _ => {}
+        }
+    }
+    Some(Call::Replies {
+        channel: Channel::Slack,
+        room: room?,
+        thread: thread?,
+        at_most: at_most?,
     })
 }
 
@@ -825,6 +1081,8 @@ pub fn posted(status: u16, body: &[u8]) -> Result<String, ChannelError> {
 /// carries, each present only where its request sends it.
 #[derive(serde::Deserialize)]
 struct Told {
+    /// The message an edit names.
+    ts: Option<String>,
     channel: Option<String>,
     markdown_text: Option<String>,
     thread_ts: Option<String>,
@@ -855,6 +1113,7 @@ mod tests {
         Identity {
             user: "U0BOT".to_owned(),
             bot: "B0SELF".to_owned(),
+            url: "https://example.slack.com/".to_owned(),
         }
     }
 
@@ -1280,10 +1539,10 @@ alerts
     #[test]
     fn who_this_instance_is_needs_a_bot_token() {
         assert_eq!(
-            identity(200, br#"{"ok":true,"user_id":"U0BOT","bot_id":"B0SELF"}"#).expect("a bot"),
+            identity(200, br#"{"ok":true,"user_id":"U0BOT","bot_id":"B0SELF","url":"https://example.slack.com/"}"#).expect("a bot"),
             Identity {
                 user: "U0BOT".to_owned(),
-                bot: "B0SELF".to_owned(),
+                bot: "B0SELF".to_owned(), url: "https://example.slack.com/".to_owned(),
             }
         );
         assert!(matches!(

@@ -16,7 +16,8 @@ The home room this record kept for one step left with
 the mention event and nothing else stands; since
 `docs/decisions/0063-another-app-is-heard-in-a-watched-room.md` the message
 subscription is read for one more thing, another app's message in a watched
-room.
+room. Since `docs/decisions/0068-a-mention-is-shown-its-thread.md`
+a mention in a thread is shown that thread before it is answered.
 
 Every claim below about what the platform does was measured on 2026-09-15
 against a real workspace, with the app installed and a person typing.

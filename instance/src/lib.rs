@@ -35,7 +35,9 @@ mod replies;
 mod requests;
 mod snapshot;
 mod sweep;
+mod threads;
 mod tools;
+mod transcript;
 mod tunnel;
 mod turns;
 mod views;
@@ -134,6 +136,19 @@ enum Timer {
         /// Whose.
         project: ProjectId,
     },
+    /// A message of a turn's transcript, grown by editing if it has grown.
+    Growing {
+        /// Whose turn.
+        speaker: vocabulary::Speaker,
+        /// Which of its messages.
+        run: u64,
+    },
+    /// The bound on a cancelled turn ending by itself, after which its
+    /// process is closed.
+    Cancelling {
+        /// Whose turn.
+        speaker: vocabulary::Speaker,
+    },
 }
 
 /// How often the instance asks which containers still deserve to be up.
@@ -228,6 +243,18 @@ impl Instance {
         match &self.stage {
             Stage::Booting(_) => Vec::new(),
             Stage::Awake(running) => running.turns.keys().copied().collect(),
+        }
+    }
+
+    /// Whose turns are waiting on the thread their message was said in
+    /// being read, once it is awake: a turn about to be registered, with a
+    /// question about the speaker in flight — see
+    /// `docs/decisions/0068-a-mention-is-shown-its-thread.md`.
+    #[must_use]
+    pub fn reading_for(&self) -> Vec<Speaker> {
+        match &self.stage {
+            Stage::Booting(_) => Vec::new(),
+            Stage::Awake(running) => running.pending_threads.keys().copied().collect(),
         }
     }
 
@@ -516,6 +543,23 @@ pub struct Running {
     sent: BTreeMap<EffectId, channel::Sent>,
     /// Effects waiting on a write, by the write they wait on, in order.
     deferred: VecDeque<(EffectId, Vec<Effect>)>,
+    /// Effects of this step that wait on nothing, released at its end.
+    immediate: Vec<Effect>,
+    /// What each room is being posted, one request in flight at a time.
+    posting: BTreeMap<stageman_core::Room, channel::Posting>,
+    /// Messages of transcripts whose turns have ended, until each has been
+    /// sent as it last read.
+    finishing: BTreeMap<(vocabulary::Speaker, u64), transcript::Open>,
+    /// Jobs a person asked to stop while they were working with no turn
+    /// registered — their thread being read, their room being made — until
+    /// the turn is, when the stop takes effect. Held and never kept, as
+    /// `docs/decisions/0053-a-job-is-stopped-or-retired-by-a-person.md`
+    /// decides for a stop.
+    stops_held: BTreeSet<JobId>,
+    /// Turns waiting on the thread their message was said in being read.
+    pending_threads: BTreeMap<vocabulary::Speaker, threads::Pending>,
+    /// Threads read, until the turn each is for composes its frame.
+    threads_read: BTreeMap<vocabulary::Speaker, threads::Read>,
     /// The wakes asked for that have not gone off, and what each was for.
     timers: BTreeMap<EffectId, Timer>,
     /// Every project whose channel is being listened to, and where its
@@ -597,6 +641,12 @@ impl Running {
             probes: BTreeMap::new(),
             sent: BTreeMap::new(),
             deferred: VecDeque::new(),
+            immediate: Vec::new(),
+            posting: BTreeMap::new(),
+            finishing: BTreeMap::new(),
+            stops_held: BTreeSet::new(),
+            pending_threads: BTreeMap::new(),
+            threads_read: BTreeMap::new(),
             timers: BTreeMap::new(),
             listeners: BTreeMap::new(),
             sockets: BTreeMap::new(),
@@ -936,6 +986,8 @@ impl Running {
                 effects.push(settling);
             }
             Some(Timer::Reconnecting { project }) => self.try_again(project, effects),
+            Some(Timer::Growing { speaker, run }) => self.grow(speaker, run),
+            Some(Timer::Cancelling { speaker }) => self.cancel_overdue(speaker, effects),
             None => tracing::warn!("woken for a timer this instance did not set; ignored"),
         }
     }
@@ -1041,6 +1093,7 @@ impl Running {
     /// step held back waits on that write; an unchanged state releases the
     /// held-back effects at once, because there is nothing to wait for.
     fn flush(&mut self, effects: &mut Vec<Effect>) {
+        effects.append(&mut self.immediate);
         let staged = std::mem::take(&mut self.staged);
         if !self.dirty {
             effects.extend(staged);
@@ -1068,6 +1121,23 @@ impl Running {
     /// Holds an effect back until the state this step changed is on the disk.
     fn defer(&mut self, effect: impl Into<Effect>) {
         self.staged.push(effect.into());
+    }
+
+    /// Holds an effect back until every write in flight has landed: this
+    /// step's, if it changes anything; else the last one still being
+    /// written; else nothing, and it goes at the step's end.
+    ///
+    /// What a post waiting its turn in a room is released with, since the
+    /// step that justified it is over by then and its write may not be.
+    fn after_writes(&mut self, effect: impl Into<Effect>) {
+        let effect = effect.into();
+        if self.dirty {
+            self.staged.push(effect);
+        } else if let Some((_, waiting)) = self.deferred.back_mut() {
+            waiting.push(effect);
+        } else {
+            self.immediate.push(effect);
+        }
     }
 
     /// Writes what became of a job.

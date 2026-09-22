@@ -11,11 +11,13 @@
 //! answer means are `stageman_channel`'s, and this is only the asking and
 //! what follows from the answer.
 
+use std::collections::VecDeque;
 use std::time::Duration;
 
-use stageman_core::{Channel, JobId, Place, ProjectId, Speaking, Thread};
+use stageman_core::{Channel, JobId, Place, ProjectId, Room, Speaking, Thread};
 use stageman_vocabulary::{Bytes, Effect as Generic, EffectId, RequestId, Responded};
 
+use crate::vocabulary::Speaker;
 use crate::{Effect, Running};
 
 /// How long a channel is given to answer a request before the request is
@@ -40,6 +42,34 @@ pub struct Sent {
     pub channel: Channel,
     /// What for.
     pub purpose: Purpose,
+    /// Which room, for a post: whose chain the answer moves along.
+    pub room: Option<Room>,
+}
+
+/// What one room is being posted: whether a request is in flight, and what
+/// waits behind it.
+///
+/// One request in flight per room, the next sent when the previous is
+/// answered, so that posts land in the order they were made — two in flight
+/// land in whichever order the platform receives them. The rule of
+/// `docs/conventions.md` §3, from
+/// `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`.
+#[derive(Default, Clone, PartialEq, serde::Serialize)]
+pub struct Posting {
+    /// Whether a request to this room is waiting to be answered.
+    in_flight: bool,
+    /// What is posted next, front first.
+    waiting: VecDeque<Queued>,
+}
+
+/// One post waiting its turn in a room.
+#[derive(Clone, PartialEq, serde::Serialize)]
+struct Queued {
+    /// The request, rendered.
+    effect: Effect,
+    /// Whether it waits for the writes in flight when its turn comes, as a
+    /// notice about a record does; a post that changes nothing goes at once.
+    after_writes: bool,
 }
 
 /// Why a request to a channel was made.
@@ -55,10 +85,29 @@ pub enum Purpose {
         /// it: told where the job is, and invited.
         origin: Option<Origin>,
     },
+    /// A foreman's room being made, before its first turn.
+    ForemanRoom {
+        /// Whose foreman.
+        project: ProjectId,
+    },
     /// Something done to a room whose outcome changes nothing here.
     Keeping(Keeping),
     /// A question a listener asks before it can read anything.
     Question(Question),
+    /// A message of a turn's transcript, grown by editing.
+    Growing {
+        /// Whose turn.
+        speaker: Speaker,
+        /// Which of its messages.
+        run: u64,
+    },
+    /// A thread being read, for the turn a message in it starts.
+    Reading {
+        /// Whose turn.
+        speaker: Speaker,
+        /// Which room the thread is in, which its messages do not say.
+        room: String,
+    },
 }
 
 /// Where a job came from, when a person's message is what started it.
@@ -85,6 +134,16 @@ pub enum Post {
         /// Which call, as the world holds it open.
         request: RequestId,
     },
+    /// A message of a turn's transcript, opened: its answer names the
+    /// message, which is what lets it grow. Its failure is said and changes
+    /// nothing, like a notice's: what a person must see is what the tool's
+    /// answer guarantees.
+    Transcript {
+        /// Whose turn.
+        speaker: Speaker,
+        /// Which of its messages.
+        run: u64,
+    },
 }
 
 /// Something done to a room that changes nothing here: its failure is said
@@ -95,6 +154,11 @@ pub enum Keeping {
     Describing {
         /// Whose room.
         job: JobId,
+    },
+    /// A foreman's room described.
+    DescribingForemans {
+        /// Whose foreman.
+        project: ProjectId,
     },
     /// Somebody invited into a room.
     Inviting {
@@ -144,40 +208,166 @@ pub fn request(id: EffectId, rendered: stageman_channel::Request) -> Effect {
 }
 
 impl Running {
-    /// Asks the world to post one message, remembering what for.
+    /// Asks the world to post one message, remembering what for, in its turn
+    /// behind whatever the room is already being posted.
+    ///
+    /// A post about a record waits for the write, as it always did; one that
+    /// changes nothing goes at the step's end. Either way it goes only once
+    /// the room's previous post has been answered.
     fn spoken(
         &mut self,
-        channel: Channel,
         speaking: &Speaking,
-        room: &str,
+        place: &Place,
         text: &str,
-        thread: Option<&str>,
         post: Post,
-    ) -> Effect {
-        let rendered = stageman_channel::post(channel, speaking, room, text, thread);
+        after_writes: bool,
+    ) {
+        let channel = place.room.channel;
+        let rendered = stageman_channel::post(
+            channel,
+            speaking,
+            &place.room.id,
+            text,
+            place.thread.as_deref(),
+        );
+        // A turn answered where it was asked: what says the signpost of 0067
+        // is not needed, whether the post is the agent's or this instance's.
+        // Remembered for the turn asked in this place, and for a job's turn
+        // whenever the place is in its own room, since a job can be asked in
+        // several threads of it over one turn.
+        for (speaker, turn) in &mut self.turns {
+            // One warrant per turn, so the speaker's is the turn's.
+            let asked_here = self
+                .warrants
+                .values()
+                .find(|warranted| warranted.speaker == *speaker)
+                .and_then(|warranted| warranted.place.as_ref())
+                == Some(place);
+            let own_room = match speaker {
+                Speaker::Job(job) => {
+                    self.state
+                        .job(*job)
+                        .and_then(|recorded| recorded.room.as_ref())
+                        == Some(&place.room)
+                }
+                Speaker::Foreman(_) => false,
+            };
+            if !(asked_here || own_room) {
+                continue;
+            }
+            if !turn.spoke_in.contains(place) {
+                turn.spoke_in.push(place.clone());
+            }
+        }
         let id = self.effect_id();
         self.sent.insert(
             id,
             Sent {
                 channel,
                 purpose: Purpose::Post(post),
+                room: Some(place.room.clone()),
             },
         );
-        request(id, rendered)
+        self.enqueue(place.room.clone(), request(id, rendered), after_writes);
+    }
+
+    /// Puts a post in its room's chain: sent now if nothing is in flight
+    /// there, and behind what is otherwise.
+    fn enqueue(&mut self, room: Room, effect: Effect, after_writes: bool) {
+        let posting = self.posting.entry(room).or_default();
+        if posting.in_flight {
+            posting.waiting.push_back(Queued {
+                effect,
+                after_writes,
+            });
+            return;
+        }
+        posting.in_flight = true;
+        if after_writes {
+            self.defer(effect);
+        } else {
+            self.immediate.push(effect);
+        }
+    }
+
+    /// A room's post was answered: the next waiting one goes, or the room
+    /// is idle.
+    ///
+    /// A post released here was justified by a step that is over, so one
+    /// that waits on a write waits on every write still in flight rather
+    /// than on this step's.
+    fn next_post(&mut self, room: &Room) {
+        let next = self
+            .posting
+            .get_mut(room)
+            .and_then(|posting| posting.waiting.pop_front());
+        match next {
+            Some(Queued {
+                effect,
+                after_writes: true,
+            }) => self.after_writes(effect),
+            Some(Queued {
+                effect,
+                after_writes: false,
+            }) => self.immediate.push(effect),
+            None => {
+                if let Some(posting) = self.posting.get_mut(room) {
+                    posting.in_flight = false;
+                }
+            }
+        }
     }
 
     /// Says something at a place on the instance's own behalf, once
     /// whatever this step changed is on the disk.
     pub fn say(&mut self, speaking: &Speaking, place: &Place, text: &str) {
-        let request = self.spoken(
-            place.room.channel,
+        self.spoken(speaking, place, text, Post::Notice, true);
+    }
+
+    /// Opens one message of a turn's transcript at a place, at the step's
+    /// end: it changes no record, so it waits for no write.
+    pub fn transcribed(
+        &mut self,
+        speaking: &Speaking,
+        place: &Place,
+        text: &str,
+        speaker: Speaker,
+        run: u64,
+    ) {
+        self.spoken(
             speaking,
-            &place.room.id,
+            place,
             text,
-            place.thread.as_deref(),
-            Post::Notice,
+            Post::Transcript { speaker, run },
+            false,
         );
-        self.defer(request);
+    }
+
+    /// Grows one message of a turn's transcript by editing it in place, at
+    /// the step's end. Not in the room's chain: it names a message already
+    /// there, so it cannot land out of order with a post.
+    pub fn grow_message(
+        &mut self,
+        speaking: &Speaking,
+        place: &Place,
+        message: &str,
+        text: &str,
+        speaker: Speaker,
+        run: u64,
+    ) {
+        let channel = place.room.channel;
+        let rendered = stageman_channel::update(channel, speaking, &place.room.id, message, text);
+        let id = self.effect_id();
+        self.sent.insert(
+            id,
+            Sent {
+                channel,
+                purpose: Purpose::Growing { speaker, run },
+                room: None,
+            },
+        );
+        let effect = request(id, rendered);
+        self.immediate.push(effect);
     }
 
     /// Makes the room a job's conversation happens in, once the job's
@@ -197,6 +387,7 @@ impl Running {
             Sent {
                 channel,
                 purpose: Purpose::Creating { job, origin },
+                room: None,
             },
         );
         let request = request(id, rendered);
@@ -213,10 +404,69 @@ impl Running {
             Sent {
                 channel,
                 purpose: Purpose::Keeping(keeping),
+                room: None,
             },
         );
         let request = request(id, rendered);
         self.defer(request);
+    }
+
+    /// Makes the room a foreman's transcript is posted in, once the inbox
+    /// that first needs it is on the disk.
+    pub fn create_foreman_room(
+        &mut self,
+        project: ProjectId,
+        channel: Channel,
+        speaking: &Speaking,
+        name: &str,
+    ) {
+        let rendered = stageman_channel::create_room(channel, speaking, name);
+        let id = self.effect_id();
+        self.sent.insert(
+            id,
+            Sent {
+                channel,
+                purpose: Purpose::ForemanRoom { project },
+                room: None,
+            },
+        );
+        let request = request(id, rendered);
+        self.defer(request);
+    }
+
+    /// Describes a foreman's room: what it is for.
+    pub fn describe_foreman_room(
+        &mut self,
+        project: ProjectId,
+        channel: Channel,
+        speaking: &Speaking,
+        room: &str,
+        purpose: &str,
+    ) {
+        self.keep(
+            channel,
+            stageman_channel::set_purpose(channel, speaking, room, purpose),
+            Keeping::DescribingForemans { project },
+        );
+    }
+
+    /// Archives a project's foreman's room, if it has one, once the record
+    /// that forgets the project is on the disk.
+    pub fn archive_foreman_room_of(&mut self, project: ProjectId) {
+        let Some((channel, speaking, room)) =
+            self.state.projects.get(&project).and_then(|watched| {
+                let room = watched.foreman_room.clone()?;
+                let bound = watched.channels.get(&room.channel)?;
+                Some((room.channel, bound.speaking(), room.id))
+            })
+        else {
+            return;
+        };
+        self.keep(
+            channel,
+            stageman_channel::archive(channel, &speaking, &room),
+            Keeping::Archiving { room },
+        );
     }
 
     /// Describes a job's room: what it is for, and where the job shows its
@@ -319,25 +569,62 @@ impl Running {
             )
     }
 
+    /// Asks the platform for a thread, once the record that the message in
+    /// it is in hand has landed: a read whose answer is routed back to the
+    /// turn that waits on it.
+    pub fn ask_for_thread(
+        &mut self,
+        speaker: Speaker,
+        channel: Channel,
+        speaking: &Speaking,
+        room: &str,
+        thread: &str,
+    ) {
+        let rendered = stageman_channel::replies(
+            channel,
+            speaking,
+            room,
+            thread,
+            crate::threads::THREAD_AT_MOST,
+        );
+        let id = self.effect_id();
+        self.sent.insert(
+            id,
+            Sent {
+                channel,
+                purpose: Purpose::Reading {
+                    speaker,
+                    room: room.to_owned(),
+                },
+                room: None,
+            },
+        );
+        let request = request(id, rendered);
+        self.defer(request);
+    }
+
+    /// A link to a message on a project's channel, once its listener has
+    /// been told where the workspace is; none until then, which a notice
+    /// says without a link.
+    #[must_use]
+    pub fn permalink(
+        &self,
+        project: ProjectId,
+        channel: Channel,
+        room: &str,
+        message: &str,
+        thread: Option<&str>,
+    ) -> Option<String> {
+        self.listeners
+            .get(&project)
+            .and_then(|listener| listener.us.as_ref())
+            .map(|us| stageman_channel::permalink(channel, us, room, message, thread))
+    }
+
     /// Posts on an agent's behalf, with the tool call held open until the
     /// platform answers.
-    pub fn post_for(
-        &mut self,
-        request: RequestId,
-        speaking: &Speaking,
-        place: &Place,
-        text: &str,
-        effects: &mut Vec<Effect>,
-    ) {
-        let posting = self.spoken(
-            place.room.channel,
-            speaking,
-            &place.room.id,
-            text,
-            place.thread.as_deref(),
-            Post::Saying { request },
-        );
-        effects.push(posting);
+    pub fn post_for(&mut self, request: RequestId, speaking: &Speaking, place: &Place, text: &str) {
+        self.spoken(speaking, place, text, Post::Saying { request }, false);
     }
 
     /// What the world said about a request to a channel.
@@ -367,7 +654,10 @@ impl Running {
                     }
                     Responded::Failed(why) => Err(unreachable(why)),
                 };
-                self.answered(&post, outcome);
+                self.answered(&post, sent.channel, sent.room.as_ref(), outcome);
+                if let Some(room) = &sent.room {
+                    self.next_post(room);
+                }
             }
             Purpose::Creating { job, origin } => {
                 let outcome = match responded {
@@ -378,6 +668,16 @@ impl Running {
                     Responded::Failed(why) => Err(unreachable(why)),
                 };
                 self.room_created(job, origin, outcome);
+            }
+            Purpose::ForemanRoom { project } => {
+                let outcome = match responded {
+                    Responded::Answered { status, body, .. } => {
+                        stageman_channel::room_created(sent.channel, *status, body.as_slice())
+                            .map_err(|why| why.to_string())
+                    }
+                    Responded::Failed(why) => Err(unreachable(why)),
+                };
+                self.foreman_room_made(project, sent.channel, outcome);
             }
             Purpose::Keeping(keeping) => {
                 let outcome = match responded {
@@ -394,19 +694,75 @@ impl Running {
             Purpose::Question(question) => {
                 self.questioned(sent.channel, question, responded, at, effects);
             }
+            Purpose::Growing { speaker, run } => {
+                let outcome = match responded {
+                    Responded::Answered { status, body, .. } => {
+                        stageman_channel::posted(sent.channel, *status, body.as_slice())
+                            .map(|_| ())
+                            .map_err(|why| why.to_string())
+                    }
+                    Responded::Failed(why) => Err(unreachable(why)),
+                };
+                self.run_grown(speaker, run, outcome);
+            }
+            Purpose::Reading { speaker, room } => {
+                // Read as a frame is, given who this instance is on the
+                // channel, which its listener was told before it could hear
+                // the message this is for.
+                let us = match speaker {
+                    Speaker::Foreman(project) => Some(project),
+                    Speaker::Job(job) => self.state.project_of(job),
+                }
+                .and_then(|project| self.listeners.get(&project))
+                .and_then(|listener| listener.us.clone());
+                let outcome = match (responded, us) {
+                    (Responded::Answered { status, body, .. }, Some(us)) => {
+                        stageman_channel::thread_read(
+                            sent.channel,
+                            *status,
+                            body.as_slice(),
+                            &room,
+                            &us,
+                        )
+                        .map_err(|why| why.to_string())
+                    }
+                    (Responded::Answered { .. }, None) => {
+                        Err("nobody has said who this instance is on the channel".to_owned())
+                    }
+                    (Responded::Failed(why), _) => Err(unreachable(why)),
+                };
+                self.thread_read_back(speaker, outcome);
+            }
         }
     }
 
     /// What follows from a channel's answer to a post, given why it was
     /// posted.
-    fn answered(&mut self, post: &Post, outcome: Result<String, String>) {
+    fn answered(
+        &mut self,
+        post: &Post,
+        channel: Channel,
+        room: Option<&Room>,
+        outcome: Result<String, String>,
+    ) {
         match post {
             Post::Notice => {
                 if let Err(why) = outcome {
                     tracing::warn!(%why, "the room could not be spoken to");
                 }
             }
-            Post::Saying { request } => self.posted(*request, outcome.map(|_| ())),
+            Post::Transcript { speaker, run } => self.run_posted(*speaker, *run, outcome),
+            // Answered with the identifier of what was posted, as the agent
+            // may name it later.
+            Post::Saying { request } => {
+                let named = outcome.map(|message| {
+                    room.map_or_else(
+                        || message.clone(),
+                        |room| stageman_channel::reference(channel, &room.id, &message),
+                    )
+                });
+                self.posted(*request, named);
+            }
         }
     }
 
@@ -425,14 +781,24 @@ impl Running {
         };
         let never = || "the record it waited on could not be written".to_owned();
         match sent.purpose {
-            Purpose::Post(post) => self.answered(&post, Err(never())),
+            Purpose::Post(post) => {
+                self.answered(&post, sent.channel, sent.room.as_ref(), Err(never()));
+                if let Some(room) = &sent.room {
+                    self.next_post(room);
+                }
+            }
             Purpose::Creating { job, origin } => self.room_created(job, origin, Err(never())),
+            Purpose::ForemanRoom { project } => {
+                self.foreman_room_made(project, sent.channel, Err(never()));
+            }
             Purpose::Keeping(keeping) => {
                 tracing::debug!(?keeping, "not done: {}", never());
             }
             Purpose::Question(
                 Question::Introducing { project } | Question::Locating { project },
             ) => self.unasked(project, effects),
+            Purpose::Growing { speaker, run } => self.run_grown(speaker, run, Err(never())),
+            Purpose::Reading { speaker, .. } => self.thread_unasked(speaker),
         }
     }
 }

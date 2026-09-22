@@ -23,6 +23,7 @@
 //! the credential invariant and `docs/conventions.md` §4 for why prompts are
 //! held to a test.
 
+use stageman_agent::{ToolCallStatus, ToolKind};
 use stageman_core::{ProjectId, VariableName, Waiting};
 
 /// What every foreman's container is named for.
@@ -98,6 +99,25 @@ pub const fn resumption_notice() -> &'static str {
     RESUMPTION
 }
 
+/// What a resumed job's agent is told when it had messages in hand: that it
+/// was interrupted, and then each message again, framed as it was.
+///
+/// Again, because a message in hand when the process died may never have
+/// reached the agent — the record of it is written before anything is
+/// started on its strength — and said so, because it also may have. See
+/// `docs/decisions/0069-a-message-reaches-a-working-job.md`.
+#[must_use]
+pub fn resumption_with(given: &[String]) -> String {
+    if given.is_empty() {
+        return RESUMPTION.to_owned();
+    }
+    format!(
+        "{RESUMPTION}\n\nWhat follows is what you had been given before you were interrupted, \
+         which you may or may not have seen.\n\n{}",
+        given.join("\n\n")
+    )
+}
+
 /// The first message in a job's room, for whoever finds the room.
 ///
 /// Written for a person reading the channel rather than for the agent, and
@@ -133,6 +153,84 @@ pub fn started_notice(link: &str) -> String {
     format!("Started a job for this: {link}.")
 }
 
+/// Why a turn started, as the notice at the root of a room says it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Because<'a> {
+    /// A person's message, linked when the channel can link it.
+    Message(Option<&'a str>),
+    /// Another app's post in a watched room, by the app's name.
+    Signal {
+        /// The app, as the platform names it.
+        app: &'a str,
+        /// A link to what it posted, when the channel can link it.
+        link: Option<&'a str>,
+    },
+    /// This process restarted with a turn in hand, linked to what the turn
+    /// was on when the channel can link it.
+    Restart(Option<&'a str>),
+}
+
+/// What the root of a room is told when a turn starts there.
+///
+/// Why, with a link to what started it. Posted by the instance before
+/// anything the agent says, so that what follows is about something — see
+/// `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`.
+#[must_use]
+pub fn turn_notice(because: &Because<'_>) -> String {
+    match because {
+        Because::Message(Some(link)) => format!("▶️ Handling {link}."),
+        Because::Message(None) => "▶️ Handling a message.".to_owned(),
+        Because::Signal {
+            app,
+            link: Some(link),
+        } => format!("▶️ Judging what {app} posted: {link}."),
+        Because::Signal { app, link: None } => format!("▶️ Judging what {app} posted."),
+        Because::Restart(Some(link)) => format!("▶️ Picking up {link} again after a restart."),
+        Because::Restart(None) => "▶️ Picking up again after a restart.".to_owned(),
+    }
+}
+
+/// What a thread is told when the job it asked in answered elsewhere: at the
+/// root of its room, where its transcript goes. The signpost of 0067, for
+/// the turn that missed the tool call.
+#[must_use]
+pub fn answered_elsewhere_notice(room: &str) -> String {
+    format!("↩️ Answered at the root of {room}.")
+}
+
+/// What a thread is told when the foreman handled the message without
+/// answering there: where its notes went, when it has a room to link.
+#[must_use]
+pub fn handled_elsewhere_notice(room: Option<&str>) -> String {
+    room.map_or_else(
+        || "↩️ Handled without answering here.".to_owned(),
+        |room| format!("↩️ Handled without answering here; its notes are in {room}."),
+    )
+}
+
+/// What a foreman's room is for, as the sidebar shows it beside the name.
+#[must_use]
+pub fn foreman_room_purpose(project: &str) -> String {
+    format!("Where {project}'s foreman thinks: what it is handling, what it decided, and why.")
+}
+
+/// The first message in a foreman's room, for whoever finds the room.
+///
+/// It teaches the one rule that matters there: the foreman is talked to by
+/// a mention, anywhere, and this room is where its work shows. The mention
+/// is rendered by the channel, since how one is spelled is the platform's
+/// business.
+#[must_use]
+pub fn foreman_room_opening(project: &str, mention: &str) -> String {
+    format!(
+        "\
+**{project}'s foreman.**
+
+_Everything it says and does as it works appears here. Mention {mention} anywhere to \
+talk to it; anything else said here is between people._"
+    )
+}
+
 /// The first thing a project's foreman is ever told.
 ///
 /// Said once, at the start of a session that then lasts as long as the project
@@ -155,9 +253,12 @@ People talk to you on a channel. Each message they send you arrives as its own \
 turn, and the only way to answer is to **call the `say` tool**, in Markdown, \
 which is rendered.
 
-Nothing you write as ordinary output is seen by anybody. What you pass to \
-`say` lands in the thread of the message you are answering, so a person can \
-always see which of their messages you meant.
+Everything you write as ordinary output is posted in a room of your own, \
+where anybody can watch you work — but the person who asked is not there. \
+What you pass to `say` lands under the message you name with `to` — each \
+message is shown to you with its identifier — so a person can always see \
+which of their messages you meant; without one, it lands at the root of your \
+own room.
 
 **You do not do the work yourself.** You have no copy of the repository and no \
 credentials to reach it, and that is deliberate rather than something missing: \
@@ -224,6 +325,12 @@ pub enum Starting {
 pub struct Turn<'a> {
     /// What was said, as the person wrote it or as the app's message reads.
     pub said: &'a str,
+    /// The message to answer under, as the channel identifies it to an
+    /// agent: the thread the message was in, or the message itself.
+    pub target: &'a str,
+    /// What the turn is shown of the thread the message was said in, when
+    /// it was in one: composed by [`thread_shown`], or [`thread_unread`].
+    pub thread: Option<&'a str>,
     /// Whether a turn on it was already begun and cut short.
     pub starting: Starting,
     /// The app that posted it, by name, when it is a signal from a watched
@@ -305,6 +412,8 @@ pub const fn resumed_notice() -> &'static str {
 pub fn asked(turn: Turn<'_>, kits: &[(&str, &str)], brief: &str) -> String {
     let Turn {
         said,
+        target,
+        thread,
         starting,
         app,
     } = turn;
@@ -321,6 +430,8 @@ pub fn asked(turn: Turn<'_>, kits: &[(&str, &str)], brief: &str) -> String {
         Starting::Fresh => String::new(),
         Starting::Interrupted => format!("{INTERRUPTION}\n\n"),
     };
+    // Before the message, so that it reads as what the message follows.
+    let context = thread.map_or_else(String::new, |shown| format!("{shown}\n\n"));
 
     let framed = app.map_or_else(
         || {
@@ -331,7 +442,8 @@ A person said this to you on the channel:
 {said}
 
 Answer it, or start a job for it with the `start_job` tool, or both. Then \
-call `say` before you finish: a turn that ends without calling it has told \
+call `say` before you finish, with `to` set to `{target}`, so that your answer \
+lands under their message: a turn that ends without calling it has told \
 nobody anything, however much you wrote."
             )
         },
@@ -345,8 +457,9 @@ nobody anything, however much you wrote."
 Nobody asked you anything: this is a signal, and yours to judge. Decide what it \
 deserves — nothing, a job started with the `start_job` tool, or a word to the \
 people in that room — and do that. Call `say` only if you acted on it or a \
-person needs to know something; the reaction on the message already says you \
-looked, so a turn that ends in silence is a decision, not a failure."
+person needs to know something, with `to` set to `{target}` to speak under \
+what {app} posted; the reaction on the message already says you looked, so a \
+turn that ends in silence is a decision, not a failure."
             )
         },
     );
@@ -365,7 +478,7 @@ words, that apply to every message and every signal:\n\n{}",
 
     format!(
         "\
-{interruption}{framed}{briefed}
+{interruption}{context}{framed}{briefed}
 
 The kits this project's jobs may run on — each an agent, set a particular way — \
 and what each is for:
@@ -418,15 +531,41 @@ pub fn stopped_notice(waiting: &Waiting, asked_by: Option<&str>, mention: &str) 
     }
 }
 
-/// What a thread is told when a reply arrives for a job that is still working.
+/// What the root of a job's room is told when a message landed in the turn
+/// in progress.
 ///
-/// The honest version of a limitation rather than a silence. A person who
-/// replies and hears nothing concludes the reply was read, which is the one
-/// wrong belief available here — they would then wait for an answer that is
-/// not coming.
+/// With a link to it, since nothing on the agent's own stream says so — see
+/// `docs/decisions/0069-a-message-reaches-a-working-job.md`. What the agent
+/// was doing reads above it, and what it does about the message below.
 #[must_use]
-pub const fn busy_notice() -> &'static str {
-    "⏳ Still working, so that did not reach it. Say it again once it stops."
+pub fn landed_notice(link: Option<&str>) -> String {
+    link.map_or_else(
+        || "↪️ Interrupted by a message.".to_owned(),
+        |link| format!("↪️ Interrupted by {link}."),
+    )
+}
+
+/// What a message is told, under it, when a person stopped the job before
+/// the message reached its agent.
+///
+/// It was received, and it will not be delivered, since a stop is the last
+/// thing the person said — see
+/// `docs/decisions/0069-a-message-reaches-a-working-job.md`.
+#[must_use]
+pub fn stopped_before_notice(mention: &str) -> String {
+    format!("⏹️ Stopped before this reached it. Mention {mention} here to carry on.")
+}
+
+/// What a message is told, under it, when the turn that was to deliver it
+/// could not be started.
+///
+/// It did not reach the agent, and saying it again is what tries again, as
+/// it is for any failed job.
+#[must_use]
+pub fn unreached_notice(mention: &str) -> String {
+    format!(
+        "⚠️ This did not reach it: its turn could not be started. Mention {mention} here to try again."
+    )
 }
 
 /// What a thread is told when a reply arrives for a job that is over.
@@ -452,16 +591,121 @@ pub const fn over_notice() -> &'static str {
 /// `docs/architecture.md` §1 — including the ones that merely wrap somebody
 /// else's.
 #[must_use]
-pub fn reply(said: &str) -> String {
-    format!(
-        "\
-A person replied on the channel:
+pub fn reply(said: &str, target: &str, thread: Option<&str>, finding: Finding) -> String {
+    // Before the reply, so that it reads as what the reply follows.
+    let context = thread.map_or_else(String::new, |shown| format!("{shown}\n\n"));
+    match finding {
+        Finding::AtRest => format!(
+            "\
+{context}A person replied on the channel:
 
 {said}
 
-Carry on from there. The same rules still hold: propose rather than merge, and \
-say what you did when you finish."
-    )
+To answer them where they asked, call `say` with `to` set to `{target}`; \
+whatever you write without it is posted at the root of your room. Carry on \
+from there. The same rules still hold: propose rather than merge, and say what \
+you did when you finish."
+        ),
+        Finding::PartWay => format!(
+            "\
+{context}You were interrupted part-way through what you were doing. A person \
+replied on the channel:
+
+{said}
+
+Something you had begun may have finished, half-finished, or never started — \
+a command, an edit, anything outside this workspace. Check how things actually \
+stand before you carry on. Do not assume your last step completed, and do not \
+assume it did not. If you had already called the `stopping` tool, that no \
+longer counts: call it again before you stop.
+
+To answer them where they asked, call `say` with `to` set to `{target}`; \
+whatever you write without it is posted at the root of your room. The same \
+rules still hold: propose rather than merge, and say what you did when you \
+finish."
+        ),
+    }
+}
+
+/// How a reply finds the job it is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Finding {
+    /// Stopped of its own accord: the reply starts a turn, and nothing was
+    /// cut short.
+    AtRest,
+    /// Part-way through something: the reply was handed to a running turn,
+    /// which the pinned adapter was measured to interrupt rather than wait
+    /// for, or follows a turn a person stopped. Framed in the terms the
+    /// resumption notice uses, per
+    /// `docs/decisions/0069-a-message-reaches-a-working-job.md`.
+    PartWay,
+}
+
+/// Who said one message of a thread, as an agent is told.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Voice<'a> {
+    /// A person, by the channel's own mention of them.
+    Person(&'a str),
+    /// This instance: the agent's own earlier words, or a notice of its.
+    Us,
+    /// Another app, by the name the platform gives it.
+    App(&'a str),
+}
+
+/// One message of a thread, as an agent is shown it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shown<'a> {
+    /// The identifier the agent would name it by.
+    pub id: &'a str,
+    /// Who said it.
+    pub voice: Voice<'a>,
+    /// What was said.
+    pub text: &'a str,
+}
+
+/// What a turn is told of the thread its message was said in.
+///
+/// Said before the message itself: what came before, oldest first, each
+/// entry with who said it and its identifier — see
+/// `docs/decisions/0068-a-mention-is-shown-its-thread.md`. From the last
+/// message the agent was given there when its session remembers what came
+/// before that, and from the start when it does not; and told when the
+/// thread was longer than what is shown.
+#[must_use]
+pub fn thread_shown(shown: &[Shown<'_>], since: bool, longer: bool) -> String {
+    let lead = if since {
+        "This was said in a thread. Below are its first message and everything said there from \
+         the last message you were given onwards, your own words among them, oldest first, each \
+         with who said it and its identifier:"
+    } else {
+        "This was said in a thread. What was said there before it, oldest first, each with who \
+         said it and its identifier:"
+    };
+    let entries = shown
+        .iter()
+        .map(|entry| {
+            let who = match entry.voice {
+                Voice::Person(mention) => mention,
+                Voice::Us => "You",
+                Voice::App(app) => app,
+            };
+            format!("{who} ({}):\n{}", entry.id, entry.text)
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let tail = if longer {
+        "\n\nThe thread is longer than this: only its most recent messages are shown."
+    } else {
+        ""
+    };
+    format!("{lead}\n\n{entries}{tail}")
+}
+
+/// What a turn is told when the thread its message was said in could not
+/// be read: that it was not, so that nothing is assumed about it.
+#[must_use]
+pub const fn thread_unread() -> &'static str {
+    "This was said in a thread that could not be read, so what came before it is not shown."
 }
 
 /// What a thread is told when a foreman's turn could not be taken at all,
@@ -483,6 +727,69 @@ pub fn stuck_notice(why: &str) -> String {
         "❌ That could not be handled: `{why}`. It will not be retried — send it again once \
 that is fixed."
     )
+}
+
+/// One line of a burst of working: a tool call as a person reads it, marked
+/// with where it has got to.
+///
+/// Composed here because every text this system posts is, and asserted whole
+/// below — see
+/// `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`.
+/// The kind is the protocol's classification of tools, said as what the
+/// agent did; the title is the adapter's, which for a command is the
+/// command. A call not yet ended, or one whose ending the adapter has not
+/// classified, reads as still running.
+#[must_use]
+pub fn working_line(kind: ToolKind, title: &str, status: Option<ToolCallStatus>) -> String {
+    let mark = match status {
+        Some(ToolCallStatus::Completed) => "✅",
+        Some(ToolCallStatus::Failed) => "❌",
+        _ => "⏳",
+    };
+    format!("{mark} {} `{title}`", did(kind))
+}
+
+/// One tool call that a message interrupted, as a line in a burst of working.
+///
+/// It was running when the message landed, and the adapter was measured to
+/// send no ending for it, so the line says what became of it rather than
+/// reading as running for ever — see
+/// `docs/decisions/0069-a-message-reaches-a-working-job.md`.
+#[must_use]
+pub fn interrupted_line(kind: ToolKind, title: &str) -> String {
+    format!("⏹️ {} `{title}` — interrupted", did(kind))
+}
+
+/// What an agent did, by the protocol's classification of the tool.
+const fn did(kind: ToolKind) -> &'static str {
+    match kind {
+        ToolKind::Read => "read",
+        ToolKind::Edit => "edited",
+        ToolKind::Delete => "deleted",
+        ToolKind::Move => "moved",
+        ToolKind::Search => "searched",
+        ToolKind::Execute => "ran",
+        ToolKind::Think => "thought about",
+        ToolKind::Fetch => "fetched",
+        _ => "did",
+    }
+}
+
+/// A thought in a burst of working, as a quoted line, where an adapter
+/// carries any: the agent's reasoning, told apart from what it did.
+#[must_use]
+pub fn thought_line(text: &str) -> String {
+    text.lines()
+        .enumerate()
+        .map(|(n, line)| {
+            if n == 0 {
+                format!("> 💭 {line}")
+            } else {
+                format!("> {line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The instruction a job begins from.
@@ -532,21 +839,28 @@ You can show people what you are doing. Anything you serve inside this container
 {port} is reachable at {tunnel} — a dev server while you work, or a built result for somebody \
 to look at before you propose it. Bind it to 0.0.0.0 and not to localhost: a server on \
 localhost answers you from inside this container and is reachable from nowhere else. Say where \
-to look with the `say` tool, because nobody finds that address on their own."
+to look, because nobody finds that address on their own."
     );
 
     let tools = "You have git and gh, both signed in as the account this work \
 belongs to, and the `say` tool for talking to people.";
 
+    // What a job is told about being read changed with
+    // `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`:
+    // its narration reaches the room as it is written, so the paragraph that
+    // asked it to finish by saying what it did is gone, and the tool is for
+    // the thread a person asked in.
     let speaking = "\
-Finish by saying what you did, by calling the `say` tool, in Markdown, which is \
-rendered. Nobody reads this \
-terminal, so anything you do not say there is lost — including the answer, if the work was a question. Say what \
-you found, what you changed, or what you could not do.
+Everything you write is posted to the people in this job's room as you write \
+it, in Markdown, which is rendered — so write for them: what you found, what \
+you changed, or what you could not do, and the answer, if the work was a \
+question.
 
-Use it during the work as well, whenever you need an answer from a person: say \
-what you need, then stop. It reaches somebody who can answer, but not now — no \
-reply arrives in this session, so do not wait for one and do not guess.";
+The `say` tool posts at the root of your room, or under a message when you \
+name it with `to`, as each message is shown to you. Use it whenever you need \
+an answer from a person: say what you need, then stop. It reaches somebody who \
+can answer, but not now — no reply arrives in this session, so do not wait for \
+one and do not guess.";
 
     // Named and never valued, and the type is what enforces it: a
     // `VariableName` cannot hold a credential, so there is no call site at
@@ -602,7 +916,8 @@ Before you stop, call the `stopping` tool, every time and last of all. Say \
 person to look at, or `waiting_for_an_answer` if you need something from a \
 person before you can go on. Nothing else tells anybody which of the two this \
 is, so a job that stops without calling it is recorded as having stopped for \
-reasons nobody knows."
+reasons nobody knows. If a message interrupts you after you have called it, \
+call it again before you stop: the first call no longer counts."
     )
 }
 
@@ -686,8 +1001,8 @@ You can show people what you are doing. Anything you serve inside this container
 is reachable at https://00000000-0000-0000-0000-000000000001.example.com — a dev server while \
 you work, or a built result for somebody to look at before you propose it. Bind it to 0.0.0.0 \
 and not to localhost: a server on localhost answers you from inside this container and is \
-reachable from nowhere else. Say where to look with the `say` tool, because nobody finds that \
-address on their own.
+reachable from nowhere else. Say where to look, because nobody finds that address on their \
+own.
 
 Some of what this project needs is already in your environment: STRIPE_API_KEY, DATABASE_URL. \
 Nothing here knows what any of them is for, so follow whatever the repository says about them. \
@@ -698,20 +1013,21 @@ When you have a change to propose, open a pull request and stop there. Do not me
 deploy anything, and do not push to the default branch. Somebody reads what you propose before \
 it counts for anything, which is what lets you work unattended.
 
-Finish by saying what you did, by calling the `say` tool, in Markdown, which is rendered. \
-Nobody reads this terminal, so anything you do not say there is lost — including the \
-answer, if the work was a question. Say what you found, what you changed, or what you could not \
-do.
+Everything you write is posted to the people in this job's room as you write it, in Markdown, \
+which is rendered — so write for them: what you found, what you changed, or what you could not \
+do, and the answer, if the work was a question.
 
-Use it during the work as well, whenever you need an answer from a person: say what you need, \
-then stop. It reaches somebody who can answer, but not now — no reply arrives in this session, \
-so do not wait for one and do not guess.
+The `say` tool posts at the root of your room, or under a message when you name it with `to`, \
+as each message is shown to you. Use it whenever you need an answer from a person: say what you \
+need, then stop. It reaches somebody who can answer, but not now — no reply arrives in this \
+session, so do not wait for one and do not guess.
 
 Before you stop, call the `stopping` tool, every time and last of all. Say `ready_for_review` if \
 you have done what was asked and there is something for a person to look at, or \
 `waiting_for_an_answer` if you need something from a person before you can go on. Nothing else \
 tells anybody which of the two this is, so a job that stops without calling it is recorded as \
-having stopped for reasons nobody knows."
+having stopped for reasons nobody knows. If a message interrupts you after you have called it, \
+call it again before you stop: the first call no longer counts."
         );
     }
 
@@ -779,33 +1095,35 @@ You can show people what you are doing. Anything you serve inside this container
 is reachable at https://00000000-0000-0000-0000-000000000001.example.com — a dev server while \
 you work, or a built result for somebody to look at before you propose it. Bind it to 0.0.0.0 \
 and not to localhost: a server on localhost answers you from inside this container and is \
-reachable from nowhere else. Say where to look with the `say` tool, because nobody finds that \
-address on their own.
+reachable from nowhere else. Say where to look, because nobody finds that address on their \
+own.
 
 When you have a change to propose, open a pull request and stop there. Do not merge it, do not \
 deploy anything, and do not push to the default branch. Somebody reads what you propose before \
 it counts for anything, which is what lets you work unattended.
 
-Finish by saying what you did, by calling the `say` tool, in Markdown, which is rendered. \
-Nobody reads this terminal, so anything you do not say there is lost — including the \
-answer, if the work was a question. Say what you found, what you changed, or what you could not \
-do.
+Everything you write is posted to the people in this job's room as you write it, in Markdown, \
+which is rendered — so write for them: what you found, what you changed, or what you could not \
+do, and the answer, if the work was a question.
 
-Use it during the work as well, whenever you need an answer from a person: say what you need, \
-then stop. It reaches somebody who can answer, but not now — no reply arrives in this session, \
-so do not wait for one and do not guess.
+The `say` tool posts at the root of your room, or under a message when you name it with `to`, \
+as each message is shown to you. Use it whenever you need an answer from a person: say what you \
+need, then stop. It reaches somebody who can answer, but not now — no reply arrives in this \
+session, so do not wait for one and do not guess.
 
 Before you stop, call the `stopping` tool, every time and last of all. Say `ready_for_review` if \
 you have done what was asked and there is something for a person to look at, or \
 `waiting_for_an_answer` if you need something from a person before you can go on. Nothing else \
 tells anybody which of the two this is, so a job that stops without calling it is recorded as \
-having stopped for reasons nobody knows."
+having stopped for reasons nobody knows. If a message interrupts you after you have called it, \
+call it again before you stop: the first call no longer counts."
         );
     }
 
-    /// Every job is told which tool reaches a person, because every job has
-    /// one: an agent not told has no way to know that ordinary output goes
-    /// nowhere.
+    /// Every job is told about the tool that speaks, because every job has
+    /// one: its narration reaches the room on its own since
+    /// `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`,
+    /// and the tool is for the thread a person asked in.
     #[test]
     fn a_kickoff_names_the_tool_that_speaks() {
         let prompt = super::kickoff("https://example.invalid/repo", "anything", A_TUNNEL, NONE);
@@ -846,6 +1164,65 @@ here is between people._"
             super::started_notice("<#C0C1VNX9AA2>"),
             "Started a job for this: <#C0C1VNX9AA2>."
         );
+        assert_eq!(
+            super::turn_notice(&super::Because::Message(Some(
+                "https://example.slack.com/archives/C0123/p1788000000000100"
+            ))),
+            "▶️ Handling https://example.slack.com/archives/C0123/p1788000000000100."
+        );
+        assert_eq!(
+            super::turn_notice(&super::Because::Message(None)),
+            "▶️ Handling a message."
+        );
+        assert_eq!(
+            super::turn_notice(&super::Because::Signal {
+                app: "GitHub",
+                link: Some("https://example.slack.com/archives/C0123/p1788000000000100"),
+            }),
+            "▶️ Judging what GitHub posted: \
+             https://example.slack.com/archives/C0123/p1788000000000100."
+        );
+        assert_eq!(
+            super::turn_notice(&super::Because::Signal {
+                app: "GitHub",
+                link: None,
+            }),
+            "▶️ Judging what GitHub posted."
+        );
+        assert_eq!(
+            super::turn_notice(&super::Because::Restart(Some(
+                "https://example.slack.com/archives/C0123/p1788000000000100"
+            ))),
+            "▶️ Picking up https://example.slack.com/archives/C0123/p1788000000000100 again \
+             after a restart."
+        );
+        assert_eq!(
+            super::turn_notice(&super::Because::Restart(None)),
+            "▶️ Picking up again after a restart."
+        );
+        assert_eq!(
+            super::answered_elsewhere_notice("<#C0C1VNX9AA2>"),
+            "↩️ Answered at the root of <#C0C1VNX9AA2>."
+        );
+        assert_eq!(
+            super::handled_elsewhere_notice(Some("<#C0C1VNX9AA2>")),
+            "↩️ Handled without answering here; its notes are in <#C0C1VNX9AA2>."
+        );
+        assert_eq!(
+            super::handled_elsewhere_notice(None),
+            "↩️ Handled without answering here."
+        );
+        assert_eq!(
+            super::foreman_room_purpose("aviary"),
+            "Where aviary's foreman thinks: what it is handling, what it decided, and why."
+        );
+        assert_eq!(
+            super::foreman_room_opening("aviary", "<@U0BOT>"),
+            "**aviary's foreman.**
+
+_Everything it says and does as it works appears here. Mention <@U0BOT> anywhere to talk to \
+it; anything else said here is between people._"
+        );
     }
 
     /// The opening teaches the mention, because the room is where a
@@ -858,32 +1235,93 @@ here is between people._"
         assert!(said.contains("between people"), "{said}");
     }
 
-    /// Reporting is the ending, not the exception — and this is why.
+    /// Being read is the rule, not the exception — and this is why.
     ///
     /// The first version of this paragraph opened with *if you need an answer
     /// from a person*, and put finishing in a subordinate clause at the end of
     /// it. An agent given read-only work then has no question, no change to
     /// propose, and no reason to speak: it answers into a session nothing
     /// keeps, and the channel stays empty. That is not hypothetical — it is
-    /// what the first real job did.
+    /// what the first real job did. Since
+    /// `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`
+    /// what a job writes is what a person reads, and the same order holds:
+    /// it is told that first, and about the tool for a person's thread after.
     ///
     /// Asserted alongside the snapshot rather than left to it, because a
     /// snapshot is updated wholesale by whoever changes the text and records
     /// no opinion about which sentence mattered.
     #[test]
-    fn a_kickoff_makes_reporting_the_ending() {
+    fn a_kickoff_makes_being_read_the_rule() {
         let prompt = super::kickoff("https://example.invalid/repo", "anything", A_TUNNEL, NONE);
 
-        let reporting = prompt
-            .find("Finish by saying")
-            .expect("it must say to report at the end");
+        let read = prompt
+            .find("Everything you write is posted")
+            .expect("it must say that what it writes is read");
         let asking = prompt
             .find("whenever you need an answer")
             .expect("and still offer the tool during the work");
 
         assert!(
-            reporting < asking,
-            "reporting must come first, or it reads as a special case of asking: {prompt}"
+            read < asking,
+            "being read must come first, or it reads as a special case of asking: {prompt}"
+        );
+    }
+
+    /// The lines a burst is built from, asserted whole, per
+    /// `docs/conventions.md` §4: a person reads them in a room, and nothing
+    /// else would notice them changing.
+    #[test]
+    fn the_working_lines_read_exactly_as_written() {
+        use stageman_agent::{ToolCallStatus, ToolKind};
+
+        assert_eq!(
+            super::working_line(ToolKind::Execute, "cargo test", None),
+            "⏳ ran `cargo test`"
+        );
+        assert_eq!(
+            super::working_line(
+                ToolKind::Execute,
+                "cargo test",
+                Some(ToolCallStatus::InProgress)
+            ),
+            "⏳ ran `cargo test`"
+        );
+        assert_eq!(
+            super::working_line(
+                ToolKind::Execute,
+                "cargo test",
+                Some(ToolCallStatus::Completed)
+            ),
+            "✅ ran `cargo test`"
+        );
+        assert_eq!(
+            super::working_line(ToolKind::Edit, "src/lib.rs", Some(ToolCallStatus::Failed)),
+            "❌ edited `src/lib.rs`"
+        );
+        assert_eq!(
+            super::working_line(ToolKind::Read, "README.md", Some(ToolCallStatus::Completed)),
+            "✅ read `README.md`"
+        );
+        assert_eq!(
+            super::working_line(ToolKind::Other, "something", None),
+            "⏳ did `something`"
+        );
+        assert_eq!(
+            super::interrupted_line(ToolKind::Execute, "cargo test"),
+            "⏹️ ran `cargo test` — interrupted"
+        );
+        for (kind, line) in [
+            (ToolKind::Delete, "⏳ deleted `old.rs`"),
+            (ToolKind::Move, "⏳ moved `old.rs`"),
+            (ToolKind::Search, "⏳ searched `old.rs`"),
+            (ToolKind::Think, "⏳ thought about `old.rs`"),
+            (ToolKind::Fetch, "⏳ fetched `old.rs`"),
+        ] {
+            assert_eq!(super::working_line(kind, "old.rs", None), line);
+        }
+        assert_eq!(
+            super::thought_line("The tests first.\nThen the fix."),
+            "> 💭 The tests first.\n> Then the fix."
         );
     }
 
@@ -929,8 +1367,18 @@ that is fixed."
 send it again once that is fixed."
         );
         assert_eq!(
-            super::busy_notice(),
-            "⏳ Still working, so that did not reach it. Say it again once it stops."
+            super::landed_notice(Some("https://example.slack.com/archives/C1/p1")),
+            "↪️ Interrupted by https://example.slack.com/archives/C1/p1."
+        );
+        assert_eq!(super::landed_notice(None), "↪️ Interrupted by a message.");
+        assert_eq!(
+            super::stopped_before_notice("<@U0BOT>"),
+            "⏹️ Stopped before this reached it. Mention <@U0BOT> here to carry on."
+        );
+        assert_eq!(
+            super::unreached_notice("<@U0BOT>"),
+            "⚠️ This did not reach it: its turn could not be started. Mention <@U0BOT> here to \
+             try again."
         );
         assert_eq!(
             super::resumed_notice(),
@@ -955,6 +1403,8 @@ here."
         let picked = super::asked(
             super::Turn {
                 said: "look at the parser",
+                target: "C0123/1788000000.000100",
+                thread: None,
                 starting: super::Starting::Interrupted,
                 app: None,
             },
@@ -978,6 +1428,8 @@ here."
         let again = super::asked(
             super::Turn {
                 said: "look at the parser",
+                target: "C0123/1788000000.000100",
+                thread: None,
                 starting: super::Starting::Interrupted,
                 app: None,
             },
@@ -1055,13 +1507,160 @@ here."
     #[test]
     fn a_reply_reads_exactly_as_written() {
         assert_eq!(
-            super::reply("use postgres"),
+            super::reply(
+                "use postgres",
+                "C0123/1788000000.000100",
+                None,
+                super::Finding::AtRest
+            ),
             "A person replied on the channel:
 
 use postgres
 
-Carry on from there. The same rules still hold: propose rather than merge, and say what you did \
-when you finish."
+To answer them where they asked, call `say` with `to` set to `C0123/1788000000.000100`; whatever you \
+write without it is posted at the root of your room. Carry on from there. The same rules still \
+hold: propose rather than merge, and say what you did when you finish."
+        );
+    }
+
+    /// What a turn is shown of its thread, asserted whole: who said each
+    /// message, its identifier, both leads, and the note that the thread
+    /// was longer. A reply or a message with a thread reads the thread
+    /// first, and the frame after it is the one without.
+    #[test]
+    fn a_thread_shown_reads_exactly_as_written() {
+        let shown = [
+            super::Shown {
+                id: "C0123/1788000000.000100",
+                voice: super::Voice::Person("<@U0HUMAN>"),
+                text: "Which database?",
+            },
+            super::Shown {
+                id: "C0123/1788000000.000200",
+                voice: super::Voice::Us,
+                text: "Two options.\nPostgres or SQLite.",
+            },
+            super::Shown {
+                id: "C0123/1788000000.000300",
+                voice: super::Voice::App("GitHub"),
+                text: "#9 Done",
+            },
+        ];
+        assert_eq!(
+            super::thread_shown(&shown, false, false),
+            "This was said in a thread. What was said there before it, oldest first, each with who \
+said it and its identifier:
+
+<@U0HUMAN> (C0123/1788000000.000100):
+Which database?
+
+You (C0123/1788000000.000200):
+Two options.
+Postgres or SQLite.
+
+GitHub (C0123/1788000000.000300):
+#9 Done"
+        );
+        assert_eq!(
+            super::thread_shown(&shown[..1], true, true),
+            "This was said in a thread. Below are its first message and everything said there from \
+the last message you were given onwards, your own words among them, oldest first, each \
+with who said it and its identifier:
+
+<@U0HUMAN> (C0123/1788000000.000100):
+Which database?
+
+The thread is longer than this: only its most recent messages are shown."
+        );
+        assert_eq!(
+            super::thread_unread(),
+            "This was said in a thread that could not be read, so what came before it is not shown."
+        );
+
+        let bare = super::reply(
+            "go with that",
+            "C0123/1788000000.000100",
+            None,
+            super::Finding::AtRest,
+        );
+        let framed = super::reply(
+            "go with that",
+            "C0123/1788000000.000100",
+            Some(super::thread_unread()),
+            super::Finding::AtRest,
+        );
+        assert_eq!(framed, format!("{}\n\n{bare}", super::thread_unread()));
+        let bare = super::asked(fresh("go with that"), &[], "");
+        let framed = super::asked(
+            super::Turn {
+                thread: Some(super::thread_unread()),
+                ..fresh("go with that")
+            },
+            &[],
+            "",
+        );
+        assert_eq!(framed, format!("{}\n\n{bare}", super::thread_unread()));
+    }
+
+    /// A reply that finds a job part-way through something says so first,
+    /// in the terms the resumption uses, and says to call the stopping tool
+    /// again. Asserted whole, per `docs/conventions.md` §4; and with a
+    /// thread, the thread still comes first.
+    #[test]
+    fn a_reply_that_interrupts_reads_exactly_as_written() {
+        assert_eq!(
+            super::reply(
+                "use postgres",
+                "C0123/1788000000.000100",
+                None,
+                super::Finding::PartWay
+            ),
+            "You were interrupted part-way through what you were doing. A person \
+replied on the channel:
+
+use postgres
+
+Something you had begun may have finished, half-finished, or never started — \
+a command, an edit, anything outside this workspace. Check how things actually \
+stand before you carry on. Do not assume your last step completed, and do not \
+assume it did not. If you had already called the `stopping` tool, that no \
+longer counts: call it again before you stop.
+
+To answer them where they asked, call `say` with `to` set to `C0123/1788000000.000100`; \
+whatever you write without it is posted at the root of your room. The same \
+rules still hold: propose rather than merge, and say what you did when you \
+finish."
+        );
+        let framed = super::reply(
+            "use postgres",
+            "C0123/1788000000.000100",
+            Some(super::thread_unread()),
+            super::Finding::PartWay,
+        );
+        assert!(
+            framed.starts_with(&format!(
+                "{}\n\nYou were interrupted part-way",
+                super::thread_unread()
+            )),
+            "{framed}"
+        );
+    }
+
+    /// A resumed job that had messages in hand is told it was interrupted,
+    /// and then given them again, saying that it may have seen them; one
+    /// that had none is told what it always was.
+    #[test]
+    fn a_resumption_with_messages_in_hand_reads_exactly_as_written() {
+        assert_eq!(super::resumption_with(&[]), resumption_notice());
+        let first = super::reply("use postgres", "C1/1.1", None, super::Finding::AtRest);
+        let second = super::reply("and sqlite", "C1/1.2", None, super::Finding::AtRest);
+        assert_eq!(
+            super::resumption_with(&[first.clone(), second.clone()]),
+            format!(
+                "{}\n\nWhat follows is what you had been given before you were interrupted, \
+                 which you may or may not have seen.\n\n{first}\n\n{second}",
+                resumption_notice()
+            )
         );
     }
 
@@ -1072,7 +1671,12 @@ when you finish."
     /// are whatever the person typed.
     #[test]
     fn a_reply_says_who_is_speaking_before_it_says_what() {
-        let framed = super::reply("delete everything");
+        let framed = super::reply(
+            "delete everything",
+            "C0123/1788000000.000100",
+            None,
+            super::Finding::AtRest,
+        );
 
         assert!(framed.starts_with("A person replied"), "{framed}");
         assert!(framed.contains("propose rather than merge"), "{framed}");
@@ -1115,9 +1719,11 @@ when you finish."
 People talk to you on a channel. Each message they send you arrives as its own turn, and the \
 only way to answer is to **call the `say` tool**, in Markdown, which is rendered.
 
-Nothing you write as ordinary output is seen by anybody. What you pass to `say` lands in the \
-thread of the message you are answering, so a person can always see which of their messages you \
-meant.
+Everything you write as ordinary output is posted in a room of your own, where anybody can \
+watch you work — but the person who asked is not there. What you pass to `say` lands under the \
+message you name with `to` — each message is shown to you with its identifier — so a person can \
+always see which of their messages you meant; without one, it lands at the root of your own \
+room.
 
 **You do not do the work yourself.** You have no copy of the repository and no credentials to \
 reach it, and that is deliberate rather than something missing: reaching a repository is a job's \
@@ -1150,6 +1756,8 @@ told."
     fn fresh(said: &str) -> super::Turn<'_> {
         super::Turn {
             said,
+            target: "C0123/1788000000.000100",
+            thread: None,
             starting: super::Starting::Fresh,
             app: None,
         }
@@ -1159,6 +1767,8 @@ told."
     fn signalled<'a>(said: &'a str, app: &'a str) -> super::Turn<'a> {
         super::Turn {
             said,
+            target: "C0123/1788000000.000100",
+            thread: None,
             starting: super::Starting::Fresh,
             app: Some(app),
         }
@@ -1178,7 +1788,8 @@ told."
 look at the parser
 
 Answer it, or start a job for it with the `start_job` tool, or both. Then call `say` before you \
-finish: a turn that ends without calling it has told nobody anything, however much you wrote.
+finish, with `to` set to `C0123/1788000000.000100`, so that your answer lands under their message: a \
+turn that ends without calling it has told nobody anything, however much you wrote.
 
 The kits this project's jobs may run on — each an agent, set a particular way — and what each \
 is for:
@@ -1214,8 +1825,9 @@ Issue created by somebody
 
 Nobody asked you anything: this is a signal, and yours to judge. Decide what it deserves — \
 nothing, a job started with the `start_job` tool, or a word to the people in that room — and do \
-that. Call `say` only if you acted on it or a person needs to know something; the reaction on \
-the message already says you looked, so a turn that ends in silence is a decision, not a failure.
+that. Call `say` only if you acted on it or a person needs to know something, with `to` set to \
+`C0123/1788000000.000100` to speak under what GitHub posted; the reaction on the message already says \
+you looked, so a turn that ends in silence is a decision, not a failure.
 
 The kits this project's jobs may run on — each an agent, set a particular way — and what each \
 is for:
@@ -1276,7 +1888,8 @@ inferred is one a person will act on, and you have no way to check it."
 look at the parser
 
 Answer it, or start a job for it with the `start_job` tool, or both. Then call `say` before you \
-finish: a turn that ends without calling it has told nobody anything, however much you wrote.
+finish, with `to` set to `C0123/1788000000.000100`, so that your answer lands under their message: a \
+turn that ends without calling it has told nobody anything, however much you wrote.
 
 The operator's brief for this project — standing instructions, in their own words, that apply \
 to every message and every signal:
@@ -1325,10 +1938,13 @@ inferred is one a person will act on, and you have no way to check it."
     /// `docs/decisions/0034-tools-are-served-not-shipped.md` resolved that by
     /// agreeing with the agent: it is a tool now, so the reflex that was wrong
     /// is right. What survives is the second half of the lesson, which was
-    /// never about the mechanism — an agent has no way to know that ordinary
-    /// output goes nowhere, so it has to be told.
+    /// never about the mechanism — an agent has no way to know where its
+    /// ordinary output goes, so it has to be told. Since
+    /// `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`
+    /// it goes to a room of the foreman's own, which the person who asked
+    /// is not in, and the lesson holds in that form.
     #[test]
-    fn a_foreman_is_told_which_tool_answers_and_that_output_reaches_nobody() {
+    fn a_foreman_is_told_which_tool_answers_and_where_its_output_goes() {
         let told = super::opening("https://example.invalid/repo");
 
         assert!(
@@ -1336,12 +1952,16 @@ inferred is one a person will act on, and you have no way to check it."
             "the tool that answers has to be named: {told}"
         );
         // The half of the original lesson that outlived the mechanism: an
-        // agent has no way to know its ordinary output goes nowhere, and one
-        // that is not told believes it has answered when it has not.
+        // agent has no way to know its ordinary output does not reach the
+        // person, and one that is not told believes it has answered when it
+        // has not.
         assert!(
-            told.contains("Nothing you write as ordinary output"),
+            told.contains(
+                "Everything you write as ordinary output is posted in a room of your own"
+            ),
             "{told}"
         );
+        assert!(told.contains("the person who asked is not there"), "{told}");
     }
 
     /// A foreman is told to report what failed, not to explain it.

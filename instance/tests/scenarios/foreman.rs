@@ -53,9 +53,19 @@ fn a_first_message_opens_a_session_and_is_acknowledged_first() {
     assert!(run.was_told("You are the foreman for"), "{run:?}");
     assert!(run.was_told("look at the parser"), "{run:?}");
     assert!(world.exists(&stageman_foreman::container(project())));
-    assert!(
-        world.posts().is_empty(),
-        "nothing is said on the instance's behalf: {:?}",
+    let in_threads: Vec<_> = world
+        .posts()
+        .iter()
+        .filter(|(place, _)| place.thread.is_some())
+        .collect();
+    assert_eq!(
+        in_threads,
+        vec![&(
+            in_thread(1),
+            stageman_foreman::handled_elsewhere_notice(Some("<#C-job-001>"))
+        )],
+        "the person's thread is signposted, since the simulated foreman answers nowhere; the \
+         foreman's own room holds the rest: {:?}",
         world.posts()
     );
     assert_eq!(
@@ -126,7 +136,8 @@ fn a_foreman_with_a_container_continues_its_session() {
 }
 
 /// Messages arriving while the foreman works are queued in arrival order,
-/// each told how many are ahead of it, and worked one after another.
+/// each given the eyes reaction as it arrives and the check mark as it is
+/// worked, one after another.
 #[test]
 fn messages_arriving_while_it_works_are_queued_and_worked_in_order() {
     let mut world = Simulation::new();
@@ -143,7 +154,27 @@ fn messages_arriving_while_it_works_are_queued_and_worked_in_order() {
     for (run, said) in runs.iter().zip(["first", "second", "third"]) {
         assert!(run.was_told(said), "in arrival order: {run:?}");
     }
-    assert!(world.posts().is_empty(), "{:?}", world.posts());
+    let signposts: Vec<_> = [1, 2, 3]
+        .into_iter()
+        .map(|n| {
+            (
+                in_thread(n),
+                stageman_foreman::handled_elsewhere_notice(Some("<#C-job-001>")),
+            )
+        })
+        .collect();
+    let in_threads: Vec<_> = world
+        .posts()
+        .iter()
+        .filter(|(place, _)| place.thread.is_some())
+        .cloned()
+        .collect();
+    assert_eq!(
+        in_threads,
+        signposts,
+        "each thread is signposted in order, since the simulated foreman answers nowhere: {:?}",
+        world.posts()
+    );
     assert_eq!(
         world.reacted(Reaction::Seen),
         [thread(1).id, thread(2).id, thread(3).id],
@@ -189,6 +220,8 @@ fn a_foreman_interrupted_mid_turn_is_picked_up_on_waking() {
     let interruption = stageman_foreman::asked(
         stageman_foreman::Turn {
             said: "look at the parser",
+            target: "C0123456789/1788000000.000001",
+            thread: None,
             starting: Starting::Interrupted,
             app: None,
         },
@@ -205,10 +238,26 @@ fn a_foreman_interrupted_mid_turn_is_picked_up_on_waking() {
         "the next was never begun: {:?}",
         runs[1]
     );
+    let in_threads: Vec<_> = world
+        .posts()
+        .iter()
+        .filter(|(place, _)| place.thread.is_some())
+        .collect();
     assert_eq!(
-        world.posts(),
-        [(in_thread(1), stageman_foreman::resumed_notice().to_owned())],
-        "no message is re-acknowledged"
+        in_threads,
+        vec![
+            &(in_thread(1), stageman_foreman::resumed_notice().to_owned()),
+            &(
+                in_thread(1),
+                stageman_foreman::handled_elsewhere_notice(Some("<#C-job-001>"))
+            ),
+            &(
+                in_thread(2),
+                stageman_foreman::handled_elsewhere_notice(Some("<#C-job-001>"))
+            ),
+        ],
+        "no message is re-acknowledged; each is signposted when its turn ends unanswered, and \
+         the foreman's own room holds the rest"
     );
 }
 
@@ -251,7 +300,12 @@ fn a_turn_that_fails_is_said_to_be_stuck_and_the_next_is_worked() {
     world.run_until(&mut instance, 10_000);
 
     assert_eq!(runs(&world).len(), 2);
-    let [(said_at, said)] = world.posts() else {
+    let stuck: Vec<_> = world
+        .posts()
+        .iter()
+        .filter(|(place, text)| place.thread.is_some() && text.starts_with("❌"))
+        .collect();
+    let [(said_at, said)] = stuck.as_slice() else {
         panic!("one notice, for the turn that failed: {:?}", world.posts());
     };
     assert_eq!(said_at, &in_thread(1), "said where the message was");
@@ -467,7 +521,11 @@ fn a_turn_that_failed_before_its_container_existed_rests_nothing() {
         world.commands()
     );
     assert_eq!(
-        world.posts().len(),
+        world
+            .posts()
+            .iter()
+            .filter(|(place, _)| place.thread.is_some())
+            .count(),
         1,
         "the person is told it was stuck: {:?}",
         world.posts()

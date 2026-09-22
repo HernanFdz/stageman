@@ -371,6 +371,7 @@ fn watching(name: &str, repository: &str) -> State {
                 attending: stageman_core::Attending::default(),
                 brief: String::new(),
                 watched: std::collections::BTreeSet::new(),
+                foreman_room: None,
             },
         )]),
     }

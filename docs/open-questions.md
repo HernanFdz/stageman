@@ -21,28 +21,6 @@ Questions blocking or shaping work, each with enough context to answer without
 re-deriving it. If you cannot state what would settle it, it is not a question
 yet — it is unease, and belongs in your own notes until it sharpens.
 
-- **Should a message reach a job that is already running?** Today it cannot,
-  and that is a limitation accepted deliberately rather than a gap nobody
-  noticed. A reply is delivered by resuming a stopped container, so it lands
-  only between turns — which covers the case the design was built for, an agent
-  that asked something and stopped. It does not cover the case a person will
-  hit first: realising *after* starting a job that the agent needs a piece of
-  context it was never given.
-
-  The symptom is "cannot message a running agent" and the cause is further
-  down. The protocol delivers a prompt to a session and the agent works until
-  its turn ends, so a mid-turn message needs the connection held open — the
-  question below about holding a foreman's container open — *and* an agent that
-  will read something while working. The second half is not this project's to
-  decide: it is a property of whichever agent is running, and neither adapter
-  examined has been checked for it.
-
-  Settled by finding out what an agent does with a second prompt mid-turn.
-  Until then the daemon refuses such a message and says so in its room, which
-  is the honest version of not supporting it. Note what that refusal is worth
-  keeping even afterwards: it is also what stops two replies resuming one
-  container at once.
-
 - **Should a job's environment have an egress allowlist?** Since
   `docs/decisions/0009-jobs-hold-their-own-platform-credentials.md`, a job holds
   credentials an agent could be talked into sending somewhere. Restricting
@@ -391,10 +369,8 @@ and wrong within a day.
 
 - Then the smaller things the room design made cheap, in no particular
   order: a direct message with the app as a room where no mention is needed;
-  an inbox per job, so that a message to a working job waits rather than
-  being refused, which is the first open question above seen from the other
-  side; a private room for a project whose own rooms are private; a link
-  from the dashboard to a job's room.
+  a private room for a project whose own rooms are private; a link from the
+  dashboard to a job's room.
 
 - Then move the end-to-end tests out of the crates they test. A test that drives
   a whole flow — a job from kickoff to a cloned repository, a session surviving

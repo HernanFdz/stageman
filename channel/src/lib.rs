@@ -19,9 +19,9 @@
 
 mod slack;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use stageman_core::{Channel, JobId, Secret, Speaking};
+use stageman_core::{Channel, JobId, ProjectId, Secret, Speaking};
 
 /// Who this instance is on a channel, so it can recognise itself.
 ///
@@ -38,6 +38,9 @@ pub struct Identity {
     pub user: String,
     /// What a post made with this instance's credential carries.
     pub bot: String,
+    /// Where the workspace is, as an address a person can open: what a link
+    /// to a message starts from.
+    pub url: String,
 }
 
 /// One message heard on a channel, as decoded.
@@ -48,7 +51,11 @@ pub struct Identity {
 /// mentions this instance is not carried, because since
 /// `docs/decisions/0060-a-binding-is-a-workspace.md` it is what made the
 /// message arrive: a person is read from the platform's own mention event,
-/// and nothing a person says without one is decoded at all. Another app's
+/// and nothing a person says without one is decoded from a frame at all. A
+/// thread read back is the one place a person's words without a mention are
+/// decoded, per `docs/decisions/0068-a-mention-is-shown-its-thread.md`, and
+/// which of its messages mention this instance is said beside them, in
+/// [`ThreadRead`], rather than on each. Another app's
 /// message is decoded whole — its attachments and blocks read into the
 /// words — and whether it is read at all is the room's to decide, in the
 /// domain's routing rule, asked by the instance. Which job or foreman it is
@@ -170,6 +177,81 @@ pub fn post(
     }
 }
 
+/// Renders editing one message this instance posted, in place: how a
+/// message of the transcript grows. Answered as a post is, so [`posted`]
+/// reads the answer.
+#[must_use]
+pub fn update(
+    channel: Channel,
+    speaking: &Speaking,
+    room: &str,
+    message: &str,
+    text: &str,
+) -> Request {
+    match channel {
+        Channel::Slack => slack::update(speaking, room, message, text),
+    }
+}
+
+/// Renders asking a channel for a thread: its parent and its most recent
+/// replies, up to `at_most`, with the credential that speaks.
+#[must_use]
+pub fn replies(
+    channel: Channel,
+    speaking: &Speaking,
+    room: &str,
+    thread: &str,
+    at_most: usize,
+) -> Request {
+    match channel {
+        Channel::Slack => slack::replies(speaking, room, thread, at_most),
+    }
+}
+
+/// A thread as a channel gave it back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadRead {
+    /// Its messages, oldest first, the parent included.
+    pub messages: Vec<Message>,
+    /// Which of them mention this instance, by identifier: a person's, read
+    /// off the text the way the platform spells a mention, since a thread
+    /// read back carries no event saying so.
+    pub mentioning: BTreeSet<String>,
+    /// Whether older replies were left out.
+    pub longer: bool,
+}
+
+/// What the platform's answer to [`replies`] means.
+///
+/// The thread's messages, oldest first, decoded as a frame's are given who
+/// this instance is; which of them mention it; and whether older ones were
+/// left out.
+///
+/// # Errors
+///
+/// Fails if the status was not a success, if the body cannot be read, or if
+/// the channel refused.
+pub fn thread_read(
+    channel: Channel,
+    status: u16,
+    body: &[u8],
+    room: &str,
+    us: &Identity,
+) -> Result<ThreadRead, ChannelError> {
+    match channel {
+        Channel::Slack => slack::thread_read(status, body, room, us),
+    }
+}
+
+/// Cuts a text into the pieces a channel will accept as posts, in order,
+/// which for a text short enough is the one piece it already is.
+#[must_use]
+pub fn pieces(channel: Channel, text: &str) -> Vec<String> {
+    match channel {
+        Channel::Slack => slack::pieces(text),
+    }
+}
+
 /// What the platform's answer to a post means: the identifier of what was
 /// posted, as text, or why nothing was.
 ///
@@ -285,11 +367,62 @@ pub fn room_name(channel: Channel, project: &str, title: &str, job: JobId) -> St
     }
 }
 
+/// The name a project's foreman's room is given on a channel.
+///
+/// The project, the word foreman, and the project's identifier's prefix,
+/// folded to what the channel allows. Only the identifier is load-bearing,
+/// for the reason [`room_name`] gives.
+#[must_use]
+pub fn foreman_room_name(channel: Channel, project: &str, id: ProjectId) -> String {
+    match channel {
+        Channel::Slack => slack::foreman_room_name(project, id),
+    }
+}
+
 /// A reference to a room, as the channel renders one inside a message.
 #[must_use]
 pub fn room_link(channel: Channel, room: &str) -> String {
     match channel {
         Channel::Slack => slack::room_link(room),
+    }
+}
+
+/// The identifier a message is shown to an agent with, and the one it names
+/// a message by.
+///
+/// The room and the message as one, so that a reply can go into a room its
+/// speaker does not own and a thread shown in an earlier turn can be named
+/// in a later one — see
+/// `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`.
+#[must_use]
+pub fn reference(channel: Channel, room: &str, message: &str) -> String {
+    match channel {
+        Channel::Slack => slack::reference(room, message),
+    }
+}
+
+/// What an identifier an agent named means: the room and the message, if
+/// it is one this crate renders.
+#[must_use]
+pub fn referenced(channel: Channel, reference: &str) -> Option<(String, String)> {
+    match channel {
+        Channel::Slack => slack::referenced(reference),
+    }
+}
+
+/// A link to one message in a room, as a person can open it, from where
+/// the channel said its workspace is: the message's own, or its place in a
+/// thread when it is a reply.
+#[must_use]
+pub fn permalink(
+    channel: Channel,
+    us: &Identity,
+    room: &str,
+    message: &str,
+    thread: Option<&str>,
+) -> String {
+    match channel {
+        Channel::Slack => slack::permalink(us, room, message, thread),
     }
 }
 
@@ -392,6 +525,28 @@ pub enum Call {
         /// In which thread, if any.
         thread: Option<String>,
     },
+    /// A thread asked for: its parent and its most recent replies.
+    Replies {
+        /// Which channel.
+        channel: Channel,
+        /// Which room.
+        room: String,
+        /// Which thread, by its parent.
+        thread: String,
+        /// How many replies at most.
+        at_most: usize,
+    },
+    /// One message edited in place.
+    Update {
+        /// Which channel it goes to.
+        channel: Channel,
+        /// Which room on it.
+        room: String,
+        /// Which message.
+        message: String,
+        /// What it now says.
+        text: String,
+    },
     /// A room created.
     CreateRoom {
         /// Which channel.
@@ -485,11 +640,12 @@ pub enum ChannelError {
 #[cfg(test)]
 mod tests {
     use super::{
-        Call, ChannelError, Identity, Incoming, Reaction, acknowledgement, archive, create_room,
-        decode, done, identity, invite, mention, open_socket, post, posted, react, room_created,
-        room_link, room_name, set_purpose, set_topic, socket_url, who_am_i,
+        Call, ChannelError, Identity, Incoming, Reaction, ThreadRead, acknowledgement, archive,
+        create_room, decode, done, foreman_room_name, identity, invite, mention, open_socket,
+        permalink, pieces, post, posted, react, reference, referenced, replies, room_created,
+        room_link, room_name, set_purpose, set_topic, socket_url, thread_read, update, who_am_i,
     };
-    use stageman_core::{Channel, JobId, Secret, Speaking, Uuid};
+    use stageman_core::{Channel, JobId, ProjectId, Secret, Speaking, Uuid};
 
     fn speaking() -> Speaking {
         Speaking {
@@ -577,12 +733,12 @@ mod tests {
             identity(
                 Channel::Slack,
                 200,
-                br#"{"ok":true,"user_id":"U0BOT","bot_id":"B0SELF"}"#
+                br#"{"ok":true,"user_id":"U0BOT","bot_id":"B0SELF","url":"https://example.slack.com/"}"#
             )
             .expect("told"),
             Identity {
                 user: "U0BOT".to_owned(),
-                bot: "B0SELF".to_owned(),
+                bot: "B0SELF".to_owned(), url: "https://example.slack.com/".to_owned(),
             }
         );
         assert!(matches!(
@@ -625,6 +781,7 @@ mod tests {
         let us = Identity {
             user: "U0BOT".to_owned(),
             bot: "B0SELF".to_owned(),
+            url: "https://example.slack.com/".to_owned(),
         };
         let heard = decode(
             Channel::Slack,
@@ -766,8 +923,205 @@ mod tests {
         let long = room_name(Channel::Slack, &"p".repeat(60), &"t".repeat(120), job);
         assert!(long.len() <= 80, "{long}");
         assert!(long.ends_with("--3fa85f64"), "{long}");
+        assert_eq!(
+            foreman_room_name(
+                Channel::Slack,
+                "Closed Loop",
+                ProjectId::from_uuid(Uuid::from_u128(0x3fa8_5f64_5717_4562_b3fc_2c96_3f66_afa6))
+            ),
+            "closed-loop--foreman--3fa85f64"
+        );
         assert_eq!(room_link(Channel::Slack, "C0C1VNX9AA2"), "<#C0C1VNX9AA2>");
         assert_eq!(mention(Channel::Slack, "U0HUMAN"), "<@U0HUMAN>");
+    }
+
+    /// A thread asked for reads back as what it asked, and its answer is
+    /// read as a frame's messages are: a person's, this instance's own and
+    /// another app's told apart by identifier, which of a person's mention
+    /// this instance, and whether older replies were left out.
+    #[test]
+    fn a_thread_reads_back_and_its_answer_is_read() {
+        let asked = replies(Channel::Slack, &speaking(), ROOM, "1788000000.000100", 50);
+        assert_eq!(asked.method, "GET");
+        assert_eq!(
+            asked.headers.get("authorization").map(String::as_str),
+            Some("Bearer xoxb-not-a-real-token")
+        );
+        assert_eq!(
+            Call::parse(&asked),
+            Some(Call::Replies {
+                channel: Channel::Slack,
+                room: ROOM.to_owned(),
+                thread: "1788000000.000100".to_owned(),
+                at_most: 50,
+            })
+        );
+
+        let us = Identity {
+            user: "U0BOT".to_owned(),
+            bot: "B0SELF".to_owned(),
+            url: "https://example.slack.com/".to_owned(),
+        };
+        let body = br##"{"ok":true,"has_more":true,"messages":[
+            {"type":"message","user":"U0HUMAN","text":"<@U0BOT> which database?","ts":"1788000000.000100","thread_ts":"1788000000.000100","reply_count":3},
+            {"type":"message","user":"U0BOT","bot_id":"B0SELF","text":"Two options, <@U0BOT> said.","ts":"1788000000.000200","thread_ts":"1788000000.000100"},
+            {"type":"message","user":"U0BOT","text":"As a user alone.","ts":"1788000000.000250","thread_ts":"1788000000.000100"},
+            {"type":"message","user":"U0GITHUB","bot_id":"B0OTHER","bot_profile":{"name":"GitHub"},"text":"","ts":"1788000000.000300","thread_ts":"1788000000.000100","attachments":[{"pretext":"Issue closed for <@U0BOT>","title":"#9 Done"}]}
+        ]}"##;
+        let ThreadRead {
+            messages,
+            mentioning,
+            longer,
+        } = thread_read(Channel::Slack, 200, body, ROOM, &us).expect("a thread read");
+        assert!(longer, "older replies were left out");
+        assert_eq!(messages.len(), 4);
+        assert_eq!(
+            mentioning.iter().map(String::as_str).collect::<Vec<_>>(),
+            vec!["1788000000.000100"],
+            "a person's mention: not this instance naming itself, and not an app doing so"
+        );
+        assert_eq!(messages[0].user.as_deref(), Some("U0HUMAN"));
+        assert!(!messages[0].from_us && messages[0].app.is_none());
+        assert_eq!(messages[0].room, ROOM);
+        assert_eq!(messages[0].thread.as_deref(), Some("1788000000.000100"));
+        assert!(
+            messages[1].from_us,
+            "this instance's own, by its bot identifier"
+        );
+        assert!(
+            messages[2].from_us && messages[2].app.is_none(),
+            "this instance's own, by its user alone"
+        );
+        assert_eq!(messages[3].app.as_deref(), Some("GitHub"));
+        assert!(messages[3].text.contains("#9 Done"), "{}", messages[3].text);
+        assert!(matches!(
+            thread_read(
+                Channel::Slack,
+                200,
+                br#"{"ok":false,"error":"thread_not_found"}"#,
+                ROOM,
+                &us
+            ),
+            Err(ChannelError::Refused(ref why)) if why == "thread_not_found"
+        ));
+        assert!(matches!(
+            thread_read(Channel::Slack, 500, b"", ROOM, &us),
+            Err(ChannelError::Unreachable(_))
+        ));
+    }
+
+    /// An identifier shown to an agent reads back as the room and the
+    /// message it names, and anything else is nothing.
+    #[test]
+    fn a_reference_reads_back_as_the_room_and_the_message() {
+        let shown = reference(Channel::Slack, ROOM, "1788000000.000100");
+        assert_eq!(shown, "C0123456789/1788000000.000100");
+        assert_eq!(
+            referenced(Channel::Slack, &shown),
+            Some((ROOM.to_owned(), "1788000000.000100".to_owned()))
+        );
+        assert_eq!(referenced(Channel::Slack, "1788000000.000100"), None);
+        assert_eq!(referenced(Channel::Slack, "/1788000000.000100"), None);
+        assert_eq!(referenced(Channel::Slack, "C0123456789/"), None);
+    }
+
+    /// A link to a message is the workspace's address, the room and the
+    /// message's digits; a reply's names its thread as well. As measured on
+    /// 2026-09-21 against a real workspace.
+    #[test]
+    fn a_link_to_a_message_reads_as_the_platform_spells_one() {
+        let us = Identity {
+            user: "U0BOT".to_owned(),
+            bot: "B0SELF".to_owned(),
+            url: "https://example.slack.com/".to_owned(),
+        };
+        assert_eq!(
+            permalink(Channel::Slack, &us, ROOM, "1788000000.000100", None),
+            "https://example.slack.com/archives/C0123456789/p1788000000000100"
+        );
+        assert_eq!(
+            permalink(
+                Channel::Slack,
+                &us,
+                ROOM,
+                "1788000000.000200",
+                Some("1788000000.000100")
+            ),
+            "https://example.slack.com/archives/C0123456789/p1788000000000200\
+             ?thread_ts=1788000000.000100&cid=C0123456789"
+        );
+        assert_eq!(
+            permalink(
+                Channel::Slack,
+                &us,
+                ROOM,
+                "1788000000.000100",
+                Some("1788000000.000100")
+            ),
+            "https://example.slack.com/archives/C0123456789/p1788000000000100",
+            "a thread's parent is linked as itself"
+        );
+    }
+
+    /// An edit reads back as what it asked, and is answered as a post is.
+    #[test]
+    fn an_edit_reads_back_as_what_it_asked() {
+        let edited = update(
+            Channel::Slack,
+            &speaking(),
+            ROOM,
+            "1788000000.000001",
+            "grown",
+        );
+        assert_eq!(
+            Call::parse(&edited),
+            Some(Call::Update {
+                channel: Channel::Slack,
+                room: ROOM.to_owned(),
+                message: "1788000000.000001".to_owned(),
+                text: "grown".to_owned(),
+            })
+        );
+        assert_eq!(
+            posted(
+                Channel::Slack,
+                200,
+                br#"{"ok":true,"ts":"1788000000.000001"}"#
+            )
+            .expect("accepted"),
+            "1788000000.000001"
+        );
+    }
+
+    /// A text a post can carry is one piece; a longer one continues in the
+    /// next, cut at a line end when there is one late enough, and nothing is
+    /// lost between them.
+    #[test]
+    fn a_long_text_is_cut_into_posts_at_line_ends() {
+        assert_eq!(pieces(Channel::Slack, "short"), vec!["short".to_owned()]);
+        assert_eq!(pieces(Channel::Slack, ""), vec![String::new()]);
+
+        let line = "x".repeat(99);
+        let long = std::iter::repeat_n(line.as_str(), 130)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let cut = pieces(Channel::Slack, &long);
+        assert_eq!(
+            cut.len(),
+            2,
+            "{:?}",
+            cut.iter().map(String::len).collect::<Vec<_>>()
+        );
+        assert!(cut[0].chars().count() <= 12_000);
+        assert!(cut[0].ends_with(&line), "cut at a line end, not inside one");
+        assert!(!cut[1].starts_with('\n'), "the break itself is not carried");
+        assert_eq!(cut.join("\n"), long, "nothing lost");
+
+        let unbroken = "y".repeat(12_001);
+        let cut = pieces(Channel::Slack, &unbroken);
+        assert_eq!(cut.len(), 2);
+        assert_eq!(cut[0].chars().count(), 12_000);
+        assert_eq!(cut[1], "y");
     }
 
     /// A request this crate did not render is not a call.
@@ -780,5 +1134,39 @@ mod tests {
         let mut bodiless = post(Channel::Slack, &speaking(), ROOM, "x", None);
         bodiless.body = None;
         assert_eq!(Call::parse(&bodiless), None);
+    }
+
+    /// The cutter's boundaries, each pinned: a text exactly as long as a
+    /// post is one piece; a line end just past the limit is not where the
+    /// cut goes, the last one inside the post's second half is; and a line
+    /// end in the first half is passed over for a cut at a character.
+    #[test]
+    fn a_text_is_cut_at_its_boundaries_exactly() {
+        let exactly = "z".repeat(12_000);
+        assert_eq!(pieces(Channel::Slack, &exactly), vec![exactly.clone()]);
+
+        let just_past = format!(
+            "{}\n{}\n{}",
+            "a".repeat(8_000),
+            "b".repeat(3_999),
+            "c".repeat(50)
+        );
+        assert_eq!(
+            pieces(Channel::Slack, &just_past),
+            vec![
+                "a".repeat(8_000),
+                format!("{}\n{}", "b".repeat(3_999), "c".repeat(50)),
+            ],
+            "cut at the line end inside the post, not at the one just past it"
+        );
+
+        let early = format!("{}\n{}", "a".repeat(100), "b".repeat(12_000));
+        let cut = pieces(Channel::Slack, &early);
+        assert_eq!(cut.len(), 2);
+        assert_eq!(
+            cut[0].chars().count(),
+            12_000,
+            "a line end in the first half is not where a post is cut"
+        );
     }
 }

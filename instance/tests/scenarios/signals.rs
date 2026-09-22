@@ -117,8 +117,12 @@ fn an_apps_message_in_a_watched_room_is_a_signal_for_the_foreman() {
         "received and done, as a person's message is"
     );
     assert!(
-        world.posts().is_empty(),
-        "nothing is said on the instance's behalf: {:?}",
+        world
+            .posts()
+            .iter()
+            .all(|(place, _)| place.thread.is_none()),
+        "nothing is said under the signal on the instance's behalf; the foreman's own room \
+         holds its opening and its transcript: {:?}",
         world.posts()
     );
 }

@@ -79,11 +79,18 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   deciding, and not a *dispatcher*, which is only the third of the three
   things it can do.
 
-- **inbox** — the messages waiting for a project's foreman, in the order they
-  arrived. It exists only while the foreman is working: a foreman with nothing
-  to do has nothing waiting, which is a property of the type rather than a rule
-  anybody keeps. Not a *queue*, which names the structure instead of what is in
-  it, and would invite a second one somewhere else.
+- **inbox** — the messages waiting for a project's foreman, or for a job
+  since `docs/decisions/0069-a-message-reaches-a-working-job.md`, in the
+  order they arrived. It exists only while its owner is working: a foreman
+  or a job with nothing to do has nothing waiting. For a foreman that is a
+  property of the type rather than a rule anybody keeps; for a job, whose
+  inbox is a field beside its progress, it is kept by every transition the
+  instance makes — a turn's end starts the next message's turn at once, a
+  stop tells what was waiting and drops it — and checked by the simulation
+  after every step. A job's is delivered into the turn that is running, by
+  steering, when that turn's conversation is open, and waits otherwise. Not
+  a *queue*, which names the structure instead of what is in it, and would
+  invite a second one somewhere else.
 
   It outlives this process, the way a job does. A message in hand when the
   daemon is killed is still in hand when it starts again, and startup is what
@@ -93,14 +100,20 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   interrupted accepted messages for ever and answered none of them.
 
 - **turn** — one message, handled from being handed to a foreman or a job until
-  its agent stops. The protocol's own word, and the unit everything else is
-  scoped to: a turn is what an inbox entry buys, what a thread collects, and
+  its agent stops, together with whatever a job's agent was steered while it
+  ran — see `docs/decisions/0069-a-message-reaches-a-working-job.md`. The
+  protocol's own word, and the unit everything else is scoped to: a turn is
+  what an inbox entry buys or is delivered into, what a thread collects, and
   what "idle" means the absence of.
 
 - **mention** — how somebody says they mean stageman rather than each other.
   It is the whole of what makes a person's message ours: nothing without one
   is read, in a thread or at the root — see
   `docs/decisions/0031-a-mention-is-what-makes-it-ours.md`. Since
+  `docs/decisions/0068-a-mention-is-shown-its-thread.md`
+  the thread a mention was said in is *shown* to the turn it starts,
+  untagged messages included, which is a different thing from being read:
+  nothing there wakes anybody or costs a turn. Since
   `docs/decisions/0060-a-binding-is-a-workspace.md` the platform's own
   mention event is what is read, in every room the app has been invited to,
   so a mention is also what makes a person's message *arrive* at all. Worth a
@@ -126,8 +139,11 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   platform, and Slack's own word would make "a job's channel" mean two
   things in one sentence. A job has a room of its own, made with the job
   and archived with it, and a mention anywhere in it is that job's — see
-  `docs/decisions/0061-a-job-has-a-room-of-its-own.md`. The foreman has no
-  room of its own and is heard in every room the app is in — see
+  `docs/decisions/0061-a-job-has-a-room-of-its-own.md`. The foreman has a
+  room of its own too, since
+  `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`,
+  where what it says and does is posted; it is still heard in every room
+  the app is in — see
   `docs/decisions/0060-a-binding-is-a-workspace.md`. Not *conversation*,
   refused under **thread** for the same reason. Not *address*, which is
   what a binding used to carry when a project was listened to in one room,
@@ -155,6 +171,8 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   framed as the app's rather than as a person's. It waits in the inbox like
   any message and is gone once the turn ends; nothing keeps a signal after
   it has been judged, which is the sense in which it is still not an entity.
+  Since `docs/decisions/0068-a-mention-is-shown-its-thread.md` a
+  signal that follows an earlier message is shown that thread too.
 - **job** — one agent, in one isolated workspace, on one project, from kickoff
   to completion. A job happens once, and there is no retry: a second attempt is
   a new job with its own workspace. It may, however, outlive the process
@@ -239,11 +257,47 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   more than one. Since `docs/decisions/0060-a-binding-is-a-workspace.md` a
   person can go on talking to the foreman in the thread it answered in,
   because each message there is its own turn and the session remembers.
+  Since `docs/decisions/0068-a-mention-is-shown-its-thread.md`
+  a mention in a thread is shown the thread: its parent, and everything
+  said there from the last message that was given to this instance, its own
+  words among them.
 
   A job's room is named `<project>--<title>--<8 hex of the job id>`, and
   only the last part is load-bearing: an archived room keeps its name for
   ever on the platform, so the name has to be unique for ever too, and the
   identifier is what makes it so. The rest is for a sidebar.
+
+- **transcript** — everything an agent says and does in a turn, as the
+  protocol streams it: its narration, its working, and the notifications
+  nothing here posts. Since
+  `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`
+  it is posted as it happens, at the root of the room its speaker owns. Not
+  *output*, which is what the instructions called the text nobody saw. Not
+  *log*, which is a diagnostic of this project's own, per
+  `docs/decisions/0018-diagnostics-are-emitted-through-tracing.md`, and goes
+  somewhere else entirely. Not *answer* either, which is the agent crate's
+  word for the text alone.
+- **narration** — the agent's own text, written to be read: one message per
+  contiguous run of it, at the root of its room. Not *answer*, since nothing
+  need have been asked; not *message*, which is a person's word on a
+  channel; and not *reply*, which is what the tool that speaks does when
+  given a target.
+- **working** — what the agent does between two runs of narration: its tool
+  calls, and its thoughts where an adapter carries any. Posted as a burst.
+  Not *transcript*, which is the whole; not *trace*, which is a scenario's
+  word for effects; not *log*, refused under **transcript**.
+- **burst** — one run of working, posted as one message that grows in place
+  until the next narration closes it. Not *batch*, which implies a size
+  somebody chose, and not *turn*, which holds many.
+- **steering** — how a message reaches a job's agent while a turn runs in
+  it: delivered into the running turn at once, pre-empting whatever the
+  agent was doing, rather than waiting for the turn to end — see
+  `docs/decisions/0069-a-message-reaches-a-working-job.md`. The adapter's
+  own word for its extension, kept because the mechanism is somebody else's
+  and renaming it would hide which one. Not *interrupt*, which is what a
+  person's stop does and ends the turn; not *inject*, which names the wire
+  and not what a person sees; and not a second *prompt*, which the adapter
+  accepts and which was measured to lose the first prompt's answer.
 
 - **tunnel** — the way in to what a job has put up for somebody to look at:
   one port published from its container when that container is created, and
@@ -695,6 +749,25 @@ justify is usually obsolete.
   on it waited for ever. An abort is the kill this daemon already survives,
   under the bar §4 sets for one, and a service manager restarts it.
 
+- **A room is posted to one request at a time, and a burst grows by
+  editing.** Two posts in flight to one room land in whichever order the
+  platform receives them, so the next is sent when the previous is answered,
+  and the order of a transcript is a property of the chain rather than of
+  luck. A post per line looks simplest and is a few hundred posts per heavy
+  turn against a budget of about one a second per room, so a burst is one
+  message edited as it grows, paced by a timer — see
+  `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`.
+  Nothing posted this way is load-bearing: a failure is logged, and the
+  tool's answer is what guarantees a person sees what they must.
+
+- **Never a second prompt while one is open.** The adapter accepts one and
+  queues it, and the first prompt's answer is then lost without a word: it
+  was measured resolving with no output at all while the model answered only
+  the second. A prompt starts a turn and nothing else. A message for a job
+  that is working is delivered by steering when its conversation is open and
+  waits in the job's inbox otherwise — see
+  `docs/decisions/0069-a-message-reaches-a-working-job.md`.
+
 ## 4. Quality bar beyond the gate
 
 `AGENTS.md` carries the bar the gate enforces mechanically. This is for the part
@@ -789,13 +862,15 @@ it lands.
   every step of every scenario, once the instance is awake and has swept: no
   container of this instance's that it has listed or made is running with
   nothing in it — no turn in flight for it, no message waiting for its
-  foreman, nothing answering on its tunnel, and no question about it in
-  flight. The other half, that nothing is left the instance cannot name, is
-  the waking sweep's, pinned by its scenario rather than by the oracle. The
-  container tests are what tie the simulated runtime to the real one, and
-  both are needed: the simulation reaches the crash between two steps that no
-  container test can, and the container test reaches the proxy that no
-  simulation would have imagined.
+  foreman or for it, nothing answering on its tunnel, and no question about
+  it in flight; and, since
+  `docs/decisions/0069-a-message-reaches-a-working-job.md`, no job that is
+  not working holds a message. The other half, that nothing is left the
+  instance cannot name, is the waking sweep's, pinned by its scenario rather
+  than by the oracle. The container tests are what tie the simulated runtime
+  to the real one, and both are needed: the simulation reaches the crash
+  between two steps that no container test can, and the container test
+  reaches the proxy that no simulation would have imagined.
 - **What a snapshot must still open is what the last release wrote, and
   nothing older.** Compatibility is a window of one tag, not a growing pile:
   when a released version exists, a schema change carries a bridge from *that*
@@ -879,7 +954,11 @@ it lands.
   Since `docs/decisions/0062-what-this-instance-says-is-markdown.md` every
   such text is Markdown and goes out as Markdown: a notice written in the
   platform's own markup would render its asterisks literally, and a
-  translator between the two is exactly what that record refuses.
+  translator between the two is exactly what that record refuses. Since
+  `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`
+  an agent's own words are posted as they come, and they are not this
+  project's to assert; what is asserted whole is every text composed around
+  them — the notices, the framing, the lines a burst is built from.
 
 - **Sequencing is tested by scenarios and seeds, and their snapshots are
   reviewed as behaviour.** Every flow that crosses an await today — a turn

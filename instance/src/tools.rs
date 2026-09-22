@@ -14,7 +14,7 @@
 //! `docs/decisions/0032-a-foreman-asks-the-instance-by-warrant.md`'s property
 //! surviving the move to a per-turn credential.
 
-use stageman_core::{ChannelConfig, Kit, ProjectId, State, Thread, Timestamp, Waiting};
+use stageman_core::{Kit, Place, ProjectId, Room, State, Thread, Timestamp, Waiting};
 
 use crate::channel::Origin;
 use crate::jobs::Commission;
@@ -81,17 +81,18 @@ pub fn tools(warranted: &Warranted, kits: &[(String, String)]) -> Vec<Tool> {
     // thing a foreman and a job both do.
     let say = Tool {
         name: "say",
-        description: "Say something to the people on this project's channel, in \
-                      Markdown: it is rendered, so headings, lists, code, tables \
-                      and links all show. This is the only way anything you write \
-                      reaches a person: ordinary output is seen by nobody."
-            .to_owned(),
+        description: say_description(warranted.speaker).to_owned(),
         schema: serde_json::json!({
             "type": "object",
             "properties": {
                 "message": {
                     "type": "string",
                     "description": "What to say, in Markdown, in your own words.",
+                },
+                "to": {
+                    "type": "string",
+                    "description": "The message to reply under, exactly as it was shown to \
+                                    you. Leave it out to post at the root of your own room.",
                 },
             },
             "required": ["message"],
@@ -181,6 +182,33 @@ pub fn tools(warranted: &Warranted, kits: &[(String, String)]) -> Vec<Tool> {
     ]
 }
 
+/// What the tool that speaks is for, which differs by who holds it: a job's
+/// narration already reaches its room, per
+/// `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`,
+/// so for a job the tool is for the thread a person asked in; a foreman's
+/// reaches a room of its own, where the person who asked is not, so for a
+/// foreman the tool is how the person is answered.
+const fn say_description(speaker: Speaker) -> &'static str {
+    match speaker {
+        Speaker::Foreman(_) => {
+            "Say something to the people on this project's channel, in Markdown: it \
+             is rendered, so headings, lists, code, tables and links all show. It \
+             posts under the message you name with `to`, which is how a person is \
+             answered where they asked; without one it posts at the root of your \
+             own room, where your ordinary output already goes and the person who \
+             asked is not."
+        }
+        Speaker::Job(_) => {
+            "Say something to the people in this job's room, in Markdown: it is \
+             rendered, so headings, lists, code, tables and links all show. It posts \
+             at the root of your room, or under a message when you name it with \
+             `to`, as each message is shown to you. Everything you write as ordinary \
+             output is posted at the root as well, so use this to answer in a \
+             person's thread, or when you need an answer from a person."
+        }
+    }
+}
+
 /// The tool a job calls to say why it is stopping.
 ///
 /// **The description is the whole of the feature.** Nothing forces an agent to
@@ -228,8 +256,14 @@ pub enum Call {
     Listing,
     /// Asking to start a job.
     Starting(Starting),
-    /// Asking to say something to a person.
-    Saying(String),
+    /// Asking to say something to a person: what, and under which message,
+    /// if any.
+    Saying {
+        /// What to say.
+        message: String,
+        /// The message to reply under, as the agent was shown it.
+        to: Option<String>,
+    },
     /// Saying why this turn is about to end, spelled as it arrived.
     Stopping(String),
     /// Asking to watch, or to stop watching, the room this turn was asked in.
@@ -374,7 +408,16 @@ fn calling(params: &serde_json::Value) -> Call {
             .to_owned()
     };
     if name == "say" {
-        return Call::Saying(field("message"));
+        let to = arguments
+            .and_then(|given| given.get("to"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|named| !named.is_empty())
+            .map(str::to_owned);
+        return Call::Saying {
+            message: field("message"),
+            to,
+        };
     }
     if name == STOPPING {
         return Call::Stopping(field("because"));
@@ -484,7 +527,6 @@ impl Running {
         nearby: bool,
         bearer: Option<&str>,
         body: &serde_json::Value,
-        effects: &mut Vec<Effect>,
     ) {
         if !nearby {
             tracing::warn!("the tools were reached from beyond this machine");
@@ -548,8 +590,8 @@ impl Running {
                     )),
                 );
             }
-            Call::Saying(message) => {
-                if let Err(why) = self.saying(id, &warranted, &message, effects) {
+            Call::Saying { message, to } => {
+                if let Err(why) = self.saying(id, &warranted, &message, to.as_deref()) {
                     self.answer(id, OK, Some(failed(incoming.id, &why)));
                 } else {
                     // Answered when the platform has, in `posted`. The
@@ -590,7 +632,7 @@ impl Running {
     /// The failure this guards against is the worst kind — an agent that
     /// believed it had spoken, stopped as it was told to, and nobody was ever
     /// told anything.
-    pub fn posted(&mut self, request: RequestId, outcome: Result<(), String>) {
+    pub fn posted(&mut self, request: RequestId, outcome: Result<String, String>) {
         let Some(asked) = self.asking.remove(&request) else {
             tracing::debug!(
                 ?request,
@@ -599,7 +641,7 @@ impl Running {
             return;
         };
         let body = match outcome {
-            Ok(()) => succeeded(asked, "said"),
+            Ok(reference) => succeeded(asked, &reference),
             Err(why) => {
                 tracing::warn!(%why, "saying it failed");
                 failed(asked, &format!("it could not be said: {why}"))
@@ -693,7 +735,6 @@ impl Running {
             called.nearby,
             called.bearer.as_deref(),
             &body,
-            effects,
         );
     }
 
@@ -794,30 +835,48 @@ impl Running {
         request: RequestId,
         warranted: &Warranted,
         message: &str,
-        effects: &mut Vec<Effect>,
+        to: Option<&str>,
     ) -> Result<(), String> {
         if message.trim().is_empty() {
             return Err("nothing was said, so nothing was posted".to_owned());
         }
-        let Some(place) = warranted.place.clone() else {
-            // Not a refusal of the agent so much as of this instance: a
-            // session declared with nowhere to speak should not have been
-            // offered a tool that speaks.
-            tracing::warn!("something spoke with nowhere to speak");
-            return Err("there is no conversation to say this in".to_owned());
+        // Where the speaker's own words go: the root of the room it owns.
+        let own = match warranted.speaker {
+            Speaker::Job(job) => crate::turns::speaking_for(&self.state, job),
+            Speaker::Foreman(project) => self.state.projects.get(&project).and_then(|watched| {
+                let room = watched.foreman_room.clone()?;
+                let bound = watched.channels.get(&room.channel)?;
+                Some((bound.speaking(), Place::root(room)))
+            }),
         };
-        let speaking = self
-            .project_of(warranted)
-            .and_then(|project| self.state.projects.get(&project))
-            .and_then(|watched| watched.channels.get(&place.room.channel))
-            .map(ChannelConfig::speaking);
-        let Some(speaking) = speaking else {
-            tracing::warn!("no channel is bound to say this on");
-            return Err(
-                "no channel is bound to this project, so there is nobody to say this to".to_owned(),
-            );
+        let Some((speaking, own_root)) = own else {
+            tracing::warn!("something spoke with no room of its own");
+            return Err("you have no room of your own to post in".to_owned());
         };
-        self.post_for(request, &speaking, &place, message, effects);
+        let channel = own_root.room.channel;
+        let place = match to {
+            None => own_root,
+            Some(named) => {
+                let Some((room, under)) = stageman_channel::referenced(channel, named) else {
+                    return Err(format!(
+                        "{named:?} is not a message as it was shown to you, which reads \
+                         <room>/<message>"
+                    ));
+                };
+                // A job speaks in its own room and nowhere else, which is
+                // the property the warrant gave the tool before it took a
+                // target; a foreman may name any room, and the platform
+                // refuses one the app is not in.
+                if matches!(warranted.speaker, Speaker::Job(_)) && room != own_root.room.id {
+                    return Err("a job may reply only in its own room".to_owned());
+                }
+                Place {
+                    room: Room { channel, id: room },
+                    thread: Some(under),
+                }
+            }
+        };
+        self.post_for(request, &speaking, &place, message);
         Ok(())
     }
 
@@ -980,8 +1039,8 @@ fn stamped(millis: u64) -> Timestamp {
 
 #[cfg(test)]
 mod tests {
-    use super::{nearby, presented, stamped};
-    use stageman_core::Timestamp;
+    use super::{nearby, presented, say_description, stamped};
+    use stageman_core::{JobId, Timestamp};
     use stageman_vocabulary::Arrival;
 
     /// A request head, as the world hands one over.
@@ -1155,7 +1214,31 @@ mod tests {
         );
         assert_eq!(
             calling(&serde_json::json!({"name": "say", "arguments": {"message": "hello"}})),
-            Call::Saying("hello".to_owned())
+            Call::Saying {
+                message: "hello".to_owned(),
+                to: None,
+            }
+        );
+        assert_eq!(
+            calling(&serde_json::json!({
+                "name": "say",
+                "arguments": {"message": "hello", "to": " C0123/1788000000.000100 "},
+            })),
+            Call::Saying {
+                message: "hello".to_owned(),
+                to: Some("C0123/1788000000.000100".to_owned()),
+            },
+            "named as shown, whitespace aside"
+        );
+        assert_eq!(
+            calling(
+                &serde_json::json!({"name": "say", "arguments": {"message": "hello", "to": ""}})
+            ),
+            Call::Saying {
+                message: "hello".to_owned(),
+                to: None,
+            },
+            "nothing named is nothing"
         );
         assert_eq!(
             calling(
@@ -1280,6 +1363,7 @@ mod tests {
                 attending: stageman_core::Attending::default(),
                 brief: String::new(),
                 watched: std::collections::BTreeSet::new(),
+                foreman_room: None,
             },
         );
 
@@ -1297,6 +1381,30 @@ mod tests {
         assert_eq!(
             named_kit(&state, ProjectId::from_uuid(Uuid::from_u128(404)), "Claude"),
             None
+        );
+    }
+
+    /// The tool that speaks is described to each speaker as it works for
+    /// them, asserted whole per `docs/conventions.md` §4: what an agent is
+    /// told about its tools is prompt text.
+    #[test]
+    fn the_speaking_tool_is_described_to_each_speaker_exactly() {
+        assert_eq!(
+            say_description(Speaker::Foreman(ProjectId::from_uuid(Uuid::from_u128(1)))),
+            "Say something to the people on this project's channel, in Markdown: it is \
+             rendered, so headings, lists, code, tables and links all show. It posts under \
+             the message you name with `to`, which is how a person is answered where they \
+             asked; without one it posts at the root of your own room, where your ordinary \
+             output already goes and the person who asked is not."
+        );
+        assert_eq!(
+            say_description(Speaker::Job(JobId::from_uuid(Uuid::from_u128(2)))),
+            "Say something to the people in this job's room, in Markdown: it is rendered, \
+             so headings, lists, code, tables and links all show. It posts at the root of \
+             your room, or under a message when you name it with `to`, as each message is \
+             shown to you. Everything you write as ordinary output is posted at the root as \
+             well, so use this to answer in a person's thread, or when you need an answer \
+             from a person."
         );
     }
 }

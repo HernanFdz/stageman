@@ -3,7 +3,8 @@
 use stageman_channel::Reaction;
 
 use crate::simulation::{
-    CHANNEL, Simulation, Spoken, in_room, job, room, seed, watching_a_channel,
+    CHANNEL, SAID_IN_ROOM, SAID_IN_ROOMS_THREAD, Simulation, Spoken, in_room, job, link_to, room,
+    seed, watching_a_channel,
 };
 use stageman_core::{JobId, Outcome, Place, Progress, State, Waiting};
 
@@ -50,11 +51,18 @@ fn a_reply_to_an_idle_job_resumes_it_after_the_record_lands() {
     );
     assert_eq!(
         world.posts(),
-        [(
-            in_room(1),
-            stageman_foreman::stopped_notice(&Waiting::Silent, None, "<@U0BOT>")
-        )],
-        "the thread is told once, when the turn ends"
+        [
+            (
+                in_room(1),
+                format!("▶️ Handling {}.", link_to(&room(1).id, SAID_IN_ROOM, None))
+            ),
+            (in_room(1), "done".to_owned()),
+            (
+                in_room(1),
+                stageman_foreman::stopped_notice(&Waiting::Silent, None, "<@U0BOT>")
+            ),
+        ],
+        "why the turn started, what the agent said, and that it ended, at the root in order"
     );
 }
 
@@ -101,62 +109,10 @@ fn a_dropped_turn_forgets_only_its_own_warrant() {
     assert_eq!(progress_of(instance.state(), running), Progress::Working);
 }
 
-/// A reply to a working job is refused and the thread is told, and the job is
-/// not moved.
-#[test]
-fn a_reply_to_a_working_job_is_refused_and_said_so() {
-    let mut world = Simulation::new();
-    let working = job(1);
-    world.holding(&watching_a_channel(&[(working, Progress::Working, 1)]));
-    let (name, held) = Simulation::ours(&stageman_job::container(working));
-    world.container(&name, held);
-    let mut instance = world.wake(seed(1));
-
-    // Before its resumed turn ends.
-    world.says_in_room(100, 1, "also check the tests");
-    world.run_until(&mut instance, 200);
-
-    assert_eq!(
-        world.posts(),
-        [(in_room(1), stageman_foreman::busy_notice().to_owned())]
-    );
-    assert_eq!(progress_of(instance.state(), working), Progress::Working);
-    assert_eq!(
-        world.talks().len(),
-        1,
-        "only the resume waking asked for: {:?}",
-        world.talks()
-    );
-}
-
-/// Two replies arriving together: the first is taken and the second is
-/// refused, because taking is one step.
-#[test]
-fn two_replies_arriving_together_resume_one_turn() {
-    let mut world = Simulation::new();
-    let idle = job(1);
-    world.holding(&watching_a_channel(&[(
-        idle,
-        Progress::Idle(Waiting::Silent),
-        1,
-    )]));
-    let (name, held) = Simulation::ours(&stageman_job::container(idle));
-    world.container(&name, held);
-    let mut instance = world.wake(seed(1));
-
-    world.says_in_room(100, 1, "first");
-    world.says_in_room(100, 1, "second");
-    world.run_until(&mut instance, 5_000);
-
-    let runs = world.talks();
-    assert_eq!(runs.len(), 1, "{runs:?}");
-    assert!(runs.first().expect("one").was_told("first"));
-    assert_eq!(
-        world.posts().first().map(|(_, text)| text.as_str()),
-        Some(stageman_foreman::busy_notice()),
-        "the second was refused and told"
-    );
-}
+// What a message to a working job leads to, and two arriving together, are
+// the inbox's since
+// `docs/decisions/0069-a-message-reaches-a-working-job.md`: see
+// `scenarios/inbox.rs`.
 
 /// A reply to a job that is over is refused with the notice that says so.
 #[test]
@@ -227,11 +183,29 @@ fn a_mention_in_a_thread_of_a_jobs_room_is_answered_there_and_noticed_at_the_roo
     );
     assert_eq!(
         world.posts(),
-        [(
-            in_room(1),
-            stageman_foreman::stopped_notice(&Waiting::Silent, None, "<@U0BOT>")
-        )],
-        "told at the root of its room, whatever thread the exchange was in"
+        [
+            (
+                in_room(1),
+                format!(
+                    "▶️ Handling {}.",
+                    link_to(&room(1).id, SAID_IN_ROOMS_THREAD, Some("1788000000.500000"))
+                )
+            ),
+            (in_room(1), "done".to_owned()),
+            (
+                in_room(1),
+                stageman_foreman::stopped_notice(&Waiting::Silent, None, "<@U0BOT>")
+            ),
+            (
+                Place {
+                    room: room(1),
+                    thread: Some("1788000000.500000".to_owned()),
+                },
+                stageman_foreman::answered_elsewhere_notice("<#C-job-001>")
+            ),
+        ],
+        "why it started, what the agent said and that it ended go to the root, whatever thread \
+         the exchange was in; the thread that got no answer is signposted there"
     );
 }
 
@@ -254,7 +228,16 @@ fn a_mention_in_a_thread_belonging_to_no_job_reaches_the_foreman() {
     world.says_in(100, 7, "hello?");
     world.run_until(&mut instance, 5_000);
 
-    assert!(world.posts().is_empty(), "{:?}", world.posts());
+    let in_threads: Vec<_> = world
+        .posts()
+        .iter()
+        .filter(|(place, _)| place.thread.is_some())
+        .collect();
+    assert!(
+        in_threads.len() == 1 && in_threads[0].1.starts_with("↩️"),
+        "the thread is only signposted, since the simulated foreman answers nowhere: {:?}",
+        world.posts()
+    );
     assert_eq!(
         world.reactions().first(),
         Some(&(

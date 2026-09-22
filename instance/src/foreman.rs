@@ -18,7 +18,7 @@
 //! `docs/decisions/0066-a-foremans-container-runs-only-while-a-turn-runs-in-it.md`.
 
 use stageman_core::{
-    Agent, Channel, ChannelConfig, Errand, Handout, Place, ProjectId, State, Taken, Thread,
+    Agent, Channel, ChannelConfig, Errand, Handout, Place, ProjectId, Room, State, Taken, Thread,
 };
 use stageman_foreman::Starting;
 
@@ -150,11 +150,118 @@ impl Running {
         self.look_before_turning(project);
     }
 
+    /// Makes the foreman's room if the project has none yet, and otherwise
+    /// asks the runtime about the foreman's container before turning.
+    ///
+    /// The room first, because it is where the turn's transcript goes, and
+    /// once, because it is recorded — see
+    /// `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`.
+    /// A platform that will not make it does not stop the turn: the message
+    /// is answered and the transcript let go, which is what a foreman with
+    /// no room already was.
+    fn look_before_turning(&mut self, project: ProjectId) {
+        let Some(watched) = self.state.projects.get(&project) else {
+            return;
+        };
+        if watched.foreman_room.is_none()
+            && let Some((channel, bound)) = watched.channels.iter().next()
+        {
+            let name = stageman_channel::foreman_room_name(*channel, &watched.name, project);
+            let speaking = bound.speaking();
+            self.create_foreman_room(project, *channel, &speaking, &name);
+            return;
+        }
+        if self.reading_thread_first(project) {
+            return;
+        }
+        self.inspect_before_turning(project);
+    }
+
+    /// Whether the message in hand was said in a thread that has not been
+    /// read for it, asking for the thread if so — per
+    /// `docs/decisions/0068-a-mention-is-shown-its-thread.md`, before the
+    /// container is looked at. A read already in flight is left to start
+    /// the turn when it is answered.
+    fn reading_thread_first(&mut self, project: ProjectId) -> bool {
+        let speaker = Speaker::Foreman(project);
+        if self.pending_threads.contains_key(&speaker) {
+            return true;
+        }
+        if self.threads_read.contains_key(&speaker) {
+            return false;
+        }
+        let Some(errand) = waiting_on(&self.state, project) else {
+            return false;
+        };
+        let in_thread = errand
+            .message
+            .as_deref()
+            .is_some_and(|message| message != errand.thread.id);
+        if !in_thread {
+            return false;
+        }
+        self.read_thread(
+            speaker,
+            crate::threads::Pending::Foreman { project },
+            &errand.thread.room,
+            &errand.thread.id,
+        )
+    }
+
+    /// The platform answered about the foreman's room: recorded, described
+    /// and opened if made, and the turn goes on either way.
+    pub fn foreman_room_made(
+        &mut self,
+        project: ProjectId,
+        channel: Channel,
+        outcome: Result<String, String>,
+    ) {
+        match outcome {
+            Ok(id) => {
+                let room = Room { channel, id };
+                let Some((speaking, name)) =
+                    self.state.projects.get(&project).and_then(|watched| {
+                        Some((
+                            watched.channels.get(&channel)?.speaking(),
+                            watched.name.clone(),
+                        ))
+                    })
+                else {
+                    return;
+                };
+                if let Some(watched) = self.state.projects.get_mut(&project) {
+                    watched.foreman_room = Some(room.clone());
+                    self.dirty = true;
+                }
+                self.describe_foreman_room(
+                    project,
+                    channel,
+                    &speaking,
+                    &room.id,
+                    &stageman_foreman::foreman_room_purpose(&name),
+                );
+                let mention = self.own_mention(project, channel);
+                self.say(
+                    &speaking,
+                    &Place::root(room),
+                    &stageman_foreman::foreman_room_opening(&name, &mention),
+                );
+            }
+            Err(why) => {
+                tracing::warn!(%project, %why, "the foreman's room could not be made");
+            }
+        }
+        if self.reading_thread_first(project) {
+            return;
+        }
+        self.inspect_before_turning(project);
+    }
+
     /// Asks the runtime about the foreman's container before turning.
     ///
     /// Held back behind whatever this step changed, so that a turn never
     /// starts on the strength of an inbox that is not on the disk.
-    fn look_before_turning(&mut self, project: ProjectId) {
+    pub(crate) fn inspect_before_turning(&mut self, project: ProjectId) {
         let container = stageman_foreman::container(project);
         let looking = self.ask(
             &Command::Label {
@@ -185,6 +292,9 @@ impl Running {
             return;
         };
         let speaker = Speaker::Foreman(project);
+        // Taken whether or not a turn follows, so that nothing read for one
+        // message is shown to the next.
+        let read = self.thread_taken(speaker);
         if self.turns.contains_key(&speaker) {
             tracing::debug!(%project, "the foreman is already working; ignored");
             return;
@@ -215,7 +325,18 @@ impl Running {
         } else {
             Starting::Fresh
         };
-        let asked = self.asked_of(project, &errand, starting);
+        self.notice_turn(project, &errand, starting);
+        // A session that is continued remembers what it was shown, so it is
+        // shown the thread since it last spoke there; one begun is shown all
+        // of it.
+        let remembers = present && keeps(agent, handout.agent());
+        let context = match (&read, errand.message.as_deref()) {
+            (Some(read), Some(message)) => {
+                crate::threads::thread_context(read, errand.thread.channel, !remembers, message)
+            }
+            _ => None,
+        };
+        let asked = self.asked_of(project, &errand, starting, context.as_deref());
         let warrant = self.warrant(
             speaker,
             Some(errand.thread.clone().into()),
@@ -281,19 +402,63 @@ impl Running {
         effects.push(first);
     }
 
+    /// Says at the root of the foreman's room why a turn is starting, with
+    /// a link to what started it, before anything the agent says — see
+    /// `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`.
+    /// Nothing without a room.
+    fn notice_turn(&mut self, project: ProjectId, errand: &Errand, starting: Starting) {
+        let Some((speaking, room)) = self.state.projects.get(&project).and_then(|watched| {
+            let room = watched.foreman_room.clone()?;
+            Some((watched.channels.get(&room.channel)?.speaking(), room))
+        }) else {
+            return;
+        };
+        let thread = &errand.thread;
+        let link = errand.message.as_deref().and_then(|message| {
+            let parent = (thread.id != message).then_some(thread.id.as_str());
+            self.permalink(project, thread.channel, &thread.room, message, parent)
+        });
+        let because = match (starting, errand.app.as_deref()) {
+            (Starting::Interrupted, _) => stageman_foreman::Because::Restart(link.as_deref()),
+            (Starting::Fresh, Some(app)) => stageman_foreman::Because::Signal {
+                app,
+                link: link.as_deref(),
+            },
+            (Starting::Fresh, None) => stageman_foreman::Because::Message(link.as_deref()),
+        };
+        self.say(
+            &speaking,
+            &Place::root(room),
+            &stageman_foreman::turn_notice(&because),
+        );
+    }
+
     /// What a foreman's turn on an errand is told: the message or the
     /// signal, framed as whose it is; the brief; and the kits — the last two
     /// said every turn, because a session outlives the edits to them.
-    fn asked_of(&self, project: ProjectId, errand: &Errand, starting: Starting) -> String {
+    fn asked_of(
+        &self,
+        project: ProjectId,
+        errand: &Errand,
+        starting: Starting,
+        thread: Option<&str>,
+    ) -> String {
         let kits = kits_offered(&self.state, project);
         let kits: Vec<(&str, &str)> = kits
             .iter()
             .map(|(name, description)| (name.as_str(), description.as_str()))
             .collect();
         let brief = brief_of(&self.state, project);
+        let target = stageman_channel::reference(
+            errand.thread.channel,
+            &errand.thread.room,
+            &errand.thread.id,
+        );
         stageman_foreman::asked(
             stageman_foreman::Turn {
                 said: &errand.said,
+                target: &target,
+                thread,
                 starting,
                 app: errand.app.as_deref(),
             },
@@ -313,20 +478,35 @@ impl Running {
         project: ProjectId,
         outcome: Result<stageman_agent::Answer, String>,
         made: bool,
+        spoke_in_place: bool,
         effects: &mut Vec<Effect>,
     ) {
         match outcome {
             Ok(_) => {
-                if let Some(errand) = waiting_on(&self.state, project)
-                    && let Some(message) = errand.message
-                {
-                    self.react_in(
-                        project,
-                        errand.thread.channel,
-                        &errand.thread.room,
-                        &message,
-                        Reaction::Done,
-                    );
+                if let Some(errand) = waiting_on(&self.state, project) {
+                    if let Some(message) = &errand.message {
+                        self.react_in(
+                            project,
+                            errand.thread.channel,
+                            &errand.thread.room,
+                            message,
+                            Reaction::Done,
+                        );
+                    }
+                    // A person answered nowhere is told where the foreman's
+                    // notes went: the signpost of 0067. Never under a signal,
+                    // where silence is the decision 0063 keeps.
+                    if errand.app.is_none() && !spoke_in_place {
+                        let room = self.state.projects.get(&project).and_then(|watched| {
+                            let room = watched.foreman_room.as_ref()?;
+                            Some(stageman_channel::room_link(room.channel, &room.id))
+                        });
+                        self.notice_in(
+                            project,
+                            &errand.thread,
+                            &stageman_foreman::handled_elsewhere_notice(room.as_deref()),
+                        );
+                    }
                 }
             }
             Err(why) => {
@@ -403,7 +583,7 @@ impl Running {
 
     /// Reacts to a message on a project's behalf, once whatever this step
     /// changed is on the disk.
-    fn react_in(
+    pub(crate) fn react_in(
         &mut self,
         project: ProjectId,
         channel: Channel,
@@ -485,6 +665,7 @@ mod tests {
                 attending: Attending::default(),
                 brief: String::new(),
                 watched: std::collections::BTreeSet::new(),
+                foreman_room: None,
             },
         );
         (state, project)

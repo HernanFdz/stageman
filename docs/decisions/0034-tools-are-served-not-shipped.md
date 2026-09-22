@@ -6,6 +6,10 @@ Accepted. Supersedes
 warrant in `docs/decisions/0032-a-foreman-asks-the-instance-by-warrant.md`, and
 changes what the listener in
 `docs/decisions/0033-the-job-endpoint-listens-beyond-loopback.md` serves.
+Since `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`
+the tool that speaks is no longer the only way an agent's words reach a
+person: what an agent says and does is posted as it happens, and the tool is
+the way to speak somewhere else.
 
 ## Context
 

@@ -87,6 +87,9 @@ pub struct Project {
     /// and never edited here, since a room is watched by asking the foreman
     /// in it.
     pub watched: Vec<String>,
+    /// The room its foreman's transcript is posted in, by the platform's
+    /// identifier, once one has been made.
+    pub foreman_room: Option<String>,
     /// How many of its jobs are still running.
     pub working: usize,
     /// How many jobs it has had, running or finished.
@@ -975,6 +978,7 @@ mod tests {
             variables: Vec::new(),
             brief: String::new(),
             watched: Vec::new(),
+            foreman_room: None,
             working: 0,
             jobs: 3,
         };
