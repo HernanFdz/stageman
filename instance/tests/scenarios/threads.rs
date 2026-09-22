@@ -27,33 +27,54 @@ fn a_job_with_a_room(world: &mut Simulation) -> (stageman_instance::Instance, Jo
 /// The parent of a thread in a job's room.
 const PARENT: &str = "1788000000.500000";
 
-/// A thread in a job's room: a person's question at the root, this
-/// instance's earlier answer, and a person's untagged reply after it.
+/// A thread in a job's room, as the platform remembers it: a person's
+/// question at the root, which mentioned the job; what somebody said without
+/// a mention while the job was answering; the job's answer; and an untagged
+/// reply after it.
+///
+/// Said as plain messages, the question included, so that nothing here
+/// starts a turn: a person is read from the mention event and from nothing
+/// else, and the platform remembers the markup either way.
 fn a_thread_in_the_jobs_room(world: &mut Simulation) {
     let room = room(1).id;
-    world.person_says(20, &room, PARENT, None, "Which database should this use?");
+    world.person_says(
+        20,
+        &room,
+        PARENT,
+        None,
+        "<@U0BOT> which database should this use?",
+    );
+    world.person_says(
+        25,
+        &room,
+        "1788000000.500001",
+        Some(PARENT),
+        "Staging is down, by the way.",
+    );
     world.we_said(
         30,
         &room,
-        "1788000000.500001",
+        "1788000000.500002",
         Some(PARENT),
         "Two options: Postgres or SQLite.",
     );
     world.person_says(
         40,
         &room,
-        "1788000000.500002",
+        "1788000000.500003",
         Some(PARENT),
         "Postgres, I think.",
     );
 }
 
 /// A mention in a thread is shown the thread first, once the record that
-/// the job is working has landed: the parent, and what was said since the
-/// job last spoke there, each with who said it and its identifier. What the
-/// job itself said is left out, since its session remembers.
+/// the job is working has landed: the parent, and everything from the last
+/// message the job was given there, each with who said it and its
+/// identifier. What was said without a mention while that turn ran is among
+/// it, though the job posted after it, and so are the job's own words, so
+/// that the rest reads in order.
 #[test]
-fn a_mention_in_a_thread_is_shown_what_was_said_since_the_job_last_spoke() {
+fn a_mention_in_a_thread_is_shown_everything_from_the_last_message_it_was_given() {
     let mut world = Simulation::new();
     let (mut instance, _) = a_job_with_a_room(&mut world);
     a_thread_in_the_jobs_room(&mut world);
@@ -74,18 +95,29 @@ fn a_mention_in_a_thread_is_shown_what_was_said_since_the_job_last_spoke() {
         persisted < read && read < turned,
         "the record, then the thread, then the turn: {shape:?}"
     );
-    // The whole of what the job was told: the parent and the untagged reply
-    // by who said each and its identifier, in order; nothing of what the job
-    // said itself, which its session remembers; and the mention after them,
-    // framed as the reply it is rather than shown among what came before.
+    // The whole of what the job was told: the question it was given, what
+    // was said while it answered, its own answer and the untagged reply, by
+    // who said each and its identifier, in order; and the mention after
+    // them, framed as the reply it is rather than shown among what came
+    // before.
     let shown = [
         Shown {
             id: "C-job-001/1788000000.500000",
             voice: Voice::Person("<@U0HUMAN>"),
-            text: "Which database should this use?",
+            text: "<@U0BOT> which database should this use?",
+        },
+        Shown {
+            id: "C-job-001/1788000000.500001",
+            voice: Voice::Person("<@U0HUMAN>"),
+            text: "Staging is down, by the way.",
         },
         Shown {
             id: "C-job-001/1788000000.500002",
+            voice: Voice::Us,
+            text: "Two options: Postgres or SQLite.",
+        },
+        Shown {
+            id: "C-job-001/1788000000.500003",
             voice: Voice::Person("<@U0HUMAN>"),
             text: "Postgres, I think.",
         },

@@ -39,7 +39,7 @@
 
 use stageman_core::{Channel, JobId, ProjectId, Secret, Speaking, Uuid};
 
-use crate::{Call, ChannelError, Identity, Incoming, Message, Reaction, Request};
+use crate::{Call, ChannelError, Identity, Incoming, Message, Reaction, Request, ThreadRead};
 
 /// Where Slack takes a message.
 const POST_MESSAGE: &str = "https://slack.com/api/chat.postMessage";
@@ -419,16 +419,19 @@ pub fn replies(speaking: &Speaking, room: &str, thread: &str, at_most: usize) ->
 }
 
 /// What the platform's answer to [`replies`] means: the thread's messages
-/// as decoded, oldest first, and whether older ones were left out. Each is
-/// read as a frame's message is, given who this instance is, so that its
-/// own words and another app's are told apart the same way; the room is the
-/// one asked, since a thread's messages do not name it.
+/// as decoded, oldest first, which of them mention this instance, and
+/// whether older ones were left out. Each is read as a frame's message is,
+/// given who this instance is, so that its own words and another app's are
+/// told apart the same way; the room is the one asked, since a thread's
+/// messages do not name it. A mention is a person's message carrying the
+/// markup for this instance: the event that says so when one arrives is not
+/// part of a thread read back.
 pub fn thread_read(
     status: u16,
     body: &[u8],
     room: &str,
     us: &Identity,
-) -> Result<(Vec<Message>, bool), ChannelError> {
+) -> Result<ThreadRead, ChannelError> {
     if !(200..300).contains(&status) {
         return Err(ChannelError::Unreachable(format!(
             "the channel answered {status}"
@@ -441,12 +444,24 @@ pub fn thread_read(
             told.error.unwrap_or_else(|| "no reason given".to_owned()),
         ));
     }
-    let messages = told
+    let messages: Vec<Message> = told
         .messages
         .into_iter()
         .filter_map(|said| said.message_in(room, us))
         .collect();
-    Ok((messages, told.has_more))
+    let named = mention(&us.user);
+    let mentioning = messages
+        .iter()
+        .filter(|message| {
+            !message.from_us && message.app.is_none() && message.text.contains(&named)
+        })
+        .map(|message| message.id.clone())
+        .collect();
+    Ok(ThreadRead {
+        messages,
+        mentioning,
+        longer: told.has_more,
+    })
 }
 
 /// A thread, as the platform gives one back.

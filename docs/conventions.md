@@ -255,7 +255,8 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   because each message there is its own turn and the session remembers.
   Since `docs/decisions/0068-a-mention-is-shown-its-thread.md`
   a mention in a thread is shown the thread: its parent, and everything
-  said there since this instance last spoke in it.
+  said there from the last message that was given to this instance, its own
+  words among them.
 
   A job's room is named `<project>--<title>--<8 hex of the job id>`, and
   only the last part is load-bearing: an archived room keeps its name for

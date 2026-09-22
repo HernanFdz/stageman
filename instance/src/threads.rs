@@ -4,16 +4,19 @@
 //! A mention in a thread is shown that thread before its turn starts: one
 //! request, made once the record that the message is in hand has landed and
 //! answered before the turn begins, the way a room is made before a job
-//! starts. What is shown is the parent and everything said since this
-//! instance last posted there, derived from the fetched thread by the bot
-//! identifier; the whole thread when the session is fresh; and nothing for
-//! a root mention, which fetches nothing. A thread that cannot be read does
-//! not stop the turn: the frame says so instead.
+//! starts. What is shown is the parent and everything said from the last
+//! message there that was given to this instance, derived from the fetched
+//! thread by the markup a mention carries and the bot identifier; the whole
+//! thread when the session is fresh; never what followed the message in
+//! hand; and nothing for a root mention, which fetches nothing. A thread
+//! that cannot be read does not stop the turn: the frame says so instead.
 //!
 //! Held and never kept: a fetch in flight when this process dies is asked
 //! again by the next start, which finds the message still in hand.
 
-use stageman_channel::Message;
+use std::collections::BTreeSet;
+
+use stageman_channel::{Message, ThreadRead};
 use stageman_core::{Channel, JobId, ProjectId};
 use stageman_foreman::{Shown, Voice};
 
@@ -46,6 +49,8 @@ pub enum Pending {
 pub struct Read {
     /// Its messages, oldest first, the parent included.
     pub messages: Vec<Message>,
+    /// Which of them mention this instance, by identifier.
+    pub mentioning: BTreeSet<String>,
     /// Whether older replies were left out.
     pub longer: bool,
     /// Whether it could not be read at all.
@@ -53,10 +58,11 @@ pub struct Read {
 }
 
 /// What a turn is shown of its thread, composed from what was read: that
-/// it could not be read, when it could not; else the parent and what
-/// followed this instance's last post there — or everything, when the
-/// session is fresh and remembers none of it — with the message being
-/// handled left out, since it follows. Nothing when nothing is left.
+/// it could not be read, when it could not; else the parent and everything
+/// from the last message there that was given to this instance — or
+/// everything, when the session is fresh and remembers none of it, or when
+/// no such message was read — and never the message being handled or what
+/// followed it. Nothing when nothing is left.
 pub fn thread_context(
     read: &Read,
     channel: Channel,
@@ -66,23 +72,42 @@ pub fn thread_context(
     if read.failed {
         return Some(stageman_foreman::thread_unread().to_owned());
     }
+    // Only what came before the message in hand. One that waited before its
+    // turn may have been followed by others, and those are shown with the
+    // next message given: a later mention shown here would be acted on
+    // twice.
     let before: Vec<&Message> = read
         .messages
         .iter()
-        .filter(|message| message.id != handling)
+        .take_while(|message| message.id != handling)
         .collect();
-    // Where this instance last spoke, when that is what decides: everything
-    // after it is what the agent has not seen, and the parent is shown
-    // again so that the rest reads as a thread rather than as fragments.
-    let last_ours = if whole {
+    // What is given to this instance: a person's mention of it, and another
+    // app's post when the message in hand is one, which is a signal's
+    // thread.
+    let signal = read
+        .messages
+        .iter()
+        .any(|message| message.id == handling && message.app.is_some());
+    let given = |message: &Message| {
+        read.mentioning.contains(&message.id) || (signal && message.app.is_some())
+    };
+    // Where the agent was last brought in: the last message given to it
+    // that a post of this instance's follows, which is how a thread says a
+    // turn was taken on it. What was said while that turn ran lies after
+    // it, so everything from it on is shown, and the parent before it so
+    // that the rest reads as a thread rather than as fragments.
+    let brought_in = if whole {
         None
     } else {
-        before.iter().rposition(|message| message.from_us)
+        before
+            .iter()
+            .rposition(|message| message.from_us)
+            .and_then(|ours| before.iter().take(ours).rposition(|message| given(message)))
     };
     let selected: Vec<&Message> = before
         .iter()
         .enumerate()
-        .filter(|(at, _)| last_ours.is_none_or(|last| *at == 0 || *at > last))
+        .filter(|(at, _)| brought_in.is_none_or(|from| *at == 0 || *at >= from))
         .map(|(_, message)| *message)
         .collect();
     if selected.is_empty() {
@@ -119,7 +144,7 @@ pub fn thread_context(
         .collect();
     Some(stageman_foreman::thread_shown(
         &shown,
-        last_ours.is_some(),
+        brought_in.is_some(),
         read.longer,
     ))
 }
@@ -155,14 +180,15 @@ impl Running {
 
     /// The platform answered about a thread, or could not: what was read is
     /// kept for the turn's frame, and the turn that waited starts.
-    pub fn thread_read_back(
-        &mut self,
-        speaker: Speaker,
-        outcome: Result<(Vec<Message>, bool), String>,
-    ) {
+    pub fn thread_read_back(&mut self, speaker: Speaker, outcome: Result<ThreadRead, String>) {
         let read = match outcome {
-            Ok((messages, longer)) => Read {
+            Ok(ThreadRead {
                 messages,
+                mentioning,
+                longer,
+            }) => Read {
+                messages,
+                mentioning,
                 longer,
                 failed: false,
             },
@@ -170,6 +196,7 @@ impl Running {
                 tracing::warn!(%why, "the thread a message was said in could not be read");
                 Read {
                     messages: Vec::new(),
+                    mentioning: BTreeSet::new(),
                     longer: false,
                     failed: true,
                 }
@@ -230,6 +257,9 @@ mod tests {
 
     const ROOM: &str = "C0123";
 
+    /// How this instance is mentioned in these threads.
+    const US: &str = "<@U0BOT>";
+
     fn person(id: &str, text: &str) -> Message {
         Message {
             room: ROOM.to_owned(),
@@ -258,9 +288,19 @@ mod tests {
         }
     }
 
+    /// A thread as read. Which messages mention this instance is read off
+    /// their text here, as the channel crate reads it off the platform's.
     fn read(messages: Vec<Message>) -> Read {
+        let mentioning = messages
+            .iter()
+            .filter(|message| {
+                !message.from_us && message.app.is_none() && message.text.contains(US)
+            })
+            .map(|message| message.id.clone())
+            .collect();
         Read {
             messages,
+            mentioning,
             longer: false,
             failed: false,
         }
@@ -270,16 +310,25 @@ mod tests {
         Shown { id, voice, text }
     }
 
-    /// A parent, this instance's answer, an untagged reply, this instance
-    /// again, another untagged reply, and the mention in hand.
+    fn human(id: &'static str, text: &'static str) -> Shown<'static> {
+        shown(id, Voice::Person("<@U0HUMAN>"), text)
+    }
+
+    /// Two mentions, each answered, with something said without a mention
+    /// while each turn ran and after it; then the mention in hand, and one
+    /// that followed it while it waited.
     fn a_thread() -> Vec<Message> {
         vec![
-            person("100", "Which database?"),
+            person("100", "<@U0BOT> which database?"),
+            person("150", "Staging is down, by the way."),
             ours("200", "Two options."),
             person("300", "Postgres?"),
+            person("350", "<@U0BOT> is Postgres fine?"),
+            person("375", "It was fine last year."),
             ours("400", "Noted."),
             person("500", "Or SQLite."),
             person("600", "<@U0BOT> decide"),
+            person("700", "<@U0BOT> and hurry"),
         ]
     }
 
@@ -287,9 +336,9 @@ mod tests {
     #[test]
     fn a_thread_that_failed_says_it_could_not_be_read() {
         let failed = Read {
-            messages: a_thread(),
             longer: true,
             failed: true,
+            ..read(a_thread())
         };
         assert_eq!(
             thread_context(&failed, Channel::Slack, false, "600").as_deref(),
@@ -297,17 +346,22 @@ mod tests {
         );
     }
 
-    /// A session that remembers is shown the parent and what followed this
-    /// instance's last post: not its own words, not what came before them,
-    /// and not the message in hand.
+    /// A session that remembers is shown the parent, and everything from
+    /// the last message it was given and answered: that message, what was
+    /// said while its turn ran, its own answer, and what followed. Not what
+    /// came before, which an earlier turn was shown; not the message in
+    /// hand; and not what followed that.
     #[test]
-    fn a_session_that_remembers_is_shown_the_parent_and_what_followed_its_last_post() {
+    fn a_session_that_remembers_is_shown_from_the_last_message_it_was_given() {
         assert_eq!(
             thread_context(&read(a_thread()), Channel::Slack, false, "600"),
             Some(thread_shown(
                 &[
-                    shown("C0123/100", Voice::Person("<@U0HUMAN>"), "Which database?"),
-                    shown("C0123/500", Voice::Person("<@U0HUMAN>"), "Or SQLite."),
+                    human("C0123/100", "<@U0BOT> which database?"),
+                    human("C0123/350", "<@U0BOT> is Postgres fine?"),
+                    human("C0123/375", "It was fine last year."),
+                    shown("C0123/400", Voice::Us, "Noted."),
+                    human("C0123/500", "Or SQLite."),
                 ],
                 true,
                 false,
@@ -315,10 +369,61 @@ mod tests {
         );
     }
 
-    /// A parent this instance wrote, with nothing of its own after it, is
-    /// shown once, as its own, and everything after it follows.
+    /// What was said without a mention while a turn ran is shown at the
+    /// next mention, though this instance posted after it: the case a line
+    /// drawn at this instance's last post never showed anybody.
     #[test]
-    fn a_parent_of_this_instances_own_is_shown_once_with_what_followed() {
+    fn what_was_said_while_a_turn_ran_is_shown_at_the_next_mention() {
+        let thread = vec![
+            person("100", "<@U0BOT> which database?"),
+            person("150", "Staging is down, by the way."),
+            ours("200", "Two options."),
+            person("300", "<@U0BOT> given that, which?"),
+        ];
+        assert_eq!(
+            thread_context(&read(thread), Channel::Slack, false, "300"),
+            Some(thread_shown(
+                &[
+                    human("C0123/100", "<@U0BOT> which database?"),
+                    human("C0123/150", "Staging is down, by the way."),
+                    shown("C0123/200", Voice::Us, "Two options."),
+                ],
+                true,
+                false,
+            ))
+        );
+    }
+
+    /// A mention nobody answered does not move the line: it is shown again
+    /// with what surrounds it, since no turn may ever have been taken on it.
+    #[test]
+    fn a_mention_nobody_answered_is_shown_again() {
+        let thread = vec![
+            person("100", "<@U0BOT> which database?"),
+            ours("200", "Two options."),
+            person("300", "<@U0BOT> still there?"),
+            person("400", "It does not seem to be."),
+            person("500", "<@U0BOT> hello?"),
+        ];
+        assert_eq!(
+            thread_context(&read(thread), Channel::Slack, false, "500"),
+            Some(thread_shown(
+                &[
+                    human("C0123/100", "<@U0BOT> which database?"),
+                    shown("C0123/200", Voice::Us, "Two options."),
+                    human("C0123/300", "<@U0BOT> still there?"),
+                    human("C0123/400", "It does not seem to be."),
+                ],
+                true,
+                false,
+            ))
+        );
+    }
+
+    /// A thread under this instance's own words, where nothing was given to
+    /// it before, is shown whole and not as "from the last message given".
+    #[test]
+    fn a_thread_under_this_instances_own_words_is_shown_whole() {
         let thread = vec![
             ours("100", "Reading the parser."),
             person("200", "Why the parser?"),
@@ -329,27 +434,96 @@ mod tests {
             Some(thread_shown(
                 &[
                     shown("C0123/100", Voice::Us, "Reading the parser."),
-                    shown("C0123/200", Voice::Person("<@U0HUMAN>"), "Why the parser?"),
+                    human("C0123/200", "Why the parser?"),
                 ],
-                true,
+                false,
                 false,
             ))
         );
     }
 
-    /// A fresh session is shown everything but the message in hand, its
-    /// own earlier words as its own, and is not told "since".
+    /// What followed the message in hand is not shown with it, a later
+    /// mention least of all: it is given in its own turn, and shown as
+    /// context it would be acted on twice.
     #[test]
-    fn a_fresh_session_is_shown_everything_but_the_message_in_hand() {
+    fn what_followed_the_message_in_hand_is_not_shown_with_it() {
+        let thread = vec![
+            person("100", "Which database?"),
+            person("200", "<@U0BOT> decide"),
+            person("300", "Actually, wait."),
+            person("400", "<@U0BOT> and hurry"),
+        ];
+        assert_eq!(
+            thread_context(&read(thread), Channel::Slack, false, "200"),
+            Some(thread_shown(
+                &[human("C0123/100", "Which database?")],
+                false,
+                false
+            ))
+        );
+    }
+
+    /// A fresh session is shown everything before the message in hand, its
+    /// own earlier words as its own, and is not told "from the last".
+    #[test]
+    fn a_fresh_session_is_shown_everything_before_the_message_in_hand() {
         assert_eq!(
             thread_context(&read(a_thread()), Channel::Slack, true, "600"),
             Some(thread_shown(
                 &[
-                    shown("C0123/100", Voice::Person("<@U0HUMAN>"), "Which database?"),
+                    human("C0123/100", "<@U0BOT> which database?"),
+                    human("C0123/150", "Staging is down, by the way."),
                     shown("C0123/200", Voice::Us, "Two options."),
-                    shown("C0123/300", Voice::Person("<@U0HUMAN>"), "Postgres?"),
+                    human("C0123/300", "Postgres?"),
+                    human("C0123/350", "<@U0BOT> is Postgres fine?"),
+                    human("C0123/375", "It was fine last year."),
                     shown("C0123/400", Voice::Us, "Noted."),
-                    shown("C0123/500", Voice::Person("<@U0HUMAN>"), "Or SQLite."),
+                    human("C0123/500", "Or SQLite."),
+                ],
+                false,
+                false,
+            ))
+        );
+    }
+
+    /// A signal's thread draws the line at the app's last post that this
+    /// instance answered, since another app's post is what is given there;
+    /// a person's mention in the same thread is given mentions only, finds
+    /// none answered, and is shown everything.
+    #[test]
+    fn a_signals_thread_counts_the_apps_posts_as_given() {
+        let thread = vec![
+            app("100", "Issue opened"),
+            app("200", "Issue closed"),
+            ours("250", "Filed as a job."),
+            person("260", "Thanks."),
+            app("300", "Issue reopened"),
+        ];
+        assert_eq!(
+            thread_context(&read(thread.clone()), Channel::Slack, false, "300"),
+            Some(thread_shown(
+                &[
+                    shown("C0123/100", Voice::App("GitHub"), "Issue opened"),
+                    shown("C0123/200", Voice::App("GitHub"), "Issue closed"),
+                    shown("C0123/250", Voice::Us, "Filed as a job."),
+                    human("C0123/260", "Thanks."),
+                ],
+                true,
+                false,
+            ))
+        );
+
+        let mut mentioned = thread;
+        mentioned.truncate(4);
+        mentioned.push(person("300", "<@U0BOT> why was this filed?"));
+        assert_eq!(
+            thread_context(&read(mentioned), Channel::Slack, false, "300"),
+            Some(thread_shown(
+                &[
+                    shown("C0123/100", Voice::App("GitHub"), "Issue opened"),
+                    shown("C0123/200", Voice::App("GitHub"), "Issue closed"),
+                    shown("C0123/250", Voice::Us, "Filed as a job."),
+                    human("C0123/260", "Thanks."),
                 ],
                 false,
                 false,
@@ -358,22 +532,21 @@ mod tests {
     }
 
     /// A thread this instance never spoke in is shown whole even to a
-    /// session that remembers, and not as "since": an app by its name,
-    /// somebody the platform did not name as somebody, and that the thread
-    /// was longer when it was.
+    /// session that remembers: an app by its name, somebody the platform
+    /// did not name as somebody, and that the thread was longer when it
+    /// was.
     #[test]
     fn a_thread_this_instance_never_spoke_in_is_shown_whole() {
         let thread = Read {
-            messages: vec![
+            longer: true,
+            ..read(vec![
                 app("100", "Issue opened"),
                 Message {
                     user: None,
                     ..person("200", "Looking.")
                 },
                 person("300", "<@U0BOT> look at this"),
-            ],
-            longer: true,
-            failed: false,
+            ])
         };
         assert_eq!(
             thread_context(&thread, Channel::Slack, false, "300"),

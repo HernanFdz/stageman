@@ -3,7 +3,11 @@
 ## Status
 
 Accepted and built. The read is made once the record that the message is in
-hand has landed, the way every request that follows a record is.
+hand has landed, the way every request that follows a record is. What is
+shown was first drawn from this instance's last post in the thread, and is
+drawn from the last message given to it there instead, for the reason the
+rejected alternative below records; the change was made before either
+shipped.
 
 Amends `docs/decisions/0031-a-mention-is-what-makes-it-ours.md` and
 `docs/decisions/0060-a-binding-is-a-workspace.md` in one respect: what a
@@ -53,20 +57,36 @@ thread's identifier and nothing of the thread.
 **A mention in a thread is shown that thread, before its turn starts.** The
 instance asks the platform for the thread, one request answered before the
 turn begins, the way a room is made before a job starts, and frames the turn
-with the parent message and everything said in the thread since this
-instance last posted there, in order. Each message is shown with who said it
-and its identifier: a person by the platform's own mention of them, this
-instance as its own words, another app by name. The mention itself is the
-last entry, marked as the one addressed to the agent.
+with the parent message and everything said in the thread from the last
+message there that was given to this instance, in order, up to the mention
+itself. Each message is shown with who said it and its identifier: a person
+by the platform's own mention of them, this instance as its own words,
+another app by name. The mention follows them, framed as the one addressed
+to the agent.
 
-**"Since this instance last posted there" is derived, never kept.** An agent
-remembers what it said and what it was shown when it said it, so everything
-after its own last post in a thread is exactly what it has not seen. The
-fetched thread says which posts are this instance's by the bot identifier,
-which is the rule the frame decoder already applies, so nothing is recorded
-to know it. When the session is fresh rather than resumed, because the
-container was recreated, the whole thread is shown, since the memory the
-rule relies on is gone.
+**Where the agent was last brought in is derived, never kept.** An agent
+remembers what it was shown and what it said, so what it has not seen is
+whatever followed the last message in the thread that was given to it: a
+person's mention of this instance, or another app's post when the message in
+hand is a signal. The fetched thread says which those are, a mention by the
+markup it carries and this instance's posts by the bot identifier, which is
+the rule the frame decoder already applies, so nothing is recorded to know
+it. A message counts as given when a post of this instance's follows it,
+which is how a thread says a turn was taken on it: a turn a person's message
+starts ends with a post where they asked, the agent's own or the signpost of
+0067. That message is shown again, and everything after it, this instance's
+own posts among them, because what was said while its turn ran lies between
+the two and reads in order only with them. When no such message is in what
+was read, which is the first mention in a thread or one older than the page,
+everything read is shown; and when the session is fresh rather than resumed,
+because the container was recreated, the whole thread is shown, since the
+memory the rule relies on is gone.
+
+**What followed the message in hand is not shown with it.** A message that
+waited before its turn may have been followed by others by the time the
+thread is read. They are shown with the next message given, which is where
+they belong: a later mention shown as context would be acted on twice, once
+as what came before and once as itself.
 
 **Capped**, at one page of the fifty most recent messages, and the frame
 says when a thread was longer. A bound rather than a design.
@@ -88,6 +108,12 @@ agent, costs a turn, or is answered because it was fetched. The rule 0031
 keeps, that people can talk under a job without waking it, holds exactly.
 What changes is that when one of them pulls the agent in, it reads what a
 colleague pulled into that thread would read.
+
+Rejected: **everything since this instance last posted there.** Built first,
+and simpler, since the bot identifier alone draws the line. It never shows
+what was said in a thread while a turn ran there, because the post that ends
+the turn moves the line past it: the case a long turn makes likely, and the
+one a person means by "given what she said".
 
 Rejected: **the parent and the mention only.** Cheaper, and it needs no rule
 about what was already seen. It breaks precisely the case above: the
@@ -130,18 +156,20 @@ scope the manifest does not grant, which 0063 already declined for a room's
 name; the markup is what a mention's own text already carries, and it renders
 as a name wherever the agent repeats it.
 
-**A message without a mention, said in a thread while a turn runs there, can
-go unshown.** Nothing that mentions the agent is affected: a mention is
-received whenever it is said, which is
-`docs/decisions/0069-a-message-reaches-a-working-job.md`. This is about what
-a later mention is shown as context, and nothing else. The thread is read
-when the turn starts and "since this instance last posted" starts from a post
-made when it ends, so a message without a mention that lands between the two
-is on the far side of the line the next time, and stays there for as long as
-the session lasts. The window is one turn long and the parent is shown every
-time, which is why it is accepted rather than closed; closing it means
-deriving from the previous mention instead of from the previous post, which
-the revisit below names.
+**The agent is shown some of its own words again**, those it posted in the
+thread after the message it was last given. A cost in tokens, accepted for
+an excerpt that reads in order.
+
+**A turn that never ran still moves the line.** A message given to this
+instance whose turn could not be taken is followed by the notice saying so,
+which is a post of this instance's like any other. The next mention is then
+shown from that message on, and not what came before it, which no turn was
+ever shown. Nothing that mentions the agent is lost by this: the message
+itself is shown again, and receiving a mention is
+`docs/decisions/0069-a-message-reaches-a-working-job.md` and not this
+record. Rare, and the parent is shown every time, which is why it is
+accepted rather than closed; closing it means telling this instance's
+notices from its answers, which the revisit below names.
 
 **The frame is snapshot-tested**, as every text this project composes is; a
 thread's messages are quoted inside it and are not this project's.
@@ -152,11 +180,10 @@ thread's messages are quoted inside it and are not this project's.
 frame.
 
 **Revisit if** threads longer than the cap turn out to be where questions get
-asked, which wants paging; if what people said while a turn ran turns out to
-be what the next question is about, which wants everything since the previous
-mention rather than since the previous post — still derived, since a mention
-is recognisable in a fetched thread by its markup; if root mentions keep
-arriving that assume the room's discussion was read, which wants the
-on-demand tool above; if a project's people object to untagged messages being
-shown, which wants a per-project switch; or if the platform starts carrying
-the thread on the event, which retires the fetch.
+asked, which wants paging; if turns that could not be taken turn out to hide
+what the next question is about, which wants this instance's notices told
+from its answers; if root mentions keep arriving that assume the room's
+discussion was read, which wants the on-demand tool above; if a project's
+people object to untagged messages being shown, which wants a per-project
+switch; or if the platform starts carrying the thread on the event, which
+retires the fetch.

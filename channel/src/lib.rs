@@ -19,7 +19,7 @@
 
 mod slack;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use stageman_core::{Channel, JobId, ProjectId, Secret, Speaking};
 
@@ -51,7 +51,11 @@ pub struct Identity {
 /// mentions this instance is not carried, because since
 /// `docs/decisions/0060-a-binding-is-a-workspace.md` it is what made the
 /// message arrive: a person is read from the platform's own mention event,
-/// and nothing a person says without one is decoded at all. Another app's
+/// and nothing a person says without one is decoded from a frame at all. A
+/// thread read back is the one place a person's words without a mention are
+/// decoded, per `docs/decisions/0068-a-mention-is-shown-its-thread.md`, and
+/// which of its messages mention this instance is said beside them, in
+/// [`ThreadRead`], rather than on each. Another app's
 /// message is decoded whole — its attachments and blocks read into the
 /// words — and whether it is read at all is the room's to decide, in the
 /// domain's routing rule, asked by the instance. Which job or foreman it is
@@ -204,9 +208,24 @@ pub fn replies(
     }
 }
 
-/// What the platform's answer to [`replies`] means: the thread's messages,
-/// oldest first, decoded as a frame's are given who this instance is, and
-/// whether older ones were left out.
+/// A thread as a channel gave it back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadRead {
+    /// Its messages, oldest first, the parent included.
+    pub messages: Vec<Message>,
+    /// Which of them mention this instance, by identifier: a person's, read
+    /// off the text the way the platform spells a mention, since a thread
+    /// read back carries no event saying so.
+    pub mentioning: BTreeSet<String>,
+    /// Whether older replies were left out.
+    pub longer: bool,
+}
+
+/// What the platform's answer to [`replies`] means.
+///
+/// The thread's messages, oldest first, decoded as a frame's are given who
+/// this instance is; which of them mention it; and whether older ones were
+/// left out.
 ///
 /// # Errors
 ///
@@ -218,7 +237,7 @@ pub fn thread_read(
     body: &[u8],
     room: &str,
     us: &Identity,
-) -> Result<(Vec<Message>, bool), ChannelError> {
+) -> Result<ThreadRead, ChannelError> {
     match channel {
         Channel::Slack => slack::thread_read(status, body, room, us),
     }
@@ -621,10 +640,10 @@ pub enum ChannelError {
 #[cfg(test)]
 mod tests {
     use super::{
-        Call, ChannelError, Identity, Incoming, Reaction, acknowledgement, archive, create_room,
-        decode, done, foreman_room_name, identity, invite, mention, open_socket, permalink, pieces,
-        post, posted, react, reference, referenced, replies, room_created, room_link, room_name,
-        set_purpose, set_topic, socket_url, thread_read, update, who_am_i,
+        Call, ChannelError, Identity, Incoming, Reaction, ThreadRead, acknowledgement, archive,
+        create_room, decode, done, foreman_room_name, identity, invite, mention, open_socket,
+        permalink, pieces, post, posted, react, reference, referenced, replies, room_created,
+        room_link, room_name, set_purpose, set_topic, socket_url, thread_read, update, who_am_i,
     };
     use stageman_core::{Channel, JobId, ProjectId, Secret, Speaking, Uuid};
 
@@ -918,8 +937,8 @@ mod tests {
 
     /// A thread asked for reads back as what it asked, and its answer is
     /// read as a frame's messages are: a person's, this instance's own and
-    /// another app's told apart by identifier, and whether older replies
-    /// were left out.
+    /// another app's told apart by identifier, which of a person's mention
+    /// this instance, and whether older replies were left out.
     #[test]
     fn a_thread_reads_back_and_its_answer_is_read() {
         let asked = replies(Channel::Slack, &speaking(), ROOM, "1788000000.000100", 50);
@@ -944,14 +963,22 @@ mod tests {
             url: "https://example.slack.com/".to_owned(),
         };
         let body = br##"{"ok":true,"has_more":true,"messages":[
-            {"type":"message","user":"U0HUMAN","text":"Which database?","ts":"1788000000.000100","thread_ts":"1788000000.000100","reply_count":3},
-            {"type":"message","user":"U0BOT","bot_id":"B0SELF","text":"Two options.","ts":"1788000000.000200","thread_ts":"1788000000.000100"},
-            {"type":"message","user":"U0GITHUB","bot_id":"B0OTHER","bot_profile":{"name":"GitHub"},"text":"","ts":"1788000000.000300","thread_ts":"1788000000.000100","attachments":[{"pretext":"Issue closed","title":"#9 Done"}]}
+            {"type":"message","user":"U0HUMAN","text":"<@U0BOT> which database?","ts":"1788000000.000100","thread_ts":"1788000000.000100","reply_count":3},
+            {"type":"message","user":"U0BOT","bot_id":"B0SELF","text":"Two options, <@U0BOT> said.","ts":"1788000000.000200","thread_ts":"1788000000.000100"},
+            {"type":"message","user":"U0GITHUB","bot_id":"B0OTHER","bot_profile":{"name":"GitHub"},"text":"","ts":"1788000000.000300","thread_ts":"1788000000.000100","attachments":[{"pretext":"Issue closed for <@U0BOT>","title":"#9 Done"}]}
         ]}"##;
-        let (messages, longer) =
-            thread_read(Channel::Slack, 200, body, ROOM, &us).expect("a thread read");
+        let ThreadRead {
+            messages,
+            mentioning,
+            longer,
+        } = thread_read(Channel::Slack, 200, body, ROOM, &us).expect("a thread read");
         assert!(longer, "older replies were left out");
         assert_eq!(messages.len(), 3);
+        assert_eq!(
+            mentioning.iter().map(String::as_str).collect::<Vec<_>>(),
+            vec!["1788000000.000100"],
+            "a person's mention: not this instance naming itself, and not an app doing so"
+        );
         assert_eq!(messages[0].user.as_deref(), Some("U0HUMAN"));
         assert!(!messages[0].from_us && messages[0].app.is_none());
         assert_eq!(messages[0].room, ROOM);

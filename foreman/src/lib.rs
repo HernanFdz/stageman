@@ -588,15 +588,16 @@ pub struct Shown<'a> {
 ///
 /// Said before the message itself: what came before, oldest first, each
 /// entry with who said it and its identifier — see
-/// `docs/decisions/0068-a-mention-is-shown-its-thread.md`. Since the agent
-/// last spoke there when its session remembers what came before, and from
-/// the start when it does not; and told when the thread was longer than
-/// what is shown.
+/// `docs/decisions/0068-a-mention-is-shown-its-thread.md`. From the last
+/// message the agent was given there when its session remembers what came
+/// before that, and from the start when it does not; and told when the
+/// thread was longer than what is shown.
 #[must_use]
-pub fn thread_shown(shown: &[Shown<'_>], since_us: bool, longer: bool) -> String {
-    let lead = if since_us {
-        "This was said in a thread. What was said there since you last spoke in it — its first \
-         message, then the rest — oldest first, each with who said it and its identifier:"
+pub fn thread_shown(shown: &[Shown<'_>], since: bool, longer: bool) -> String {
+    let lead = if since {
+        "This was said in a thread. Below are its first message and everything said there from \
+         the last message you were given onwards, your own words among them, oldest first, each \
+         with who said it and its identifier:"
     } else {
         "This was said in a thread. What was said there before it, oldest first, each with who \
          said it and its identifier:"
@@ -1437,8 +1438,9 @@ GitHub (C0123/1788000000.000300):
         );
         assert_eq!(
             super::thread_shown(&shown[..1], true, true),
-            "This was said in a thread. What was said there since you last spoke in it — its first \
-message, then the rest — oldest first, each with who said it and its identifier:
+            "This was said in a thread. Below are its first message and everything said there from \
+the last message you were given onwards, your own words among them, oldest first, each \
+with who said it and its identifier:
 
 <@U0HUMAN> (C0123/1788000000.000100):
 Which database?
