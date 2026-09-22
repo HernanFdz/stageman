@@ -834,6 +834,13 @@ mod tests {
             (Some(1), Some(2), None)
         );
         assert!(transcript.has(1), "closing, not gone");
+        assert!(
+            transcript
+                .closing
+                .iter()
+                .all(|open| open.closed() && !open.lost()),
+            "what a new run closed is closed, and nothing more"
+        );
 
         let ended = transcript.call_changed("call-1", None, Some(ToolCallStatus::Completed));
         assert_eq!(
@@ -846,6 +853,17 @@ mod tests {
             (unknown.closed, unknown.opened, unknown.grew),
             (None, None, None)
         );
+
+        // A message let go of stays let go of when its run ends.
+        if let Some(open) = &mut transcript.open {
+            open.standing = Standing::Lost;
+        }
+        assert_eq!(transcript.close(), Some(2));
+        assert!(
+            transcript.closing.last().is_some_and(Open::lost),
+            "lost, not merely closed"
+        );
+        assert_eq!(transcript.close(), None, "nothing open to close");
     }
 
     /// A message past the platform's limit is closed and continued: a

@@ -271,4 +271,9 @@ fn an_empty_run_of_narration_is_not_posted() {
         "nothing empty was posted: {:?}",
         world.posts()
     );
+    assert!(
+        world.edits().is_empty(),
+        "what was said is the message's first text, not an edit of an empty post: {:?}",
+        world.edits()
+    );
 }
