@@ -193,8 +193,18 @@ fn Watched(project: Project) -> Element {
                 class: "text-sm font-medium hover:underline",
                 "{project.name}"
             }
-            span { class: "truncate font-mono text-xs text-faint-foreground",
-                "{project.repository}"
+            if let Some(link) = project.repository_link {
+                a {
+                    href: "{link}",
+                    target: "_blank",
+                    rel: "noopener noreferrer",
+                    class: "truncate font-mono text-xs text-faint-foreground hover:text-foreground hover:underline",
+                    "{project.repository}"
+                }
+            } else {
+                span { class: "truncate font-mono text-xs text-faint-foreground",
+                    "{project.repository}"
+                }
             }
             span { class: "ml-auto flex shrink-0 items-center gap-2",
                 if project.attending {

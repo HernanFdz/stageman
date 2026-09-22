@@ -98,6 +98,10 @@ pub struct Project {
     pub name: String,
     /// Where its jobs work.
     pub repository: String,
+    /// The same, as an address a browser can open, when what it holds is
+    /// one. Absent for a project written before addresses were checked,
+    /// whose text is shown and linked to nothing.
+    pub repository_link: Option<String>,
     /// How its foreman's agent is set, as the identifiers a browser sends
     /// back — not the names a person reads.
     pub foreman: Fitted,
@@ -351,41 +355,116 @@ impl fmt::Debug for Draft {
     }
 }
 
+/// One part of the project form a problem can point at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Part {
+    /// The name.
+    Name,
+    /// The repository.
+    Repository,
+    /// What the foreman thinks with.
+    Foreman,
+    /// The kits, as a set.
+    Kits,
+    /// One kit, counting from nought.
+    Kit(usize),
+    /// The token for the repository.
+    Credential,
+    /// The Slack binding.
+    Channel,
+    /// The variables, as a set.
+    Variables,
+    /// One variable, counting from nought.
+    Variable(usize),
+}
+
+/// Something the form cannot be saved with, and where.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Problem {
+    /// Which part of the form.
+    pub part: Part,
+    /// What is wrong with it, for a person.
+    pub why: String,
+}
+
 impl Draft {
-    /// Whether this says everything a project needs.
+    /// Everything that stops this being saved, each pointing at where.
     ///
-    /// The same conditions the instance enforces, deliberately: the control
-    /// that submits is unavailable until pressing it would succeed. It is
-    /// not a second definition of validity — the instance still checks —
-    /// but it is the screen refusing to ask the question badly. Creating
-    /// needs a credential and a whole channel binding; amending needs
-    /// neither, because a blank credential there means the one already held
-    /// and the channel is not offered at all. A row of variables needs a
-    /// value unless the project already holds that name.
+    /// The same conditions the instance enforces, deliberately, so the form
+    /// can say which box before asking rather than after being refused. It is
+    /// not a second definition of validity — the instance still checks — but
+    /// it is the screen refusing to ask the question badly. Creating needs a
+    /// credential and a whole channel binding; amending needs neither,
+    /// because a blank credential there means the one already held and the
+    /// channel is not offered at all. A row of variables needs a value unless
+    /// the project already holds that name.
+    #[must_use]
+    pub fn problems(&self, filling: &Filling, held: &[String]) -> Vec<Problem> {
+        let mut found = Vec::new();
+        let mut problem = |part: Part, why: &str| {
+            found.push(Problem {
+                part,
+                why: why.to_owned(),
+            });
+        };
+        if self.name.trim().is_empty() {
+            problem(Part::Name, "It needs a name.");
+        }
+        if self.repository.trim().is_empty() {
+            problem(Part::Repository, "It needs the repository's address.");
+        }
+        if !self.foreman.is_complete() {
+            problem(Part::Foreman, "The foreman needs an agent and a model.");
+        }
+        if self.kits.is_empty() {
+            problem(Part::Kits, "It needs at least one kit its jobs can run on.");
+        }
+        for (position, kit) in self.kits.iter().enumerate() {
+            if kit.name.trim().is_empty() {
+                problem(Part::Kit(position), "A kit needs a name.");
+            }
+            if kit.description.trim().is_empty() {
+                problem(
+                    Part::Kit(position),
+                    "Say what this kit is for; the foreman chooses by it.",
+                );
+            }
+            if !kit.fitted.is_complete() {
+                problem(Part::Kit(position), "A kit needs an agent and a model.");
+            }
+        }
+        if !distinct(&self.kits) {
+            problem(
+                Part::Kits,
+                "Two kits share a name, and a name has to pick one out.",
+            );
+        }
+        if filling.creating() {
+            if self.credential.trim().is_empty() {
+                problem(Part::Credential, "It needs a token for the repository.");
+            }
+            if self.channel.credential.trim().is_empty()
+                || self.channel.listen_credential.trim().is_empty()
+            {
+                problem(Part::Channel, "It needs both Slack tokens.");
+            }
+        }
+        for (position, row) in self.variables.iter().enumerate() {
+            if row.name.trim().is_empty() {
+                problem(Part::Variable(position), "A variable needs a name.");
+            } else if row.value.trim().is_empty() && !held.iter().any(|had| had == row.name.trim())
+            {
+                problem(Part::Variable(position), "A new variable needs a value.");
+            }
+        }
+        found
+    }
+
+    /// Whether this says everything a project needs: nothing is wrong with
+    /// it anywhere.
     #[must_use]
     pub fn is_complete(&self, filling: &Filling, held: &[String]) -> bool {
-        let described = !self.name.trim().is_empty()
-            && !self.repository.trim().is_empty()
-            && self.foreman.is_complete()
-            && !self.kits.is_empty()
-            && self.kits.iter().all(KitDraft::is_complete)
-            && distinct(&self.kits);
-        let named = self.variables.iter().all(|row| !row.name.trim().is_empty());
-        let valued = self.variables.iter().all(|row| {
-            !row.value.trim().is_empty() || held.iter().any(|had| had == row.name.trim())
-        });
-
-        match filling {
-            Filling::Creating => {
-                described
-                    && named
-                    && valued
-                    && !self.credential.trim().is_empty()
-                    && !self.channel.credential.trim().is_empty()
-                    && !self.channel.listen_credential.trim().is_empty()
-            }
-            Filling::Amending(_) => described && named && valued,
-        }
+        self.problems(filling, held).is_empty()
     }
 }
 
@@ -521,6 +600,8 @@ pub struct Working {
     pub name: String,
     /// Where its jobs work.
     pub repository: String,
+    /// The same, as an address a browser can open, when what it holds is one.
+    pub repository_link: Option<String>,
     /// The kits its jobs may run on. Never empty in a valid instance.
     pub kits: Vec<Offered>,
     /// Its jobs, newest first.
@@ -583,6 +664,12 @@ pub enum Refusal {
     Incomplete {
         /// The field, named as the screen names it.
         field: String,
+    },
+    /// The repository is not an address on the platform.
+    #[error("the repository has to be an address on GitHub: {rule}")]
+    RepositoryRefused {
+        /// Which rule it broke, in words.
+        rule: String,
     },
     /// A project would have no kit its jobs could run on.
     #[error("a project needs at least one kit its jobs can run on")]
@@ -696,6 +783,7 @@ impl Refusal {
             // the operator can fix by typing something different.
             Self::CredentialMissing
             | Self::Incomplete { .. }
+            | Self::RepositoryRefused { .. }
             | Self::KitsMissing
             | Self::AgentNotConfigured { .. }
             | Self::KitNotOnProject { .. }
@@ -713,6 +801,40 @@ impl Refusal {
             | Self::ProjectBusy { .. }
             | Self::JobWorking
             | Self::ChannelMissing { .. } => 409,
+        }
+    }
+
+    /// Which part of the project form this points at, where it points at
+    /// one, so a page can say it beside the box rather than at the top.
+    #[must_use]
+    pub fn part(&self) -> Option<Part> {
+        match self {
+            Self::Incomplete { field } => match field.as_str() {
+                "name" => Some(Part::Name),
+                "repository" => Some(Part::Repository),
+                "credential" => Some(Part::Credential),
+                _ => None,
+            },
+            Self::RepositoryRefused { .. } => Some(Part::Repository),
+            Self::KitsMissing | Self::KitNameTaken { .. } => Some(Part::Kits),
+            Self::ChannelIncomplete => Some(Part::Channel),
+            Self::VariableNameRefused { position, .. } | Self::VariableRepeated { position } => {
+                position.checked_sub(1).map(Part::Variable)
+            }
+            Self::VariableValueMissing | Self::VariableReserved { .. } => Some(Part::Variables),
+            Self::UnknownAgent { .. }
+            | Self::CredentialMissing
+            | Self::AgentInUse { .. }
+            | Self::UnknownProject { .. }
+            | Self::ChannelMissing { .. }
+            | Self::AgentNotConfigured { .. }
+            | Self::KitNotOnProject { .. }
+            | Self::UnknownSetting { .. }
+            | Self::EffortNotOnModel { .. }
+            | Self::ProjectBusy { .. }
+            | Self::UnknownJob { .. }
+            | Self::JobWorking
+            | Self::Failed => None,
         }
     }
 }
@@ -879,6 +1001,74 @@ mod tests {
         assert!(
             !without(|draft| draft.channel.listen_credential.clear())
                 .is_complete(&Filling::Creating, NOTHING_HELD)
+        );
+    }
+
+    /// Each thing wrong points at its own box, in the order the form shows
+    /// them, and a refusal from the instance points at a box too where it
+    /// can.
+    #[test]
+    fn every_problem_points_at_where_it_is() {
+        use super::{Part, Refusal};
+
+        let mut draft = filled();
+        draft.name.clear();
+        draft.kits.push(KitDraft {
+            name: " Claude ".to_owned(),
+            description: String::new(),
+            fitted: as_it_comes(),
+        });
+        draft.variables.push(VariableDraft::default());
+        draft.channel.listen_credential.clear();
+
+        let problems = draft.problems(&Filling::Creating, NOTHING_HELD);
+        let parts: Vec<Part> = problems.iter().map(|problem| problem.part).collect();
+        assert_eq!(
+            parts,
+            [
+                Part::Name,
+                Part::Kit(1),
+                Part::Kits,
+                Part::Channel,
+                Part::Variable(1),
+            ],
+            "{problems:?}"
+        );
+        assert!(problems.iter().all(|problem| !problem.why.is_empty()));
+        assert!(!draft.is_complete(&Filling::Creating, NOTHING_HELD));
+        assert!(
+            filled()
+                .problems(&Filling::Creating, NOTHING_HELD)
+                .is_empty()
+        );
+
+        assert_eq!(
+            Refusal::Incomplete {
+                field: "repository".to_owned()
+            }
+            .part(),
+            Some(Part::Repository)
+        );
+        assert_eq!(
+            Refusal::RepositoryRefused {
+                rule: "it has to be on github.com".to_owned()
+            }
+            .part(),
+            Some(Part::Repository)
+        );
+        assert_eq!(
+            Refusal::VariableRepeated { position: 2 }.part(),
+            Some(Part::Variable(1)),
+            "the instance counts from one and the form from nought"
+        );
+        assert_eq!(Refusal::VariableRepeated { position: 0 }.part(), None);
+        assert_eq!(Refusal::JobWorking.part(), None);
+        assert_eq!(
+            Refusal::RepositoryRefused {
+                rule: "it has to be on github.com".to_owned()
+            }
+            .status(),
+            400
         );
     }
 
@@ -1051,6 +1241,7 @@ mod tests {
             id: "an-identifier".to_owned(),
             name: "aviary".to_owned(),
             repository: "https://example.invalid/aviary".to_owned(),
+            repository_link: None,
             foreman: as_it_comes(),
             kits: vec![default_kit()],
             platforms: Vec::new(),

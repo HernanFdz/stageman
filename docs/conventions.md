@@ -854,6 +854,20 @@ justify is usually obsolete.
   is for; anything longer sits behind an info control beside the label, read
   by whoever wants it.
 
+  **The line goes under the label, whatever the field holds.** Label, line,
+  control, in that order, so that every field reads as a titled thing with
+  its line as the subtitle; a line under the control reads as belonging to
+  whatever is above it, which for a list is its last row. A problem takes
+  the line's place rather than adding to it, so a field that is wrong says
+  one thing, where the eye already looks. What adds to a list sits at the
+  end of the label's line, where an action belongs, rather than under the
+  list, where it moves as the list grows and takes a row for one small
+  control. A control beside a box is the box's height and square, and a
+  list inside a section is rows parted by a hairline rather than boxes
+  within the box: a shorter control reads as a misalignment, and a nested
+  box pads its rows in from the edge every other control on the page sits
+  at.
+
 ## 4. Quality bar beyond the gate
 
 `AGENTS.md` carries the bar the gate enforces mechanically. This is for the part

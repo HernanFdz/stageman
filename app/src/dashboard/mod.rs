@@ -39,6 +39,7 @@ mod error;
 mod home_view;
 mod jobs_view;
 mod live;
+mod project_settings_view;
 mod projects_view;
 mod status_view;
 
@@ -51,6 +52,7 @@ pub use error::{DashboardError, DashboardResult};
 pub use home_view::{Home, HomeView, ProjectJob};
 pub use jobs_view::{Job, ProjectJobsView, Standing, Working};
 pub use live::{Live, LiveMark};
+pub use project_settings_view::{ProjectNewView, ProjectSettingsView};
 pub use projects_view::{Choice, Fitted, KitDraft, ModelChoice, Project, ProjectsView, Shape};
 pub use status_view::{Instance, Status};
 
@@ -108,8 +110,17 @@ pub enum Route {
         #[route("/projects")]
         ProjectsView {},
 
+        // A static segment, which the router prefers to the dynamic one
+        // below, so a project can never be called `new` by mistake — see
+        // `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+        #[route("/projects/new")]
+        ProjectNewView {},
+
         #[route("/projects/:project")]
         ProjectJobsView { project: String },
+
+        #[route("/projects/:project/settings")]
+        ProjectSettingsView { project: String },
 }
 
 /// The whole dashboard.

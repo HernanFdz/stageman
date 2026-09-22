@@ -20,7 +20,8 @@ use stageman_instance::{Request, Response};
 use super::error::{DashboardError, DashboardResult};
 use super::live::Live;
 use crate::ui::{
-    Badge, BadgeTone, Button, ButtonVariant, Card, EmptyState, Icon, Modal, Skeleton, Tooltip, When,
+    Badge, BadgeTone, Button, ButtonVariant, Card, EmptyState, Icon, Modal, Skeleton, TextArea,
+    Tooltip, When,
 };
 
 pub use stageman_wire::{Ending, Job, Offered, Standing, Working};
@@ -153,11 +154,34 @@ pub fn ProjectJobsView(project: String) -> Element {
                 Some(Ok(working)) => rsx! {
                     Card {
                         title: working.name.clone(),
-                        note: working.repository.clone(),
+                        under: rsx! {
+                            if let Some(link) = working.repository_link.clone() {
+                                a {
+                                    href: "{link}",
+                                    target: "_blank",
+                                    rel: "noopener noreferrer",
+                                    class: "font-mono hover:text-foreground hover:underline",
+                                    "{working.repository}"
+                                }
+                            } else {
+                                span { class: "font-mono", "{working.repository}" }
+                            }
+                        },
                         badge: rsx! {
                             Badge { "{working.jobs.len()}" }
                         },
                         aside: rsx! {
+                            div { class: "flex items-center gap-2",
+                            Tooltip { text: "Settings",
+                                Link {
+                                    to: super::Route::ProjectSettingsView {
+                                        project: identifier.clone(),
+                                    },
+                                    class: ButtonVariant::Secondary.styled("px-2"),
+                                    aria_label: "Settings",
+                                    {Icon::Edit.draw(16)}
+                                }
+                            }
                             Tooltip { text: "Start a job",
                             Button {
                                 class: "px-2",
@@ -177,6 +201,7 @@ pub fn ProjectJobsView(project: String) -> Element {
                                     }
                                 },
                                 {Icon::Add.draw(16)}
+                            }
                             }
                             }
                         },
@@ -282,6 +307,10 @@ fn RanJob(
     onchanged: EventHandler<Result<Working, DashboardError>>,
 ) -> Element {
     let mut showing = use_signal(|| false);
+    // Which ending is being confirmed, if one is. Retiring removes the
+    // container and the session in it, so it is asked twice — see
+    // `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+    let mut confirming = use_signal(|| None::<Ending>);
     let over = matches!(
         job.standing,
         Standing::Done | Standing::Discarded | Standing::Lost
@@ -380,17 +409,7 @@ fn RanJob(
                             variant: ButtonVariant::Ghost,
                             class: CONTROL,
                             aria_label: "It is done",
-                            onclick: {
-                                let project = project.clone();
-                                let id = job.id.clone();
-                                move |_| {
-                                    let project = project.clone();
-                                    let id = id.clone();
-                                    async move {
-                                        onchanged.call(retire(project, id, Ending::Done).await);
-                                    }
-                                }
-                            },
+                            onclick: move |_| confirming.set(Some(Ending::Done)),
                             {Icon::Done.draw(16)}
                         }
                     }
@@ -399,20 +418,53 @@ fn RanJob(
                             variant: ButtonVariant::Ghost,
                             class: CONTROL,
                             aria_label: "Discard it",
-                            onclick: {
-                                // Moved rather than cloned: the last control
-                                // on the row is the last thing that wants it.
-                                let project = project;
-                                let id = job.id.clone();
-                                move |_| {
-                                    let project = project.clone();
-                                    let id = id.clone();
-                                    async move {
-                                        onchanged.call(retire(project, id, Ending::Discarded).await);
-                                    }
-                                }
-                            },
+                            onclick: move |_| confirming.set(Some(Ending::Discarded)),
                             {Icon::Discard.draw(16)}
+                        }
+                    }
+                }
+                if let Some(ending) = confirming() {
+                    Modal {
+                        title: match ending {
+                            Ending::Done => "Retire this job as done?",
+                            Ending::Discarded => "Discard this job?",
+                        },
+                        onclose: move |()| confirming.set(None),
+                        actions: rsx! {
+                            Button {
+                                variant: match ending {
+                                    Ending::Done => ButtonVariant::Primary,
+                                    Ending::Discarded => ButtonVariant::Danger,
+                                },
+                                onclick: {
+                                    // Moved rather than cloned: the last
+                                    // control on the row is the last thing
+                                    // that wants it.
+                                    let project = project;
+                                    let id = job.id.clone();
+                                    move |_| {
+                                        let project = project.clone();
+                                        let id = id.clone();
+                                        confirming.set(None);
+                                        async move {
+                                            onchanged.call(retire(project, id, ending).await);
+                                        }
+                                    }
+                                },
+                                match ending {
+                                    Ending::Done => "Retire",
+                                    Ending::Discarded => "Discard",
+                                }
+                            }
+                        },
+                        p { class: "text-sm text-muted-foreground",
+                            "Its container and everything in it are removed, and the job stays in \
+                             the list as "
+                            match ending {
+                                Ending::Done => "done",
+                                Ending::Discarded => "discarded",
+                            }
+                            ". Nothing on the platform changes."
                         }
                     }
                 }
@@ -472,34 +524,46 @@ fn JobForm(draft: Signal<Wanted>, kits: Vec<Offered>) -> Element {
     rsx! {
         div { class: "flex flex-col gap-3",
             // Only when there is a choice. A project with one kit has already
-            // made this decision, and a select with one option asks a question
-            // that has no other answer.
+            // made this decision, and a choice with one option asks a question
+            // that has no other answer. Cards rather than a dropdown, per
+            // `docs/conventions.md` §3: a kit is chosen by what it is for,
+            // and that is a line to read, not an entry to scroll past.
             if kits.len() > 1 {
-                label { class: "flex flex-col gap-1",
+                div { class: "flex flex-col gap-1", role: "radiogroup", aria_label: "Runs on",
                     span { class: "text-xs font-medium text-muted-foreground", "Runs on" }
-                    select {
-                        class: FIELD,
-                        value: "{draft().kit}",
-                        onchange: move |event| draft.with_mut(|draft| draft.kit = event.value()),
-                        for kit in kits.iter() {
-                            option {
-                                key: "{kit.name}",
+                    for kit in kits.iter() {
+                        label {
+                            key: "{kit.name}",
+                            class: if draft().kit == kit.name {
+                                "flex cursor-pointer items-baseline gap-2 rounded-md border border-primary bg-surface-muted px-3 py-2"
+                            } else {
+                                "flex cursor-pointer items-baseline gap-2 rounded-md border border-border px-3 py-2 hover:bg-surface-muted"
+                            },
+                            input {
+                                r#type: "radio",
+                                name: "kit",
+                                class: "sr-only",
                                 value: "{kit.name}",
-                                title: "{kit.description}",
-                                "{kit.name} — {kit.description}"
+                                checked: draft().kit == kit.name,
+                                onchange: {
+                                    let name = kit.name.clone();
+                                    move |_| draft.with_mut(|draft| draft.kit.clone_from(&name))
+                                },
                             }
+                            span { class: "text-sm font-medium", "{kit.name}" }
+                            span { class: "text-xs text-muted-foreground", "{kit.description}" }
                         }
                     }
                 }
             }
             label { class: "flex flex-col gap-1",
                 span { class: "text-xs font-medium text-muted-foreground", "The work" }
-                textarea {
-                    class: "{FIELD} min-h-40 resize-y",
+                TextArea {
+                    class: "min-h-40",
                     placeholder: "What needs doing, in your own words. Say what \"done\" looks \
                                   like, and name anything the agent should read first.",
-                    value: "{draft().work}",
-                    oninput: move |event| draft.with_mut(|draft| draft.work = event.value()),
+                    value: draft().work,
+                    oninput: move |event: FormEvent| draft.with_mut(|draft| draft.work = event.value()),
                 }
             }
             p { class: "text-xs text-faint-foreground",
@@ -510,11 +574,6 @@ fn JobForm(draft: Signal<Wanted>, kits: Vec<Offered>) -> Element {
         }
     }
 }
-
-/// What every input on this screen looks like.
-const FIELD: &str = "w-full rounded-md border border-border bg-surface px-2 py-1.5 \
-                     text-sm placeholder:text-faint-foreground focus-visible:outline-none \
-                     focus-visible:ring-2 focus-visible:ring-primary";
 
 #[cfg(test)]
 mod tests {

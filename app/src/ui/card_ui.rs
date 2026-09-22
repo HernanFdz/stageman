@@ -18,6 +18,10 @@ pub struct CardProps {
     /// An optional line under the title, for what the title cannot say.
     #[props(default)]
     pub note: Option<String>,
+    /// The same line, where it needs to be more than text — a link, most
+    /// often. Shown under the note where both are given.
+    #[props(default)]
+    pub under: Option<Element>,
     /// Something aligned to the right of the title — a count, a badge, an
     /// action.
     #[props(default)]
@@ -48,6 +52,9 @@ pub fn Card(props: CardProps) -> Element {
                     }
                     if let Some(note) = props.note {
                         p { class: "mt-0.5 text-xs text-muted-foreground", "{note}" }
+                    }
+                    if let Some(under) = props.under {
+                        div { class: "mt-0.5 text-xs text-muted-foreground", {under} }
                     }
                 }
                 if let Some(aside) = props.aside {

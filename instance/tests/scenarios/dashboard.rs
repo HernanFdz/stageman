@@ -36,7 +36,9 @@ fn as_it_comes() -> Fitted {
 pub fn a_draft(name: &str) -> Draft {
     Draft {
         name: name.to_owned(),
-        repository: format!("https://example.invalid/{name}"),
+        // An address on the platform, since a draft with anything else is
+        // refused before it becomes a project.
+        repository: format!("https://github.com/example/{name}"),
         foreman: as_it_comes(),
         kits: vec![KitDraft {
             name: "Claude".to_owned(),

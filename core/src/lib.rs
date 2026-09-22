@@ -474,6 +474,87 @@ pub enum Platform {
     GitHub,
 }
 
+/// Where a project's repository is, as the platform names it: an owner and
+/// a name on GitHub.
+///
+/// Parsed from what an operator typed and refused when it is not an address
+/// on the platform, per
+/// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`: the
+/// dashboard composes addresses from it — the repository's own, and a pull
+/// request's by number — and an address composed from text that was not one
+/// would be wrong quietly. A project written before this existed may hold
+/// text that does not parse; it is opened and shown, and nothing is composed
+/// from it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryAddress {
+    /// Who owns it, as the platform spells it.
+    pub owner: String,
+    /// What it is called there.
+    pub name: String,
+}
+
+impl RepositoryAddress {
+    /// Parses an https address on GitHub, forgiving the two things people
+    /// paste along with one: a trailing `.git`, and a trailing slash.
+    ///
+    /// # Errors
+    ///
+    /// Fails if it is not https, not on GitHub, or not an owner and a name
+    /// and nothing more.
+    pub fn parse(text: &str) -> Result<Self, RepositoryError> {
+        let Some(rest) = text.trim().strip_prefix("https://") else {
+            return Err(RepositoryError::NotHttps);
+        };
+        let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+        if !host.eq_ignore_ascii_case("github.com") && !host.eq_ignore_ascii_case("www.github.com")
+        {
+            return Err(RepositoryError::NotOnGitHub);
+        }
+        let path = path.trim_end_matches('/');
+        let path = path.strip_suffix(".git").unwrap_or(path);
+        let mut parts = path.split('/');
+        match (parts.next(), parts.next(), parts.next()) {
+            (Some(owner), Some(name), None) if is_slug(owner) && is_slug(name) => Ok(Self {
+                owner: owner.to_owned(),
+                name: name.to_owned(),
+            }),
+            _ => Err(RepositoryError::NotOwnerAndName),
+        }
+    }
+
+    /// The address as this project writes it: https, no suffix, no slash.
+    #[must_use]
+    pub fn https(&self) -> String {
+        format!("https://github.com/{}/{}", self.owner, self.name)
+    }
+}
+
+/// Whether one part of a path is something the platform would call an owner
+/// or a repository: letters, digits, and the three marks it allows.
+fn is_slug(part: &str) -> bool {
+    !part.is_empty()
+        && part
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// Why some text is not a repository's address.
+///
+/// Says which rule was broken rather than merely refusing, because the
+/// operator is looking at the box they typed it into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum RepositoryError {
+    /// It does not start with the one scheme accepted.
+    #[error("it has to start with https://")]
+    NotHttps,
+    /// It is on some other host.
+    #[error("it has to be on github.com")]
+    NotOnGitHub,
+    /// Its path is not an owner and a name.
+    #[error("it has to name an owner and a repository, and nothing more")]
+    NotOwnerAndName,
+}
+
 /// The name of one variable a project gives its jobs.
 ///
 /// Validated on the way in, so that everything downstream is total: an adapter
@@ -2635,8 +2716,8 @@ mod tests {
         Agent, AgentConfig, Arriving, Attending, BASE64, Channel, ChannelConfig, ClaudeEffort,
         ClaudeModel, Errand, Handout, HandoutError, Inbox, Inconsistent, Job, JobId, Key, Kit,
         KitConfig, KitName, KitNameError, NONCE_LEN, Nonce, OpenError, Outcome, Place, Platform,
-        Progress, Project, ProjectId, Recipient, Room, Secret, Snapshot, State, Taken, Thread,
-        VariableName, VariableNameError, Waiting,
+        Progress, Project, ProjectId, Recipient, RepositoryAddress, RepositoryError, Room, Secret,
+        Snapshot, State, Taken, Thread, VariableName, VariableNameError, Waiting,
     };
     use base64::Engine as _;
     use jiff::Timestamp;
@@ -4585,5 +4666,48 @@ mod tests {
             snapshot.open(&key()),
             Err(OpenError::Inconsistent(Inconsistent::NoKits(_)))
         ));
+    }
+
+    /// An address is what an operator pastes, with what they paste beside it
+    /// forgiven, and nothing else.
+    #[test]
+    fn a_repository_address_is_https_on_github_with_an_owner_and_a_name() {
+        let parsed = RepositoryAddress::parse(" https://github.com/HernanFdz/stageman.git/ ")
+            .expect("an address");
+        assert_eq!(parsed.owner, "HernanFdz");
+        assert_eq!(parsed.name, "stageman");
+        assert_eq!(parsed.https(), "https://github.com/HernanFdz/stageman");
+        assert_eq!(
+            RepositoryAddress::parse("https://WWW.GitHub.com/owner/name").map(|a| a.https()),
+            Ok("https://github.com/owner/name".to_owned()),
+            "the host is not case-sensitive"
+        );
+
+        assert_eq!(
+            RepositoryAddress::parse("http://github.com/owner/name"),
+            Err(RepositoryError::NotHttps)
+        );
+        assert_eq!(
+            RepositoryAddress::parse("git@github.com:owner/name.git"),
+            Err(RepositoryError::NotHttps)
+        );
+        assert_eq!(
+            RepositoryAddress::parse("https://example.invalid/owner/name"),
+            Err(RepositoryError::NotOnGitHub)
+        );
+        for path in [
+            "",
+            "owner",
+            "owner/",
+            "owner/name/tree/main",
+            "owner/na me",
+            "/name",
+        ] {
+            assert_eq!(
+                RepositoryAddress::parse(&format!("https://github.com/{path}")),
+                Err(RepositoryError::NotOwnerAndName),
+                "{path:?}"
+            );
+        }
     }
 }

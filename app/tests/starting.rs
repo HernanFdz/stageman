@@ -766,6 +766,7 @@ fn nothing_served_carries_a_credential() {
         running.get("/"),
         running.get("/api/home"),
         running.get("/api/instance"),
+        running.get("/projects/00000000-0000-0000-0000-000000000000/settings"),
     ] {
         for secret in [
             VARIABLE_VALUE,
@@ -960,6 +961,41 @@ fn a_credential_is_taken_once_and_never_returned() {
             "a credential reached the browser: {served}"
         );
     }
+}
+
+/// A project is made and changed on pages of their own, at addresses of
+/// their own: the settings page shows what the project is, and a new project
+/// is that page with nothing filled in — see
+/// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+#[test]
+fn a_project_has_a_settings_page_and_a_new_one_is_that_page_empty() {
+    let (_kept, snapshot) = scratch();
+    let watched = watching("aviary", "https://example.invalid/aviary");
+    written(&snapshot, &watched);
+    let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
+
+    let fresh = running.get("/projects/new");
+    assert!(fresh.contains("200 OK"), "{fresh}");
+    assert!(fresh.contains("New project"), "{fresh}");
+    assert!(
+        !fresh.contains("no project has the identifier"),
+        "the static address was taken for an identifier: {fresh}"
+    );
+
+    let settings = running.get("/projects/00000000-0000-0000-0000-000000000000/settings");
+    assert!(settings.contains("200 OK"), "{settings}");
+    assert!(
+        settings.contains(r#"value="aviary""#),
+        "the name should be in its box: {settings}"
+    );
+    assert!(settings.contains("example.invalid/aviary"), "{settings}");
+    // A text area's value is its text and not an attribute, so a box the
+    // server rendered from an attribute alone arrives empty. The kit's
+    // description is the one text this helper fills.
+    assert!(
+        settings.contains("explains what it did.</textarea>"),
+        "a text area rendered on the server carries its value as its text: {settings}"
+    );
 }
 
 /// A page learns of change from a tick: a write that lands is told to every

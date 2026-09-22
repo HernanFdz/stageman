@@ -15,7 +15,7 @@ use std::fmt;
 
 use stageman_core::{
     AgentConfig, Channel, ChannelConfig, JobId, Kit, KitConfig, KitName, Outcome, Platform,
-    Progress, Project, ProjectId, Secret, State, Timestamp, VariableName,
+    Progress, Project, ProjectId, RepositoryAddress, Secret, State, Timestamp, VariableName,
 };
 use stageman_wire::{ChannelDraft, Draft, Ending, KitDraft, Refusal, VariableDraft};
 
@@ -261,7 +261,7 @@ impl Running {
     /// leaves nothing changed.
     fn create(&mut self, draft: &Draft) -> Result<Response, Refusal> {
         let name = required("name", &draft.name)?;
-        let repository = required("repository", &draft.repository)?;
+        let repository = addressed(&draft.repository)?;
         let foreman_kit = views::kit_of(&draft.foreman)?;
         let credential = required("credential", &draft.credential)?;
         let kits = kits_of(&draft.kits)?;
@@ -310,7 +310,7 @@ impl Running {
     /// empty. The channel is not offered at all, for the same reason.
     fn amend(&mut self, project: &str, draft: &Draft) -> Result<Response, Refusal> {
         let name = required("name", &draft.name)?;
-        let repository = required("repository", &draft.repository)?;
+        let repository = addressed(&draft.repository)?;
         let foreman_kit = views::kit_of(&draft.foreman)?;
         let kits = kits_of(&draft.kits)?;
         let identifier = views::identify(&self.state, project)?;
@@ -688,6 +688,23 @@ pub fn title_of(work: &str) -> String {
         .join(" ")
 }
 
+/// The repository, required, and written as this project writes an address:
+/// an owner and a name on the platform, with what was pasted beside them
+/// forgiven — see `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+///
+/// # Errors
+///
+/// Fails if nothing was given, or if what was given is not an address on
+/// the platform, saying which rule it broke.
+pub fn addressed(given: &str) -> Result<String, Refusal> {
+    let text = required("repository", given)?;
+    RepositoryAddress::parse(&text)
+        .map(|address| address.https())
+        .map_err(|why| Refusal::RepositoryRefused {
+            rule: why.to_string(),
+        })
+}
+
 /// A field that has to say something.
 ///
 /// # Errors
@@ -705,7 +722,9 @@ pub fn required(field: &str, given: &str) -> Result<String, Refusal> {
 
 #[cfg(test)]
 mod tests {
-    use super::{amended, binding, busy, identify_job, kits_of, offered, resolved, title_of};
+    use super::{
+        addressed, amended, binding, busy, identify_job, kits_of, offered, resolved, title_of,
+    };
     use stageman_core::{
         Agent, AgentConfig, Channel, ChannelConfig, ClaudeEffort, ClaudeModel, Job, JobId, Kit,
         KitConfig, KitName, Platform, Progress, Project, ProjectId, Secret, State, Timestamp, Uuid,
@@ -796,6 +815,30 @@ mod tests {
         map.iter()
             .map(|(name, value)| (name.to_string(), value.expose().to_owned()))
             .collect()
+    }
+
+    /// A repository is kept as the address this project writes, whatever was
+    /// pasted beside it, and refused when it is not one.
+    #[test]
+    fn a_repository_is_written_as_an_address_or_refused_by_rule() {
+        assert_eq!(
+            addressed("https://github.com/HernanFdz/stageman.git/"),
+            Ok("https://github.com/HernanFdz/stageman".to_owned())
+        );
+        assert_eq!(
+            addressed("  "),
+            Err(Refusal::Incomplete {
+                field: "repository".to_owned()
+            })
+        );
+        assert!(matches!(
+            addressed("git@github.com:HernanFdz/stageman.git"),
+            Err(Refusal::RepositoryRefused { .. })
+        ));
+        assert!(matches!(
+            addressed("https://example.invalid/aviary"),
+            Err(Refusal::RepositoryRefused { .. })
+        ));
     }
 
     /// Amending replaces both the foreman's kit and the kits whole, keeps a

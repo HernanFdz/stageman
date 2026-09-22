@@ -8,7 +8,7 @@
 
 use stageman_core::{
     Agent, Attending, Channel, ClaudeEffort, ClaudeModel, Inconsistent, Job, JobId, Kit, Outcome,
-    Platform, Progress, Project, ProjectId, State, Waiting,
+    Platform, Progress, Project, ProjectId, RepositoryAddress, State, Waiting,
 };
 use stageman_wire::{Choice, Fitted, KitDraft, ModelChoice, Refusal, Shape, Standing};
 
@@ -213,6 +213,15 @@ pub fn identify(state: &State, identifier: &str) -> Result<ProjectId, Refusal> {
         })
 }
 
+/// The repository as an address a browser can open, when what a project
+/// holds is one; a project written before addresses were checked may hold
+/// text that is not, which is shown and linked to nothing.
+fn linked(repository: &str) -> Option<String> {
+    RepositoryAddress::parse(repository)
+        .ok()
+        .map(|address| address.https())
+}
+
 /// What a screen calls an agent.
 pub fn shown(agent: Agent) -> String {
     wire_name(agent).1.to_owned()
@@ -248,6 +257,7 @@ pub fn projected(id: ProjectId, project: &Project) -> stageman_wire::Project {
         id: id.to_string(),
         name: project.name.clone(),
         repository: project.repository.clone(),
+        repository_link: linked(&project.repository),
         foreman: fitted(&project.foreman_kit),
         kits: project
             .kits
@@ -359,6 +369,7 @@ pub fn working(
     Ok(stageman_wire::Working {
         name: watched.name.clone(),
         repository: watched.repository.clone(),
+        repository_link: linked(&watched.repository),
         kits: watched
             .kits
             .iter()
