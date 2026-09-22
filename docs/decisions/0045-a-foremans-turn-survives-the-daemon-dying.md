@@ -20,8 +20,10 @@ arrival that finds it idle. After a restart it is not idle — it is holding the
 message it was interrupted on — so no arrival ever drives it again. The project
 is wedged permanently, and the shape of the failure is worse than silence:
 every later message is accepted, acknowledged on its thread, and told how many
-are ahead of it, with that number climbing for ever. It looks like a busy
-system. The only repair is to edit the instance file by hand.
+are ahead of it (a notice then; a reaction since
+`docs/decisions/0062-what-this-instance-says-is-markdown.md`), with that
+number climbing for ever. It looks like a busy system. The only repair is to
+edit the instance file by hand.
 
 It went unnoticed because the two things that would have caught it both look
 elsewhere. The sweep at startup reconciles jobs against containers and has no

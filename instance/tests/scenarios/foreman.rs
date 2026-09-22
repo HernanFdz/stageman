@@ -136,7 +136,8 @@ fn a_foreman_with_a_container_continues_its_session() {
 }
 
 /// Messages arriving while the foreman works are queued in arrival order,
-/// each told how many are ahead of it, and worked one after another.
+/// each given the eyes reaction as it arrives and the check mark as it is
+/// worked, one after another.
 #[test]
 fn messages_arriving_while_it_works_are_queued_and_worked_in_order() {
     let mut world = Simulation::new();

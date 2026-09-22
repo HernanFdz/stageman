@@ -15,6 +15,16 @@ process, with the same outcome; a stop that finds the job working with no
 turn registered yet is held in memory until the turn is; and what a stop
 does with messages the job had not yet been given is that record's.
 
+Since `docs/decisions/0056-the-instance-decides-and-the-world-performs.md`
+forgetting a project is one synchronous step: the record goes in that step
+and the discards of its containers wait on the write that removes it, so
+the window the decision below reports rather than closes no longer exists,
+and the refusal is checked once. A container the daemon leaves between that
+write and the discard carries this instance's label, per
+`docs/decisions/0054-a-container-says-which-instance-started-it.md`, and
+names no job, which the waking sweep removes — so nothing is left
+untracked, which was the reason for releasing the containers first.
+
 ## Context
 
 Nothing ever removed a container. 0015 accepted that deliberately — "when a
