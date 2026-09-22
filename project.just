@@ -177,6 +177,11 @@ dev *arguments:
     fi
     export STAGEMAN_KEY="$(cat "$key")"
     export STAGEMAN_STATE="${STAGEMAN_STATE:-$scratch/instance.json}"
+    # A port of its own for the tools a job is told to call, for the reason
+    # `image-session` takes one: serving this out of the checkout beside the
+    # real daemon is the ordinary arrangement, and the real one is very
+    # likely on the default. Left to the caller where they said otherwise.
+    export STAGEMAN_JOB_PORT="${STAGEMAN_JOB_PORT:-47115}"
     # Emptied, because the bundle directory is a compile-time input and a
     # binary carrying one prefers it over the live tree `dx` is serving. A
     # stale bundle embedded here would look exactly like hot reloading having
