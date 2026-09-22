@@ -115,7 +115,11 @@ first.
   request path into the instance. What is left here is the application's own
   half: an entry point that draws a seed, serves the pages on a loopback port
   and says where, and one adapter, which matches a server function's answer
-  to whoever asked.
+  to whoever asked. Since
+  `docs/decisions/0071-a-page-learns-of-change-from-a-tick.md` it also tells
+  every open page when a write has landed: a version bumped when the world
+  answers a write, and a route that streams each bump as a tick, knowing
+  nothing of what was written.
 - **instance** — the deciding and the doing as one deterministic value: what
   the daemon knows, and what it does about each thing that happens, answered
   as effects. It is the seam

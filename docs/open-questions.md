@@ -251,21 +251,6 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   Settled by picking the forwarding infra, since the answer is a property of
   that choice rather than an independent decision.
 
-- **How does a page find out that something changed?** Everything the dashboard
-  shows is read once, while the page is rendered. A job finishing, a signal
-  arriving, a foreman deciding — none of it reaches a browser that is
-  already open, and this is the first thing anybody will notice.
-
-  The mechanisms are known and the choice between them is not: polling the
-  route on a timer, which is trivial and wrong at any interval you pick;
-  server-sent events, which fit one-directional updates exactly; or the
-  framework's websocket support, which fits and costs more. What actually
-  decides it is what the *first* changing view needs, and none exists yet.
-
-  Note the interaction with the question above it. Anything long-lived is a
-  connection somebody has to authenticate, so answering that one first is
-  cheaper than answering it twice.
-
 - **What should happen when an agent credential expires while nobody is
   watching?** It will, and it lands on every job at once. The options run from
   failing each job loudly and showing it on the dashboard, to pausing the
@@ -323,13 +308,50 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   could not explain, and not before: noted so that it is not forgotten,
   deliberately not built.
 
+- **Should the image sweep be scoped by instance?**
+  `docs/decisions/0054-a-container-says-which-instance-started-it.md` labels
+  every container with the instance that made it, so a sweep removes only
+  its own. An image is named by its recipe, per
+  `docs/decisions/0051-an-image-is-named-by-the-recipe-it-is-built-from.md`,
+  and shared by every instance on the runtime — and the sweep that removes
+  an image nothing needs asks only this instance's containers whether they
+  need it. Observed with two instances on one runtime, which is the ordinary
+  arrangement of `just dev` beside the real daemon: the second instance,
+  waking, tried to remove the images the first one's containers were built
+  from, and was refused only because those containers still held them. An
+  image the other instance's *next* job needs is held by nothing, so a
+  development instance can cost the real one a rebuild, minutes and a
+  network, on its next job. Settled by deciding whose an image is: the
+  runtime's, pruned by a person as `docs/conventions.md` §5 already says of
+  dangling ones, which means the sweep stops removing images at all; or each
+  instance's, labelled as containers are, which means two instances build
+  the same image twice.
+
 ## Next
 
 Intended next steps, in order, each with its reason. Written as intentions, not
 progress: "next X, because Y" — never "X is 60% done", which is both derivable
 and wrong within a day.
 
-- Next, make the container tests a recorder, because what they check is what
+- Next, the dashboard pass
+  `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`,
+  `docs/decisions/0071-a-page-learns-of-change-from-a-tick.md` and
+  `docs/decisions/0072-the-dashboard-has-a-dark-theme.md` describe, because
+  the loop runs end to end and the console is what an operator meets next.
+  In this order, each with its docs in the same commit: the foundation —
+  the dark tokens and the toggle, one icon set with the marks, tooltips,
+  motion, the placeholders that stand in for a page still reading; the
+  shell and Home; the tick; the project page with its settings page and New
+  project; the job page, with the pull requests a job claims and the typed
+  repository; variables pasted as a file, with a note per variable that the
+  agent is told, which wants a small record of its own; and the setup
+  guides — a link that prefills a platform's token form, and a pasted
+  credential checked against the platform before it is kept. A GitHub App
+  the operator owns, created from the dashboard and minting a short-lived
+  token per turn, is the destination for the guides and a record of its own,
+  after them.
+
+- Then make the container tests a recorder, because what they check is what
   the pinned runtime and the pinned agent actually do, which is a recording
   rather than a test. A recipe runs reality, captures what it prints and how
   it answers, and writes the captures as the fixtures the in-memory tests
@@ -369,8 +391,7 @@ and wrong within a day.
 
 - Then the smaller things the room design made cheap, in no particular
   order: a direct message with the app as a room where no mention is needed;
-  a private room for a project whose own rooms are private; a link from the
-  dashboard to a job's room.
+  a private room for a project whose own rooms are private.
 
 - Then move the end-to-end tests out of the crates they test. A test that drives
   a whole flow — a job from kickoff to a cloned repository, a session surviving

@@ -490,6 +490,26 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   changes rather than in the gate. Not an *example* either, which says how to
   use something rather than what something else is like.
 
+- **chip** — one thing shown inline and compact, and usually a link: a kit
+  on a project's row, a pull request on a job's. A chip says which and
+  where, and carries no verdict. Not a *badge*, which carries one word of
+  state and never links; not a *tag* or a *label*, which are what a platform
+  calls its own; not a *pill*, which names the shape rather than the thing.
+
+- **mark** — an agent's own symbol, drawn inline at icon size: one per agent
+  this build can run, keyed by the identifier the wire uses for it, with a
+  generic one for an identifier this build does not know. A mark says
+  *whose*; an icon says *what*. Not a *logo*, which is a brand's full lockup
+  and belongs to nobody here; not an *icon*, which is reserved for the one
+  set §3 names.
+
+- **tick** — what an open page is told when a write of the instance's file
+  has landed: that something may have changed, and nothing else — see
+  `docs/decisions/0071-a-page-learns-of-change-from-a-tick.md`. Not an
+  *event*, which is what the world tells the instance; not a *notification*,
+  which is what a channel posts to a person; not an *update*, which would
+  claim to carry the change.
+
 ## 3. House rules
 
 Anything someone would otherwise get wrong: framework versions and their
@@ -767,6 +787,65 @@ justify is usually obsolete.
   that is working is delivered by steering when its conversation is open and
   waits in the job's inbox otherwise — see
   `docs/decisions/0069-a-message-reaches-a-working-job.md`.
+
+- **One icon set, one icon per concept, decided in one module.** Every icon
+  is lucide's. The text glyphs the dashboard once used for add, save, close
+  and edit are refused: a glyph arrives in colour on the platforms that give
+  it an emoji presentation, and two vocabularies on one page read as an
+  accident. Which icon means which concept is decided once, in one module of
+  the app crate, so a foreman is the same shape on every page. The crate
+  compiles icons by category, so an icon that will not resolve usually means
+  a category to add rather than an icon that does not exist, and the cost of a
+  category is compile time rather than bundle size, since a browser build
+  strips what nothing draws. An agent is shown by its mark, per §2, vendored
+  as an inline drawing rather than fetched from anywhere.
+
+- **A closed set is a control, never a dropdown.** Every set a form here
+  chooses from has a handful of members — an agent, a model, an effort, a
+  kit — and a set that small is a segmented control, or a row of cards with
+  their descriptions, in the page, where every option is seen at once and
+  nothing floats over anything. The browser's own select was what the form
+  used and is refused for two reasons: it draws itself, outside the theme,
+  and it hides the options a choice is made between. A listbox that floats is
+  for a set that is open or long; none exists here, and when one does it is
+  lifted from the components the framework's own registry publishes rather
+  than depended on, because the crate published under that name was a
+  placeholder when this was written.
+
+- **A theme is a token block, and a component never names one.** Since
+  `docs/decisions/0072-the-dashboard-has-a-dark-theme.md` there are two,
+  under one class on the root, applied before paint by the one script the
+  dashboard writes by hand. A component that seems to need a dark variant is
+  one whose colour has no token yet, and the token is the fix. The three
+  state colours are chosen per theme rather than tinted from one.
+
+- **Motion is a transition, honours the reduced-motion preference, and needs
+  no library.** What moves: hover and focus, a panel or a popover entering
+  and leaving, the mark that says working, and a row arriving once a page is
+  live. Nothing moves for its own sake, and everything that moves is still
+  under the preference, because a person who asked for stillness asked for
+  it everywhere.
+
+- **A page is live through a tick, never through polling.** The shell opens
+  one stream, and every page restarts its own read on a tick — see
+  `docs/decisions/0071-a-page-learns-of-change-from-a-tick.md`. A page that
+  read on a timer would read while nothing changes and still be stale between
+  reads. The mark in the shell says whether the page is live, and a page
+  without it behind a proxy is a proxy that buffers.
+
+- **A time is shown relative, exact on hover, and drawn after the page
+  wakes.** The server renders the page and the browser hydrates it, and a
+  relative time computed twice from two clocks is two different strings,
+  which the framework reports as a mismatch. So the exact time is what
+  arrives, and the relative one is drawn in the browser.
+
+- **One visible line per field, and the rest behind a control.** A form's
+  copy is the highest-leverage text an operator reads and the easiest to
+  stop reading: a paragraph under every field is six paragraphs, and a
+  person skips all six. A field gets a label that is a noun, a placeholder
+  that is an example rather than an instruction, and one line saying what it
+  is for; anything longer sits behind an info control beside the label, read
+  by whoever wants it.
 
 ## 4. Quality bar beyond the gate
 
