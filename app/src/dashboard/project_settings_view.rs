@@ -19,6 +19,7 @@
 
 use dioxus::prelude::*;
 
+use super::UNDER_SHELL;
 use super::agents_view::Agent;
 use super::error::DashboardError;
 use super::live::Live;
@@ -342,7 +343,12 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
 
     rsx! {
         div { class: "flex flex-col gap-4",
-            div { class: "flex items-baseline gap-3",
+            // In view while the page scrolls, because what commits the form
+            // is here and the form is longer than a screen —
+            // `docs/conventions.md` §3. Pulled up into the page's own top
+            // padding and given it back, so the page passes under this and
+            // not through a gap above it.
+            div { class: "{UNDER_SHELL} -mt-6 flex items-baseline gap-3 border-b border-border bg-background pt-6 pb-3",
                 h1 { class: "text-base font-semibold",
                     if creating { "New project" } else { "{name}" }
                 }

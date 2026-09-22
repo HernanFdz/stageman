@@ -46,7 +46,10 @@ pub fn Status() -> Element {
     };
 
     rsx! {
-        footer { class: "border-t border-border",
+        // In view at the foot of the window, under the same rule as the
+        // shell's header — `docs/conventions.md` §3 — and opaque, so that
+        // the page passes under it rather than through it.
+        footer { class: "sticky bottom-0 z-40 border-t border-border bg-surface",
             div { class: "mx-auto flex max-w-5xl flex-wrap items-baseline gap-x-5 gap-y-1 px-6 py-4 \
                           text-xs text-muted-foreground",
                 Fact { label: "runtime", value: shown.container_runtime }

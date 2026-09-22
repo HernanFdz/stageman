@@ -137,6 +137,21 @@ pub fn Dashboard() -> Element {
     }
 }
 
+/// What a page's own header wears to stay in view under the shell's.
+///
+/// The shell's header is a line of base text with its padding, fourteen
+/// units tall, and a hairline under that; this sits one pixel under the
+/// hairline, deliberately. A gap between the two would show the page
+/// scrolling through it, and an overlap shows nothing, since the shell's
+/// header is above.
+///
+/// The ladder, so that nothing is above what it should be under: what
+/// floats within a page — a tooltip, a popover — is at twenty; a page's
+/// own header at thirty, so those pass beneath it; the shell's header and
+/// status line at forty, above both; and the modal at fifty, above all of
+/// it, since it is the one thing that covers a page.
+pub(crate) const UNDER_SHELL: &str = "sticky top-14 z-30";
+
 /// The frame every screen is drawn in.
 ///
 /// Holds the stylesheet as well as the navigation, so that a screen is only
@@ -164,7 +179,10 @@ pub fn Shell() -> Element {
         // foot whatever a page's height, rather than wherever the contents
         // happened to end.
         div { class: "flex min-h-screen flex-col bg-background font-sans text-foreground",
-            header { class: "border-b border-border bg-surface",
+            // In view from wherever a person has scrolled to, with the
+            // status line at the foot the same way — `docs/conventions.md`
+            // §3 — and above what scrolls under it, below the modal.
+            header { class: "sticky top-0 z-40 border-b border-border bg-surface",
                 div { class: "mx-auto flex max-w-5xl items-baseline gap-6 px-6 py-4",
                     span { class: "text-base font-semibold tracking-tight", "stageman" }
                     // In the order

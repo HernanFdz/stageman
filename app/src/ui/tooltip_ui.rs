@@ -1,9 +1,12 @@
-//! A few words that appear on hover or focus, under a control that has no
-//! visible label.
+//! A few words that appear on hover, or on a focus that came from the
+//! keyboard, under a control that has no visible label.
 //!
-//! Stylesheet alone: it is shown by the browser's own hover and focus states
-//! and runs nothing, which is what keeps it honest on a page that was rendered
-//! on the server and has not woken yet. It is hidden from assistive
+//! Stylesheet alone: it is shown by the browser's own states and runs
+//! nothing, which is what keeps it honest on a page that was rendered on
+//! the server and has not woken yet. Hover, and `focus-visible` rather than
+//! focus, per `docs/conventions.md` §3: a control that is clicked keeps its
+//! focus, so a tooltip shown for focus stayed until the next click landed
+//! somewhere that took it, and read as stuck. It is hidden from assistive
 //! technology, because the control it sits under carries its own name and
 //! saying it twice helps nobody — so a caller gives the control an accessible
 //! name, and this repeats it for eyes.
@@ -23,7 +26,7 @@ pub struct TooltipProps {
     pub children: Element,
 }
 
-/// A few words on hover or focus.
+/// A few words on hover, or on keyboard focus.
 #[component]
 pub fn Tooltip(props: TooltipProps) -> Element {
     rsx! {
@@ -38,7 +41,7 @@ pub fn Tooltip(props: TooltipProps) -> Element {
                         whitespace-nowrap rounded-md border border-border bg-surface px-2 py-1 \
                         text-xs text-foreground shadow-md opacity-0 delay-150 \
                         motion-safe:transition-opacity group-hover:opacity-100 \
-                        group-focus-within:opacity-100",
+                        group-has-[:focus-visible]:opacity-100",
                 "{props.text}"
             }
         }

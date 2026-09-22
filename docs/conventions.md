@@ -851,8 +851,8 @@ justify is usually obsolete.
   stop reading: a paragraph under every field is six paragraphs, and a
   person skips all six. A field gets a label that is a noun, a placeholder
   that is an example rather than an instruction, and one line saying what it
-  is for; anything longer sits behind an info control beside the label, read
-  by whoever wants it.
+  is for; anything longer is said by an info control beside the label, to
+  whoever hovers or focuses it.
 
   **The line goes under the label, whatever the field holds.** Label, line,
   control, in that order, so that every field reads as a titled thing with
@@ -867,6 +867,44 @@ justify is usually obsolete.
   within the box: a shorter control reads as a misalignment, and a nested
   box pads its rows in from the edge every other control on the page sits
   at.
+
+- **A tooltip, and what the info control beside a label says, show on
+  hover and on a focus that came from the keyboard, never for a click.** A
+  control that is clicked keeps its focus, so a tooltip shown for focus
+  stays until the next click lands somewhere that takes it, and reads as
+  stuck. Shown for `focus-visible` instead, it appears for a person on a
+  keyboard, who cannot hover, and for nobody else. The info control was a
+  disclosure — opened by a click, closed by nothing but a second click, so
+  that several stood open at once and each stood for ever — and is a
+  tooltip now, with two differences a paragraph earns over a repeated
+  name: it is the control's description to assistive technology, because
+  it says what the label does not; and Escape dismisses it while the
+  control has focus, until the pointer leaves or focus moves on, which is
+  the one thing the browser's own states cannot do and the only script in
+  either. One difference it does not earn, and the near-miss worth
+  recording: neither holds still for a pointer that moves onto the text.
+  It was tried, because a paragraph is read rather than glanced at, and it
+  put the text between the pointer and whatever is under the label — the
+  next label's own control was unreachable beneath it. So the text lets
+  the pointer through, and a person who wants it to hold has the keyboard,
+  where focus keeps it until Escape or the next Tab. On a touch screen a
+  tap stands in for hover and a tap elsewhere for leaving, which is the
+  browser's own doing, and nothing said this way is essential on a screen
+  without a pointer, because the line under the label carries what
+  matters. Not a disclosure, which is for content that stays; not a
+  popover, which is for something a person acts in.
+
+- **The shell's header and status line stay in view, and so does a page's
+  own header when the control that commits the page lives in it.** The
+  settings page is longer than a screen, and what a person reaches for
+  after editing the bottom of it is Save, which
+  `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md` put
+  at the top; a control that has to be scrolled to is a control somebody
+  scrolls past. The navigation, the live mark and the machine are worth
+  seeing from wherever a person has scrolled to, which was the point of
+  making the machine a line rather than a page. Whatever stays in view is
+  opaque and above what scrolls under it, so a tooltip or a popover passes
+  beneath, and below the modal, which is the one thing that covers a page.
 
 ## 4. Quality bar beyond the gate
 
