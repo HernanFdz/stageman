@@ -19,7 +19,7 @@ use super::agents_view::Agent;
 use super::error::DashboardResult;
 use super::live::Live;
 use crate::ui::{
-    Badge, BadgeTone, ButtonVariant, Card, EmptyState, Icon, KitChip, Skeleton, Tooltip,
+    Badge, BadgeTone, ButtonVariant, Card, EmptyState, Icon, KitChip, Reference, Skeleton, Tooltip,
 };
 
 pub use stageman_wire::{Choice, Draft, Fitted, KitDraft, ModelChoice, Project, Shape, Watching};
@@ -175,7 +175,7 @@ fn shown_as(available: &[Agent], identifier: &str) -> String {
 /// What a fitted agent reads as: the model's name, and the effort's
 /// spelling and name where the model takes one — from the shape the server
 /// sent, or the identifiers as they stand where it sent none.
-fn read_as(shapes: &[Shape], fitted: &Fitted) -> (String, Option<(String, String)>) {
+pub(super) fn read_as(shapes: &[Shape], fitted: &Fitted) -> (String, Option<(String, String)>) {
     let shape = shapes.iter().find(|shape| shape.agent == fitted.agent);
     let model = shape
         .and_then(|shape| shape.models.iter().find(|model| model.id == fitted.model))
@@ -206,11 +206,9 @@ fn read_as(shapes: &[Shape], fitted: &Fitted) -> (String, Option<(String, String
 #[component]
 fn WatchedProject(project: Project, available: Vec<Agent>, shapes: Vec<Shape>) -> Element {
     let (foreman_model, foreman_effort) = read_as(&shapes, &project.foreman);
-    // Absence for the two things a project cannot work without, and presence
-    // for the rest: a project with no variables is the ordinary case and says
-    // nothing, while one carrying third-party credentials is worth seeing at
-    // a glance. A watched room is shown by the platform's identifier, because
-    // a name costs a scope the manifest does not grant.
+    // Absence for the two things a project cannot work without, and what
+    // the foreman watches: a watched room is shown by the platform's
+    // identifier, because a name costs a scope the manifest does not grant.
     let mut notes = Vec::new();
     if project.platforms.is_empty() {
         notes.push("no token for the repository".to_owned());
@@ -218,16 +216,13 @@ fn WatchedProject(project: Project, available: Vec<Agent>, shapes: Vec<Shape>) -
     if project.channels.is_empty() {
         notes.push("no Slack app".to_owned());
     }
-    if !project.variables.is_empty() {
-        notes.push(format!("{} variable(s)", project.variables.len()));
-    }
     if !project.watched.is_empty() {
         notes.push(format!("watching {}", project.watched.join(", ")));
     }
-    if let Some(foremans) = &project.foreman_room {
-        notes.push(format!("foreman in {foremans}"));
-    }
     let notes = notes.join(" · ");
+    // The variables, by name, a hover away: names and never values.
+    let variables = project.variables.join("\n");
+    let counted = format!("{} variable(s)", project.variables.len());
 
     rsx! {
         // Roomier than the rows on the agents screen, and deliberately: an
@@ -239,7 +234,7 @@ fn WatchedProject(project: Project, available: Vec<Agent>, shapes: Vec<Shape>) -
         // therefore equal. Anything else makes the top gap the sum of two
         // paddings and the eye reads it as a mistake.
         div { class: "flex flex-col gap-2 py-4 first:pt-0 last:pb-0",
-            div { class: "flex items-baseline gap-3",
+            div { class: "flex items-center gap-3",
                 Link {
                     to: super::Route::ProjectJobsView {
                         project: project.id.clone(),
@@ -247,17 +242,20 @@ fn WatchedProject(project: Project, available: Vec<Agent>, shapes: Vec<Shape>) -
                     class: "text-sm font-medium hover:underline",
                     "{project.name}"
                 }
-                if let Some(link) = project.repository_link.clone() {
-                    a {
-                        href: "{link}",
-                        target: "_blank",
-                        rel: "noopener noreferrer",
-                        class: "truncate font-mono text-xs text-faint-foreground hover:text-foreground hover:underline",
-                        "{project.repository}"
-                    }
-                } else {
-                    span { class: "truncate font-mono text-xs text-faint-foreground",
-                        "{project.repository}"
+                // Where it is, as marks with the address a hover away: the
+                // repository, and the foreman's room once there is one —
+                // a link where the link is true, per
+                // `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+                Reference {
+                    mark: "github",
+                    says: project.repository.clone(),
+                    link: project.repository_link.clone(),
+                }
+                if let Some(room) = project.foreman_room.clone() {
+                    Reference {
+                        mark: "slack",
+                        says: "The foreman's room, {room}",
+                        link: project.foreman_room_link.clone(),
                     }
                 }
                 span { class: "ml-auto flex shrink-0 items-center gap-2",
@@ -266,6 +264,13 @@ fn WatchedProject(project: Project, available: Vec<Agent>, shapes: Vec<Shape>) -
                             Badge { tone: BadgeTone::Working,
                                 {Icon::Foreman.draw(12)}
                                 "foreman"
+                            }
+                        }
+                    }
+                    if !project.variables.is_empty() {
+                        Tooltip { text: variables,
+                            Badge { tabindex: "0", aria_label: "{counted}: {project.variables.join(\", \")}",
+                                "{counted}"
                             }
                         }
                     }
@@ -293,7 +298,8 @@ fn WatchedProject(project: Project, available: Vec<Agent>, shapes: Vec<Shape>) -
                 }
             }
             // Who thinks and who works, as chips rather than a sentence: the
-            // hat says which is the foreman, and each kit says its name,
+            // hat says which is the foreman's, the hammer which are the
+            // jobs', a hairline parts the two, and each kit says its name,
             // whose it is, which model, and how hard.
             div { class: "flex flex-wrap items-center gap-1.5",
                 Tooltip { text: "The foreman thinks with this",
@@ -305,7 +311,10 @@ fn WatchedProject(project: Project, available: Vec<Agent>, shapes: Vec<Shape>) -
                     model: foreman_model,
                     effort: foreman_effort,
                 }
-                span { class: "mx-1 text-xs text-faint-foreground", "runs jobs on" }
+                span { class: "mx-1 h-4 w-px bg-border-strong", aria_hidden: "true" }
+                Tooltip { text: "Its jobs run on these",
+                    span { class: "inline-flex items-center text-muted-foreground", {Icon::Kit.draw(14)} }
+                }
                 for kit in project.kits.iter() {
                     {
                         let (model, effort) = read_as(&shapes, &kit.fitted);

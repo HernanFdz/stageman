@@ -14,8 +14,9 @@
 
 use dioxus::prelude::*;
 use lucide_dioxus::{
-    Bot, Check, CircleCheck, CircleOff, CircleX, ExternalLink, Eye, EyeOff, HardHat, Info,
-    LoaderCircle, Moon, Pencil, Plus, Square, Sun, SunMoon, Trash2, X,
+    Activity, ArrowLeft, Bot, Calendar, Check, CircleCheck, CircleOff, CircleX, ExternalLink, Eye,
+    EyeOff, Hammer, HardHat, Info, LoaderCircle, Moon, Pencil, Plus, Square, Sun, SunMoon, Trash2,
+    X,
 };
 
 /// A concept a screen can point at, and nothing about how it is drawn.
@@ -64,6 +65,14 @@ pub enum Icon {
     Agent,
     /// The foreman: the one that reads what a person says and decides.
     Foreman,
+    /// What a job runs on: its kit, and on a project the kits its jobs may.
+    Kit,
+    /// Where a job has got to.
+    Standing,
+    /// When something was made.
+    Made,
+    /// The way back to where a page was reached from.
+    Back,
 }
 
 impl Icon {
@@ -92,6 +101,10 @@ impl Icon {
         Self::Info,
         Self::Agent,
         Self::Foreman,
+        Self::Kit,
+        Self::Standing,
+        Self::Made,
+        Self::Back,
     ];
 
     /// Drawn at `size` pixels, in the current text colour.
@@ -131,6 +144,12 @@ impl Icon {
             // A hat, because the word is a role and the hat is what the role
             // wears — see `docs/conventions.md` §2 on why it is a foreman.
             Self::Foreman => rsx! { HardHat { size, class } },
+            // A hammer, because a job is the work and a kit is what it is
+            // done with, beside the hat that assigns it.
+            Self::Kit => rsx! { Hammer { size, class } },
+            Self::Standing => rsx! { Activity { size, class } },
+            Self::Made => rsx! { Calendar { size, class } },
+            Self::Back => rsx! { ArrowLeft { size, class } },
         }
     }
 }

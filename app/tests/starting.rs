@@ -42,7 +42,7 @@ use std::time::Duration;
 
 use stageman_core::{
     Agent, AgentConfig, Channel, ChannelConfig, Job, JobId, Key, Kit, KitConfig, KitName,
-    NONCE_LEN, Progress, Project, ProjectId, Secret, State, Timestamp, Waiting,
+    NONCE_LEN, Outcome, Progress, Project, ProjectId, Secret, State, Timestamp, Waiting,
 };
 
 /// A key, as an operator would supply it: thirty-two bytes of base64.
@@ -767,6 +767,7 @@ fn nothing_served_carries_a_credential() {
         running.get("/api/home"),
         running.get("/api/instance"),
         running.get("/projects/00000000-0000-0000-0000-000000000000/settings"),
+        running.get("/projects/00000000-0000-0000-0000-000000000000/jobs/00000000-0000-0000-0000-000000000007"),
     ] {
         for secret in [
             VARIABLE_VALUE,
@@ -996,6 +997,48 @@ fn a_project_has_a_settings_page_and_a_new_one_is_that_page_empty() {
         settings.contains("explains what it did.</textarea>"),
         "a text area rendered on the server carries its value as its text: {settings}"
     );
+}
+
+/// A job has a page of its own, at an address that keeps its identifier:
+/// its reason, what it was told, and its standing — see
+/// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+#[test]
+fn a_job_has_a_page_of_its_own() {
+    let (_kept, snapshot) = scratch();
+    let mut watched = watching("aviary", "https://github.com/example/aviary");
+    watched
+        .projects
+        .get_mut(&ProjectId::from_uuid(uuid::Uuid::nil()))
+        .expect("the project")
+        .jobs
+        // Over already, so that the waking sweep — which finds no container
+        // for it and would otherwise record it lost — leaves it as written.
+        .insert(
+            JobId::from_uuid(uuid::Uuid::from_u128(7)),
+            job(Progress::Retired(Outcome::Done)),
+        );
+    written(&snapshot, &watched);
+    let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
+
+    let page = running.get(
+        "/projects/00000000-0000-0000-0000-000000000000/jobs/00000000-0000-0000-0000-000000000007",
+    );
+    assert!(page.contains("200 OK"), "{page}");
+    assert!(page.contains("because a test said so"), "{page}");
+    assert!(page.contains("do the thing"), "{page}");
+    assert!(
+        page.contains("This job is over"),
+        "a job that is over offers the mark and no control: {page}"
+    );
+    assert!(
+        page.contains(r#"href="https://github.com/example/aviary""#),
+        "the repository is a link where it is an address: {page}"
+    );
+
+    let missing = running.get(
+        "/projects/00000000-0000-0000-0000-000000000000/jobs/00000000-0000-0000-0000-00000000dead",
+    );
+    assert!(missing.contains("no job here is"), "{missing}");
 }
 
 /// A page learns of change from a tick: a write that lands is told to every

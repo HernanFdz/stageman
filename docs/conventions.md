@@ -496,12 +496,13 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   state and never links; not a *tag* or a *label*, which are what a platform
   calls its own; not a *pill*, which names the shape rather than the thing.
 
-- **mark** — an agent's own symbol, drawn inline at icon size: one per agent
-  this build can run, keyed by the identifier the wire uses for it, with a
-  generic one for an identifier this build does not know. A mark says
-  *whose*; an icon says *what*. Not a *logo*, which is a brand's full lockup
-  and belongs to nobody here; not an *icon*, which is reserved for the one
-  set §3 names.
+- **mark** — somebody's own symbol, drawn inline at icon size: an agent's,
+  one per agent this build can run, keyed by the identifier the wire uses
+  for it, with a generic one for an identifier this build does not know;
+  and since the job page, a platform's and a channel's, for the links a
+  page makes to them, keyed the same way. A mark says *whose*; an icon says
+  *what*. Not a *logo*, which is a brand's full lockup and belongs to nobody
+  here; not an *icon*, which is reserved for the one set §3 names.
 
 - **tick** — what an open page is told when a write of the instance's file
   has landed: that something may have changed, and nothing else — see
@@ -797,8 +798,13 @@ justify is usually obsolete.
   compiles icons by category, so an icon that will not resolve usually means
   a category to add rather than an icon that does not exist, and the cost of a
   category is compile time rather than bundle size, since a browser build
-  strips what nothing draws. An agent is shown by its mark, per §2, vendored
-  as an inline drawing rather than fetched from anywhere.
+  strips what nothing draws. An agent, a platform and a channel are shown by
+  their marks, per §2, vendored as inline drawings rather than fetched from
+  anywhere: a brand's symbol is not the icon set's to draw, and a link that
+  leaves the page says whose it goes to at a glance, where a word would take
+  a glance and a half. A reference that leaves the page is a mark or an
+  icon with the address a hover away, never the address written out — an
+  address is read character by character and a row of them is a wall.
 
 - **A closed set is a control, never a dropdown.** Every set a form here
   chooses from has a handful of members — an agent, a model, an effort, a
@@ -895,16 +901,21 @@ justify is usually obsolete.
   popover, which is for something a person acts in.
 
 - **The shell's header and status line stay in view, and so does a page's
-  own header when the control that commits the page lives in it.** The
-  settings page is longer than a screen, and what a person reaches for
-  after editing the bottom of it is Save, which
+  own header, through one component.** The settings page is longer than a
+  screen, and what a person reaches for after editing the bottom of it is
+  Save, which
   `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md` put
   at the top; a control that has to be scrolled to is a control somebody
-  scrolls past. The navigation, the live mark and the machine are worth
-  seeing from wherever a person has scrolled to, which was the point of
-  making the machine a line rather than a page. Whatever stays in view is
-  opaque and above what scrolls under it, so a tooltip or a popover passes
-  beneath, and below the modal, which is the one thing that covers a page.
+  scrolls past. A job's page is longer than a screen too, and what its
+  header says — which job, and where it is talking and showing — is worth
+  keeping in view over the instruction. The navigation, the live mark and
+  the machine are worth seeing from wherever a person has scrolled to,
+  which was the point of making the machine a line rather than a page. A
+  page that has a header of its own gives it to the one component that
+  stays in view, so that no page sticks while another does not. Whatever
+  stays in view is opaque and above what scrolls under it, so a tooltip or
+  a popover passes beneath, and below the modal, which is the one thing
+  that covers a page.
 
 ## 4. Quality bar beyond the gate
 

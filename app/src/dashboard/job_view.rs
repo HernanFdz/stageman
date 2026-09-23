@@ -1,0 +1,187 @@
+//! One job's page: what it is, what it was told, and where it is talking
+//! and showing.
+//!
+//! The page `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`
+//! gives a job: its reason, the kit it runs on, what its session reported,
+//! the instruction it began from, when it was made, and every reference as a
+//! link where the link is true. It links to where the conversation is and
+//! never carries one, which is what
+//! `docs/decisions/0005-conversation-happens-on-channels.md` decided and
+//! 0070 kept. Icons lead and words follow, per `docs/conventions.md` §3: a
+//! reference that leaves the page is a mark with the address a hover away.
+
+use dioxus::prelude::*;
+#[cfg(feature = "server")]
+use stageman_instance::{Request, Response};
+
+use super::error::{DashboardError, DashboardResult};
+use super::jobs_view::{JobControls, Showing, Toned as _};
+use super::live::Live;
+use super::projects_view::read_as;
+use crate::ui::{Badge, Card, Icon, Info, KitChip, PageHeader, Reference, Skeleton, When};
+
+pub use stageman_wire::JobPage;
+use stageman_wire::{Standing, Working};
+
+/// One job's page.
+///
+/// # Errors
+///
+/// Fails if the project or the job is unknown.
+#[get("/api/projects/{project}/jobs/{job}")]
+pub async fn job_page(project: String, job: String) -> DashboardResult<JobPage> {
+    match super::ask(Request::Job { project, job }).await? {
+        Response::Job(page) => Ok(*page),
+        other => Err(super::unexpected(&other)),
+    }
+}
+
+/// One job's screen.
+#[component]
+pub fn ProjectJobView(project: String, job: String) -> Element {
+    // `use_reactive!` for the reason the project's screen gives: a plain
+    // value is read once, and the screen would keep showing the first job
+    // it was opened on.
+    let live = use_context::<Live>();
+    let reading = use_server_future(use_reactive!(|project, job| {
+        let _ = live.follow();
+        job_page(project, job)
+    }))?;
+    let failure = use_signal(|| None::<DashboardError>);
+
+    rsx! {
+        match reading.cloned() {
+            Some(Ok(page)) => rsx! { Shown { page, failure } },
+            Some(Err(reason)) => rsx! {
+                Card { title: "This job could not be read",
+                    p { class: "text-sm text-failed", "{reason}" }
+                }
+            },
+            None => rsx! { Skeleton {} },
+        }
+    }
+}
+
+/// The page, once read.
+///
+/// The header says which job and where it is talking and showing, and
+/// stays in view over the instruction. The summary says where the job has
+/// got to, with the verbs on it, what it runs on, and when it was made. The
+/// controls are the row's, so that a job is stopped and retired the same
+/// way wherever it is met; the page is live through the tick, so it
+/// re-reads itself once whatever a control did has landed, and only what a
+/// control refused is kept here.
+#[component]
+fn Shown(page: JobPage, failure: Signal<Option<DashboardError>>) -> Element {
+    let mut failure = failure;
+    let (model, effort) = read_as(std::slice::from_ref(&page.shape), &page.fitted);
+    let job = page.job.clone();
+    let reported = job
+        .reported
+        .iter()
+        .map(|(option, value)| format!("{option} {value}"))
+        .collect::<Vec<_>>()
+        .join(" · ");
+
+    rsx! {
+        div { class: "flex flex-col gap-4",
+            PageHeader {
+                div { class: "flex items-center gap-2",
+                    Link {
+                        to: super::Route::ProjectJobsView { project: page.project.clone() },
+                        class: "inline-flex items-center gap-1 text-sm text-muted-foreground \
+                                hover:text-foreground hover:underline",
+                        {Icon::Back.draw(14)}
+                        "{page.project_name}"
+                    }
+                    Reference {
+                        mark: "github",
+                        says: page.repository.clone(),
+                        link: page.repository_link.clone(),
+                    }
+                }
+                div { class: "flex items-center gap-2",
+                    h1 { class: "text-base font-semibold", "{job.reason}" }
+                    // The room is a link while the channel has said where
+                    // its workspace is, and its identifier otherwise.
+                    if let Some(room) = page.room.clone() {
+                        Reference {
+                            mark: "slack",
+                            says: "Its room, {room}",
+                            link: page.room_link.clone(),
+                        }
+                    }
+                    Showing { tunnel: job.tunnel.clone() }
+                }
+            }
+            if let Some(reason) = failure() {
+                p { role: "alert", class: "text-sm text-failed", "{reason}" }
+            }
+
+            Card { title: "Summary",
+                div { class: "flex flex-col gap-3",
+                    // Where it has got to, with what a person does about it
+                    // beside it.
+                    Row { icon: Icon::Standing, says: "Where it has got to",
+                        Badge { tone: job.standing.tone(), "{job.standing.label()}" }
+                        if let Standing::Failed { why } = &job.standing {
+                            span { class: "text-sm text-failed", "{why}" }
+                        }
+                        JobControls {
+                            project: page.project.clone(),
+                            job: job.clone(),
+                            onchanged: move |answered: Result<Working, DashboardError>| {
+                                match answered {
+                                    Ok(_) => failure.set(None),
+                                    Err(reason) => failure.set(Some(reason)),
+                                }
+                            },
+                        }
+                    }
+                    // What it runs on, and — a hover away — what the session
+                    // said it was set to, in the adapter's spelling: the one
+                    // case worth seeing is the two disagreeing.
+                    Row { icon: Icon::Kit, says: "What it runs on",
+                        KitChip {
+                            agent: page.fitted.agent.clone(),
+                            agent_name: page.agent_name,
+                            model,
+                            effort,
+                        }
+                        if !reported.is_empty() {
+                            Info { text: "Its session reported: {reported}" }
+                        }
+                    }
+                    Row { icon: Icon::Made, says: "When it was made",
+                        When { at: job.created_at.clone() }
+                    }
+                }
+            }
+
+            Card {
+                title: "Instruction",
+                info: "What its agent began from — the whole of it, since it is the only record of what was asked.",
+                pre { class: "max-h-[32rem] overflow-auto whitespace-pre-wrap rounded-md bg-surface-muted p-3 font-mono text-xs text-muted-foreground",
+                    "{job.kickoff}"
+                }
+            }
+        }
+    }
+}
+
+/// One line of the summary: an icon saying what, and the thing itself.
+#[component]
+fn Row(icon: Icon, says: String, children: Element) -> Element {
+    rsx! {
+        div { class: "flex items-center gap-3",
+            span {
+                class: "inline-flex shrink-0 items-center text-muted-foreground",
+                role: "img",
+                aria_label: "{says}",
+                title: "{says}",
+                {icon.draw(16)}
+            }
+            div { class: "flex min-w-0 flex-wrap items-center gap-2", {children} }
+        }
+    }
+}

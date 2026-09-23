@@ -538,6 +538,74 @@ fn a_job_started_by_hand_on_a_bound_project_has_its_room_made_first() {
     );
 }
 
+/// A job's page says what the job is and links only what is true: its room
+/// once the channel has said where its workspace is, and nothing for a job
+/// nobody has — see
+/// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+#[test]
+fn a_jobs_page_says_what_it_is_and_links_only_what_is_true() {
+    let mut sim = Simulation::new();
+    sim.holding(&watching_a_channel(&[]));
+    let mut instance = sim.wake(seed(1));
+
+    let Response::Jobs(shown) = ask(
+        &mut sim,
+        &mut instance,
+        1,
+        Request::Start {
+            project: project().to_string(),
+            kit: "Claude".to_owned(),
+            work: "fix the build".to_owned(),
+            at: Timestamp::UNIX_EPOCH,
+        },
+    ) else {
+        panic!("the project's screen");
+    };
+    let started = shown.jobs[0].id.clone();
+
+    let Response::Job(page) = ask(
+        &mut sim,
+        &mut instance,
+        2,
+        Request::Job {
+            project: project().to_string(),
+            job: started.clone(),
+        },
+    ) else {
+        panic!("the job's page");
+    };
+    assert_eq!(page.job.id, started);
+    assert_eq!(page.project, project().to_string());
+    assert_eq!(page.job.standing, Standing::Working);
+    assert_eq!(page.fitted, as_it_comes());
+    assert_eq!(page.agent_name, "Claude");
+    assert!(
+        page.job.kickoff.contains("fix the build"),
+        "{}",
+        page.job.kickoff
+    );
+    let room = page.room.clone().expect("a room was made for it");
+    assert_eq!(
+        page.room_link.as_deref(),
+        Some(format!("https://example.slack.com/archives/{room}").as_str()),
+        "linked from where the channel said its workspace is"
+    );
+
+    let refused = ask(
+        &mut sim,
+        &mut instance,
+        3,
+        Request::Job {
+            project: project().to_string(),
+            job: "00000000-0000-0000-0000-00000000dead".to_owned(),
+        },
+    );
+    assert!(
+        matches!(refused, Response::Refused(Refusal::UnknownJob { .. })),
+        "{refused:?}"
+    );
+}
+
 /// Stopping ends the turn, and the job is paused once the world says it
 /// ended — not before.
 #[test]

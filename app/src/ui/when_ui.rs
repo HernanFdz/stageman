@@ -4,7 +4,8 @@
 //! the relative reading is drawn afterwards — the rule in
 //! `docs/conventions.md` §3: a relative time computed on two clocks is two
 //! strings, which the framework reports as a mismatch. The exact time stays a
-//! hover away.
+//! hover away, spelled the way the browser's own locale spells one once the
+//! page is awake, and as the wire spells it before.
 
 use dioxus::prelude::*;
 
@@ -20,7 +21,7 @@ pub struct WhenProps {
 /// How long ago `at` was, once the page is awake; the moment itself before.
 #[component]
 pub fn When(props: WhenProps) -> Element {
-    let mut elapsed = use_signal(|| None::<u64>);
+    let mut asked_for = use_signal(|| None::<(u64, String)>);
     let at = props.at.clone();
 
     use_effect(move || {
@@ -29,16 +30,19 @@ pub fn When(props: WhenProps) -> Element {
             // On the server there is no evaluator and this is an error, which
             // leaves the exact moment showing.
             let mut asked = document::eval(&asking(&at));
-            if let Ok(seconds) = asked.recv::<u64>().await {
-                elapsed.set(Some(seconds));
+            if let Ok(answered) = asked.recv::<(u64, String)>().await {
+                asked_for.set(Some(answered));
             }
         });
     });
 
-    let shown = elapsed().map_or_else(|| props.at.clone(), ago);
+    let (shown, exact) = asked_for().map_or_else(
+        || (props.at.clone(), props.at.clone()),
+        |(seconds, spelled)| (ago(seconds), spelled),
+    );
 
     rsx! {
-        Tooltip { text: "{props.at}",
+        Tooltip { text: "{exact}",
             time {
                 datetime: "{props.at}",
                 class: "font-mono text-xs text-faint-foreground",
@@ -48,7 +52,8 @@ pub fn When(props: WhenProps) -> Element {
     }
 }
 
-/// What the browser is asked: how many whole seconds ago `at` was.
+/// What the browser is asked: how many whole seconds ago `at` was, and the
+/// moment as the browser's own locale spells one.
 ///
 /// The browser's clock and the browser's parser. The fraction of a second is
 /// dropped first, because not every parser takes six digits of it; whole
@@ -57,8 +62,9 @@ pub fn When(props: WhenProps) -> Element {
 /// never returned, per `docs/conventions.md` §3.
 fn asking(at: &str) -> String {
     format!(
-        "dioxus.send(Math.max(0, Math.floor((Date.now() - \
-         Date.parse({at:?}.replace(/\\.\\d+(?=Z$)/, ''))) / 1000)));"
+        "var at = new Date(Date.parse({at:?}.replace(/\\.\\d+(?=Z$)/, ''))); \
+         dioxus.send([Math.max(0, Math.floor((Date.now() - at.getTime()) / 1000)), \
+         at.toLocaleString(undefined, {{ dateStyle: 'medium', timeStyle: 'short' }})]);"
     )
 }
 
@@ -114,7 +120,7 @@ mod tests {
     #[test]
     fn the_browser_is_asked_by_a_script_that_sends_rather_than_returns() {
         let script = asking("2026-09-15T17:37:05.271648Z");
-        assert!(script.starts_with("dioxus.send("), "{script}");
+        assert!(script.contains("dioxus.send(["), "{script}");
         assert!(!script.contains("return"), "{script}");
         assert!(
             script.contains(r#""2026-09-15T17:37:05.271648Z""#),

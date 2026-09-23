@@ -426,6 +426,16 @@ pub fn permalink(
     }
 }
 
+/// A link to a room, as a person can open it, from where the channel said
+/// its workspace is — what a page links a room by, per
+/// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+#[must_use]
+pub fn room_address(channel: Channel, us: &Identity, room: &str) -> String {
+    match channel {
+        Channel::Slack => slack::room_address(us, room),
+    }
+}
+
 /// A mention of somebody, as the channel renders one inside a message.
 #[must_use]
 pub fn mention(channel: Channel, user: &str) -> String {
@@ -642,8 +652,9 @@ mod tests {
     use super::{
         Call, ChannelError, Identity, Incoming, Reaction, ThreadRead, acknowledgement, archive,
         create_room, decode, done, foreman_room_name, identity, invite, mention, open_socket,
-        permalink, pieces, post, posted, react, reference, referenced, replies, room_created,
-        room_link, room_name, set_purpose, set_topic, socket_url, thread_read, update, who_am_i,
+        permalink, pieces, post, posted, react, reference, referenced, replies, room_address,
+        room_created, room_link, room_name, set_purpose, set_topic, socket_url, thread_read,
+        update, who_am_i,
     };
     use stageman_core::{Channel, JobId, ProjectId, Secret, Speaking, Uuid};
 
@@ -1060,6 +1071,20 @@ mod tests {
             ),
             "https://example.slack.com/archives/C0123456789/p1788000000000100",
             "a thread's parent is linked as itself"
+        );
+    }
+
+    /// A link to a room is a message's link without the message.
+    #[test]
+    fn a_link_to_a_room_is_the_workspaces_address_and_the_room() {
+        let us = Identity {
+            user: "U0BOT".to_owned(),
+            bot: "B0SELF".to_owned(),
+            url: "https://example.slack.com/".to_owned(),
+        };
+        assert_eq!(
+            room_address(Channel::Slack, &us, ROOM),
+            "https://example.slack.com/archives/C0123456789"
         );
     }
 

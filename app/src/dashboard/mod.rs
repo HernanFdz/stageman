@@ -37,6 +37,7 @@
 pub(crate) mod agents_view;
 mod error;
 mod home_view;
+mod job_view;
 mod jobs_view;
 mod live;
 mod project_settings_view;
@@ -50,6 +51,7 @@ use crate::ui::{THEME_SCRIPT, ThemeToggle};
 pub use agents_view::{Agent, AgentsView};
 pub use error::{DashboardError, DashboardResult};
 pub use home_view::{Home, HomeView, ProjectJob};
+pub use job_view::{JobPage, ProjectJobView};
 pub use jobs_view::{Job, ProjectJobsView, Standing, Working};
 pub use live::{Live, LiveMark};
 pub use project_settings_view::{ProjectNewView, ProjectSettingsView};
@@ -121,6 +123,11 @@ pub enum Route {
 
         #[route("/projects/:project/settings")]
         ProjectSettingsView { project: String },
+
+        // A job's page keeps the identifier, since names are not unique —
+        // `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+        #[route("/projects/:project/jobs/:job")]
+        ProjectJobView { project: String, job: String },
 }
 
 /// The whole dashboard.
@@ -136,21 +143,6 @@ pub fn Dashboard() -> Element {
         Router::<Route> {}
     }
 }
-
-/// What a page's own header wears to stay in view under the shell's.
-///
-/// The shell's header is a line of base text with its padding, fourteen
-/// units tall, and a hairline under that; this sits one pixel under the
-/// hairline, deliberately. A gap between the two would show the page
-/// scrolling through it, and an overlap shows nothing, since the shell's
-/// header is above.
-///
-/// The ladder, so that nothing is above what it should be under: what
-/// floats within a page — a tooltip, a popover — is at twenty; a page's
-/// own header at thirty, so those pass beneath it; the shell's header and
-/// status line at forty, above both; and the modal at fifty, above all of
-/// it, since it is the one thing that covers a page.
-pub(crate) const UNDER_SHELL: &str = "sticky top-14 z-30";
 
 /// The frame every screen is drawn in.
 ///

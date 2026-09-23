@@ -6,9 +6,12 @@
 //! decides what the browser calls it. A wire name is a contract, and
 //! deciding it deliberately is the point.
 
+use std::collections::BTreeMap;
+
+use stageman_channel::Identity;
 use stageman_core::{
     Agent, Attending, Channel, ClaudeEffort, ClaudeModel, Inconsistent, Job, JobId, Kit, Outcome,
-    Platform, Progress, Project, ProjectId, RepositoryAddress, State, Waiting,
+    Platform, Progress, Project, ProjectId, RepositoryAddress, Room, State, Waiting,
 };
 use stageman_wire::{Choice, Fitted, KitDraft, ModelChoice, Refusal, Shape, Standing};
 
@@ -213,6 +216,19 @@ pub fn identify(state: &State, identifier: &str) -> Result<ProjectId, Refusal> {
         })
 }
 
+/// Who this instance is on each project's channel, where the channel has
+/// said: what a room is linked from, and held rather than kept — see the
+/// amendment to
+/// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+pub type Identities = BTreeMap<ProjectId, Identity>;
+
+/// A room as an address a person can open, from where the channel said its
+/// workspace is. A caller with no identity to hand links nothing, so that a
+/// page links only what is true.
+fn room_address(us: &Identity, room: &Room) -> String {
+    stageman_channel::room_address(room.channel, us, &room.id)
+}
+
 /// The repository as an address a browser can open, when what a project
 /// holds is one; a project written before addresses were checked may hold
 /// text that is not, which is shown and linked to nothing.
@@ -252,7 +268,11 @@ const fn wire_channel(channel: Channel) -> &'static str {
 
 /// One project, as the browser sees it: identifiers where it sends them back,
 /// names where a person reads them, and never a credential.
-pub fn projected(id: ProjectId, project: &Project) -> stageman_wire::Project {
+pub fn projected(
+    id: ProjectId,
+    project: &Project,
+    us: Option<&Identity>,
+) -> stageman_wire::Project {
     stageman_wire::Project {
         id: id.to_string(),
         name: project.name.clone(),
@@ -286,6 +306,11 @@ pub fn projected(id: ProjectId, project: &Project) -> stageman_wire::Project {
         brief: project.brief.clone(),
         watched: project.watched.iter().map(|room| room.id.clone()).collect(),
         foreman_room: project.foreman_room.as_ref().map(|room| room.id.clone()),
+        foreman_room_link: project
+            .foreman_room
+            .as_ref()
+            .zip(us)
+            .map(|(room, us)| room_address(us, room)),
         attending: !matches!(project.attending, Attending::Idle),
         working: project
             .jobs
@@ -297,11 +322,11 @@ pub fn projected(id: ProjectId, project: &Project) -> stageman_wire::Project {
 }
 
 /// Every project this instance watches.
-pub fn watching(state: &State) -> Vec<stageman_wire::Project> {
+pub fn watching(state: &State, identities: &Identities) -> Vec<stageman_wire::Project> {
     state
         .projects
         .iter()
-        .map(|(id, project)| projected(*id, project))
+        .map(|(id, project)| projected(*id, project, identities.get(id)))
         .collect()
 }
 
@@ -382,6 +407,50 @@ pub fn working(
     })
 }
 
+/// One job's page — see
+/// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+///
+/// # Errors
+///
+/// Fails if nothing is watched under that identifier, or if the project
+/// holds no job under the other.
+pub fn job_page(
+    state: &State,
+    identities: &Identities,
+    project: &str,
+    job: &str,
+    domain: &Domain,
+    serving: u16,
+) -> Result<stageman_wire::JobPage, Refusal> {
+    let identifier = identify(state, project)?;
+    let watched = state
+        .projects
+        .get(&identifier)
+        .ok_or_else(|| Refusal::UnknownProject {
+            id: project.to_owned(),
+        })?;
+    let unknown = || Refusal::UnknownJob { id: job.to_owned() };
+    let named = crate::requests::identify_job(state, identifier, job).ok_or_else(unknown)?;
+    let recorded = watched.jobs.get(&named).ok_or_else(unknown)?;
+    let agent = recorded.kit().agent();
+    Ok(stageman_wire::JobPage {
+        project: identifier.to_string(),
+        project_name: watched.name.clone(),
+        repository: watched.repository.clone(),
+        repository_link: linked(&watched.repository),
+        job: job_view(named, recorded, domain, serving),
+        fitted: fitted(recorded.kit()),
+        agent_name: shown(agent),
+        shape: shape_of(agent),
+        room: recorded.room.as_ref().map(|room| room.id.clone()),
+        room_link: recorded
+            .room
+            .as_ref()
+            .zip(identities.get(&identifier))
+            .map(|(room, us)| room_address(us, room)),
+    })
+}
+
 /// One job, as a page sees it.
 fn job_view(id: JobId, job: &Job, domain: &Domain, serving: u16) -> stageman_wire::Job {
     stageman_wire::Job {
@@ -406,7 +475,12 @@ fn job_view(id: JobId, job: &Job, domain: &Domain, serving: u16) -> stageman_wir
 ///
 /// Ordered by when each job was made, until the moment a standing changed is
 /// recorded: the record asks for it, and it arrives with the job's page.
-pub fn home(state: &State, domain: &Domain, serving: u16) -> stageman_wire::Home {
+pub fn home(
+    state: &State,
+    identities: &Identities,
+    domain: &Domain,
+    serving: u16,
+) -> stageman_wire::Home {
     let mut needs_you = Vec::new();
     let mut working = Vec::new();
     for (project_id, project) in &state.projects {
@@ -428,7 +502,7 @@ pub fn home(state: &State, domain: &Domain, serving: u16) -> stageman_wire::Home
     stageman_wire::Home {
         needs_you,
         working,
-        projects: watching(state),
+        projects: watching(state, identities),
     }
 }
 
@@ -444,9 +518,9 @@ pub fn instance(state: &State, runtime: &str, domain: &Domain) -> stageman_wire:
 
 /// What the projects screen shows: the projects, the agents that may be
 /// named, and the shape of each of those.
-pub fn watching_now(state: &State) -> stageman_wire::Watching {
+pub fn watching_now(state: &State, identities: &Identities) -> stageman_wire::Watching {
     stageman_wire::Watching {
-        projects: watching(state),
+        projects: watching(state, identities),
         available: listed(state)
             .into_iter()
             .filter(|agent| agent.configured)
@@ -708,7 +782,7 @@ mod tests {
                 .insert(JobId::from_uuid(Uuid::from_u128(which)), job);
         }
 
-        let shown = super::projected(ProjectId::from_uuid(Uuid::nil()), watched);
+        let shown = super::projected(ProjectId::from_uuid(Uuid::nil()), watched, None);
         assert_eq!(shown.working, 1);
         assert_eq!(shown.jobs, 3);
         assert_eq!(shown.name, "aviary");
@@ -745,7 +819,7 @@ mod tests {
         }
         let domain = Domain::parse("example.com").expect("a domain");
 
-        let shown = super::home(&state, &domain, 8080);
+        let shown = super::home(&state, &super::Identities::new(), &domain, 8080);
 
         let named = |placed: &[stageman_wire::ProjectJob]| {
             placed
@@ -786,7 +860,7 @@ mod tests {
             id: "C0BT53FM079".to_owned(),
         });
 
-        let shown = super::projected(ProjectId::from_uuid(Uuid::nil()), watched);
+        let shown = super::projected(ProjectId::from_uuid(Uuid::nil()), watched, None);
         assert_eq!(shown.brief, "Ignore alerts below error.");
         assert_eq!(shown.watched, vec!["C0BT53FM079".to_owned()]);
     }

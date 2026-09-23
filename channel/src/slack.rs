@@ -504,6 +504,12 @@ pub fn permalink(us: &Identity, room: &str, message: &str, thread: Option<&str>)
     }
 }
 
+/// A link to a room, as Slack spells one: the workspace's address and the
+/// room, which is a message's link without the message.
+pub fn room_address(us: &Identity, room: &str) -> String {
+    format!("{}/archives/{room}", us.url.trim_end_matches('/'))
+}
+
 /// Where to connect, from the answer to [`open_socket`].
 pub fn socket_url(status: u16, body: &[u8]) -> Result<String, ChannelError> {
     let told = accepted(status, body)?;

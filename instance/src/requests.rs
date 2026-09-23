@@ -78,6 +78,13 @@ pub enum Request {
         /// The project, by identifier.
         project: String,
     },
+    /// One job's page.
+    Job {
+        /// The project, by identifier.
+        project: String,
+        /// The job, by identifier.
+        job: String,
+    },
     /// Start a job on a project.
     Start {
         /// The project, by identifier.
@@ -132,6 +139,11 @@ impl fmt::Debug for Request {
                 .finish(),
             Self::Forget { project } => f.debug_struct("Forget").field("project", project).finish(),
             Self::Jobs { project } => f.debug_struct("Jobs").field("project", project).finish(),
+            Self::Job { project, job } => f
+                .debug_struct("Job")
+                .field("project", project)
+                .field("job", job)
+                .finish(),
             Self::Start {
                 project,
                 kit,
@@ -176,6 +188,9 @@ pub enum Response {
     Projects(stageman_wire::Watching),
     /// One project's screen.
     Jobs(stageman_wire::Working),
+    /// One job's page. Boxed, because a page carries the whole instruction
+    /// and every other answer is a fraction of its size.
+    Job(Box<stageman_wire::JobPage>),
     /// It was not done, and why.
     Refused(Refusal),
 }
@@ -191,17 +206,22 @@ impl Running {
             ))),
             Request::Home => Ok(Response::Home(views::home(
                 &self.state,
+                &self.identities(),
                 &self.domain,
                 self.serving,
             ))),
             Request::Agents => Ok(Response::Agents(views::listed(&self.state))),
             Request::Configure { agent, credential } => self.configure(&agent, &credential),
             Request::ForgetAgent { agent } => self.forget_agent(&agent),
-            Request::Projects => Ok(Response::Projects(views::watching_now(&self.state))),
+            Request::Projects => Ok(Response::Projects(views::watching_now(
+                &self.state,
+                &self.identities(),
+            ))),
             Request::Create { draft } => self.create(&draft),
             Request::Amend { project, draft } => self.amend(&project, &draft),
             Request::Forget { project } => self.forget(&project),
             Request::Jobs { project } => self.jobs(&project),
+            Request::Job { project, job } => self.job_page(&project, &job),
             Request::Start {
                 project,
                 kit,
@@ -300,7 +320,10 @@ impl Running {
         if let Some(question) = self.listen(created) {
             self.defer(question);
         }
-        Ok(Response::Projects(views::watching_now(&self.state)))
+        Ok(Response::Projects(views::watching_now(
+            &self.state,
+            &self.identities(),
+        )))
     }
 
     /// Changes what a project is, leaving what it has done alone.
@@ -336,7 +359,10 @@ impl Running {
             .map_err(|reason| views::from_inconsistent(&reason))?;
         self.state = candidate;
         self.dirty = true;
-        Ok(Response::Projects(views::watching_now(&self.state)))
+        Ok(Response::Projects(views::watching_now(
+            &self.state,
+            &self.identities(),
+        )))
     }
 
     /// Stops watching a repository, and reclaims everything it was holding.
@@ -382,7 +408,10 @@ impl Running {
         }
         self.state.projects.remove(&identifier);
         self.dirty = true;
-        Ok(Response::Projects(views::watching_now(&self.state)))
+        Ok(Response::Projects(views::watching_now(
+            &self.state,
+            &self.identities(),
+        )))
     }
 
     /// One project's screen.
@@ -393,6 +422,28 @@ impl Running {
             &self.domain,
             self.serving,
         )?))
+    }
+
+    /// One job's page.
+    fn job_page(&self, project: &str, job: &str) -> Result<Response, Refusal> {
+        Ok(Response::Job(Box::new(views::job_page(
+            &self.state,
+            &self.identities(),
+            project,
+            job,
+            &self.domain,
+            self.serving,
+        )?)))
+    }
+
+    /// Who this instance is on each project's channel, where the channel
+    /// has said: held by the listener and never kept, so a page links a room
+    /// while the channel is connected and shows its identifier otherwise.
+    fn identities(&self) -> views::Identities {
+        self.listeners
+            .iter()
+            .filter_map(|(id, listener)| listener.us.clone().map(|us| (*id, us)))
+            .collect()
     }
 
     /// Starts a job on a project, by hand.

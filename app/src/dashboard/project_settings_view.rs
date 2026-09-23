@@ -19,14 +19,13 @@
 
 use dioxus::prelude::*;
 
-use super::UNDER_SHELL;
 use super::agents_view::Agent;
 use super::error::DashboardError;
 use super::live::Live;
 use super::projects_view::{amend, create, forget, projects};
 use crate::ui::{
-    BESIDE, Button, ButtonVariant, Card, FIELD, Field, Icon, Modal, Segmented, Skeleton, TextArea,
-    Tooltip,
+    BESIDE, Button, ButtonVariant, Card, FIELD, Field, Icon, Modal, PageHeader, Segmented,
+    Skeleton, TextArea, Tooltip,
 };
 
 pub use stageman_wire::{
@@ -345,23 +344,23 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
         div { class: "flex flex-col gap-4",
             // In view while the page scrolls, because what commits the form
             // is here and the form is longer than a screen —
-            // `docs/conventions.md` §3. Pulled up into the page's own top
-            // padding and given it back, so the page passes under this and
-            // not through a gap above it.
-            div { class: "{UNDER_SHELL} -mt-6 flex items-baseline gap-3 border-b border-border bg-background pt-6 pb-3",
-                h1 { class: "text-base font-semibold",
-                    if creating { "New project" } else { "{name}" }
-                }
-                if !creating {
-                    span { class: "text-sm text-muted-foreground", "settings" }
-                }
-                span { class: "ml-auto flex items-center gap-2",
-                    Link {
-                        to: back,
-                        class: ButtonVariant::Secondary.styled(""),
-                        "Cancel"
+            // `docs/conventions.md` §3.
+            PageHeader {
+                div { class: "flex items-baseline gap-3",
+                    h1 { class: "text-base font-semibold",
+                        if creating { "New project" } else { "{name}" }
                     }
-                    Button { onclick: save, if creating { "Create" } else { "Save" } }
+                    if !creating {
+                        span { class: "text-sm text-muted-foreground", "settings" }
+                    }
+                    span { class: "ml-auto flex items-center gap-2",
+                        Link {
+                            to: back,
+                            class: ButtonVariant::Secondary.styled(""),
+                            "Cancel"
+                        }
+                        Button { onclick: save, if creating { "Create" } else { "Save" } }
+                    }
                 }
             }
             if let Some(reason) = unplaced {
@@ -971,6 +970,7 @@ mod tests {
                 brief: "be careful".to_owned(),
                 watched: Vec::new(),
                 foreman_room: None,
+                foreman_room_link: None,
                 attending: false,
                 working: 0,
                 jobs: 0,

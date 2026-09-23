@@ -20,8 +20,8 @@ use stageman_instance::{Request, Response};
 use super::error::{DashboardError, DashboardResult};
 use super::live::Live;
 use crate::ui::{
-    Badge, BadgeTone, Button, ButtonVariant, Card, EmptyState, Icon, Modal, Skeleton, TextArea,
-    Tooltip, When,
+    Badge, BadgeTone, Button, ButtonVariant, Card, EmptyState, Icon, Modal, Reference, Skeleton,
+    TextArea, Tooltip, When,
 };
 
 pub use stageman_wire::{Ending, Job, Offered, Standing, Working};
@@ -154,21 +154,13 @@ pub fn ProjectJobsView(project: String) -> Element {
                 Some(Ok(working)) => rsx! {
                     Card {
                         title: working.name.clone(),
-                        under: rsx! {
-                            if let Some(link) = working.repository_link.clone() {
-                                a {
-                                    href: "{link}",
-                                    target: "_blank",
-                                    rel: "noopener noreferrer",
-                                    class: "font-mono hover:text-foreground hover:underline",
-                                    "{working.repository}"
-                                }
-                            } else {
-                                span { class: "font-mono", "{working.repository}" }
-                            }
-                        },
                         badge: rsx! {
                             Badge { "{working.jobs.len()}" }
+                            Reference {
+                                mark: "github",
+                                says: working.repository.clone(),
+                                link: working.repository_link.clone(),
+                            }
                         },
                         aside: rsx! {
                             div { class: "flex items-center gap-2",
@@ -282,45 +274,36 @@ pub fn ProjectJobsView(project: String) -> Element {
     }
 }
 
-/// How every icon-only control on a job row is padded.
+/// How every icon-only control on a job's row or page is padded.
 ///
-/// Written once because there are five of them: padded and pulled back, so
-/// the target is bigger than the shape without moving anything around it. The
-/// colour and the hover are the ghost button's.
+/// Written once because there are several of them: padded and pulled back,
+/// so the target is bigger than the shape without moving anything around
+/// it. The colour and the hover are the ghost button's.
 const CONTROL: &str = "-m-1 p-1";
 
-/// One job, as the list shows it.
-///
-/// **Which controls it offers is decided by the standing**, and the two are
-/// deliberately never offered together: a working job can be stopped and not
-/// retired, and every other job can be retired and not stopped. Retiring
-/// destroys the container and the session in it, so putting it beside a
-/// control that keeps both would make the irreversible one a mis-click away —
-/// see `docs/decisions/0053-a-job-is-stopped-or-retired-by-a-person.md`.
-///
-/// A job that is already over offers neither: there is nothing left to stop
-/// and nothing left to reclaim.
+/// One job, as the list shows it: its standing, its reason as the way to
+/// its page, what it ran on and when, and the controls its standing offers.
 #[component]
 fn RanJob(
     job: Job,
     project: String,
     onchanged: EventHandler<Result<Working, DashboardError>>,
 ) -> Element {
-    let mut showing = use_signal(|| false);
-    // Which ending is being confirmed, if one is. Retiring removes the
-    // container and the session in it, so it is asked twice — see
-    // `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
-    let mut confirming = use_signal(|| None::<Ending>);
-    let over = matches!(
-        job.standing,
-        Standing::Done | Standing::Discarded | Standing::Lost
-    );
-
     rsx! {
         div { class: "flex flex-col gap-1.5 py-4 first:pt-0 last:pb-0",
             div { class: "flex items-baseline gap-3",
                 Badge { tone: job.standing.tone(), "{job.standing.label()}" }
-                span { class: "text-sm", "{job.reason}" }
+                // The reason is the way to the job's page, where its
+                // instruction and its links are — see
+                // `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+                Link {
+                    to: super::Route::ProjectJobView {
+                        project: project.clone(),
+                        job: job.id.clone(),
+                    },
+                    class: "text-sm hover:underline",
+                    "{job.reason}"
+                }
                 span { class: "ml-auto flex shrink-0 items-baseline gap-2 font-mono text-xs text-faint-foreground",
                     "{job.kit}"
                     When { at: job.created_at.clone() }
@@ -340,151 +323,168 @@ fn RanJob(
                     {job.reported.iter().map(|(option, value)| format!("{option} {value}")).collect::<Vec<_>>().join(" · ")}
                 }
             }
-            // Icons rather than words, because a row of jobs is a list and a
-            // list reads better as shapes. Every control carries an accessible
-            // name, and its tooltip repeats the name for eyes: an icon-only
-            // control with neither is a puzzle, and the tooltip is the only
-            // thing that says which address the second one goes to.
             div { class: "flex items-center gap-1",
-                Tooltip { text: if showing() { "Hide what it was told" } else { "What it was told" },
+                Showing { tunnel: job.tunnel.clone() }
+                JobControls { project, job, onchanged }
+            }
+        }
+    }
+}
+
+/// The way to what a job is showing, as an arrow leaving a frame.
+///
+/// In a tab of its own, and told to carry nothing there. What is on the
+/// other side is an application this instance's agent wrote, so it gets
+/// neither a handle on the page that opened it nor the address that page
+/// was at. An arrow leaving a frame rather than an eye, and the distinction
+/// is worth keeping: an eye means *reveal this*, and this one navigates
+/// away.
+#[component]
+pub(super) fn Showing(tunnel: String) -> Element {
+    rsx! {
+        Tooltip { text: "Look at what it is showing — {tunnel}",
+            a {
+                class: "{CONTROL} inline-flex items-center rounded-md text-muted-foreground \
+                        hover:bg-surface-muted hover:text-foreground focus-visible:outline-none \
+                        focus-visible:ring-2 focus-visible:ring-primary",
+                href: "{tunnel}",
+                target: "_blank",
+                rel: "noopener noreferrer",
+                aria_label: "Look at what it is showing",
+                {Icon::Look.draw(16)}
+            }
+        }
+    }
+}
+
+/// The controls a job offers, on its row and on its page.
+///
+/// **Which controls it offers is decided by the standing**, and the two are
+/// deliberately never offered together: a working job can be stopped and not
+/// retired, and every other job can be retired and not stopped. Retiring
+/// destroys the container and the session in it, so putting it beside a
+/// control that keeps both would make the irreversible one a mis-click away —
+/// see `docs/decisions/0053-a-job-is-stopped-or-retired-by-a-person.md`.
+///
+/// A job that is already over offers neither: there is nothing left to stop
+/// and nothing left to reclaim.
+#[component]
+pub(super) fn JobControls(
+    project: String,
+    job: Job,
+    onchanged: EventHandler<Result<Working, DashboardError>>,
+) -> Element {
+    // Which ending is being confirmed, if one is. Retiring removes the
+    // container and the session in it, so it is asked twice — see
+    // `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+    let mut confirming = use_signal(|| None::<Ending>);
+    let over = job.standing.is_over();
+
+    rsx! {
+        // Icons rather than words, because a row of jobs is a list and a
+        // list reads better as shapes. Every control carries an accessible
+        // name, and its tooltip repeats the name for eyes: an icon-only
+        // control with neither is a puzzle.
+        div { class: "flex items-center gap-1",
+            // A working job can be stopped, and that is all it can be:
+            // its container is in use and its session is mid-turn.
+            if job.standing == Standing::Working {
+                Tooltip { text: "Stop it — the job keeps everything and can be given more",
                     Button {
                         variant: ButtonVariant::Ghost,
                         class: CONTROL,
-                        onclick: move |_| showing.toggle(),
-                        aria_label: if showing() { "Hide what it was told" } else { "What it was told" },
-                        if showing() {
-                            {Icon::Hide.draw(16)}
-                        } else {
-                            {Icon::Reveal.draw(16)}
-                        }
-                    }
-                }
-                // In a tab of its own, and told to carry nothing there. What
-                // is on the other side is an application this instance's agent
-                // wrote, so it gets neither a handle on the page that opened
-                // it nor the address that page was at.
-                //
-                // An arrow leaving a frame rather than an eye, and the
-                // distinction is worth keeping: an eye means *reveal this*, as
-                // the control beside it does, and this one navigates away.
-                Tooltip { text: "Look at what it is showing — {job.tunnel}",
-                    a {
-                        class: "{CONTROL} inline-flex items-center rounded-md text-muted-foreground \
-                                hover:bg-surface-muted hover:text-foreground focus-visible:outline-none \
-                                focus-visible:ring-2 focus-visible:ring-primary",
-                        href: "{job.tunnel}",
-                        target: "_blank",
-                        rel: "noopener noreferrer",
-                        aria_label: "Look at what it is showing",
-                        {Icon::Look.draw(16)}
-                    }
-                }
-                // A working job can be stopped, and that is all it can be:
-                // its container is in use and its session is mid-turn.
-                if job.standing == Standing::Working {
-                    Tooltip { text: "Stop it — the job keeps everything and can be given more",
-                        Button {
-                            variant: ButtonVariant::Ghost,
-                            class: CONTROL,
-                            aria_label: "Stop it",
-                            onclick: {
+                        aria_label: "Stop it",
+                        onclick: {
+                            let project = project.clone();
+                            let id = job.id.clone();
+                            move |_| {
                                 let project = project.clone();
-                                let id = job.id.clone();
+                                let id = id.clone();
+                                async move { onchanged.call(stop(project, id).await) }
+                            }
+                        },
+                        {Icon::Stop.draw(16)}
+                    }
+                }
+            }
+            // And a job that has stopped can be ended, either way. Two
+            // controls rather than one with a choice behind it, because
+            // the verdict is the whole of what is being recorded.
+            if !over && job.standing != Standing::Working {
+                Tooltip { text: "It is done — removes its container and everything in it",
+                    Button {
+                        variant: ButtonVariant::Ghost,
+                        class: CONTROL,
+                        aria_label: "It is done",
+                        onclick: move |_| confirming.set(Some(Ending::Done)),
+                        {Icon::Done.draw(16)}
+                    }
+                }
+                Tooltip { text: "Discard it — removes its container and everything in it",
+                    Button {
+                        variant: ButtonVariant::Ghost,
+                        class: CONTROL,
+                        aria_label: "Discard it",
+                        onclick: move |_| confirming.set(Some(Ending::Discarded)),
+                        {Icon::Discard.draw(16)}
+                    }
+                }
+            }
+            if let Some(ending) = confirming() {
+                Modal {
+                    title: match ending {
+                        Ending::Done => "Retire this job as done?",
+                        Ending::Discarded => "Discard this job?",
+                    },
+                    onclose: move |()| confirming.set(None),
+                    actions: rsx! {
+                        Button {
+                            variant: match ending {
+                                Ending::Done => ButtonVariant::Primary,
+                                Ending::Discarded => ButtonVariant::Danger,
+                            },
+                            onclick: {
+                                // Moved rather than cloned: the last
+                                // control on the row is the last thing
+                                // that wants it.
+                                let project = project;
+                                let id = job.id;
                                 move |_| {
                                     let project = project.clone();
                                     let id = id.clone();
-                                    async move { onchanged.call(stop(project, id).await) }
+                                    confirming.set(None);
+                                    async move {
+                                        onchanged.call(retire(project, id, ending).await);
+                                    }
                                 }
                             },
-                            {Icon::Stop.draw(16)}
-                        }
-                    }
-                }
-                // And a job that has stopped can be ended, either way. Two
-                // controls rather than one with a choice behind it, because
-                // the verdict is the whole of what is being recorded.
-                if !over && job.standing != Standing::Working {
-                    Tooltip { text: "It is done — removes its container and everything in it",
-                        Button {
-                            variant: ButtonVariant::Ghost,
-                            class: CONTROL,
-                            aria_label: "It is done",
-                            onclick: move |_| confirming.set(Some(Ending::Done)),
-                            {Icon::Done.draw(16)}
-                        }
-                    }
-                    Tooltip { text: "Discard it — removes its container and everything in it",
-                        Button {
-                            variant: ButtonVariant::Ghost,
-                            class: CONTROL,
-                            aria_label: "Discard it",
-                            onclick: move |_| confirming.set(Some(Ending::Discarded)),
-                            {Icon::Discard.draw(16)}
-                        }
-                    }
-                }
-                if let Some(ending) = confirming() {
-                    Modal {
-                        title: match ending {
-                            Ending::Done => "Retire this job as done?",
-                            Ending::Discarded => "Discard this job?",
-                        },
-                        onclose: move |()| confirming.set(None),
-                        actions: rsx! {
-                            Button {
-                                variant: match ending {
-                                    Ending::Done => ButtonVariant::Primary,
-                                    Ending::Discarded => ButtonVariant::Danger,
-                                },
-                                onclick: {
-                                    // Moved rather than cloned: the last
-                                    // control on the row is the last thing
-                                    // that wants it.
-                                    let project = project;
-                                    let id = job.id.clone();
-                                    move |_| {
-                                        let project = project.clone();
-                                        let id = id.clone();
-                                        confirming.set(None);
-                                        async move {
-                                            onchanged.call(retire(project, id, ending).await);
-                                        }
-                                    }
-                                },
-                                match ending {
-                                    Ending::Done => "Retire",
-                                    Ending::Discarded => "Discard",
-                                }
-                            }
-                        },
-                        p { class: "text-sm text-muted-foreground",
-                            "Its container and everything in it are removed, and the job stays in \
-                             the list as "
                             match ending {
-                                Ending::Done => "done",
-                                Ending::Discarded => "discarded",
+                                Ending::Done => "Retire",
+                                Ending::Discarded => "Discard",
                             }
-                            ". Nothing on the platform changes."
                         }
+                    },
+                    p { class: "text-sm text-muted-foreground",
+                        "Its container and everything in it are removed, and the job stays in \
+                         the list as "
+                        match ending {
+                            Ending::Done => "done",
+                            Ending::Discarded => "discarded",
+                        }
+                        ". Nothing on the platform changes."
                     }
                 }
-                if over {
-                    Tooltip { text: "This job is over — its container and session are gone",
-                        span {
-                            class: "{CONTROL} inline-flex text-faint-foreground",
-                            // Reachable by keyboard, so the tooltip can be
-                            // asked for without a mouse: nothing else on the
-                            // row says what the shape means.
-                            tabindex: "0",
-                            aria_label: "This job is over",
-                            {Icon::Over.draw(16)}
-                        }
-                    }
-                }
-                if showing() {
-                    pre { class: "mt-1.5 max-h-64 overflow-auto whitespace-pre-wrap rounded-md \
-                                  bg-surface-muted p-3 font-mono text-xs text-muted-foreground",
-                        "{job.kickoff}"
+            }
+            if over {
+                Tooltip { text: "This job is over — its container and session are gone",
+                    span {
+                        class: "{CONTROL} inline-flex text-faint-foreground",
+                        // Reachable by keyboard, so the tooltip can be
+                        // asked for without a mouse: nothing else on the
+                        // row says what the shape means.
+                        tabindex: "0",
+                        aria_label: "This job is over",
+                        {Icon::Over.draw(16)}
                     }
                 }
             }

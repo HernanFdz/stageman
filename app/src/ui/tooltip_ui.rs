@@ -37,8 +37,11 @@ pub fn Tooltip(props: TooltipProps) -> Element {
                 // Below the control, centred on it, and a moment late: a
                 // tooltip that appears the instant a pointer crosses a row of
                 // controls is five tooltips in a row.
+                // Kept on the lines it was given and never wrapped: one
+                // line for a name, and a line per item where a caller
+                // lists a few.
                 class: "pointer-events-none absolute left-1/2 top-full z-20 mt-1.5 -translate-x-1/2 \
-                        whitespace-nowrap rounded-md border border-border bg-surface px-2 py-1 \
+                        whitespace-pre rounded-md border border-border bg-surface px-2 py-1 \
                         text-xs text-foreground shadow-md opacity-0 delay-150 \
                         motion-safe:transition-opacity group-hover:opacity-100 \
                         group-has-[:focus-visible]:opacity-100",

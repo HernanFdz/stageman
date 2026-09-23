@@ -16,7 +16,7 @@ use stageman_instance::{Request, Response};
 use super::error::DashboardResult;
 use super::jobs_view::Toned as _;
 use super::live::Live;
-use crate::ui::{Badge, BadgeTone, Card, EmptyState, Icon, Skeleton, Tooltip, When};
+use crate::ui::{Badge, BadgeTone, Card, EmptyState, Icon, Reference, Skeleton, Tooltip, When};
 
 pub use stageman_wire::{Home, Project, ProjectJob};
 
@@ -147,8 +147,9 @@ fn Overview(home: Home) -> Element {
 /// One job on the first page: its standing, its project, its reason, and the
 /// verb its standing wants, if any.
 ///
-/// The verb leads to the project's page, where the job's controls are, until
-/// a job has a page of its own.
+/// The verb leads to the job's page, where its controls, its instruction
+/// and its links are, and so does the reason; the project's name leads to
+/// the project.
 #[component]
 fn Placed(placed: ProjectJob) -> Element {
     let ProjectJob {
@@ -156,23 +157,33 @@ fn Placed(placed: ProjectJob) -> Element {
         project_name,
         job,
     } = placed;
-    let to = super::Route::ProjectJobsView { project };
+    let to_project = super::Route::ProjectJobsView {
+        project: project.clone(),
+    };
+    let to_job = super::Route::ProjectJobView {
+        project,
+        job: job.id.clone(),
+    };
 
     rsx! {
         div { class: "flex items-baseline gap-3 py-3 first:pt-0 last:pb-0",
             Badge { tone: job.standing.tone(), "{job.standing.label()}" }
             Link {
-                to: to.clone(),
+                to: to_project,
                 class: "shrink-0 text-sm font-medium hover:underline",
                 "{project_name}"
             }
-            span { class: "truncate text-sm text-muted-foreground", "{job.reason}" }
+            Link {
+                to: to_job.clone(),
+                class: "truncate text-sm text-muted-foreground hover:text-foreground hover:underline",
+                "{job.reason}"
+            }
             span { class: "ml-auto flex shrink-0 items-baseline gap-3",
                 span { class: "font-mono text-xs text-faint-foreground", "{job.kit}" }
                 When { at: job.created_at.clone() }
                 if let Some(verb) = job.standing.asks() {
                     Link {
-                        to,
+                        to: to_job,
                         class: "text-xs font-medium text-primary hover:underline",
                         "{verb}"
                     }
@@ -193,18 +204,10 @@ fn Watched(project: Project) -> Element {
                 class: "text-sm font-medium hover:underline",
                 "{project.name}"
             }
-            if let Some(link) = project.repository_link {
-                a {
-                    href: "{link}",
-                    target: "_blank",
-                    rel: "noopener noreferrer",
-                    class: "truncate font-mono text-xs text-faint-foreground hover:text-foreground hover:underline",
-                    "{project.repository}"
-                }
-            } else {
-                span { class: "truncate font-mono text-xs text-faint-foreground",
-                    "{project.repository}"
-                }
+            Reference {
+                mark: "github",
+                says: project.repository.clone(),
+                link: project.repository_link.clone(),
             }
             span { class: "ml-auto flex shrink-0 items-center gap-2",
                 if project.attending {

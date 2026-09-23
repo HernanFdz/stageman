@@ -124,6 +124,10 @@ pub struct Project {
     /// The room its foreman's transcript is posted in, by the platform's
     /// identifier, once one has been made.
     pub foreman_room: Option<String>,
+    /// The same, as an address a person can open, while the channel is
+    /// connected and has said where its workspace is — see
+    /// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+    pub foreman_room_link: Option<String>,
     /// Whether its foreman is on a message right now.
     pub attending: bool,
     /// How many of its jobs are still running.
@@ -582,6 +586,37 @@ pub struct Job {
     /// promises nothing: the port is published when the container is
     /// created, whether or not the agent ever uses it.
     pub tunnel: String,
+}
+
+/// One job's page: the job, the project it is on, and what the page links to.
+///
+/// See `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+/// A link is present only where it is true: a repository that is an address,
+/// a room while the channel has said where its workspace is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobPage {
+    /// The project, by identifier.
+    pub project: String,
+    /// The project, by name.
+    pub project_name: String,
+    /// Where its jobs work.
+    pub repository: String,
+    /// The same, as an address a browser can open, when what it holds is one.
+    pub repository_link: Option<String>,
+    /// The job, as a list shows it.
+    pub job: Job,
+    /// What it runs on, as the identifiers a chip is drawn from.
+    pub fitted: Fitted,
+    /// Its agent, as a person reads it.
+    pub agent_name: String,
+    /// The shape of that agent, which names the model and the effort.
+    pub shape: Shape,
+    /// The room its conversation happens in, by the platform's identifier,
+    /// once one has been made.
+    pub room: Option<String>,
+    /// The same, as an address a person can open, while the channel is
+    /// connected and has said where its workspace is.
+    pub room_link: Option<String>,
 }
 
 /// One kit a project offers, as much of it as a page needs to offer it back.
@@ -1250,6 +1285,7 @@ mod tests {
             brief: String::new(),
             watched: Vec::new(),
             foreman_room: None,
+            foreman_room_link: None,
             attending: false,
             working: 0,
             jobs: 3,

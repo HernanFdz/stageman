@@ -12,6 +12,17 @@ among the smaller things the room design made cheap.
 `docs/decisions/0072-the-dashboard-has-a-dark-theme.md` are taken beside it;
 the first is what makes any page here worth leaving open.
 
+Amended when the job page was built. The workspace's address is what the
+channel already asks on every connection and holds, rather than something
+kept on the binding: a room is a link while the channel is connected and
+text otherwise, which is the rule the tunnel is under and costs no field.
+And the tunnel is shown whether or not something answers on it, for now:
+the instance probes an idle job's tunnel to decide its container's fate and
+keeps no fact of the answer, and never probes a working one, so showing it
+only while something answers waits on the instance keeping that fact —
+taken up with the moment a standing changed, which is the other fact this
+record asks it to keep.
+
 ## Context
 
 Four pages, flat: the instance, the agents, the projects, and one project's

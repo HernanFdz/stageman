@@ -296,8 +296,10 @@ one offers and set the credentials each one needs, watch jobs and read their
 logs, and pause or kill one that has gone wrong. A page you leave open
 updates itself as the instance changes, and a mark in its header says whether
 it is live. Each project has a settings page, and a new project is that page
-with nothing filled in. It follows your system's light or dark look, and a
-control in its header pins either one. A
+with nothing filled in. Each job has a page of its own: what it was told, what
+it ran on, and links to its channel and to what it is showing. It follows
+your system's light or dark look, and a control in its header pins either
+one. A
 single instance manages several projects, and a job belongs to exactly one of
 them: it cannot see another project's repository, credentials or channels.
 
