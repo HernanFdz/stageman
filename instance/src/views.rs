@@ -178,22 +178,20 @@ pub fn shape_of(agent: Agent) -> Shape {
     }
 }
 
-/// A kit in the words a person reads on a job's row: the agent, and whatever
-/// differs from the agent's own defaults.
-pub fn described(kit: &Kit) -> String {
+/// A kit as a chip is drawn from it: the agent by identifier and by name,
+/// the model by name, and the effort by spelling and name where the model
+/// takes one — resolved here, because a job's kit is only ever read.
+pub fn kit_shown(kit: &Kit) -> stageman_wire::Kit {
     match kit {
-        Kit::Claude { model } => {
-            let mut parts = vec![wire_name(Agent::Claude).1.to_owned()];
-            if !matches!(model, ClaudeModel::Default { .. }) {
-                parts.push(wire_model(*model).1.to_owned());
-            }
-            if let Some(effort) = model.effort()
-                && effort != ClaudeEffort::Default
-            {
-                parts.push(wire_effort(effort).1.to_lowercase());
-            }
-            parts.join(" · ")
-        }
+        Kit::Claude { model } => stageman_wire::Kit {
+            agent: wire_name(Agent::Claude).0.to_owned(),
+            agent_name: wire_name(Agent::Claude).1.to_owned(),
+            model: wire_model(*model).1.to_owned(),
+            effort: model.effort().map(|effort| {
+                let (spelled, name) = wire_effort(effort);
+                (spelled.to_owned(), name.to_owned())
+            }),
+        },
     }
 }
 
@@ -372,6 +370,7 @@ pub fn standing(progress: &Progress) -> Standing {
 /// Fails if nothing is watched under that identifier.
 pub fn working(
     state: &State,
+    identities: &Identities,
     project: &str,
     domain: &Domain,
     serving: u16,
@@ -383,11 +382,12 @@ pub fn working(
         .ok_or_else(|| Refusal::UnknownProject {
             id: project.to_owned(),
         })?;
+    let us = identities.get(&identifier);
 
     let mut jobs: Vec<stageman_wire::Job> = watched
         .jobs
         .iter()
-        .map(|(id, job)| job_view(id, job, &watched.repository, domain, serving))
+        .map(|(id, job)| job_view(id, job, &watched.repository, us, domain, serving))
         .collect();
     jobs.sort_by(|one, other| other.created_at.cmp(&one.created_at));
 
@@ -432,22 +432,19 @@ pub fn job_page(
     let unknown = || Refusal::UnknownJob { id: job.to_owned() };
     let named = crate::requests::identify_job(state, identifier, job).ok_or_else(unknown)?;
     let recorded = watched.jobs.get(&named).ok_or_else(unknown)?;
-    let agent = recorded.kit().agent();
     Ok(stageman_wire::JobPage {
         project: identifier.to_string(),
         project_name: watched.name.clone(),
         repository: watched.repository.clone(),
         repository_link: linked(&watched.repository),
-        job: job_view(&named, recorded, &watched.repository, domain, serving),
-        fitted: fitted(recorded.kit()),
-        agent_name: shown(agent),
-        shape: shape_of(agent),
-        room: recorded.room.as_ref().map(|room| room.id.clone()),
-        room_link: recorded
-            .room
-            .as_ref()
-            .zip(identities.get(&identifier))
-            .map(|(room, us)| room_address(us, room)),
+        job: job_view(
+            &named,
+            recorded,
+            &watched.repository,
+            identities.get(&identifier),
+            domain,
+            serving,
+        ),
     })
 }
 
@@ -461,17 +458,19 @@ pub fn pull_request_link(repository: &str, number: u64) -> Option<String> {
         .map(|address| format!("{}/pull/{number}", address.https()))
 }
 
-/// One job, as a page sees it.
+/// One job, as a page sees it: with its room as a link where the channel
+/// has said where its workspace is, and as its identifier otherwise.
 fn job_view(
     id: &JobId,
     job: &Job,
     repository: &str,
+    us: Option<&Identity>,
     domain: &Domain,
     serving: u16,
 ) -> stageman_wire::Job {
     stageman_wire::Job {
         id: id.to_string(),
-        kit: described(job.kit()),
+        kit: kit_shown(job.kit()),
         reported: job
             .reported
             .iter()
@@ -483,6 +482,12 @@ fn job_view(
         standing: standing(&job.progress),
         since: job.since.map(|moment| moment.to_string()),
         tunnel: address(domain, id, serving),
+        room: job.room.as_ref().map(|room| room.id.clone()),
+        room_link: job
+            .room
+            .as_ref()
+            .zip(us)
+            .map(|(room, us)| room_address(us, room)),
         pull_requests: job
             .pull_requests
             .iter()
@@ -529,7 +534,14 @@ pub fn home(
         stageman_wire::ProjectJob {
             project: project_id.to_string(),
             project_name: project.name.clone(),
-            job: job_view(id, job, &project.repository, domain, serving),
+            job: job_view(
+                id,
+                job,
+                &project.repository,
+                identities.get(&project_id),
+                domain,
+                serving,
+            ),
         }
     };
     stageman_wire::Home {
@@ -579,8 +591,8 @@ pub fn from_inconsistent(reason: &Inconsistent) -> Refusal {
 #[cfg(test)]
 mod tests {
     use super::{
-        Domain, dependents, described, fitted, identify, kit_of, listed, named, shape_of, shown,
-        standing, wire_channel, wire_name, wire_platform, working,
+        Domain, Identities, dependents, fitted, identify, kit_of, kit_shown, listed, named,
+        shape_of, shown, standing, wire_channel, wire_name, wire_platform, working,
     };
     use stageman_core::{
         Agent, AgentConfig, ClaudeEffort, ClaudeModel, Job, JobId, Kit, KitConfig, KitName,
@@ -686,30 +698,35 @@ mod tests {
         );
     }
 
+    /// A job's kit is shown with every name a chip needs, resolved here:
+    /// the agent by identifier and name, the model by name, and the effort
+    /// by spelling and name where the model takes one.
     #[test]
-    fn a_kit_is_described_by_what_differs_from_the_defaults() {
-        assert_eq!(described(&Kit::defaults(Agent::Claude)), "Claude");
+    fn a_kit_is_shown_with_its_names_resolved() {
+        let shown = kit_shown(&Kit::Claude {
+            model: ClaudeModel::Opus {
+                effort: ClaudeEffort::XHigh,
+            },
+        });
+        assert_eq!(shown.agent, "claude");
+        assert_eq!(shown.agent_name, "Claude");
+        assert_eq!(shown.model, "Opus");
         assert_eq!(
-            described(&Kit::Claude {
-                model: ClaudeModel::Opus {
-                    effort: ClaudeEffort::XHigh,
-                },
-            }),
-            "Claude · Opus · extra high"
+            shown.effort,
+            Some(("xhigh".to_owned(), "Extra high".to_owned()))
         );
         assert_eq!(
-            described(&Kit::Claude {
+            kit_shown(&Kit::defaults(Agent::Claude)).effort,
+            Some(("default".to_owned(), "Default".to_owned())),
+            "the agent's own default is a spelling the chip knows to leave unmetered"
+        );
+        assert_eq!(
+            kit_shown(&Kit::Claude {
                 model: ClaudeModel::Haiku,
-            }),
-            "Claude · Haiku"
-        );
-        assert_eq!(
-            described(&Kit::Claude {
-                model: ClaudeModel::Default {
-                    effort: ClaudeEffort::Low,
-                },
-            }),
-            "Claude · low"
+            })
+            .effort,
+            None,
+            "a model that takes no effort shows none"
         );
     }
 
@@ -996,7 +1013,14 @@ mod tests {
         state.projects.insert(project, watched);
 
         let domain = Domain::parse("example.com").expect("a domain");
-        let shown = working(&state, &project.to_string(), &domain, 8080).expect("watched");
+        let shown = working(
+            &state,
+            &Identities::new(),
+            &project.to_string(),
+            &domain,
+            8080,
+        )
+        .expect("watched");
         assert_eq!(shown.jobs.len(), 2);
         for job in &shown.jobs {
             assert_eq!(job.tunnel, format!("https://{}.example.com", job.id));
@@ -1004,7 +1028,7 @@ mod tests {
         }
         assert_eq!(shown.kits.len(), 1);
         assert!(
-            working(&state, "nope", &domain, 8080).is_err(),
+            working(&state, &Identities::new(), "nope", &domain, 8080).is_err(),
             "a project nobody watches"
         );
     }

@@ -935,6 +935,52 @@ justify is usually obsolete.
   a popover passes beneath, and below the modal, which is the one thing
   that covers a page.
 
+- **A job's row is two lines, titled by its name.** The standing badge and
+  the kit chip share the first column, and the column is the list's rather
+  than the row's — a subgrid — so that it is one width down the whole list
+  and every title starts at the same place, while a badge stays as wide as
+  its word. The name, with the room's mark and the tunnel beside it while
+  the job is not over, since nothing can answer on the tunnel of one that
+  is, and then the pull requests share the second column; what a person does
+  about the job sits at the right end of the first line and how long it has
+  been so at the right end of the second. The reason is a hover away on the
+  row and a paragraph of the page's kickoff, because it is prose about why
+  and reads badly as a title, which is what the rows carried before
+  `docs/decisions/0074-a-jobs-identifier-is-its-name.md`. What the session
+  reported it was set to is the page's alone: the one case worth seeing is
+  a disagreement with the kit, and a list is not where anybody hunts for
+  one. One component draws the row wherever a job is listed, on Home with
+  the project's name before the job's and the verb its standing wants at the
+  end, and on a project's page with the controls there instead, so that a
+  job looks the same wherever it is met.
+
+- **A job's page keeps its instruction folded, under its reason.** The two
+  are one card, the kickoff: the reason is a paragraph a person reads, and
+  the whole instruction is the only record of what was asked, so it is there
+  and closed until asked for. The trigger sits where the instruction
+  appears, under the reason, says what it opens, and is a disclosure rather
+  than a script: it works before the page wakes and from the keyboard, and
+  the browser keeps it open across the re-reads a tick causes. Not a
+  control in the card's title line, which is the near-miss worth recording:
+  a trigger parted from what it reveals is the one nobody finds.
+
+- **One colour signal per row, and one primary action.** The standing badge
+  is the row's colour. A control is muted until hovered or focused, and
+  takes its colour then: the verdict that keeps in the primary green, the
+  one that discards in the failed red, so that a column of controls never
+  reads as a column of alarms. Not tinted at rest, which is the near-miss
+  worth recording: a discard control in the failed red on every idle row is
+  the red a person scans for, and there is nothing behind it.
+
+- **Targets never overlap, and siblings keep eight pixels between them.** An
+  icon-only control is a target of at least twenty-four pixels a side, and a
+  gap between two of them is a gap between their targets and not between
+  their glyphs: adjacent controls were measured intersecting by four, which
+  is the awkwardness of a control that is hit from its neighbour. More
+  between groups than within them, and no divider inside a pair that is one
+  decision — done or discarded is a verdict — since what needs parting is
+  the pair from everything else.
+
 ## 4. Quality bar beyond the gate
 
 `AGENTS.md` carries the bar the gate enforces mechanically. This is for the part

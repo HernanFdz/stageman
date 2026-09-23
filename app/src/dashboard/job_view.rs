@@ -9,6 +9,10 @@
 //! `docs/decisions/0005-conversation-happens-on-channels.md` decided and
 //! 0070 kept. Icons lead and words follow, per `docs/conventions.md` §3: a
 //! reference that leaves the page is a mark with the address a hover away.
+//! It is headed by the job's name, per
+//! `docs/decisions/0074-a-jobs-identifier-is-its-name.md`; the reason and
+//! the instruction are the kickoff, one card, with the instruction folded
+//! away until asked for.
 
 use dioxus::prelude::*;
 #[cfg(feature = "server")]
@@ -17,7 +21,6 @@ use stageman_instance::{Request, Response};
 use super::error::{DashboardError, DashboardResult};
 use super::jobs_view::{JobControls, Showing, Toned as _};
 use super::live::Live;
-use super::projects_view::read_as;
 use crate::ui::{Badge, Card, Chip, Icon, Info, KitChip, PageHeader, Reference, Skeleton, When};
 
 pub use stageman_wire::JobPage;
@@ -65,8 +68,8 @@ pub fn ProjectJobView(project: String, job: String) -> Element {
 /// The page, once read.
 ///
 /// The header says which job and where it is talking and showing, and
-/// stays in view over the instruction. The summary says where the job has
-/// got to, with the verbs on it, what it runs on, and when it was made. The
+/// stays in view over the kickoff. The summary says where the job has got
+/// to, with the verbs on it, what it runs on, and when it was made. The
 /// controls are the row's, so that a job is stopped and retired the same
 /// way wherever it is met; the page is live through the tick, so it
 /// re-reads itself once whatever a control did has landed, and only what a
@@ -74,7 +77,6 @@ pub fn ProjectJobView(project: String, job: String) -> Element {
 #[component]
 fn Shown(page: JobPage, failure: Signal<Option<DashboardError>>) -> Element {
     let mut failure = failure;
-    let (model, effort) = read_as(std::slice::from_ref(&page.shape), &page.fitted);
     let job = page.job.clone();
     let reported = job
         .reported
@@ -101,17 +103,22 @@ fn Shown(page: JobPage, failure: Signal<Option<DashboardError>>) -> Element {
                     }
                 }
                 div { class: "flex items-center gap-2",
-                    h1 { class: "text-base font-semibold", "{job.reason}" }
+                    // Its name, in the face identifiers wear here.
+                    h1 { class: "font-mono text-base font-semibold", "{job.id}" }
                     // The room is a link while the channel has said where
                     // its workspace is, and its identifier otherwise.
-                    if let Some(room) = page.room.clone() {
+                    if let Some(room) = job.room.clone() {
                         Reference {
                             mark: "slack",
                             says: "Its room, {room}",
-                            link: page.room_link.clone(),
+                            link: job.room_link.clone(),
                         }
                     }
-                    Showing { tunnel: job.tunnel.clone() }
+                    // Nothing can answer on the tunnel of a job that is
+                    // over, so none is offered.
+                    if !job.standing.is_over() {
+                        Showing { tunnel: job.tunnel.clone() }
+                    }
                 }
             }
             if let Some(reason) = failure() {
@@ -133,7 +140,7 @@ fn Shown(page: JobPage, failure: Signal<Option<DashboardError>>) -> Element {
                             span { class: "text-sm text-failed", "{why}" }
                         }
                         JobControls {
-                            project: page.project.clone(),
+                            project: page.project,
                             job: job.clone(),
                             onchanged: move |answered: Result<Working, DashboardError>| {
                                 match answered {
@@ -148,10 +155,10 @@ fn Shown(page: JobPage, failure: Signal<Option<DashboardError>>) -> Element {
                     // case worth seeing is the two disagreeing.
                     Row { icon: Icon::Kit, says: "What it runs on",
                         KitChip {
-                            agent: page.fitted.agent.clone(),
-                            agent_name: page.agent_name,
-                            model,
-                            effort,
+                            agent: job.kit.agent.clone(),
+                            agent_name: job.kit.agent_name.clone(),
+                            model: job.kit.model.clone(),
+                            effort: job.kit.effort.clone(),
                         }
                         if !reported.is_empty() {
                             Info { text: "Its session reported: {reported}" }
@@ -173,11 +180,36 @@ fn Shown(page: JobPage, failure: Signal<Option<DashboardError>>) -> Element {
                 }
             }
 
+            // Why it was started and what its agent was told, together: the
+            // reason is a paragraph a person reads, and the instruction is
+            // the whole record of what was asked, folded until asked for.
+            // The trigger is where the instruction appears, under the
+            // reason, and says what it opens; a disclosure rather than a
+            // script, so it works before the page wakes and from the
+            // keyboard.
             Card {
-                title: "Instruction",
-                info: "What its agent began from — the whole of it, since it is the only record of what was asked.",
-                pre { class: "max-h-[32rem] overflow-auto whitespace-pre-wrap rounded-md bg-surface-muted p-3 font-mono text-xs text-muted-foreground",
-                    "{job.kickoff}"
+                title: "Kickoff",
+                note: "Why it was started, and what its agent began from.",
+                div { class: "flex flex-col gap-3",
+                    p { class: "text-sm", "{job.reason}" }
+                    details { class: "group",
+                        summary {
+                            class: "flex w-fit cursor-pointer list-none items-center gap-1.5 rounded-md text-xs \
+                                    font-medium text-muted-foreground hover:text-foreground \
+                                    focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary \
+                                    focus-visible:ring-offset-2 focus-visible:ring-offset-background \
+                                    [&::-webkit-details-marker]:hidden",
+                            span {
+                                class: "inline-flex motion-safe:transition-transform group-open:rotate-90",
+                                aria_hidden: "true",
+                                {Icon::Disclose.draw(14)}
+                            }
+                            "The whole instruction"
+                        }
+                        pre { class: "mt-3 max-h-[32rem] overflow-auto whitespace-pre-wrap rounded-md bg-surface-muted p-3 font-mono text-xs text-muted-foreground",
+                            "{job.kickoff}"
+                        }
+                    }
                 }
             }
         }

@@ -327,6 +327,34 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   instance's, labelled as containers are, which means two instances build
   the same image twice.
 
+- **Should a job's kickoff be kept as its parts rather than as one text?**
+  The instruction a job's agent begins from is composed by the foreman crate
+  from parts with different jobs: the work, the repository, where the tunnel
+  is, which variables are in the environment, and the rules that never
+  change — nothing is checked out, the tools are signed in, stop at a
+  proposal. The record keeps only the rendered text, so a page can show it
+  only whole, folded under the reason since the dashboard pass, and a reader
+  looking for the work has to find it inside the boilerplate. Kept as typed
+  parts, the page could lead with the work and fold the rest, and a change
+  to the standing text would not rewrite what every older job was told.
+  Against: the domain would carry the foreman crate's structure, which
+  `docs/conventions.md` §3 keeps behind that crate's boundary; the snapshot
+  tests that assert the literal text would move to the parts; and every job
+  the last release wrote holds one text, which is a bridge or a job shown
+  whole. Settled by whether a page reading the parts is worth a record's
+  structure crossing that boundary.
+
+- **Should a kit be allowed to leave a model or an effort to the agent's
+  default?** `docs/decisions/0048-a-job-runs-on-a-kit.md` lets a kit say
+  *default* for both, and the adapter resolves it at each turn, so what ran
+  is known only from what the session reported. The chip then reads
+  *Default*, which says nothing to a person, and a job's record says what
+  was asked rather than what ran. Requiring a value would make every chip a
+  name and every record exact; it would also make every kit a thing to
+  re-pin when the agent's models change, which the default absorbs today,
+  and every kit the last release wrote one to bridge or refuse. Settled with
+  a record amending 0048 either way.
+
 ## Next
 
 Intended next steps, in order, each with its reason. Written as intentions, not

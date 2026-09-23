@@ -25,7 +25,13 @@ record asks it to keep. Since
 `docs/decisions/0074-a-jobs-identifier-is-its-name.md` a job's identifier
 is its name, so the addresses that keep it read as one; the argument below
 against a readable slug still holds for a project, whose name has no suffix
-to make it unique.
+to make it unique. With it, a job's row and its page are titled by that
+name, the reason is a hover away on the row and a paragraph of the page's
+kickoff card, where the instruction is folded under it, and what the
+session reported it was set to is shown on the page alone; the rules a row
+and the page keep are in `docs/conventions.md` §3. A job that is over
+shows no tunnel: the standing itself is the fact the probe never kept,
+since nothing is behind the tunnel of a job whose container is gone.
 
 ## Context
 

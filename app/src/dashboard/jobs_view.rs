@@ -20,7 +20,7 @@ use stageman_instance::{Request, Response};
 use super::error::{DashboardError, DashboardResult};
 use super::live::Live;
 use crate::ui::{
-    Badge, BadgeTone, Button, ButtonVariant, Card, EmptyState, FIELD, Field, Icon, Modal,
+    Badge, BadgeTone, Button, ButtonVariant, Card, EmptyState, FIELD, Field, Icon, KitChip, Modal,
     Reference, Skeleton, TextArea, Tooltip, When,
 };
 
@@ -211,9 +211,12 @@ pub fn ProjectJobsView(project: String) -> Element {
                                        container of its own, stopping at a proposal.",
                             }
                         } else {
-                            ul { class: "divide-y divide-border",
+                            // The list owns the columns and every row shares
+                            // them, so a badge is as wide as its word and the
+                            // titles still start together — see [`JobRow`].
+                            ul { class: ROWS,
                                 for job in working.jobs {
-                                    li { key: "{job.id}",
+                                    li { key: "{job.id}", class: ROW,
                                         RanJob {
                                             job,
                                             project: identifier.clone(),
@@ -281,15 +284,23 @@ pub fn ProjectJobsView(project: String) -> Element {
     }
 }
 
-/// How every icon-only control on a job's row or page is padded.
+/// How every icon-only control on a job's row or page is padded: to a
+/// target of twenty-four a side, per `docs/conventions.md` §3.
 ///
-/// Written once because there are several of them: padded and pulled back,
-/// so the target is bigger than the shape without moving anything around
-/// it. The colour and the hover are the ghost button's.
-const CONTROL: &str = "-m-1 p-1";
+/// Written once because there are several of them. The group that holds a
+/// few pulls the outer padding back, so the outer glyphs sit flush with
+/// what is around them while the targets keep their distance from each
+/// other; a control on its own is not pulled back, because nothing is
+/// beside it. The colour and the hover are the ghost button's, unless a
+/// verdict says otherwise.
+const CONTROL: &str = "p-1";
 
-/// One job, as the list shows it: its standing, its reason as the way to
-/// its page, what it ran on and when, and the controls its standing offers.
+/// What parts the controls in a group: eight pixels between targets, and
+/// the group pulled back by the padding of its outer controls.
+const CONTROLS: &str = "-m-1 flex items-center gap-2";
+
+/// One job, as the project's list shows it: the row every list draws,
+/// with the controls its standing offers at the end of its first line.
 #[component]
 fn RanJob(
     job: Job,
@@ -297,49 +308,139 @@ fn RanJob(
     onchanged: EventHandler<Result<Working, DashboardError>>,
 ) -> Element {
     rsx! {
-        div { class: "flex flex-col gap-1.5 py-4 first:pt-0 last:pb-0",
-            div { class: "flex items-baseline gap-3",
-                Badge { tone: job.standing.tone(), "{job.standing.label()}" }
-                // The reason is the way to the job's page, where its
-                // instruction and its links are — see
-                // `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
-                Link {
-                    to: super::Route::ProjectJobView {
-                        project: project.clone(),
-                        job: job.id.clone(),
-                    },
-                    class: "text-sm hover:underline",
-                    "{job.reason}"
+        JobRow {
+            job: job.clone(),
+            project: project.clone(),
+            aside: rsx! {
+                JobControls { project, job, onchanged }
+            },
+        }
+    }
+}
+
+/// What a list of jobs wears: the three columns every row shares.
+///
+/// The columns are the list's rather than the row's, so that the first
+/// column is one width down the whole list and every title starts at the
+/// same place; a row that owned its own grid would size that column to its
+/// own badge and chip, and titles would wander from row to row.
+pub(super) const ROWS: &str = "grid grid-cols-[auto_minmax(0,1fr)_auto] divide-y divide-border";
+
+/// What one item of that list wears: the list's columns, taken over as a
+/// subgrid, and the row's padding. The padding is the item's, because a
+/// first- or last-child variant on the row itself would match its only
+/// child, every time.
+pub(super) const ROW: &str = "col-span-3 grid grid-cols-subgrid items-center gap-x-3 gap-y-1.5 py-3 \
+                              first:pt-0 last:pb-0";
+
+/// Properties for [`JobRow`].
+#[derive(Props, PartialEq, Clone)]
+pub(super) struct JobRowProps {
+    /// The job.
+    pub job: Job,
+    /// Its project, by identifier, which is where its page is.
+    pub project: String,
+    /// Its project, by name, where the list spans projects.
+    #[props(default)]
+    pub project_name: Option<String>,
+    /// What sits at the right end of the first line: the controls its
+    /// standing offers, or the verb it wants.
+    pub aside: Element,
+}
+
+/// One job, as every list shows it: two lines, per `docs/conventions.md`
+/// §3.
+///
+/// The standing and the kit share the first column, so that every title
+/// starts at the same place. The name — the way to the job's page, with
+/// the reason a hover away — with its room and its tunnel beside it, and
+/// then the pull requests it opened, share the second. What a person does
+/// about it ends the first line and how long it has been so ends the
+/// second. A failed job says why on a third line, under the title, because
+/// that is what a person acts on.
+///
+/// Its cells are the item's, placed in the columns the list owns ([`ROWS`]
+/// and [`ROW`]): the root here takes no box of its own, so that a wrapper
+/// between the item and its cells does not start a grid of its own.
+#[component]
+pub(super) fn JobRow(props: JobRowProps) -> Element {
+    let JobRowProps {
+        job,
+        project,
+        project_name,
+        aside,
+    } = props;
+    let to_project = super::Route::ProjectJobsView {
+        project: project.clone(),
+    };
+    let to_job = super::Route::ProjectJobView {
+        project,
+        job: job.id.clone(),
+    };
+
+    rsx! {
+        div { class: "contents",
+            // As wide as its word: a grid stretches a cell's item unless
+            // told where to put it.
+            Badge { tone: job.standing.tone(), class: "justify-self-start", "{job.standing.label()}" }
+            div { class: "flex min-w-0 items-center gap-2",
+                if let Some(name) = project_name {
+                    Link {
+                        to: to_project,
+                        class: "shrink-0 text-sm text-muted-foreground hover:text-foreground hover:underline",
+                        "{name}"
+                    }
                 }
+                // A name, in the face identifiers wear here, and the reason
+                // a hover away: prose about why, which reads badly as a
+                // title — see
+                // `docs/decisions/0074-a-jobs-identifier-is-its-name.md`.
+                Tooltip { text: job.reason.clone(), wrap: true, class: "min-w-0",
+                    Link {
+                        to: to_job,
+                        class: "truncate font-mono text-sm font-medium hover:underline",
+                        "{job.id}"
+                    }
+                }
+                // Where it talks and where it shows, as on its page: the
+                // room is a link while the channel has said where its
+                // workspace is, and its identifier otherwise.
+                if let Some(room) = job.room.clone() {
+                    Reference {
+                        mark: "slack",
+                        says: "Its room, {room}",
+                        link: job.room_link.clone(),
+                    }
+                }
+                // Nothing can answer on the tunnel of a job that is over,
+                // so none is offered.
+                if !job.standing.is_over() {
+                    Showing { tunnel: job.tunnel.clone() }
+                }
+            }
+            div { class: "flex items-center justify-self-end", {aside} }
+            div { class: "justify-self-start",
+                KitChip {
+                    agent: job.kit.agent.clone(),
+                    agent_name: job.kit.agent_name.clone(),
+                    model: job.kit.model.clone(),
+                    effort: job.kit.effort.clone(),
+                }
+            }
+            div { class: "flex min-w-0 flex-wrap items-center gap-1.5",
                 for opened in job.pull_requests.iter() {
                     super::job_view::PullRequestChip { key: "{opened.number}", number: opened.number, link: opened.link.clone() }
                 }
-                span { class: "ml-auto flex shrink-0 items-baseline gap-2 font-mono text-xs text-faint-foreground",
-                    "{job.kit}"
-                    // How long it has been this way; a job the last release
-                    // wrote says only that it waits.
-                    if let Some(since) = job.since.clone() {
-                        When { at: since }
-                    }
+            }
+            div { class: "justify-self-end",
+                // How long it has been this way; a job the last release
+                // wrote says only that it waits.
+                if let Some(since) = job.since.clone() {
+                    When { at: since }
                 }
             }
             if let Standing::Failed { why } = &job.standing {
-                p { class: "text-xs text-failed", "{why}" }
-            }
-            // What the session said it was set to, in the adapter's spelling,
-            // beside what was asked for above. Shown whenever there is
-            // anything, because the one case worth seeing is the two
-            // disagreeing — and a reader cannot spot a disagreement that is
-            // only shown when it occurs.
-            if !job.reported.is_empty() {
-                p { class: "font-mono text-xs text-faint-foreground",
-                    "reported "
-                    {job.reported.iter().map(|(option, value)| format!("{option} {value}")).collect::<Vec<_>>().join(" · ")}
-                }
-            }
-            div { class: "flex items-center gap-1",
-                Showing { tunnel: job.tunnel.clone() }
-                JobControls { project, job, onchanged }
+                p { class: "col-span-2 col-start-2 text-xs text-failed", "{why}" }
             }
         }
     }
@@ -399,7 +500,7 @@ pub(super) fn JobControls(
         // list reads better as shapes. Every control carries an accessible
         // name, and its tooltip repeats the name for eyes: an icon-only
         // control with neither is a puzzle.
-        div { class: "flex items-center gap-1",
+        div { class: CONTROLS,
             // A working job can be stopped, and that is all it can be:
             // its container is in use and its session is mid-turn.
             if job.standing == Standing::Working {
@@ -423,12 +524,18 @@ pub(super) fn JobControls(
             }
             // And a job that has stopped can be ended, either way. Two
             // controls rather than one with a choice behind it, because
-            // the verdict is the whole of what is being recorded.
+            // the verdict is the whole of what is being recorded. Each
+            // takes its colour on hover and on keyboard focus, and not at
+            // rest — the primary green for the verdict that keeps, the
+            // failed red for the one that discards — so that a list of
+            // them never reads as a list of alarms; see
+            // `docs/conventions.md` §3.
             if !over && job.standing != Standing::Working {
                 Tooltip { text: "It is done — removes its container and everything in it",
                     Button {
                         variant: ButtonVariant::Ghost,
-                        class: CONTROL,
+                        class: "{CONTROL} hover:bg-primary/10 hover:text-primary \
+                                focus-visible:text-primary",
                         aria_label: "It is done",
                         onclick: move |_| confirming.set(Some(Ending::Done)),
                         {Icon::Done.draw(16)}
@@ -437,7 +544,8 @@ pub(super) fn JobControls(
                 Tooltip { text: "Discard it — removes its container and everything in it",
                     Button {
                         variant: ButtonVariant::Ghost,
-                        class: CONTROL,
+                        class: "{CONTROL} hover:bg-failed/10 hover:text-failed \
+                                focus-visible:text-failed",
                         aria_label: "Discard it",
                         onclick: move |_| confirming.set(Some(Ending::Discarded)),
                         {Icon::Discard.draw(16)}

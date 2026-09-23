@@ -577,16 +577,23 @@ fn a_jobs_page_says_what_it_is_and_links_only_what_is_true() {
     assert_eq!(page.job.id, started);
     assert_eq!(page.project, project().to_string());
     assert_eq!(page.job.standing, Standing::Working);
-    assert_eq!(page.fitted, as_it_comes());
-    assert_eq!(page.agent_name, "Claude");
+    // What it runs on, with every name a chip needs resolved on this side:
+    // the kit a person drafted, read back as it is shown.
+    assert_eq!(page.job.kit.agent, as_it_comes().agent);
+    assert_eq!(page.job.kit.agent_name, "Claude");
+    assert_eq!(page.job.kit.model, "Default");
+    assert_eq!(
+        page.job.kit.effort,
+        Some(("default".to_owned(), "Default".to_owned()))
+    );
     assert!(
         page.job.kickoff.contains("fix the build"),
         "{}",
         page.job.kickoff
     );
-    let room = page.room.clone().expect("a room was made for it");
+    let room = page.job.room.clone().expect("a room was made for it");
     assert_eq!(
-        page.room_link.as_deref(),
+        page.job.room_link.as_deref(),
         Some(format!("https://example.slack.com/archives/{room}").as_str()),
         "linked from where the channel said its workspace is"
     );

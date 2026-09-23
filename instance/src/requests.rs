@@ -420,6 +420,7 @@ impl Running {
     fn jobs(&self, project: &str) -> Result<Response, Refusal> {
         Ok(Response::Jobs(views::working(
             &self.state,
+            &self.identities(),
             project,
             &self.domain,
             self.serving,

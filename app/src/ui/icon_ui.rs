@@ -14,9 +14,9 @@
 
 use dioxus::prelude::*;
 use lucide_dioxus::{
-    Activity, ArrowLeft, Bot, Calendar, Check, CircleCheck, CircleOff, CircleX, ExternalLink, Eye,
-    EyeOff, GitPullRequest, Hammer, HardHat, Info, LoaderCircle, Moon, Pencil, Plus, Square, Sun,
-    SunMoon, Trash2, X,
+    Activity, ArrowLeft, Bot, Calendar, Check, ChevronRight, CircleCheck, CircleOff, CircleX,
+    ExternalLink, Eye, EyeOff, GitPullRequest, Hammer, HardHat, Info, LoaderCircle, Moon, Pencil,
+    Plus, Square, Sun, SunMoon, Trash2, X,
 };
 
 /// A concept a screen can point at, and nothing about how it is drawn.
@@ -75,6 +75,9 @@ pub enum Icon {
     Back,
     /// A pull request a job opened.
     PullRequest,
+    /// There is more here, folded away: the trigger of a disclosure, which
+    /// turns to point down at what it opened.
+    Disclose,
 }
 
 impl Icon {
@@ -108,6 +111,7 @@ impl Icon {
         Self::Made,
         Self::Back,
         Self::PullRequest,
+        Self::Disclose,
     ];
 
     /// Drawn at `size` pixels, in the current text colour.
@@ -154,6 +158,7 @@ impl Icon {
             Self::Made => rsx! { Calendar { size, class } },
             Self::Back => rsx! { ArrowLeft { size, class } },
             Self::PullRequest => rsx! { GitPullRequest { size, class } },
+            Self::Disclose => rsx! { ChevronRight { size, class } },
         }
     }
 }

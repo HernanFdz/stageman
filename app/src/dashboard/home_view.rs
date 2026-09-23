@@ -14,9 +14,9 @@ use dioxus::prelude::*;
 use stageman_instance::{Request, Response};
 
 use super::error::DashboardResult;
-use super::jobs_view::Toned as _;
+use super::jobs_view::{JobRow, ROW, ROWS};
 use super::live::Live;
-use crate::ui::{Badge, BadgeTone, Card, EmptyState, Icon, Reference, Skeleton, Tooltip, When};
+use crate::ui::{Badge, BadgeTone, Card, EmptyState, Icon, Reference, Skeleton, Tooltip};
 
 pub use stageman_wire::{Home, Project, ProjectJob};
 
@@ -84,9 +84,11 @@ fn Overview(home: Home) -> Element {
                                what to do about it.",
                     }
                 } else {
-                    ul { class: "divide-y divide-border",
+                    ul { class: ROWS,
                         for placed in home.needs_you {
-                            li { key: "{placed.job.id}", Placed { placed } }
+                            li { key: "{placed.job.id}", class: ROW,
+                                Placed { placed }
+                            }
                         }
                     }
                 }
@@ -101,9 +103,11 @@ fn Overview(home: Home) -> Element {
                                whether a foreman or you started it.",
                     }
                 } else {
-                    ul { class: "divide-y divide-border",
+                    ul { class: ROWS,
                         for placed in home.working {
-                            li { key: "{placed.job.id}", Placed { placed } }
+                            li { key: "{placed.job.id}", class: ROW,
+                                Placed { placed }
+                            }
                         }
                     }
                 }
@@ -144,12 +148,11 @@ fn Overview(home: Home) -> Element {
     }
 }
 
-/// One job on the first page: its standing, its project, its reason, and the
-/// verb its standing wants, if any.
+/// One job on the first page: the row every list draws, with its project
+/// before its name and the verb its standing wants at the end.
 ///
 /// The verb leads to the job's page, where its controls, its instruction
-/// and its links are, and so does the reason; the project's name leads to
-/// the project.
+/// and its links are; Home finds, and the page acts.
 #[component]
 fn Placed(placed: ProjectJob) -> Element {
     let ProjectJob {
@@ -157,45 +160,26 @@ fn Placed(placed: ProjectJob) -> Element {
         project_name,
         job,
     } = placed;
-    let to_project = super::Route::ProjectJobsView {
-        project: project.clone(),
-    };
     let to_job = super::Route::ProjectJobView {
-        project,
+        project: project.clone(),
         job: job.id.clone(),
     };
+    let verb = job.standing.asks();
 
     rsx! {
-        div { class: "flex items-baseline gap-3 py-3 first:pt-0 last:pb-0",
-            Badge { tone: job.standing.tone(), "{job.standing.label()}" }
-            Link {
-                to: to_project,
-                class: "shrink-0 text-sm font-medium hover:underline",
-                "{project_name}"
-            }
-            Link {
-                to: to_job.clone(),
-                class: "truncate text-sm text-muted-foreground hover:text-foreground hover:underline",
-                "{job.reason}"
-            }
-            for opened in job.pull_requests.iter() {
-                super::job_view::PullRequestChip { key: "{opened.number}", number: opened.number, link: opened.link.clone() }
-            }
-            span { class: "ml-auto flex shrink-0 items-baseline gap-3",
-                span { class: "font-mono text-xs text-faint-foreground", "{job.kit}" }
-                // How long it has been this way; a job the last release
-                // wrote says only that it waits.
-                if let Some(since) = job.since.clone() {
-                    When { at: since }
-                }
-                if let Some(verb) = job.standing.asks() {
+        JobRow {
+            job,
+            project,
+            project_name: Some(project_name),
+            aside: rsx! {
+                if let Some(verb) = verb {
                     Link {
                         to: to_job,
                         class: "text-xs font-medium text-primary hover:underline",
                         "{verb}"
                     }
                 }
-            }
+            },
         }
     }
 }

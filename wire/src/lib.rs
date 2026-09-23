@@ -576,14 +576,35 @@ impl Standing {
     }
 }
 
+/// What a job runs on, as a chip is drawn from it: the agent by the
+/// identifier the wire uses and by name, the model by name, and the effort
+/// by its spelling and its name where the model takes one.
+///
+/// Resolved on the server, unlike a project's kits, which a browser edits
+/// and so carries as identifiers with the shapes to read them by: a job's
+/// kit is fixed when the job is made and only ever read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Kit {
+    /// The agent, by the identifier the wire uses.
+    pub agent: String,
+    /// The agent, as a person reads it.
+    pub agent_name: String,
+    /// The model, as a person reads it.
+    pub model: String,
+    /// The effort, as the wire spells it and as a person reads it, where the
+    /// model takes one.
+    pub effort: Option<(String, String)>,
+}
+
 /// One job, as much of it as a page is allowed to know.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Job {
-    /// What names it, and what its container is named after.
+    /// Its name, which is what its container, the tail of its room's name
+    /// and its tunnel's host are named after — see
+    /// `docs/decisions/0074-a-jobs-identifier-is-its-name.md`.
     pub id: String,
-    /// What it ran on, in the words a person reads: the agent, and whatever
-    /// of its settings differs from that agent's own defaults.
-    pub kit: String,
+    /// What it runs on, as a chip is drawn from it.
+    pub kit: Kit,
     /// What its session reported it was set to, in the adapter's own words.
     /// Beside the kit rather than folded into it, because the two were
     /// measured to differ.
@@ -605,6 +626,12 @@ pub struct Job {
     /// promises nothing: the port is published when the container is
     /// created, whether or not the agent ever uses it.
     pub tunnel: String,
+    /// The room its conversation happens in, by the platform's identifier,
+    /// once one has been made.
+    pub room: Option<String>,
+    /// The same, as an address a person can open, while the channel is
+    /// connected and has said where its workspace is.
+    pub room_link: Option<String>,
     /// The pull requests it said it opened, in order, each with its address
     /// where the repository is one — see
     /// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
@@ -639,20 +666,9 @@ pub struct JobPage {
     pub repository: String,
     /// The same, as an address a browser can open, when what it holds is one.
     pub repository_link: Option<String>,
-    /// The job, as a list shows it.
+    /// The job, as a list shows it: its kit, its room and its tunnel are
+    /// on it, since a row shows them too.
     pub job: Job,
-    /// What it runs on, as the identifiers a chip is drawn from.
-    pub fitted: Fitted,
-    /// Its agent, as a person reads it.
-    pub agent_name: String,
-    /// The shape of that agent, which names the model and the effort.
-    pub shape: Shape,
-    /// The room its conversation happens in, by the platform's identifier,
-    /// once one has been made.
-    pub room: Option<String>,
-    /// The same, as an address a person can open, while the channel is
-    /// connected and has said where its workspace is.
-    pub room_link: Option<String>,
 }
 
 /// One kit a project offers, as much of it as a page needs to offer it back.
