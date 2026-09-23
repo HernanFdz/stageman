@@ -130,6 +130,7 @@ async fn propose() -> Result<(), String> {
             project: project.to_string(),
             kit: "Claude".to_owned(),
             work: WORK.to_owned(),
+            title: String::new(),
         })
         .await;
     let job = match asked {
@@ -143,10 +144,9 @@ async fn propose() -> Result<(), String> {
     };
 
     let outcome = finished(&world, project, &job).await?;
-    let container = Uuid::parse_str(&job)
-        .map(JobId::from_uuid)
-        .map(stageman_job::container)
-        .map_err(|error| format!("the job's identifier: {error}"))?;
+    let container = JobId::parse(&job)
+        .map(|named| stageman_job::container(&named))
+        .map_err(|error| format!("the job's name: {error}"))?;
 
     println!();
     println!("  job        {job}");

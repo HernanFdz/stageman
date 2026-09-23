@@ -2,7 +2,7 @@
 //! starts, described and opened, a platform that refuses, and a record that
 //! never lands.
 
-use stageman_core::{JobId, Progress, Uuid, Waiting};
+use stageman_core::{JobId, Progress, Waiting};
 use stageman_instance::{Instance, Request, Response};
 
 use crate::simulation::{Simulation, in_room, project, request, room, seed, watching_a_channel};
@@ -17,6 +17,7 @@ fn asking(sim: &mut Simulation, instance: &mut Instance, id: u64, work: &str) {
                 project: project().to_string(),
                 kit: "Claude".to_owned(),
                 work: work.to_owned(),
+                title: String::new(),
             },
         ),
     ) {
@@ -34,10 +35,10 @@ fn which(sim: &Simulation, id: u64, work: &str) -> JobId {
         .iter()
         .find(|listed| listed.kickoff.contains(work))
         .expect("the job just started");
-    JobId::from_uuid(Uuid::parse_str(&listed.id).expect("an identifier"))
+    JobId::parse(&listed.id).expect("a name")
 }
 
-fn progress_of(instance: &Instance, id: JobId) -> Progress {
+fn progress_of(instance: &Instance, id: &JobId) -> Progress {
     instance.state().job(id).expect("the job").progress.clone()
 }
 
@@ -63,17 +64,21 @@ fn a_jobs_room_is_made_before_it_starts() {
     let made = room(1);
     let (id, name) = sim.rooms().first().expect("the room was made");
     assert_eq!(id, &made.id);
+    // The job is named by its title and a suffix, and the room after the
+    // project and the job — see
+    // `docs/decisions/0074-a-jobs-identifier-is-its-name.md`.
     assert!(
-        name.starts_with("example--fix-the-build-before-the-release--"),
-        "named after the project and the title: {name}"
-    );
-    let identifier: String = job.as_uuid().simple().to_string().chars().take(8).collect();
-    assert!(
-        name.ends_with(&identifier),
-        "and the job's identifier: {name}"
+        job.as_str()
+            .starts_with("fix-the-build-before-the-release--"),
+        "named by its title: {job}"
     );
     assert_eq!(
-        instance.state().job(job).expect("the job").room,
+        name,
+        &format!("example--{job}"),
+        "the room is named after the project and the job's name"
+    );
+    assert_eq!(
+        instance.state().job(&job).expect("the job").room,
         Some(made),
         "the room the platform named is where the job speaks"
     );
@@ -110,7 +115,10 @@ fn a_jobs_room_is_made_before_it_starts() {
         asked < answered && answered < started,
         "the turn waits for the room: {shape:?}"
     );
-    assert_eq!(progress_of(&instance, job), Progress::Idle(Waiting::Silent));
+    assert_eq!(
+        progress_of(&instance, &job),
+        Progress::Idle(Waiting::Silent)
+    );
 }
 
 /// A platform that refuses to make the room fails the job before any
@@ -127,7 +135,7 @@ fn a_platform_that_refuses_the_room_fails_the_job_before_any_container() {
     sim.run_until(&mut instance, 5_000);
     let job = which(&sim, 1, "fix the build");
 
-    let Progress::Idle(Waiting::Failed(why)) = progress_of(&instance, job) else {
+    let Progress::Idle(Waiting::Failed(why)) = progress_of(&instance, &job) else {
         panic!("a job whose room could not be made has failed");
     };
     assert!(why.contains("its room could not be made"), "{why}");
@@ -135,14 +143,14 @@ fn a_platform_that_refuses_the_room_fails_the_job_before_any_container() {
     assert!(sim.talks().is_empty(), "no agent was spoken to");
     assert!(sim.posts().is_empty(), "nothing was said anywhere");
     assert!(
-        !sim.exists(&stageman_job::container(job)),
+        !sim.exists(&stageman_job::container(&job)),
         "no container was made for a job that cannot speak"
     );
     assert_eq!(
-        progress_of(&instance, job),
+        progress_of(&instance, &job),
         sim.disk()
             .expect("landed")
-            .job(job)
+            .job(&job)
             .expect("the job")
             .progress
             .clone(),

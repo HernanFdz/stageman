@@ -192,6 +192,19 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   either, since both imply a durable intent that separate attempts belong to,
   and no such thing exists here. A job records which agent ran it, because once
   more than one can, "why did this go badly?" has no answer without it.
+
+  A job is named, and identified, by one string: the title its foreman gave
+  it — or the first words of its work, when a person started it by hand —
+  folded to a slug of at most forty characters, then two hyphens and eight
+  hex minted for it, as in `fix-login-timeout--3f9a2c1b`. That string is its
+  address on the dashboard, its container's name after the prefix, the host
+  it shows its work on and the tail of its room's name, per
+  `docs/decisions/0074-a-jobs-identifier-is-its-name.md`, and nothing parses
+  it: the title in it is for a reader, and the hex is what made it unique.
+  A job the last release wrote is named by its UUID, which is a name under
+  the same grammar. Not an *id* with a *name* beside it, which would be two
+  names for one job; not a *slug*, which names the fold rather than the
+  thing.
 - **working, idle, retired** — where a job has got to, and the only three
   things this system *does* about one: run a turn in it, leave it alone with
   its container, or reclaim what it was holding. Idle carries a reading of why
@@ -262,10 +275,12 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   said there from the last message that was given to this instance, its own
   words among them.
 
-  A job's room is named `<project>--<title>--<8 hex of the job id>`, and
-  only the last part is load-bearing: an archived room keeps its name for
-  ever on the platform, so the name has to be unique for ever too, and the
-  identifier is what makes it so. The rest is for a sidebar.
+  A job's room is named `<project>--<job's name>` since
+  `docs/decisions/0074-a-jobs-identifier-is-its-name.md`, and was
+  `<project>--<title>--<8 hex of the job id>` before it, which the rooms
+  made then keep. Only the name's suffix is load-bearing: an archived room
+  keeps its name for ever on the platform, so the name has to be unique for
+  ever too, and the suffix is what makes it so. The rest is for a sidebar.
 
 - **transcript** — everything an agent says and does in a turn, as the
   protocol streams it: its narration, its working, and the notifications

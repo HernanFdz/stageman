@@ -93,6 +93,10 @@ pub enum Request {
         kit: String,
         /// What to do, in the operator's own words.
         work: String,
+        /// A few words naming it, which its name is made from; the first
+        /// words of the work when blank — see
+        /// `docs/decisions/0074-a-jobs-identifier-is-its-name.md`.
+        title: String,
     },
     /// Stop the turn running in a job, keeping everything.
     Stop {
@@ -142,11 +146,17 @@ impl fmt::Debug for Request {
                 .field("project", project)
                 .field("job", job)
                 .finish(),
-            Self::Start { project, kit, work } => f
+            Self::Start {
+                project,
+                kit,
+                work,
+                title,
+            } => f
                 .debug_struct("Start")
                 .field("project", project)
                 .field("kit", kit)
                 .field("work", work)
+                .field("title", title)
                 .finish(),
             Self::Stop { project, job } => f
                 .debug_struct("Stop")
@@ -214,7 +224,12 @@ impl Running {
             Request::Forget { project } => self.forget(&project),
             Request::Jobs { project } => self.jobs(&project),
             Request::Job { project, job } => self.job_page(&project, &job),
-            Request::Start { project, kit, work } => self.start_by_hand(&project, &kit, &work),
+            Request::Start {
+                project,
+                kit,
+                work,
+                title,
+            } => self.start_by_hand(&project, &kit, &work, &title),
             Request::Stop { project, job } => self.stop(&project, &job, effects),
             Request::Retire {
                 project,
@@ -373,13 +388,13 @@ impl Running {
                 working,
             });
         }
-        let jobs: Vec<JobId> = watched.jobs.keys().copied().collect();
+        let jobs: Vec<JobId> = watched.jobs.keys().cloned().collect();
         for job in &jobs {
             // Its room is archived before its record goes, since the record
             // is what names the room.
-            self.archive_room_of(*job);
-            self.forget_tunnel(*job);
-            let discard = self.discard(stageman_job::container(*job));
+            self.archive_room_of(job);
+            self.forget_tunnel(job);
+            let discard = self.discard(stageman_job::container(job));
             self.defer(discard);
         }
         // The foreman's room too, before the record that names it goes.
@@ -438,7 +453,13 @@ impl Running {
     /// A project's kits are the only kits, by hand as much as by the foreman,
     /// so a name outside them is a request this instance refuses rather than
     /// a handout it cannot decide.
-    fn start_by_hand(&mut self, project: &str, kit: &str, work: &str) -> Result<Response, Refusal> {
+    fn start_by_hand(
+        &mut self,
+        project: &str,
+        kit: &str,
+        work: &str,
+        title: &str,
+    ) -> Result<Response, Refusal> {
         let at = self.stamp();
         let work = work.trim();
         if work.is_empty() {
@@ -459,11 +480,17 @@ impl Running {
             project: watched.name.clone(),
         })?;
         let name = watched.name.clone();
+        // A title a person gave, or the first words of the work: the same
+        // default the form shows as its placeholder.
+        let title = match title.trim() {
+            "" => stageman_wire::titled(work),
+            given => given.to_owned(),
+        };
         let commission = crate::jobs::Commission {
             kit: chosen,
             reason: BY_HAND,
             work,
-            title: &title_of(work),
+            title: &title,
         };
         self.begin(identifier, commission, None, at)
             .map_err(|reason| match reason {
@@ -495,11 +522,11 @@ impl Running {
         let identifier = views::identify(&self.state, project)?;
         let named = identify_job(&self.state, identifier, job)
             .ok_or_else(|| Refusal::UnknownJob { id: job.to_owned() })?;
-        if self.stop_turn(Speaker::Job(named), effects) {
+        if self.stop_turn(Speaker::Job(named.clone()), effects) {
             tracing::info!(job = %named, "asked to stop a job");
         } else if self
             .state
-            .job(named)
+            .job(&named)
             .is_some_and(|recorded| recorded.progress == Progress::Working)
         {
             // Working with no turn registered: its thread is being read, or
@@ -522,7 +549,7 @@ impl Running {
         let named = identify_job(&self.state, identifier, job)
             .ok_or_else(|| Refusal::UnknownJob { id: job.to_owned() })?;
         let since = self.stamp();
-        let Some(recorded) = self.state.job_mut(named) else {
+        let Some(recorded) = self.state.job_mut(&named) else {
             return Err(Refusal::UnknownJob { id: job.to_owned() });
         };
         match recorded.progress {
@@ -540,9 +567,9 @@ impl Running {
         // Its room is archived once the verdict is on the disk: an archived
         // room leaves the sidebar, stays readable, and takes no more posts,
         // which is what makes the conversation over on the platform too.
-        self.archive_room_of(named);
-        self.forget_tunnel(named);
-        let discard = self.discard(stageman_job::container(named));
+        self.archive_room_of(&named);
+        self.forget_tunnel(&named);
+        let discard = self.discard(stageman_job::container(&named));
         self.defer(discard);
         let reclaiming = self.ask(&Command::Images, Asked::Images);
         self.defer(reclaiming);
@@ -556,7 +583,7 @@ impl Running {
 /// well-formed identifier belonging to *another* project must not be found
 /// here, or a stale page could retire a job it is not looking at.
 pub fn identify_job(state: &State, project: ProjectId, job: &str) -> Option<JobId> {
-    let named = JobId::from_uuid(stageman_core::Uuid::parse_str(job.trim()).ok()?);
+    let named = JobId::parse(job.trim()).ok()?;
     state
         .projects
         .get(&project)?
@@ -713,16 +740,6 @@ pub fn binding(channel: &ChannelDraft) -> Result<BTreeMap<Channel, ChannelConfig
     )]))
 }
 
-/// A title for a job started by hand: the first few words of the work,
-/// which is what a person would read in a sidebar. A foreman gives a job
-/// its title; a person starting one from the dashboard gave the work.
-pub fn title_of(work: &str) -> String {
-    work.split_whitespace()
-        .take(6)
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 /// The repository, required, and written as this project writes an address:
 /// an owner and a name on the platform, with what was pasted beside them
 /// forgiven — see `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
@@ -757,9 +774,7 @@ pub fn required(field: &str, given: &str) -> Result<String, Refusal> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        addressed, amended, binding, busy, identify_job, kits_of, offered, resolved, title_of,
-    };
+    use super::{addressed, amended, binding, busy, identify_job, kits_of, offered, resolved};
     use stageman_core::{
         Agent, AgentConfig, Channel, ChannelConfig, ClaudeEffort, ClaudeModel, Job, JobId, Kit,
         KitConfig, KitName, Platform, Progress, Project, ProjectId, Secret, State, Timestamp, Uuid,
@@ -1106,17 +1121,6 @@ mod tests {
         assert!(!shown.contains("xapp-not-a-real-token"), "{shown}");
     }
 
-    /// A job started by hand is titled by the first words of its work.
-    #[test]
-    fn a_job_started_by_hand_is_titled_by_its_first_words() {
-        assert_eq!(
-            title_of("Fix the flaky parser test before the release ships"),
-            "Fix the flaky parser test before"
-        );
-        assert_eq!(title_of("  one   thing  "), "one thing");
-        assert_eq!(title_of(""), "");
-    }
-
     /// The count is of running jobs, not of jobs.
     #[test]
     fn a_project_is_busy_for_exactly_its_running_jobs() {
@@ -1228,6 +1232,7 @@ mod tests {
                     project: "p".to_owned(),
                     kit: "Claude".to_owned(),
                     work: "fix it".to_owned(),
+                    title: String::new(),
                 },
                 "Start",
             ),
@@ -1270,13 +1275,16 @@ mod tests {
         let mine = JobId::from_uuid(Uuid::from_u128(1));
         let theirs = JobId::from_uuid(Uuid::from_u128(2));
         let mut watched = holding(&[]);
-        watched.jobs.insert(mine, job(Progress::Working));
+        watched.jobs.insert(mine.clone(), job(Progress::Working));
         state.projects.insert(here, watched);
         let mut other = holding(&[]);
-        other.jobs.insert(theirs, job(Progress::Working));
+        other.jobs.insert(theirs.clone(), job(Progress::Working));
         state.projects.insert(there, other);
 
-        assert_eq!(identify_job(&state, here, &mine.to_string()), Some(mine));
+        assert_eq!(
+            identify_job(&state, here, &mine.to_string()),
+            Some(mine.clone())
+        );
         assert_eq!(
             identify_job(&state, here, &format!("  {mine}  ")),
             Some(mine)

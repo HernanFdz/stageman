@@ -14,7 +14,7 @@ use crate::simulation::{
 /// Visits a job's name and runs until it has been answered.
 fn visit(sim: &mut Simulation, instance: &mut Instance, which: u128) -> RequestId {
     let now = sim.now();
-    let id = sim.visits(now, &tunnel_host(job(which)));
+    let id = sim.visits(now, &tunnel_host(&job(which)));
     sim.run_until(instance, now);
     id
 }
@@ -38,20 +38,20 @@ fn looked(sim: &Simulation) -> usize {
 fn a_jobs_tunnel_is_looked_up_once_and_remembered() {
     let mut sim = Simulation::new();
     sim.holding(&watching(&[(job(1), Progress::Working)]));
-    let (name, held) = Simulation::ours(&stageman_job::container(job(1)));
+    let (name, held) = Simulation::ours(&stageman_job::container(&job(1)));
     sim.container(&name, held);
     let mut instance = sim.wake(seed(1));
     // Waking resumes the job, which starts its container on a port a
     // moment later.
     sim.run_until(&mut instance, 5);
     let port = sim
-        .port_of(&stageman_job::container(job(1)))
+        .port_of(&stageman_job::container(&job(1)))
         .expect("resumed, so running on a port");
 
     // Two visits before the runtime has answered either.
     let now = sim.now();
-    let first = sim.visits(now, &tunnel_host(job(1)));
-    let second = sim.visits(now, &tunnel_host(job(1)));
+    let first = sim.visits(now, &tunnel_host(&job(1)));
+    let second = sim.visits(now, &tunnel_host(&job(1)));
     sim.run_until(&mut instance, now);
     assert_eq!(looked(&sim), 1, "asked once for both");
     assert_eq!(sim.route(first), Some(Sent::To(port)));
@@ -96,7 +96,7 @@ fn a_stranger_and_a_retired_job_are_answered_without_asking() {
         (job(1), Progress::Retired(Outcome::Done)),
         (job(2), Progress::Idle(Waiting::Silent)),
     ]));
-    let (name, held) = Simulation::ours(&stageman_job::container(job(2)));
+    let (name, held) = Simulation::ours(&stageman_job::container(&job(2)));
     sim.container(&name, held);
     let mut instance = sim.wake(seed(1));
 
@@ -123,12 +123,12 @@ fn a_stranger_and_a_retired_job_are_answered_without_asking() {
 fn a_port_that_can_have_moved_is_looked_up_again() {
     let mut sim = Simulation::new();
     sim.holding(&watching_a_channel(&[(job(1), Progress::Working, 1)]));
-    let (name, held) = Simulation::ours(&stageman_job::container(job(1)));
+    let (name, held) = Simulation::ours(&stageman_job::container(&job(1)));
     sim.container(&name, held);
     let mut instance = sim.wake(seed(1));
     sim.run_until(&mut instance, 5);
     let first = sim
-        .port_of(&stageman_job::container(job(1)))
+        .port_of(&stageman_job::container(&job(1)))
         .expect("resumed, so running on a port");
 
     let once = visit(&mut sim, &mut instance, 1);
@@ -140,7 +140,7 @@ fn a_port_that_can_have_moved_is_looked_up_again() {
     // found — and nothing answers there, so the container is halted; the
     // port it was on reaches nothing now.
     sim.run_until(&mut instance, 2_000);
-    assert!(!sim.is_running(&stageman_job::container(job(1))));
+    assert!(!sim.is_running(&stageman_job::container(&job(1))));
     assert_eq!(
         looked(&sim),
         2,
@@ -162,7 +162,7 @@ fn a_port_that_can_have_moved_is_looked_up_again() {
     let until = sim.now() + 5;
     sim.run_until(&mut instance, until);
     let second = sim
-        .port_of(&stageman_job::container(job(1)))
+        .port_of(&stageman_job::container(&job(1)))
         .expect("resumed again");
     assert_ne!(first, second, "the runtime publishes afresh on every start");
     let resumed = visit(&mut sim, &mut instance, 1);

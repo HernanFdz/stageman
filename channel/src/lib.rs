@@ -354,16 +354,17 @@ pub fn done(channel: Channel, status: u16, body: &[u8]) -> Result<(), ChannelErr
     }
 }
 
-/// The name a job's room is given on a channel: the project, a title, and
-/// the identifier's prefix, folded to what the channel allows.
+/// The name a job's room is given on a channel: the project's name, folded
+/// to what the channel allows, and the job's name whole — see
+/// `docs/decisions/0074-a-jobs-identifier-is-its-name.md`.
 ///
-/// Only the identifier is load-bearing. An archived room keeps its name for
-/// ever, so the name has to be unique for ever too, and the identifier is
-/// what makes it so; the rest is for a sidebar.
+/// Only the job's name is load-bearing. An archived room keeps its name for
+/// ever, so the name has to be unique for ever too, and the job's name is
+/// what makes it so; the project's part is for a sidebar.
 #[must_use]
-pub fn room_name(channel: Channel, project: &str, title: &str, job: JobId) -> String {
+pub fn room_name(channel: Channel, project: &str, job: &JobId) -> String {
     match channel {
-        Channel::Slack => slack::room_name(project, title, job),
+        Channel::Slack => slack::room_name(project, job),
     }
 }
 
@@ -907,31 +908,32 @@ mod tests {
         ));
     }
 
-    /// A room's name is folded to what the channel allows, and its
-    /// identifier is the part that is always there.
+    /// A room's name is the project's part folded to what the channel
+    /// allows and the job's name whole, which is the part that is always
+    /// there — see `docs/decisions/0074-a-jobs-identifier-is-its-name.md`.
     #[test]
-    fn a_rooms_name_is_the_project_the_title_and_the_identifier() {
-        let job = JobId::from_uuid(Uuid::from_u128(0x3fa8_5f64_5717_4562_b3fc_2c96_3f66_afa6));
+    fn a_rooms_name_is_the_project_and_the_jobs_name() {
+        let minted = Uuid::from_u128(0x3fa8_5f64_5717_4562_b3fc_2c96_3f66_afa6);
+        let job = JobId::named("Fix the flaky parser test!", &minted);
         assert_eq!(
-            room_name(
-                Channel::Slack,
-                "Closed Loop",
-                "Fix the flaky parser test!",
-                job
-            ),
+            room_name(Channel::Slack, "Closed Loop", &job),
             "closed-loop--fix-the-flaky-parser-test--3fa85f64"
         );
         assert_eq!(
-            room_name(Channel::Slack, "aviary", "", job),
-            "aviary--3fa85f64",
-            "no title is no middle part rather than an empty one"
+            room_name(Channel::Slack, "", &job),
+            "fix-the-flaky-parser-test--3fa85f64",
+            "a project with nothing left in its part is left out"
         );
         assert_eq!(
-            room_name(Channel::Slack, "", "", job),
-            "job--3fa85f64",
+            room_name(Channel::Slack, "aviary", &JobId::named("", &minted)),
+            "aviary--job--3fa85f64",
             "a name with nothing to say still says what it is"
         );
-        let long = room_name(Channel::Slack, &"p".repeat(60), &"t".repeat(120), job);
+        let long = room_name(
+            Channel::Slack,
+            &"p".repeat(60),
+            &JobId::named(&"t ".repeat(120), &minted),
+        );
         assert!(long.len() <= 80, "{long}");
         assert!(long.ends_with("--3fa85f64"), "{long}");
         assert_eq!(

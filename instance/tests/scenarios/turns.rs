@@ -3,7 +3,7 @@
 //! and a stop that lands between steps.
 
 use stageman_agent::Command;
-use stageman_core::{JobId, Progress, Uuid, Waiting};
+use stageman_core::{JobId, Progress, Waiting};
 use stageman_instance::{Instance, Request, Response};
 
 use crate::simulation::{Simulation, job, project, request, seed, watching_a_channel};
@@ -18,6 +18,7 @@ fn asking(sim: &mut Simulation, instance: &mut Instance, id: u64, work: &str) {
                 project: project().to_string(),
                 kit: "Claude".to_owned(),
                 work: work.to_owned(),
+                title: String::new(),
             },
         ),
     ) {
@@ -35,7 +36,7 @@ fn which(sim: &Simulation, id: u64, work: &str) -> JobId {
         .iter()
         .find(|listed| listed.kickoff.contains(work))
         .expect("the job just started");
-    JobId::from_uuid(Uuid::parse_str(&listed.id).expect("an identifier"))
+    JobId::parse(&listed.id).expect("a name")
 }
 
 /// Starts a job by hand, waits for the record to land, and says which it is.
@@ -47,7 +48,7 @@ fn started(sim: &mut Simulation, instance: &mut Instance, id: u64, work: &str) -
     which(sim, id, work)
 }
 
-fn progress_of(instance: &Instance, id: JobId) -> Progress {
+fn progress_of(instance: &Instance, id: &JobId) -> Progress {
     instance.state().job(id).expect("the job").progress.clone()
 }
 
@@ -91,8 +92,11 @@ fn an_image_is_built_once_for_every_turn_that_wants_it() {
         sim.commands()
     );
     for job in [one, two] {
-        assert!(sim.exists(&stageman_job::container(job)));
-        assert_eq!(progress_of(&instance, job), Progress::Idle(Waiting::Silent));
+        assert!(sim.exists(&stageman_job::container(&job)));
+        assert_eq!(
+            progress_of(&instance, &job),
+            Progress::Idle(Waiting::Silent)
+        );
     }
     assert_eq!(sim.talks().len(), 2);
 }
@@ -112,13 +116,13 @@ fn a_build_that_fails_fails_every_turn_waiting_on_it() {
     let one = which(&sim, 1, "one thing");
     let two = which(&sim, 2, "another");
 
-    for job in [one, two] {
-        let Progress::Idle(Waiting::Failed(why)) = progress_of(&instance, job) else {
+    for job in [one.clone(), two] {
+        let Progress::Idle(Waiting::Failed(why)) = progress_of(&instance, &job) else {
             panic!("a job whose image could not be built has failed");
         };
         assert!(why.contains("failed to fetch the adapter"), "{why}");
         assert!(why.contains("could not be built"), "{why}");
-        assert!(!sim.exists(&stageman_job::container(job)));
+        assert!(!sim.exists(&stageman_job::container(&job)));
     }
     assert_eq!(
         asked(&sim, |command| matches!(command, Command::Create { .. })),
@@ -126,10 +130,10 @@ fn a_build_that_fails_fails_every_turn_waiting_on_it() {
     );
     assert!(sim.talks().is_empty(), "no agent was spoken to");
     assert_eq!(
-        progress_of(&instance, one),
+        progress_of(&instance, &one),
         sim.disk()
             .expect("landed")
-            .job(one)
+            .job(&one)
             .expect("the job")
             .progress
             .clone(),
@@ -149,14 +153,14 @@ fn a_checkout_that_fails_fails_the_job_before_its_agent_speaks() {
     let job = started(&mut sim, &mut instance, 1, "one thing");
     sim.run_until(&mut instance, 5_000);
 
-    let Progress::Idle(Waiting::Failed(why)) = progress_of(&instance, job) else {
+    let Progress::Idle(Waiting::Failed(why)) = progress_of(&instance, &job) else {
         panic!("a job whose repository could not be checked out has failed");
     };
     assert!(why.contains("repository not found"), "{why}");
     assert!(why.contains("example.invalid"), "{why}");
     assert!(sim.talks().is_empty(), "no agent was spoken to");
     assert!(
-        sim.exists(&stageman_job::container(job)),
+        sim.exists(&stageman_job::container(&job)),
         "the container was made, and is kept for whoever looks"
     );
 }
@@ -188,10 +192,13 @@ fn a_stop_before_the_agent_speaks_ends_the_turn_at_its_next_step() {
     }
     sim.run_until(&mut instance, 5_000);
 
-    assert_eq!(progress_of(&instance, job), Progress::Idle(Waiting::Paused));
+    assert_eq!(
+        progress_of(&instance, &job),
+        Progress::Idle(Waiting::Paused)
+    );
     assert!(sim.talks().is_empty(), "the agent was never run");
     assert!(
-        sim.exists(&stageman_job::container(job)),
+        sim.exists(&stageman_job::container(&job)),
         "what was made before the stop landed is kept, like everything a stop leaves"
     );
 }
@@ -204,7 +211,7 @@ fn a_stop_before_the_agent_speaks_ends_the_turn_at_its_next_step() {
 fn a_turn_is_the_commands_it_runs_in_order() {
     let mut sim = Simulation::new();
     sim.holding(&watching_a_channel(&[(job(1), Progress::Working, 1)]));
-    let (name, held) = Simulation::ours(&stageman_job::container(job(1)));
+    let (name, held) = Simulation::ours(&stageman_job::container(&job(1)));
     sim.container(&name, held);
     let mut instance = sim.wake(seed(1));
     let woke = sim.commands().len();
@@ -239,7 +246,7 @@ fn a_turn_is_the_commands_it_runs_in_order() {
     assert!(resumed, "waking started the working job's container");
     assert_eq!(sim.talks().len(), 2);
     assert!(sim.talks_in(&name)[0].resumed());
-    assert!(sim.talks_in(&stageman_job::container(begun))[0].began());
+    assert!(sim.talks_in(&stageman_job::container(&begun))[0].began());
 
     // Both turns have ended, and nothing of either is held: not the turn,
     // not the process it talked over, not the credential it presented.

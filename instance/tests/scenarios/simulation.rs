@@ -387,7 +387,7 @@ pub const fn project() -> ProjectId {
 pub const CHANNEL: &str = "C0123456789";
 
 /// A job of that project, by number.
-pub const fn job(n: u128) -> JobId {
+pub fn job(n: u128) -> JobId {
     JobId::from_uuid(Uuid::from_u128(n))
 }
 
@@ -499,7 +499,7 @@ fn configured(project: Project) -> State {
 pub fn watching(jobs: &[(JobId, Progress)]) -> State {
     configured(a_project(
         jobs.iter()
-            .map(|(id, progress)| (*id, a_job(progress, None)))
+            .map(|(id, progress)| (id.clone(), a_job(progress, None)))
             .collect(),
         false,
     ))
@@ -510,7 +510,7 @@ pub fn watching(jobs: &[(JobId, Progress)]) -> State {
 pub fn watching_a_channel(jobs: &[(JobId, Progress, u32)]) -> State {
     configured(a_project(
         jobs.iter()
-            .map(|(id, progress, n)| (*id, a_job(progress, Some(self::room(*n)))))
+            .map(|(id, progress, n)| (id.clone(), a_job(progress, Some(self::room(*n)))))
             .collect(),
         true,
     ))
@@ -559,8 +559,8 @@ pub fn briefed(state: &mut State, brief: &str) {
 }
 
 /// The name a job's tunnel answers on, under the domain every scenario uses.
-pub fn tunnel_host(job: JobId) -> String {
-    format!("{}.localhost", job.as_uuid())
+pub fn tunnel_host(job: &JobId) -> String {
+    format!("{job}.localhost")
 }
 
 /// A person asking something of the dashboard.
@@ -1249,7 +1249,7 @@ impl Simulation {
     fn oracle(&self, instance: &Instance) {
         for job in instance.state().working() {
             assert!(
-                self.containers.contains_key(&stageman_job::container(job))
+                self.containers.contains_key(&stageman_job::container(&job))
                     || !self.begun.contains(&job),
                 "job {job} is working with no container"
             );
@@ -1294,7 +1294,7 @@ impl Simulation {
                 // about it in flight, for the one step between a turn's end
                 // and the next turn's registration.
                 (Some(job), _) => {
-                    turning.contains(&stageman_instance::Speaker::Job(job))
+                    turning.contains(&stageman_instance::Speaker::Job(job.clone()))
                         || reading.contains(&stageman_instance::Speaker::Job(job))
                         || held.serving
                         || deciding

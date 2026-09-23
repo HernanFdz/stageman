@@ -93,9 +93,171 @@ impl fmt::Display for Secret {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ProjectId(Uuid);
 
-/// Identifies a job.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct JobId(Uuid);
+/// Identifies a job, and names it.
+///
+/// One string, and it is the job's name wherever the job is met: the key
+/// here, the segment of its page's address, the suffix of its container's
+/// name, the bottom label of its tunnel's host, and the tail of its room's
+/// name — see `docs/decisions/0074-a-jobs-identifier-is-its-name.md`. It is
+/// the title the job was given, folded by [`slug`] and capped at
+/// [`JobId::TITLE_AT_MOST`], then [`JobId::SEPARATOR`] and
+/// [`JobId::SUFFIX_CHARS`] of hex minted for it. A job the last release
+/// wrote is named by its UUID, which fits the same grammar as it stands.
+///
+/// **Nothing parses one.** The title in it is for a reader and the hex is
+/// what made it unique; the only reader of its shape is [`JobId::parse`],
+/// which says whether a text is a name and never what it means.
+///
+/// Text rather than a UUID, so it is cloned where the UUID was copied.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct JobId(String);
+
+impl JobId {
+    /// The most a name may be, in characters: a title at its cap, the
+    /// separator, and the suffix. Under a DNS label's sixty-three, and
+    /// beside a project's part under a room's eighty.
+    pub const AT_MOST: usize = 50;
+    /// The most of a title a name carries.
+    pub const TITLE_AT_MOST: usize = 40;
+    /// What parts the title from the suffix: two hyphens, because a title
+    /// contains single ones.
+    pub const SEPARATOR: &'static str = "--";
+    /// How much of the minted hex a name carries: enough that two jobs of
+    /// one instance never collide in practice, short enough to read.
+    pub const SUFFIX_CHARS: usize = 8;
+    /// What a title with nothing left in it after folding reads as, so that
+    /// every name has its two parts.
+    const NAMELESS: &'static str = "job";
+
+    /// The name of a job identified by a UUID: the shape the last release
+    /// wrote, and the one tests mint from a number.
+    #[must_use]
+    pub fn from_uuid(value: Uuid) -> Self {
+        Self(value.hyphenated().to_string())
+    }
+
+    /// A name from a title and the hex minted for it.
+    ///
+    /// There is no constructor that mints: doing so needs randomness, and
+    /// this crate takes no effects. See the crate documentation.
+    #[must_use]
+    pub fn named(title: &str, minted: &Uuid) -> Self {
+        let mut name = slug(title, Self::TITLE_AT_MOST);
+        if name.is_empty() {
+            name.push_str(Self::NAMELESS);
+        }
+        name.push_str(Self::SEPARATOR);
+        name.extend(minted.simple().to_string().chars().take(Self::SUFFIX_CHARS));
+        Self(name)
+    }
+
+    /// Reads a name, refusing anything the grammar does not allow: lowercase
+    /// ASCII letters and digits in runs parted by hyphens, none at either
+    /// end, and no longer than [`JobId::AT_MOST`].
+    ///
+    /// # Errors
+    ///
+    /// Says which rule the text broke.
+    pub fn parse(text: &str) -> Result<Self, InvalidJobId> {
+        if text.is_empty() {
+            return Err(InvalidJobId::Empty);
+        }
+        if text.chars().count() > Self::AT_MOST {
+            return Err(InvalidJobId::TooLong);
+        }
+        if text.starts_with('-') || text.ends_with('-') {
+            return Err(InvalidJobId::HyphenAtAnEnd);
+        }
+        if let Some(character) = text
+            .chars()
+            .find(|c| !(c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '-'))
+        {
+            return Err(InvalidJobId::Character(character));
+        }
+        Ok(Self(text.to_owned()))
+    }
+
+    /// The name, as text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for JobId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl TryFrom<String> for JobId {
+    type Error = InvalidJobId;
+
+    fn try_from(text: String) -> Result<Self, Self::Error> {
+        Self::parse(&text)
+    }
+}
+
+impl From<JobId> for String {
+    fn from(name: JobId) -> Self {
+        name.0
+    }
+}
+
+/// Why a text is not a job's name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum InvalidJobId {
+    /// Nothing at all.
+    #[error("a job's name cannot be empty")]
+    Empty,
+    /// More than a name may be.
+    #[error("a job's name is at most {} characters", JobId::AT_MOST)]
+    TooLong,
+    /// A hyphen where a DNS label refuses one.
+    #[error("a job's name neither starts nor ends with a hyphen")]
+    HyphenAtAnEnd,
+    /// Something outside the alphabet every place a name goes shares.
+    #[error("a job's name is lowercase letters, digits and hyphens, and {0:?} is none of those")]
+    Character(char),
+}
+
+/// Folds text to a piece of a name.
+///
+/// Lowercase, with every run of anything but an ASCII letter or digit as
+/// one hyphen, no hyphen at either end, and no longer than `at_most` — cut
+/// back to the last whole word that fits when the cut would land inside
+/// one, and cut where it is when what is left is one word longer than the
+/// cap.
+///
+/// The one fold for everything named here: a job, and the project's part of
+/// a room's name in the channel crate — see
+/// `docs/decisions/0074-a-jobs-identifier-is-its-name.md`.
+#[must_use]
+pub fn slug(text: &str, at_most: usize) -> String {
+    let mut folded = String::new();
+    for character in text.chars() {
+        let lowered = character.to_ascii_lowercase();
+        if lowered.is_ascii_alphanumeric() {
+            folded.push(lowered);
+        } else if !folded.is_empty() && !folded.ends_with('-') {
+            folded.push('-');
+        }
+    }
+    // Every character kept is ASCII, so a length is a count and a cut at
+    // `at_most` lands on a character boundary.
+    if folded.len() > at_most {
+        let inside_a_word = folded.chars().nth(at_most).is_some_and(|c| c != '-');
+        folded.truncate(at_most);
+        if inside_a_word
+            && folded.ends_with(|c: char| c != '-')
+            && let Some(last_break) = folded.rfind('-')
+        {
+            folded.truncate(last_break);
+        }
+    }
+    folded.trim_end_matches('-').to_owned()
+}
 
 /// Identifies one instance of this program.
 ///
@@ -142,7 +304,6 @@ macro_rules! identifier {
 }
 
 identifier!(ProjectId);
-identifier!(JobId);
 identifier!(InstanceId);
 
 /// A coding agent this project knows how to run.
@@ -1611,7 +1772,7 @@ impl State {
                 .jobs
                 .iter()
                 .filter(|(_, job)| matches!(job.progress, Progress::Working))
-                .map(|(id, _)| *id)
+                .map(|(id, _)| id.clone())
         })
     }
 
@@ -1630,7 +1791,7 @@ impl State {
                 .jobs
                 .iter()
                 .filter(|(_, job)| !job.progress.is_retired())
-                .map(|(id, _)| *id)
+                .map(|(id, _)| id.clone())
         })
     }
 
@@ -1641,10 +1802,10 @@ impl State {
     /// container's name, which says the job and not the project, so it needs
     /// the search this does.
     #[must_use]
-    pub fn job(&self, job: JobId) -> Option<&Job> {
+    pub fn job(&self, job: &JobId) -> Option<&Job> {
         self.projects
             .values()
-            .find_map(|project| project.jobs.get(&job))
+            .find_map(|project| project.jobs.get(job))
     }
 
     /// Which project a job belongs to.
@@ -1655,18 +1816,18 @@ impl State {
     /// search for the rest. Whoever speaks on that job's behalf needs the
     /// project, because the channel binding is the project's.
     #[must_use]
-    pub fn project_of(&self, job: JobId) -> Option<ProjectId> {
+    pub fn project_of(&self, job: &JobId) -> Option<ProjectId> {
         self.projects
             .iter()
-            .find(|(_, project)| project.jobs.contains_key(&job))
+            .find(|(_, project)| project.jobs.contains_key(job))
             .map(|(id, _)| *id)
     }
 
     /// A job, for recording what became of it.
-    pub fn job_mut(&mut self, job: JobId) -> Option<&mut Job> {
+    pub fn job_mut(&mut self, job: &JobId) -> Option<&mut Job> {
         self.projects
             .values_mut()
-            .find_map(|project| project.jobs.get_mut(&job))
+            .find_map(|project| project.jobs.get_mut(job))
     }
 
     /// Who a message arriving on a channel is for.
@@ -1738,7 +1899,9 @@ impl State {
                     .as_ref()
                     .is_some_and(|room| room.channel == channel && room.id == arriving.room)
             })
-            .map_or(Recipient::Foreman(project), |(job, _)| Recipient::Job(*job))
+            .map_or(Recipient::Foreman(project), |(job, _)| {
+                Recipient::Job(job.clone())
+            })
     }
 
     /// Converts to the form that goes on disk, sealing every credential.
@@ -2378,7 +2541,7 @@ pub struct Arriving<'a> {
 }
 
 /// Who an arriving message is for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Recipient {
     /// The job whose room it arrived in.
     Job(JobId),
@@ -3051,15 +3214,16 @@ mod tests {
         let mut state = configured();
         let project = ProjectId::from_uuid(Uuid::from_u128(3));
         state.projects.insert(project, a_project_with_a_job());
-        let job = *state
+        let job = state
             .projects
             .get(&project)
             .expect("just inserted")
             .jobs
             .keys()
             .next()
-            .expect("a job");
-        state.job_mut(job).expect("the job").room = Some(a_room());
+            .expect("a job")
+            .clone();
+        state.job_mut(&job).expect("the job").room = Some(a_room());
         (state, project, job)
     }
 
@@ -3140,7 +3304,7 @@ mod tests {
         for thread in [None, Some("1728312345.678901")] {
             assert_eq!(
                 state.recipient(project, Channel::Slack, &arriving(JOB_ROOM, thread)),
-                Recipient::Job(job),
+                Recipient::Job(job.clone()),
                 "{thread:?}"
             );
         }
@@ -3241,7 +3405,7 @@ mod tests {
     #[test]
     fn an_idle_jobs_room_still_routes_to_it() {
         let (mut state, project, job) = listening();
-        state.job_mut(job).expect("the job").progress = Progress::Idle(Waiting::Silent);
+        state.job_mut(&job).expect("the job").progress = Progress::Idle(Waiting::Silent);
 
         assert_eq!(
             state.recipient(project, Channel::Slack, &arriving(JOB_ROOM, None)),
@@ -3385,7 +3549,7 @@ mod tests {
     #[test]
     fn a_jobs_thread_survives_the_snapshot_boundary() {
         let mut state = populated();
-        let job = *state
+        let job = state
             .projects
             .values()
             .next()
@@ -3393,8 +3557,9 @@ mod tests {
             .jobs
             .keys()
             .next()
-            .expect("a job");
-        state.job_mut(job).expect("the job").room = Some(a_room());
+            .expect("a job")
+            .clone();
+        state.job_mut(&job).expect("the job").room = Some(a_room());
 
         let json = serde_json::to_string(
             &state
@@ -3406,7 +3571,7 @@ mod tests {
         let reopened = reopened.open(&key()).expect("and opens");
 
         let room = reopened
-            .job(job)
+            .job(&job)
             .expect("the job survived")
             .room
             .clone()
@@ -3551,7 +3716,7 @@ mod tests {
             .get_mut(&project)
             .expect("the project")
             .jobs
-            .insert(job, recorded);
+            .insert(job.clone(), recorded);
 
         let json = serde_json::to_string(
             &state
@@ -3561,7 +3726,7 @@ mod tests {
         .expect("a snapshot serialises");
         let reopened: Snapshot = serde_json::from_str(&json).expect("and parses back");
         let reopened = reopened.open(&key()).expect("and opens");
-        let survived = reopened.job(job).expect("the job survived");
+        let survived = reopened.job(&job).expect("the job survived");
 
         assert_eq!(
             *survived.kit(),
@@ -4466,8 +4631,8 @@ mod tests {
         let waiting = JobId::from_uuid(Uuid::from_u128(22));
         let over = JobId::from_uuid(Uuid::from_u128(23));
         for (id, progress) in [
-            (going, Progress::Working),
-            (waiting, Progress::Idle(Waiting::Asked)),
+            (going.clone(), Progress::Working),
+            (waiting.clone(), Progress::Idle(Waiting::Asked)),
             (over, Progress::Retired(Outcome::Done)),
         ] {
             let mut job = Job::new(
@@ -4481,7 +4646,7 @@ mod tests {
         }
 
         let mut unfinished: Vec<JobId> = state.unfinished().collect();
-        unfinished.sort_by_key(|job| job.as_uuid().as_u128());
+        unfinished.sort();
         assert_eq!(unfinished, vec![going, waiting]);
     }
 
@@ -4538,7 +4703,7 @@ mod tests {
         let found: Vec<JobId> = state.working().collect();
 
         assert_eq!(found.len(), 1, "{found:?}");
-        assert!(state.job(found[0]).is_some());
+        assert!(state.job(&found[0]).is_some());
     }
 
     #[test]
@@ -4546,11 +4711,11 @@ mod tests {
         let mut state = populated();
         let id = state.working().next().expect("one to start with");
 
-        state.job_mut(id).expect("it is there").progress = Progress::Idle(Waiting::Silent);
+        state.job_mut(&id).expect("it is there").progress = Progress::Idle(Waiting::Silent);
 
         assert_eq!(state.working().count(), 0);
         assert!(
-            state.job(id).is_some(),
+            state.job(&id).is_some(),
             "finishing is not forgetting: the record stays"
         );
     }
@@ -4674,9 +4839,9 @@ mod tests {
     fn a_job_names_the_project_it_belongs_to() {
         let (state, project, job) = listening();
 
-        assert_eq!(state.project_of(job), Some(project));
+        assert_eq!(state.project_of(&job), Some(project));
         assert_eq!(
-            state.project_of(JobId::from_uuid(Uuid::from_u128(99))),
+            state.project_of(&JobId::from_uuid(Uuid::from_u128(99))),
             None
         );
     }
@@ -4685,7 +4850,7 @@ mod tests {
     fn a_job_this_instance_never_had_is_not_found() {
         let state = populated();
 
-        assert!(state.job(JobId::from_uuid(Uuid::from_u128(404))).is_none());
+        assert!(state.job(&JobId::from_uuid(Uuid::from_u128(404))).is_none());
     }
 
     /// A file describing an instance that cannot exist is refused where it is

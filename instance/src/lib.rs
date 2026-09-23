@@ -127,7 +127,7 @@ fn out_of_order(asked: EffectId, id: EffectId) {
 }
 
 /// What a wake was asked for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum Timer {
     /// The settling sweep: which containers still deserve to be up.
     Settling,
@@ -244,7 +244,7 @@ impl Instance {
     pub fn turning(&self) -> Vec<Speaker> {
         match &self.stage {
             Stage::Booting(_) => Vec::new(),
-            Stage::Awake(running) => running.turns.keys().copied().collect(),
+            Stage::Awake(running) => running.turns.keys().cloned().collect(),
         }
     }
 
@@ -256,7 +256,7 @@ impl Instance {
     pub fn reading_for(&self) -> Vec<Speaker> {
         match &self.stage {
             Stage::Booting(_) => Vec::new(),
-            Stage::Awake(running) => running.pending_threads.keys().copied().collect(),
+            Stage::Awake(running) => running.pending_threads.keys().cloned().collect(),
         }
     }
 
@@ -280,7 +280,7 @@ impl Instance {
                 | Asked::Discarded { container }
                 | Asked::Inspected { container } => Some(container.clone()),
                 Asked::Labelled { name, .. } => Some(name.clone()),
-                Asked::Port { job } | Asked::Probing { job } => Some(stageman_job::container(*job)),
+                Asked::Port { job } | Asked::Probing { job } => Some(stageman_job::container(job)),
                 Asked::Listing
                 | Asked::Images
                 | Asked::Reclaimed { .. }
@@ -291,12 +291,7 @@ impl Instance {
                 | Asked::CheckedOut { .. } => None,
             })
             .chain(running.listing.keys().cloned())
-            .chain(
-                running
-                    .probes
-                    .values()
-                    .map(|job| stageman_job::container(*job)),
-            )
+            .chain(running.probes.values().map(stageman_job::container))
             .collect()
     }
 
@@ -806,14 +801,14 @@ impl Running {
                 // container with no tunnel prints, so an empty answer and a
                 // failed one mean the same thing here: nowhere to send them.
                 let port = stageman_agent::published(said(finished));
-                self.port_found(job, port, effects);
+                self.port_found(&job, port, effects);
             }
             Asked::Probing { job } => {
                 if let Some(why) = complaint(finished) {
                     tracing::debug!(%job, %why, "the runtime could not say where a job's tunnel is");
                 }
                 let port = stageman_agent::published(said(finished));
-                self.probing(job, port, effects);
+                self.probing(&job, port, effects);
             }
         }
     }
@@ -1009,8 +1004,8 @@ impl Running {
                 effects.push(settling);
             }
             Some(Timer::Reconnecting { project }) => self.try_again(project, effects),
-            Some(Timer::Growing { speaker, run }) => self.grow(speaker, run),
-            Some(Timer::Cancelling { speaker }) => self.cancel_overdue(speaker, effects),
+            Some(Timer::Growing { speaker, run }) => self.grow(&speaker, run),
+            Some(Timer::Cancelling { speaker }) => self.cancel_overdue(&speaker, effects),
             None => tracing::warn!("woken for a timer this instance did not set; ignored"),
         }
     }
@@ -1164,7 +1159,7 @@ impl Running {
     }
 
     /// Writes what became of a job.
-    fn record(&mut self, job: JobId, progress: Progress) {
+    fn record(&mut self, job: &JobId, progress: Progress) {
         let since = self.stamp();
         if let Some(recorded) = self.state.job_mut(job) {
             recorded.progress = progress;
@@ -1180,7 +1175,7 @@ impl Running {
     }
 
     /// Writes down what a job's session reported it was set to, this turn.
-    fn noted(&mut self, job: JobId, reported: BTreeMap<String, String>) {
+    fn noted(&mut self, job: &JobId, reported: BTreeMap<String, String>) {
         if let Some(recorded) = self.state.job_mut(job) {
             recorded.reported = reported;
             self.dirty = true;
@@ -1189,7 +1184,7 @@ impl Running {
 
     /// What a job resuming needs from its record: the room it speaks in, and
     /// what it runs on.
-    fn recorded(&self, job: JobId) -> Option<(Option<Room>, Kit)> {
+    fn recorded(&self, job: &JobId) -> Option<(Option<Room>, Kit)> {
         self.state
             .job(job)
             .map(|recorded| (recorded.room.clone(), recorded.kit().clone()))
@@ -1201,17 +1196,17 @@ impl Running {
     /// Unguessable from the instance's own generator, so there is one answer
     /// to where an unguessable value comes from. Bounded by construction: one
     /// entry per turn in flight rather than one per turn ever taken.
-    fn warrant(&mut self, speaker: Speaker, place: Option<Place>, from: Option<String>) -> String {
+    fn warrant(&mut self, speaker: &Speaker, place: Option<Place>, from: Option<String>) -> String {
         let credential = format!(
             "{}{}",
             mint(&mut self.rng).simple(),
             mint(&mut self.rng).simple()
         );
-        self.warrants.retain(|_, known| known.speaker != speaker);
+        self.warrants.retain(|_, known| known.speaker != *speaker);
         self.warrants.insert(
             credential.clone(),
             Warranted {
-                speaker,
+                speaker: speaker.clone(),
                 place,
                 from,
             },

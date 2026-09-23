@@ -75,7 +75,7 @@ pub const fn answering(probed: Probed) -> bool {
 /// It answers with the container to stop rather than stopping one, so the
 /// deciding is a function anything can call and the asking stays with the
 /// instance, which is what mints an identifier for the answer.
-fn halting(job: JobId, answering: bool) -> Option<String> {
+fn halting(job: &JobId, answering: bool) -> Option<String> {
     if answering {
         tracing::info!(
             %job,
@@ -200,11 +200,11 @@ fn is_label(label: &str) -> bool {
 /// through the thing forwarding the domain, which listens where a browser
 /// looks by default.
 #[must_use]
-pub fn address(domain: &Domain, job: JobId, serving: u16) -> String {
+pub fn address(domain: &Domain, job: &JobId, serving: u16) -> String {
     if domain.is_local() {
-        format!("http://{}.{domain}:{serving}", job.as_uuid())
+        format!("http://{job}.{domain}:{serving}")
     } else {
-        format!("https://{}.{domain}", job.as_uuid())
+        format!("https://{job}.{domain}")
     }
 }
 
@@ -272,11 +272,11 @@ pub fn decode(host: &str, domain: &Domain) -> Routed {
     };
     // One level, because one level is what a wildcard covers — both in the
     // forwarding rule and in the certificate. A label with a dot in it is not
-    // an identifier, so a deeper name falls out below with everything else
-    // that is not one.
-    stageman_core::Uuid::parse_str(label)
-        .ok()
-        .map_or(Routed::Stranger, |job| Routed::Job(JobId::from_uuid(job)))
+    // a name, so a deeper name falls out below with everything else that is
+    // not one. What is one is read by the one grammar a job's name has, per
+    // `docs/decisions/0074-a-jobs-identifier-is-its-name.md`, so a stranger
+    // is a label no name could be; a name no job has is found out below.
+    JobId::parse(label).map_or(Routed::Stranger, Routed::Job)
 }
 
 /// The bare hostname in a `Host` header.
@@ -363,11 +363,20 @@ impl crate::Running {
     }
 
     pub fn tunnel_asked(&mut self, id: RequestId, job: JobId, effects: &mut Vec<Effect>) {
-        let showing = self
-            .state
-            .job(job)
-            .is_some_and(|recorded| !matches!(recorded.progress, Progress::Retired(_)));
-        if !showing {
+        let Some(recorded) = self.state.job(&job) else {
+            // The same diagnostic a stranger gets, because since a name is
+            // read by a grammar most labels are names, and a name no job
+            // has is the likelier sign that the domain is not what is
+            // forwarded here.
+            tracing::warn!(
+                %job,
+                "a name under this instance's domain identifies no job — a stale link, or the \
+                 domain set to something other than what is forwarded here"
+            );
+            Self::nobody(id, effects);
+            return;
+        };
+        if matches!(recorded.progress, Progress::Retired(_)) {
             Self::nobody(id, effects);
             return;
         }
@@ -375,12 +384,12 @@ impl crate::Running {
             Self::routed(id, Some(port), effects);
             return;
         }
-        let waiting = self.routing.entry(job).or_default();
+        let waiting = self.routing.entry(job.clone()).or_default();
         waiting.push(id);
         if waiting.len() == 1 {
             let looking = self.ask(
                 &Command::Port {
-                    name: stageman_job::container(job),
+                    name: stageman_job::container(&job),
                 },
                 Asked::Port { job },
             );
@@ -389,11 +398,11 @@ impl crate::Running {
     }
 
     /// Records where a job's tunnel was found, and answers everyone waiting.
-    pub fn port_found(&mut self, job: JobId, port: Option<u16>, effects: &mut Vec<Effect>) {
+    pub fn port_found(&mut self, job: &JobId, port: Option<u16>, effects: &mut Vec<Effect>) {
         if let Some(port) = port {
-            self.tunnels.insert(job, port);
+            self.tunnels.insert(job.clone(), port);
         }
-        for id in self.routing.remove(&job).unwrap_or_default() {
+        for id in self.routing.remove(job).unwrap_or_default() {
             Self::routed(id, port, effects);
         }
     }
@@ -412,7 +421,7 @@ impl crate::Running {
     pub fn probe(&mut self, job: JobId, effects: &mut Vec<Effect>) {
         let looking = self.ask(
             &Command::Port {
-                name: stageman_job::container(job),
+                name: stageman_job::container(&job),
             },
             Asked::Probing { job },
         );
@@ -424,13 +433,13 @@ impl crate::Running {
     /// Nothing published is nothing to reach, and so is a container the
     /// runtime will not answer about: both are a tunnel with nothing behind
     /// it, and neither is probed.
-    pub fn probing(&mut self, job: JobId, port: Option<u16>, effects: &mut Vec<Effect>) {
+    pub fn probing(&mut self, job: &JobId, port: Option<u16>, effects: &mut Vec<Effect>) {
         let Some(port) = port else {
             self.tunnel_answered(job, false, effects);
             return;
         };
         let id = self.effect_id();
-        self.probes.insert(id, job);
+        self.probes.insert(id, job.clone());
         effects.push(Generic::Probe {
             id,
             port,
@@ -444,7 +453,7 @@ impl crate::Running {
             tracing::warn!("a port was probed that this instance did not ask about; ignored");
             return;
         };
-        self.tunnel_answered(job, answering(probed), effects);
+        self.tunnel_answered(&job, answering(probed), effects);
     }
 
     /// What is done about a job's tunnel, now it is known whether anything
@@ -457,8 +466,8 @@ impl crate::Running {
     /// under it: the race
     /// `docs/decisions/0066-a-foremans-container-runs-only-while-a-turn-runs-in-it.md`
     /// admits, closed for a job.
-    fn tunnel_answered(&mut self, job: JobId, answering: bool, effects: &mut Vec<Effect>) {
-        if !answering && self.turns.contains_key(&Speaker::Job(job)) {
+    fn tunnel_answered(&mut self, job: &JobId, answering: bool, effects: &mut Vec<Effect>) {
+        if !answering && self.turns.contains_key(&Speaker::Job(job.clone())) {
             tracing::debug!(%job, "its tunnel answers nobody, but a turn has started in it since");
             return;
         }
@@ -488,8 +497,8 @@ impl crate::Running {
     /// restarted by somebody else and moved — and the settling probe finds
     /// that within its interval, which is the same recovery arriving a
     /// minute later rather than a new one being needed.
-    pub fn forget_tunnel(&mut self, job: JobId) {
-        self.tunnels.remove(&job);
+    pub fn forget_tunnel(&mut self, job: &JobId) {
+        self.tunnels.remove(job);
     }
 }
 
@@ -521,10 +530,10 @@ mod tests {
     fn a_tunnel_that_answers_keeps_its_container_and_silence_stops_it() {
         let job = JobId::from_uuid(Uuid::from_u128(5));
 
-        assert_eq!(halting(job, true), None, "answering keeps the container");
+        assert_eq!(halting(&job, true), None, "answering keeps the container");
         assert_eq!(
-            halting(job, false),
-            Some(stageman_job::container(job)),
+            halting(&job, false),
+            Some(stageman_job::container(&job)),
             "silence stops it, and that container and no other"
         );
     }
@@ -610,7 +619,7 @@ mod tests {
     #[test]
     fn a_hostname_says_whether_it_is_the_dashboard_or_a_job() {
         let domain = Domain::parse("example.com").expect("a domain");
-        let named = a_job().as_uuid().to_string();
+        let named = a_job().to_string();
 
         assert_eq!(decode("example.com", &domain), Routed::Dashboard);
         assert_eq!(
@@ -623,7 +632,7 @@ mod tests {
     #[test]
     fn a_hostname_is_compared_without_its_port_case_or_root() {
         let domain = Domain::parse("example.com").expect("a domain");
-        let named = a_job().as_uuid().to_string();
+        let named = a_job().to_string();
 
         for host in [
             format!("{named}.example.com:8080"),
@@ -636,12 +645,21 @@ mod tests {
     }
 
     /// A name this instance does not serve is not silently the dashboard.
+    ///
+    /// Since `docs/decisions/0074-a-jobs-identifier-is-its-name.md` a label
+    /// that fits a name's grammar is read as a name and found to belong to
+    /// no job further on; a stranger is a label no name could be.
     #[test]
     fn a_name_under_this_domain_that_names_no_job_is_not_the_dashboard() {
         let domain = Domain::parse("example.com").expect("a domain");
-        let named = a_job().as_uuid().to_string();
+        let named = a_job().to_string();
 
-        assert_eq!(decode("nope.example.com", &domain), Routed::Stranger);
+        assert_eq!(
+            decode("nope.example.com", &domain),
+            Routed::Job(JobId::parse("nope").expect("a name")),
+            "a well-formed label is a name, whether or not a job has it"
+        );
+        assert_eq!(decode("not_a_name.example.com", &domain), Routed::Stranger);
         assert_eq!(
             decode(&format!("deeper.{named}.example.com"), &domain),
             Routed::Stranger,
@@ -677,16 +695,16 @@ mod tests {
     /// one because it is the only one with nothing in front of it.
     #[test]
     fn an_address_names_the_port_only_when_nothing_forwards_to_it() {
-        let named = a_job().as_uuid().to_string();
+        let named = a_job().to_string();
 
         assert_eq!(
-            address(&Domain::local(), a_job(), 8080),
+            address(&Domain::local(), &a_job(), 8080),
             format!("http://{named}.localhost:8080"),
         );
         assert_eq!(
             address(
                 &Domain::parse("dev.localhost").expect("a domain"),
-                a_job(),
+                &a_job(),
                 3000
             ),
             format!("http://{named}.dev.localhost:3000"),
@@ -695,7 +713,7 @@ mod tests {
         assert_eq!(
             address(
                 &Domain::parse("example.com").expect("a domain"),
-                a_job(),
+                &a_job(),
                 8080
             ),
             format!("https://{named}.example.com"),
@@ -708,7 +726,7 @@ mod tests {
     fn an_address_decodes_back_to_the_job_it_was_built_for() {
         for domain in ["localhost", "example.com", "stageman.example.com"] {
             let domain = Domain::parse(domain).expect("a domain");
-            let built = address(&domain, a_job(), 8080);
+            let built = address(&domain, &a_job(), 8080);
             let host = built.split("//").nth(1).expect("a scheme and an authority");
             assert_eq!(decode(host, &domain), Routed::Job(a_job()), "{built}");
         }

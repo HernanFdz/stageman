@@ -24,7 +24,7 @@ const SECOND: &str = "1788000099.000020";
 const PARENT: &str = "1788000000.500000";
 const OTHER: &str = "1788000000.600000";
 
-fn progress_of(state: &State, id: JobId) -> Progress {
+fn progress_of(state: &State, id: &JobId) -> Progress {
     state.job(id).expect("the job").progress.clone()
 }
 
@@ -56,8 +56,12 @@ fn handed(message: &str, text: &str) -> String {
 /// message arrives.
 fn a_working_job(world: &mut Simulation) -> (stageman_instance::Instance, JobId) {
     let working = job(1);
-    world.holding(&watching_a_channel(&[(working, Progress::Working, 1)]));
-    let (name, held) = Simulation::ours(&stageman_job::container(working));
+    world.holding(&watching_a_channel(&[(
+        working.clone(),
+        Progress::Working,
+        1,
+    )]));
+    let (name, held) = Simulation::ours(&stageman_job::container(&working));
     world.container(&name, held);
     let instance = world.wake(seed(1));
     (instance, working)
@@ -67,11 +71,11 @@ fn a_working_job(world: &mut Simulation) -> (stageman_instance::Instance, JobId)
 fn an_idle_job(world: &mut Simulation) -> (stageman_instance::Instance, JobId) {
     let idle = job(1);
     world.holding(&watching_a_channel(&[(
-        idle,
+        idle.clone(),
         Progress::Idle(Waiting::Asked),
         1,
     )]));
-    let (name, held) = Simulation::ours(&stageman_job::container(idle));
+    let (name, held) = Simulation::ours(&stageman_job::container(&idle));
     world.container(&name, held);
     let instance = world.wake(seed(1));
     (instance, idle)
@@ -124,7 +128,7 @@ fn a_message_to_a_working_job_is_handed_to_its_turn() {
             .is_none(),
         "a message at the root has no thread to read"
     );
-    let recorded = instance.state().job(working).expect("the job");
+    let recorded = instance.state().job(&working).expect("the job");
     assert_eq!(recorded.progress, Progress::Idle(Waiting::Silent));
     assert!(recorded.inbox.is_empty(), "nothing waits for an idle job");
     let shape = world.shape();
@@ -188,7 +192,7 @@ fn a_message_that_lands_clears_the_claim_and_marks_the_interrupted_call() {
     world.run_until(&mut instance, 10_000);
 
     assert_eq!(
-        progress_of(instance.state(), working),
+        progress_of(instance.state(), &working),
         Progress::Idle(Waiting::Silent),
         "the claim made before the message landed no longer counts"
     );
@@ -229,7 +233,7 @@ fn two_messages_arriving_together_start_one_turn_and_the_second_is_handed_to_it(
     assert!(
         instance
             .state()
-            .job(idle)
+            .job(&idle)
             .expect("the job")
             .inbox
             .is_empty()
@@ -286,7 +290,7 @@ fn a_message_the_adapter_declines_is_delivered_by_the_turns_end() {
     );
     assert_eq!(world.reacted(Reaction::Done), [FIRST, SECOND]);
     assert_eq!(
-        progress_of(instance.state(), working),
+        progress_of(instance.state(), &working),
         Progress::Idle(Waiting::Silent)
     );
 }
@@ -352,14 +356,14 @@ fn a_cancel_nobody_answers_closes_the_process() {
     }
     world.run_until(&mut instance, 20_000);
     assert_eq!(
-        progress_of(instance.state(), working),
+        progress_of(instance.state(), &working),
         Progress::Working,
         "still waiting on the cancel being answered"
     );
     world.run_until(&mut instance, 40_000);
 
     assert_eq!(
-        progress_of(instance.state(), working),
+        progress_of(instance.state(), &working),
         Progress::Idle(Waiting::Paused)
     );
     let runs = world.talks();
@@ -399,7 +403,7 @@ fn a_stop_is_a_cancel_and_tells_what_was_waiting() {
     world.run_until(&mut instance, 5_000);
 
     assert_eq!(
-        progress_of(instance.state(), working),
+        progress_of(instance.state(), &working),
         Progress::Idle(Waiting::Paused)
     );
     let runs = world.talks();
@@ -425,7 +429,7 @@ fn a_stop_is_a_cancel_and_tells_what_was_waiting() {
     assert!(
         instance
             .state()
-            .job(working)
+            .job(&working)
             .expect("the job")
             .inbox
             .is_empty(),
@@ -541,7 +545,7 @@ fn a_stop_before_the_turn_is_registered_is_held_and_takes_effect() {
     world.says_in_rooms_thread(100, 1, "1788000000.500000", "go with that");
     world.run_until(&mut instance, 100);
     assert_eq!(
-        progress_of(instance.state(), idle),
+        progress_of(instance.state(), &idle),
         Progress::Working,
         "received, and its thread not yet read: {:?}",
         world.shape()
@@ -561,7 +565,7 @@ fn a_stop_before_the_turn_is_registered_is_held_and_takes_effect() {
     world.run_until(&mut instance, 5_000);
 
     assert_eq!(
-        progress_of(instance.state(), idle),
+        progress_of(instance.state(), &idle),
         Progress::Idle(Waiting::Paused)
     );
     assert!(
@@ -572,7 +576,7 @@ fn a_stop_before_the_turn_is_registered_is_held_and_takes_effect() {
     assert!(
         instance
             .state()
-            .job(idle)
+            .job(&idle)
             .expect("the job")
             .inbox
             .is_empty()
@@ -615,7 +619,7 @@ fn a_turn_that_ends_with_a_message_waiting_starts_the_next_at_once() {
     );
     assert_eq!(world.reacted(Reaction::Done), [FIRST, SECOND]);
     assert_eq!(
-        progress_of(instance.state(), working),
+        progress_of(instance.state(), &working),
         Progress::Idle(Waiting::Silent)
     );
 }
@@ -663,7 +667,7 @@ fn a_probe_in_flight_does_not_halt_a_container_a_new_turn_needs() {
         world.commands_after(runs[0].ended_at.expect("the first ended"))
     );
     assert_eq!(
-        progress_of(instance.state(), working),
+        progress_of(instance.state(), &working),
         Progress::Idle(Waiting::Silent)
     );
 }
@@ -689,7 +693,7 @@ fn a_turn_that_fails_with_a_message_waiting_is_tried_again_by_it() {
         "the message the second turn handled, and nothing for the failed one"
     );
     assert_eq!(
-        progress_of(instance.state(), working),
+        progress_of(instance.state(), &working),
         Progress::Idle(Waiting::Silent)
     );
 }
@@ -702,8 +706,8 @@ fn a_turn_that_fails_with_a_message_waiting_is_tried_again_by_it() {
 fn a_resumed_job_is_told_again_what_it_had_in_hand() {
     let mut world = Simulation::new();
     let working = job(1);
-    let mut state = watching_a_channel(&[(working, Progress::Working, 1)]);
-    let recorded = state.job_mut(working).expect("the job");
+    let mut state = watching_a_channel(&[(working.clone(), Progress::Working, 1)]);
+    let recorded = state.job_mut(&working).expect("the job");
     recorded.inbox.receive(stageman_core::Errand {
         said: "<@U0BOT> use postgres".to_owned(),
         thread: stageman_core::Thread {
@@ -717,7 +721,7 @@ fn a_resumed_job_is_told_again_what_it_had_in_hand() {
     });
     recorded.inbox.give();
     world.holding(&state);
-    let (name, held) = Simulation::ours(&stageman_job::container(working));
+    let (name, held) = Simulation::ours(&stageman_job::container(&working));
     world.container(&name, held);
     let mut instance = world.wake(seed(1));
     world.run_until(&mut instance, 5_000);
@@ -749,7 +753,7 @@ fn a_resumed_job_is_told_again_what_it_had_in_hand() {
     assert!(
         instance
             .state()
-            .job(working)
+            .job(&working)
             .expect("the job")
             .inbox
             .is_empty()
@@ -762,9 +766,9 @@ fn a_resumed_job_is_told_again_what_it_had_in_hand() {
 fn a_job_that_is_not_working_opens_with_nothing_waiting() {
     let mut world = Simulation::new();
     let idle = job(1);
-    let mut state = watching_a_channel(&[(idle, Progress::Idle(Waiting::Asked), 1)]);
+    let mut state = watching_a_channel(&[(idle.clone(), Progress::Idle(Waiting::Asked), 1)]);
     state
-        .job_mut(idle)
+        .job_mut(&idle)
         .expect("the job")
         .inbox
         .receive(stageman_core::Errand {
@@ -785,7 +789,7 @@ fn a_job_that_is_not_working_opens_with_nothing_waiting() {
     assert!(
         instance
             .state()
-            .job(idle)
+            .job(&idle)
             .expect("the job")
             .inbox
             .is_empty()
@@ -821,7 +825,7 @@ fn a_message_to_a_job_that_is_over_is_refused() {
     let mut world = Simulation::new();
     let over = job(1);
     world.holding(&watching_a_channel(&[(
-        over,
+        over.clone(),
         Progress::Retired(stageman_core::Outcome::Done),
         1,
     )]));
@@ -837,7 +841,7 @@ fn a_message_to_a_job_that_is_over_is_refused() {
     assert!(
         instance
             .state()
-            .job(over)
+            .job(&over)
             .expect("the job")
             .inbox
             .is_empty()

@@ -21,7 +21,11 @@ the instance probes an idle job's tunnel to decide its container's fate and
 keeps no fact of the answer, and never probes a working one, so showing it
 only while something answers waits on the instance keeping that fact —
 taken up with the moment a standing changed, which is the other fact this
-record asks it to keep.
+record asks it to keep. Since
+`docs/decisions/0074-a-jobs-identifier-is-its-name.md` a job's identifier
+is its name, so the addresses that keep it read as one; the argument below
+against a readable slug still holds for a project, whose name has no suffix
+to make it unique.
 
 ## Context
 

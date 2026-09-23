@@ -17,6 +17,12 @@ a job's room also carries what its agent says and does as it happens, the
 foreman has a room of its own, and a job started from the dashboard is
 announced there.
 
+Amended by `docs/decisions/0074-a-jobs-identifier-is-its-name.md`: a job's
+identifier now carries its title, so its room is named
+`<project>--<identifier>`, and the title and the eight-hex prefix the
+decision below puts beside the project's name are inside the identifier
+instead. Rooms made before that keep the name they were given.
+
 Every claim below about what the platform does was measured on 2026-09-15
 against a real workspace.
 

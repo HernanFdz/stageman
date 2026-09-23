@@ -81,7 +81,7 @@ pub fn tools(warranted: &Warranted, kits: &[(String, String)]) -> Vec<Tool> {
     // thing a foreman and a job both do.
     let say = Tool {
         name: "say",
-        description: say_description(warranted.speaker).to_owned(),
+        description: say_description(&warranted.speaker).to_owned(),
         schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -170,8 +170,9 @@ pub fn tools(warranted: &Warranted, kits: &[(String, String)]) -> Vec<Tool> {
                     "title": {
                         "type": "string",
                         "description": "A few words naming the job, as a person would read \
-                                        them in a sidebar: the room it reports in is named \
-                                        after them.",
+                                        them in a sidebar. Its name is made from them, folded \
+                                        and given a short suffix, and its room, its page and \
+                                        its container are named after that.",
                     },
                 },
                 "required": ["reason", "instructions", "kit", "title"],
@@ -188,7 +189,7 @@ pub fn tools(warranted: &Warranted, kits: &[(String, String)]) -> Vec<Tool> {
 /// so for a job the tool is for the thread a person asked in; a foreman's
 /// reaches a room of its own, where the person who asked is not, so for a
 /// foreman the tool is how the person is answered.
-const fn say_description(speaker: Speaker) -> &'static str {
+const fn say_description(speaker: &Speaker) -> &'static str {
     match speaker {
         Speaker::Foreman(_) => {
             "Say something to the people on this project's channel, in Markdown: it \
@@ -802,8 +803,8 @@ impl Running {
 
     /// Which project a bearer belongs to.
     fn project_of(&self, warranted: &Warranted) -> Option<ProjectId> {
-        match warranted.speaker {
-            Speaker::Foreman(project) => Some(project),
+        match &warranted.speaker {
+            Speaker::Foreman(project) => Some(*project),
             Speaker::Job(job) => self.state.project_of(job),
         }
     }
@@ -891,9 +892,9 @@ impl Running {
             return Err("nothing was said, so nothing was posted".to_owned());
         }
         // Where the speaker's own words go: the root of the room it owns.
-        let own = match warranted.speaker {
+        let own = match &warranted.speaker {
             Speaker::Job(job) => crate::turns::speaking_for(&self.state, job),
-            Speaker::Foreman(project) => self.state.projects.get(&project).and_then(|watched| {
+            Speaker::Foreman(project) => self.state.projects.get(project).and_then(|watched| {
                 let room = watched.foreman_room.clone()?;
                 let bound = watched.channels.get(&room.channel)?;
                 Some((bound.speaking(), Place::root(room)))
@@ -1007,7 +1008,7 @@ impl Running {
         warranted: &Warranted,
         stopping: &Stopping,
     ) -> Result<&'static str, String> {
-        let Speaker::Job(job) = warranted.speaker else {
+        let Speaker::Job(job) = &warranted.speaker else {
             tracing::warn!("a foreman said why it was stopping");
             return Err(format!("this instance serves no tool called {STOPPING:?}"));
         };
@@ -1023,7 +1024,7 @@ impl Running {
             ));
         };
         let opened = stopping.pull_requests.clone()?;
-        if let Some(turn) = self.turns.get_mut(&Speaker::Job(job)) {
+        if let Some(turn) = self.turns.get_mut(&Speaker::Job(job.clone())) {
             turn.claimed = Some(claim.into());
             turn.pull_requests.extend(opened);
             Ok("noted")
@@ -1491,7 +1492,7 @@ mod tests {
     #[test]
     fn the_speaking_tool_is_described_to_each_speaker_exactly() {
         assert_eq!(
-            say_description(Speaker::Foreman(ProjectId::from_uuid(Uuid::from_u128(1)))),
+            say_description(&Speaker::Foreman(ProjectId::from_uuid(Uuid::from_u128(1)))),
             "Say something to the people on this project's channel, in Markdown: it is \
              rendered, so headings, lists, code, tables and links all show. It posts under \
              the message you name with `to`, which is how a person is answered where they \
@@ -1499,7 +1500,7 @@ mod tests {
              output already goes and the person who asked is not."
         );
         assert_eq!(
-            say_description(Speaker::Job(JobId::from_uuid(Uuid::from_u128(2)))),
+            say_description(&Speaker::Job(JobId::from_uuid(Uuid::from_u128(2)))),
             "Say something to the people in this job's room, in Markdown: it is rendered, \
              so headings, lists, code, tables and links all show. It posts at the root of \
              your room, or under a message when you name it with `to`, as each message is \

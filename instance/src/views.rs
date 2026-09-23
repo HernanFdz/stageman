@@ -387,7 +387,7 @@ pub fn working(
     let mut jobs: Vec<stageman_wire::Job> = watched
         .jobs
         .iter()
-        .map(|(id, job)| job_view(*id, job, &watched.repository, domain, serving))
+        .map(|(id, job)| job_view(id, job, &watched.repository, domain, serving))
         .collect();
     jobs.sort_by(|one, other| other.created_at.cmp(&one.created_at));
 
@@ -438,7 +438,7 @@ pub fn job_page(
         project_name: watched.name.clone(),
         repository: watched.repository.clone(),
         repository_link: linked(&watched.repository),
-        job: job_view(named, recorded, &watched.repository, domain, serving),
+        job: job_view(&named, recorded, &watched.repository, domain, serving),
         fitted: fitted(recorded.kit()),
         agent_name: shown(agent),
         shape: shape_of(agent),
@@ -463,7 +463,7 @@ pub fn pull_request_link(repository: &str, number: u64) -> Option<String> {
 
 /// One job, as a page sees it.
 fn job_view(
-    id: JobId,
+    id: &JobId,
     job: &Job,
     repository: &str,
     domain: &Domain,
@@ -509,13 +509,13 @@ pub fn home(
     domain: &Domain,
     serving: u16,
 ) -> stageman_wire::Home {
-    let mut idle: Vec<(ProjectId, &Project, JobId, &Job)> = Vec::new();
-    let mut running: Vec<(ProjectId, &Project, JobId, &Job)> = Vec::new();
+    let mut idle: Vec<(ProjectId, &Project, &JobId, &Job)> = Vec::new();
+    let mut running: Vec<(ProjectId, &Project, &JobId, &Job)> = Vec::new();
     for (project_id, project) in &state.projects {
         for (id, job) in &project.jobs {
             match &job.progress {
-                Progress::Idle(_) => idle.push((*project_id, project, *id, job)),
-                Progress::Working => running.push((*project_id, project, *id, job)),
+                Progress::Idle(_) => idle.push((*project_id, project, id, job)),
+                Progress::Working => running.push((*project_id, project, id, job)),
                 Progress::Retired(_) => {}
             }
         }
@@ -525,7 +525,7 @@ pub fn home(
     let changed = |job: &Job| (job.since, job.created_at);
     idle.sort_by_key(|placed| changed(placed.3));
     running.sort_by_key(|placed| std::cmp::Reverse(changed(placed.3)));
-    let placed = |(project_id, project, id, job): (ProjectId, &Project, JobId, &Job)| {
+    let placed = |(project_id, project, id, job): (ProjectId, &Project, &JobId, &Job)| {
         stageman_wire::ProjectJob {
             project: project_id.to_string(),
             project_name: project.name.clone(),

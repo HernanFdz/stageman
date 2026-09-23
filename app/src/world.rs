@@ -253,7 +253,7 @@ mod tests {
     #[ignore = "needs a container runtime and the network; run `just image-handshake`"]
     async fn a_published_port_with_nothing_inside_answers_for_nobody() {
         let runtime = located_runtime();
-        let name = stageman_job::container(JobId::from_uuid(Uuid::from_u128(43)));
+        let name = stageman_job::container(&JobId::from_uuid(Uuid::from_u128(43)));
         stageman_agent::discard(&runtime, &name)
             .await
             .expect("a clean slate");

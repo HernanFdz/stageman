@@ -16,6 +16,12 @@ names: `just drift` resolves a backticked identifier against this source, and
 a record written before the code it governs would otherwise fail the gate for
 being early rather than for being wrong.
 
+Amended by `docs/decisions/0074-a-jobs-identifier-is-its-name.md`: the
+bottom label of a request's host is read by that record's grammar rather
+than as a UUID, and a well-formed label naming no job is answered as an
+unknown job, with a line in the log; a stranger is a label no name could
+be.
+
 ## Context
 
 A job's work is invisible until it is proposed. Everything this project does

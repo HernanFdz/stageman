@@ -389,9 +389,9 @@ fn forgetting_a_project_removes_its_containers_and_refuses_while_busy() {
         (job(1), Progress::Working),
         (job(2), Progress::Idle(Waiting::Silent)),
     ]));
-    let (name, held) = Simulation::ours(&stageman_job::container(job(1)));
+    let (name, held) = Simulation::ours(&stageman_job::container(&job(1)));
     sim.container(&name, held);
-    let (name, held) = Simulation::ours(&stageman_job::container(job(2)));
+    let (name, held) = Simulation::ours(&stageman_job::container(&job(2)));
     sim.container(&name, held);
     let (name, held) = Simulation::ours(&stageman_foreman::container(project()));
     sim.container(&name, held);
@@ -421,8 +421,8 @@ fn forgetting_a_project_removes_its_containers_and_refuses_while_busy() {
         panic!("the projects screen");
     };
     assert!(shown.projects.is_empty());
-    assert!(!sim.exists(&stageman_job::container(job(1))));
-    assert!(!sim.exists(&stageman_job::container(job(2))));
+    assert!(!sim.exists(&stageman_job::container(&job(1))));
+    assert!(!sim.exists(&stageman_job::container(&job(2))));
     assert!(!sim.exists(&stageman_foreman::container(project())));
     assert!(first(&sim, "-> Write") < first_removal(&sim));
     assert!(sim.reclaims() >= 1);
@@ -446,6 +446,7 @@ fn starting_a_job_by_hand_runs_its_first_turn_once_the_record_has_landed() {
             project: id.clone(),
             kit: "Claude".to_owned(),
             work: " fix the build ".to_owned(),
+            title: String::new(),
         },
     ) else {
         panic!("the project's screen");
@@ -461,8 +462,8 @@ fn starting_a_job_by_hand_runs_its_first_turn_once_the_record_has_landed() {
     assert_eq!(started.reason, "started by hand from the dashboard");
     assert!(started.tunnel.contains(&started.id));
     assert!(first(&sim, "-> Write") < sim.first_turn().expect("a turn"));
-    let begun = JobId::from_uuid(Uuid::parse_str(&started.id).expect("an identifier"));
-    assert!(sim.is_running(&stageman_job::container(begun)));
+    let begun = JobId::parse(&started.id).expect("a name");
+    assert!(sim.is_running(&stageman_job::container(&begun)));
 
     assert_eq!(
         ask(
@@ -473,6 +474,7 @@ fn starting_a_job_by_hand_runs_its_first_turn_once_the_record_has_landed() {
                 project: id.clone(),
                 kit: "gpt".to_owned(),
                 work: "anything".to_owned(),
+                title: String::new(),
             },
         ),
         Response::Refused(Refusal::KitNotOnProject {
@@ -489,6 +491,7 @@ fn starting_a_job_by_hand_runs_its_first_turn_once_the_record_has_landed() {
                 project: id,
                 kit: "Claude".to_owned(),
                 work: "  ".to_owned(),
+                title: String::new(),
             },
         ),
         Response::Refused(Refusal::Incomplete {
@@ -514,6 +517,7 @@ fn a_job_started_by_hand_on_a_bound_project_has_its_room_made_first() {
             project: project().to_string(),
             kit: "Claude".to_owned(),
             work: "fix the build".to_owned(),
+            title: String::new(),
         },
     ) else {
         panic!("the project's screen");
@@ -524,11 +528,11 @@ fn a_job_started_by_hand_on_a_bound_project_has_its_room_made_first() {
         .expect("the room was made");
     assert!(made < sim.first_turn().expect("a turn"));
     assert_eq!(sim.rooms().len(), 1);
-    let started = JobId::from_uuid(Uuid::parse_str(&shown.jobs[0].id).expect("an identifier"));
+    let started = JobId::parse(&shown.jobs[0].id).expect("a name");
     assert!(
         instance
             .state()
-            .job(started)
+            .job(&started)
             .and_then(|job| job.room.clone())
             .is_some()
     );
@@ -552,6 +556,7 @@ fn a_jobs_page_says_what_it_is_and_links_only_what_is_true() {
             project: project().to_string(),
             kit: "Claude".to_owned(),
             work: "fix the build".to_owned(),
+            title: String::new(),
         },
     ) else {
         panic!("the project's screen");
@@ -610,9 +615,9 @@ fn stopping_a_job_ends_its_turn_and_leaves_it_paused() {
         (job(1), Progress::Working),
         (job(2), Progress::Idle(Waiting::Silent)),
     ]));
-    let (name, held) = Simulation::ours(&stageman_job::container(job(1)));
+    let (name, held) = Simulation::ours(&stageman_job::container(&job(1)));
     sim.container(&name, held);
-    let (name, held) = Simulation::ours(&stageman_job::container(job(2)));
+    let (name, held) = Simulation::ours(&stageman_job::container(&job(2)));
     sim.container(&name, held);
     let mut instance = sim.wake(seed(1));
     // Far enough for the resumed job's agent to be running, so that the
@@ -648,18 +653,21 @@ fn stopping_a_job_ends_its_turn_and_leaves_it_paused() {
 
     sim.run_until(&mut instance, 10);
     assert_eq!(
-        instance.state().job(job(1)).map(|job| job.progress.clone()),
+        instance
+            .state()
+            .job(&job(1))
+            .map(|job| job.progress.clone()),
         Some(Progress::Idle(Waiting::Paused))
     );
     assert_eq!(
         sim.disk()
             .expect("landed")
-            .job(job(1))
+            .job(&job(1))
             .map(|job| job.progress.clone()),
         Some(Progress::Idle(Waiting::Paused))
     );
     assert!(
-        sim.exists(&stageman_job::container(job(1))),
+        sim.exists(&stageman_job::container(&job(1))),
         "stopping keeps"
     );
 
@@ -698,9 +706,9 @@ fn retiring_a_job_records_the_verdict_before_its_container_goes() {
         (job(1), Progress::Idle(Waiting::Asked), 1),
         (job(2), Progress::Working, 2),
     ]));
-    let (name, held) = Simulation::ours(&stageman_job::container(job(1)));
+    let (name, held) = Simulation::ours(&stageman_job::container(&job(1)));
     sim.container(&name, held);
-    let (name, held) = Simulation::ours(&stageman_job::container(job(2)));
+    let (name, held) = Simulation::ours(&stageman_job::container(&job(2)));
     sim.container(&name, held);
     let mut instance = sim.wake(seed(1));
     let id = project().to_string();
@@ -725,7 +733,7 @@ fn retiring_a_job_records_the_verdict_before_its_container_goes() {
         .expect("still listed");
     assert_eq!(retired.standing, Standing::Done);
     assert!(first(&sim, "-> Write") < first_removal(&sim));
-    assert!(!sim.exists(&stageman_job::container(job(1))));
+    assert!(!sim.exists(&stageman_job::container(&job(1))));
     assert_eq!(sim.reclaims(), reclaimed + 1);
     // Its room went with it, once the verdict was on the disk: an archived
     // room leaves the sidebar and takes no more posts.
@@ -737,7 +745,7 @@ fn retiring_a_job_records_the_verdict_before_its_container_goes() {
     assert_eq!(
         sim.disk()
             .expect("landed")
-            .job(job(1))
+            .job(&job(1))
             .map(|job| job.progress.clone()),
         Some(Progress::Retired(Outcome::Done))
     );
@@ -767,7 +775,10 @@ fn retiring_a_job_records_the_verdict_before_its_container_goes() {
         },
     );
     assert_eq!(
-        instance.state().job(job(1)).map(|job| job.progress.clone()),
+        instance
+            .state()
+            .job(&job(1))
+            .map(|job| job.progress.clone()),
         Some(Progress::Retired(Outcome::Done)),
         "a verdict is never overwritten"
     );
@@ -797,6 +808,7 @@ fn the_same_requests_leave_the_same_trace() {
                 project: project().to_string(),
                 kit: "Claude".to_owned(),
                 work: "fix the build".to_owned(),
+                title: String::new(),
             },
         );
         sim.run_until(&mut instance, 5_000);
@@ -824,6 +836,7 @@ fn starting_a_job_on_a_project_with_no_binding_is_refused_by_name() {
                 project: project().to_string(),
                 kit: "Claude".to_owned(),
                 work: "fix the build".to_owned(),
+                title: String::new(),
             },
         ),
         Response::Refused(Refusal::ChannelMissing {

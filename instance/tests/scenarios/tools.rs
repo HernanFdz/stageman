@@ -288,11 +288,8 @@ fn a_foreman_starts_a_job_whose_room_is_made_before_its_agent_speaks() {
     assert!(!is_error(answer), "{answer:?}");
     let said = text_of(answer);
     assert!(said.starts_with("started job "), "{said}");
-    let started = said
-        .trim_start_matches("started job ")
-        .parse()
-        .expect("an identifier");
-    let started = stageman_core::JobId::from_uuid(started);
+    let started =
+        stageman_core::JobId::parse(said.trim_start_matches("started job ")).expect("a name");
 
     let shape = world.shape();
     let persisted = shape
@@ -304,7 +301,7 @@ fn a_foreman_starts_a_job_whose_room_is_made_before_its_agent_speaks() {
     let opened = world
         .first_call(|call| matches!(call, Call::CreateRoom { .. }))
         .expect("made");
-    let talks = world.talks_in(&stageman_job::container(started));
+    let talks = world.talks_in(&stageman_job::container(&started));
     let [run] = talks.as_slice() else {
         panic!("the job's agent was spoken to once: {talks:?}");
     };
@@ -321,7 +318,7 @@ fn a_foreman_starts_a_job_whose_room_is_made_before_its_agent_speaks() {
 
     let recorded = instance
         .state()
-        .job(started)
+        .job(&started)
         .expect("the job is on the record");
     assert_eq!(recorded.reason, "the parser is flaky");
     assert_eq!(
@@ -417,11 +414,11 @@ fn starting_is_refused_to_a_job_and_for_a_kit_the_project_does_not_offer() {
     let mut world = Simulation::new();
     let idle = job(1);
     world.holding(&watching_a_channel(&[(
-        idle,
+        idle.clone(),
         Progress::Idle(Waiting::Asked),
         1,
     )]));
-    let (name, held) = Simulation::ours(&stageman_job::container(idle));
+    let (name, held) = Simulation::ours(&stageman_job::container(&idle));
     world.container(&name, held);
     let mut instance = world.wake(seed(1));
     world.says_in_room(100, 1, "go on");
@@ -550,11 +547,11 @@ fn a_jobs_claim_is_recorded_when_its_turn_ends() {
     let mut world = Simulation::new();
     let idle = job(1);
     world.holding(&watching_a_channel(&[(
-        idle,
+        idle.clone(),
         Progress::Idle(Waiting::Asked),
         1,
     )]));
-    let (name, held) = Simulation::ours(&stageman_job::container(idle));
+    let (name, held) = Simulation::ours(&stageman_job::container(&idle));
     world.container(&name, held);
     let mut instance = world.wake(seed(1));
     world.says_in_room(100, 1, "go on");
@@ -588,7 +585,7 @@ fn a_jobs_claim_is_recorded_when_its_turn_ends() {
         text_of(refused)
     );
     assert_eq!(
-        instance.state().job(idle).expect("the job").progress,
+        instance.state().job(&idle).expect("the job").progress,
         Progress::Idle(Waiting::Proposed),
         "the claim was read when the turn ended"
     );
@@ -629,11 +626,11 @@ fn a_jobs_pull_requests_are_kept_as_the_union_of_everything_claimed() {
     let mut world = Simulation::new();
     let idle = job(1);
     world.holding(&watching_a_channel(&[(
-        idle,
+        idle.clone(),
         Progress::Idle(Waiting::Asked),
         1,
     )]));
-    let (name, held) = Simulation::ours(&stageman_job::container(idle));
+    let (name, held) = Simulation::ours(&stageman_job::container(&idle));
     world.container(&name, held);
     let mut instance = world.wake(seed(1));
     world.says_in_room(100, 1, "go on");
@@ -669,7 +666,7 @@ fn a_jobs_pull_requests_are_kept_as_the_union_of_everything_claimed() {
         text_of(world.tool_answer(noted).expect("answered")),
         "noted"
     );
-    let recorded = instance.state().job(idle).expect("the job");
+    let recorded = instance.state().job(&idle).expect("the job");
     assert_eq!(recorded.progress, Progress::Idle(Waiting::Proposed));
     assert_eq!(
         recorded.pull_requests.iter().copied().collect::<Vec<u64>>(),
@@ -704,7 +701,7 @@ fn a_jobs_pull_requests_are_kept_as_the_union_of_everything_claimed() {
         text_of(world.tool_answer(later).expect("answered")),
         "noted"
     );
-    let recorded = instance.state().job(idle).expect("the job");
+    let recorded = instance.state().job(&idle).expect("the job");
     assert_eq!(recorded.progress, Progress::Idle(Waiting::Asked));
     assert_eq!(
         recorded.pull_requests.iter().copied().collect::<Vec<u64>>(),

@@ -103,13 +103,13 @@ pub const fn belonging(started: Option<InstanceId>, instance: InstanceId) -> Who
 /// lives. One whose project is gone is the same loss as a forgotten job's.
 pub fn unplaceable<'a>(left: &[Left<'a>], state: &State) -> Vec<Unplaceable<'a>> {
     left.iter()
-        .filter_map(|container| match container.job {
+        .filter_map(|container| match &container.job {
             None => match container.foreman {
                 Some(project) if state.projects.contains_key(&project) => None,
                 Some(_) | None => Some(Unplaceable::Unidentified(container.name)),
             },
             Some(job) if state.job(job).is_none() => {
-                Some(Unplaceable::Forgotten(container.name, job))
+                Some(Unplaceable::Forgotten(container.name, job.clone()))
             }
             Some(_) => None,
         })
@@ -130,18 +130,19 @@ fn labelled(left: &[Left<'_>], name: &str) -> Option<InstanceId> {
 /// a container to report rather than one to remove.
 pub fn over(left: &[Left<'_>], state: &State) -> Vec<JobId> {
     left.iter()
-        .filter_map(|container| container.job)
+        .filter_map(|container| container.job.clone())
         .filter(|job| {
             state
-                .job(*job)
+                .job(job)
                 .is_some_and(|recorded| recorded.progress.is_retired())
         })
         .collect()
 }
 
 /// Whether anything left behind is this job's container.
-pub fn has_container(left: &[Left<'_>], job: JobId) -> bool {
-    left.iter().any(|container| container.job == Some(job))
+pub fn has_container(left: &[Left<'_>], job: &JobId) -> bool {
+    left.iter()
+        .any(|container| container.job.as_ref() == Some(job))
 }
 
 /// Which of the jobs whose containers are up should be asked whether they are
@@ -159,11 +160,11 @@ pub fn has_container(left: &[Left<'_>], job: JobId) -> bool {
 pub fn resting(up: &[JobId], state: &State) -> (Vec<JobId>, Vec<JobId>) {
     let mut placed = Vec::new();
     let mut unplaced = Vec::new();
-    for job in up.iter().copied() {
+    for job in up {
         match state.job(job) {
             Some(recorded) if matches!(recorded.progress, Progress::Working) => {}
-            Some(_) => placed.push(job),
-            None => unplaced.push(job),
+            Some(_) => placed.push(job.clone()),
+            None => unplaced.push(job.clone()),
         }
     }
     (placed, unplaced)
@@ -291,7 +292,7 @@ impl Running {
         let cleared = over(&left, &self.state);
         for job in &cleared {
             tracing::info!(%job, "removing the container of a job that is over");
-            let discard = self.discard(stageman_job::container(*job));
+            let discard = self.discard(stageman_job::container(job));
             effects.push(discard);
         }
 
@@ -302,21 +303,21 @@ impl Running {
         let lost: Vec<JobId> = self
             .state
             .unfinished()
-            .filter(|job| !has_container(&left, *job))
+            .filter(|job| !has_container(&left, job))
             .collect();
         for job in &lost {
             tracing::warn!(%job, "its container is gone, so the job is lost");
-            self.record(*job, Progress::Retired(Outcome::Lost));
+            self.record(job, Progress::Retired(Outcome::Lost));
         }
 
         // Every working job left has a container, and its record is already
         // on the disk, so resuming waits for nothing.
         let resuming: Vec<JobId> = self.state.working().collect();
         for job in &resuming {
-            let Some((room, kit)) = self.recorded(*job) else {
+            let Some((room, kit)) = self.recorded(job) else {
                 continue;
             };
-            let speaker = Speaker::Job(*job);
+            let speaker = Speaker::Job(job.clone());
             // What the turn had been given is said again, after the notice
             // that it was interrupted, as something it may or may not have
             // seen: the record of it was written before anything was handed
@@ -325,9 +326,9 @@ impl Running {
             // Its thread is not read again: what the agent was shown of it
             // when the message was given, it remembers.
             let given: Vec<String> = self
-                .bound(*job)
+                .bound(job)
                 .and_then(|(project, channel)| {
-                    let recorded = self.state.job(*job)?;
+                    let recorded = self.state.job(job)?;
                     Some(
                         recorded
                             .inbox
@@ -346,17 +347,17 @@ impl Running {
                     )
                 })
                 .unwrap_or_default();
-            let warrant = self.warrant(speaker, room.map(Place::root), None);
+            let warrant = self.warrant(&speaker, room.map(Place::root), None);
             // The room is told why a turn is starting in it, since what the
             // agent says next is about something: the restart.
             self.notice(
-                *job,
+                job,
                 &stageman_foreman::turn_notice(&stageman_foreman::Because::Restart(None)),
             );
             let first = self.turn(
                 speaker,
                 Turn::quiet(Run::Resume {
-                    container: stageman_job::container(*job),
+                    container: stageman_job::container(job),
                     kit,
                     warrant,
                     tools: self.tools.clone(),
@@ -372,7 +373,7 @@ impl Running {
         let up: Vec<JobId> = left
             .iter()
             .filter(|container| container.running)
-            .filter_map(|container| container.job)
+            .filter_map(|container| container.job.clone())
             .collect();
         let (placed, _) = resting(&up, &self.state);
         for job in placed {
@@ -488,7 +489,7 @@ impl Running {
         for job in unplaced {
             let started = running
                 .iter()
-                .find(|container| stageman_job::job_of(&container.name) == Some(job))
+                .find(|container| stageman_job::job_of(&container.name).as_ref() == Some(&job))
                 .and_then(|container| container.instance);
             if belonging(started, self.id) == Whose::Ours {
                 self.probe(job, effects);
@@ -560,7 +561,7 @@ mod tests {
                 credentials: BTreeMap::new(),
                 channels: BTreeMap::new(),
                 jobs: BTreeMap::from([(
-                    job,
+                    job.clone(),
                     Job::new(
                         Kit::defaults(Agent::Claude),
                         "an issue was opened".to_owned(),
@@ -611,10 +612,10 @@ mod tests {
     fn a_name_that_cannot_be_read_and_one_naming_a_lost_job_are_told_apart() {
         let (state, _, known) = with_a_running_job();
         let lost = JobId::from_uuid(Uuid::from_u128(404));
-        let lost_name = stageman_job::container(lost);
-        let known_name = stageman_job::container(known);
+        let lost_name = stageman_job::container(&lost);
+        let known_name = stageman_job::container(&known);
         let containers = [
-            left("stageman-job-from-an-older-scheme"),
+            left("stageman-job-from_an_older_scheme"),
             left(&lost_name),
             left(&known_name),
         ];
@@ -622,7 +623,7 @@ mod tests {
         assert_eq!(
             unplaceable(&containers, &state),
             vec![
-                Unplaceable::Unidentified("stageman-job-from-an-older-scheme"),
+                Unplaceable::Unidentified("stageman-job-from_an_older_scheme"),
                 Unplaceable::Forgotten(&lost_name, lost),
             ],
             "a container for a job the instance still has is placeable"
@@ -659,8 +660,8 @@ mod tests {
         let ended = JobId::from_uuid(Uuid::from_u128(3));
         let idle = JobId::from_uuid(Uuid::from_u128(4));
         for (id, progress) in [
-            (ended, Progress::Retired(Outcome::Done)),
-            (idle, Progress::Idle(Waiting::Asked)),
+            (ended.clone(), Progress::Retired(Outcome::Done)),
+            (idle.clone(), Progress::Idle(Waiting::Asked)),
         ] {
             let mut job = Job::new(
                 Kit::defaults(Agent::Claude),
@@ -677,10 +678,10 @@ mod tests {
                 .insert(id, job);
         }
         let names = [
-            stageman_job::container(ended),
-            stageman_job::container(idle),
-            stageman_job::container(busy),
-            stageman_job::container(JobId::from_uuid(Uuid::from_u128(0x77))),
+            stageman_job::container(&ended),
+            stageman_job::container(&idle),
+            stageman_job::container(&busy),
+            stageman_job::container(&JobId::from_uuid(Uuid::from_u128(0x77))),
             "stageman-foreman-something".to_owned(),
         ];
         let containers: Vec<Left<'_>> = names.iter().map(|name| left(name)).collect();
@@ -692,12 +693,12 @@ mod tests {
     fn a_job_is_only_matched_to_a_container_that_names_it() {
         let job = JobId::from_uuid(Uuid::from_u128(7));
         let other = JobId::from_uuid(Uuid::from_u128(8));
-        let other_name = stageman_job::container(other);
+        let other_name = stageman_job::container(&other);
         let containers = [left("stageman-job-unidentified"), left(&other_name)];
 
-        assert!(!has_container(&containers, job));
-        assert!(has_container(&containers, other));
-        assert!(!has_container(&[], job));
+        assert!(!has_container(&containers, &job));
+        assert!(has_container(&containers, &other));
+        assert!(!has_container(&[], &job));
     }
 
     /// A container holding a turn is never asked to stop; every other one is.
@@ -706,16 +707,16 @@ mod tests {
         let (mut state, project, working) = with_a_running_job();
         let idle = JobId::from_uuid(Uuid::from_u128(13));
         let unknown = JobId::from_uuid(Uuid::from_u128(99));
-        let mut resting_job = state.job(working).expect("the running job").clone();
+        let mut resting_job = state.job(&working).expect("the running job").clone();
         resting_job.progress = Progress::Idle(Waiting::Silent);
         state
             .projects
             .get_mut(&project)
             .expect("the project")
             .jobs
-            .insert(idle, resting_job);
+            .insert(idle.clone(), resting_job);
 
-        let (placed, unplaced) = resting(&[working, idle, unknown], &state);
+        let (placed, unplaced) = resting(&[working.clone(), idle.clone(), unknown.clone()], &state);
         assert_eq!(placed, vec![idle]);
         assert_eq!(unplaced, vec![unknown]);
 

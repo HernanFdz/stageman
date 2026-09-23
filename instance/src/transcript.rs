@@ -413,11 +413,11 @@ enum Tending {
 impl Running {
     /// Where a speaker's transcript goes, if it has anywhere: the root of
     /// the room it owns, a job's own or its project's foreman's.
-    fn transcript_place(&self, speaker: Speaker) -> Option<(Speaking, Place)> {
+    fn transcript_place(&self, speaker: &Speaker) -> Option<(Speaking, Place)> {
         match speaker {
             Speaker::Job(job) => speaking_for(&self.state, job),
             Speaker::Foreman(project) => {
-                let watched = self.state.projects.get(&project)?;
+                let watched = self.state.projects.get(project)?;
                 let room = watched.foreman_room.clone()?;
                 let bound = watched.channels.get(&room.channel)?;
                 Some((bound.speaking(), Place::root(room)))
@@ -430,12 +430,12 @@ impl Running {
     ///
     /// Let go when the speaker has no room: a job with none, or a foreman
     /// whose room could not be made.
-    pub fn noticed(&mut self, speaker: Speaker, noticed: Noticed) {
+    pub fn noticed(&mut self, speaker: &Speaker, noticed: Noticed) {
         let Some((_, root)) = self.transcript_place(speaker) else {
             return;
         };
         let channel = root.room.channel;
-        let Some(turn) = self.turns.get_mut(&speaker) else {
+        let Some(turn) = self.turns.get_mut(speaker) else {
             return;
         };
         let change = match noticed {
@@ -473,8 +473,8 @@ impl Running {
     /// A message landed in a speaker's turn: every tool call still running
     /// in its transcript is marked interrupted, and the messages that
     /// changed are grown.
-    pub fn calls_interrupted(&mut self, speaker: Speaker) {
-        let Some(turn) = self.turns.get_mut(&speaker) else {
+    pub fn calls_interrupted(&mut self, speaker: &Speaker) {
+        let Some(turn) = self.turns.get_mut(speaker) else {
             return;
         };
         for run in turn.transcript.interrupt_running() {
@@ -485,11 +485,11 @@ impl Running {
     /// A turn ended: its open message closes, and what is not yet sent as
     /// it reads is kept until it is, since the answers to come will find
     /// no turn.
-    pub fn finish(&mut self, speaker: Speaker, mut transcript: Transcript) {
+    pub fn finish(&mut self, speaker: &Speaker, mut transcript: Transcript) {
         transcript.close();
         let runs: Vec<u64> = transcript.closing.iter().map(|open| open.run).collect();
         for open in transcript.closing.drain(..) {
-            self.finishing.insert((speaker, open.run), open);
+            self.finishing.insert((speaker.clone(), open.run), open);
         }
         for run in runs {
             self.tend(speaker, run);
@@ -499,7 +499,7 @@ impl Running {
 
     /// The platform answered the post that opened a message: it can grow
     /// now, or it never will.
-    pub fn run_posted(&mut self, speaker: Speaker, run: u64, outcome: Result<String, String>) {
+    pub fn run_posted(&mut self, speaker: &Speaker, run: u64, outcome: Result<String, String>) {
         if let Some(open) = self.find_run(speaker, run) {
             open.awaiting = false;
             match outcome {
@@ -515,7 +515,7 @@ impl Running {
     }
 
     /// The platform answered an edit of a message.
-    pub fn run_grown(&mut self, speaker: Speaker, run: u64, outcome: Result<(), String>) {
+    pub fn run_grown(&mut self, speaker: &Speaker, run: u64, outcome: Result<(), String>) {
         if let Some(open) = self.find_run(speaker, run) {
             open.awaiting = false;
             if let Err(why) = outcome {
@@ -530,7 +530,7 @@ impl Running {
     /// The pace came round for a message: it is edited to read as it now
     /// does, if that differs from what was sent, whether or not it is still
     /// growing. That is what pacing paces.
-    pub fn grow(&mut self, speaker: Speaker, run: u64) {
+    pub fn grow(&mut self, speaker: &Speaker, run: u64) {
         if let Some(open) = self.find_run(speaker, run) {
             open.pacing = false;
         }
@@ -539,15 +539,15 @@ impl Running {
     }
 
     /// The message numbered, in its turn or among those finishing.
-    fn find_run(&mut self, speaker: Speaker, run: u64) -> Option<&mut Open> {
+    fn find_run(&mut self, speaker: &Speaker, run: u64) -> Option<&mut Open> {
         let in_turn = self
             .turns
-            .get(&speaker)
+            .get(speaker)
             .is_some_and(|turn| turn.transcript.has(run));
         if in_turn {
-            self.turns.get_mut(&speaker)?.transcript.find(run)
+            self.turns.get_mut(speaker)?.transcript.find(run)
         } else {
-            self.finishing.get_mut(&(speaker, run))
+            self.finishing.get_mut(&(speaker.clone(), run))
         }
     }
 
@@ -556,13 +556,13 @@ impl Running {
     /// was sent and is closed, or its pace has come round; waits a pace
     /// otherwise, so that a growing message is edited at most that often.
     /// Nothing while an answer is awaited, since the answer looks again.
-    fn tend(&mut self, speaker: Speaker, run: u64) {
+    fn tend(&mut self, speaker: &Speaker, run: u64) {
         self.tend_after(speaker, run, false);
     }
 
     /// [`Running::tend`], saying whether the message's pace has come round,
     /// which is when a message still growing is edited.
-    fn tend_after(&mut self, speaker: Speaker, run: u64, paced: bool) {
+    fn tend_after(&mut self, speaker: &Speaker, run: u64, paced: bool) {
         let Some((speaking, place)) = self.transcript_place(speaker) else {
             return;
         };
@@ -604,13 +604,19 @@ impl Running {
         };
         match tending {
             Tending::Nothing => {}
-            Tending::Post(text) => self.transcribed(&speaking, &place, &text, speaker, run),
+            Tending::Post(text) => self.transcribed(&speaking, &place, &text, speaker.clone(), run),
             Tending::Edit { message, text } => {
-                self.grow_message(&speaking, &place, &message, &text, speaker, run);
+                self.grow_message(&speaking, &place, &message, &text, speaker.clone(), run);
             }
             Tending::Pace => {
                 let id = self.effect_id();
-                self.timers.insert(id, Timer::Growing { speaker, run });
+                self.timers.insert(
+                    id,
+                    Timer::Growing {
+                        speaker: speaker.clone(),
+                        run,
+                    },
+                );
                 self.immediate.push(Effect::Wake { id, after: PACE });
             }
         }
@@ -622,12 +628,12 @@ impl Running {
     /// Skipped by mutation testing for the reason the transcript's own is:
     /// what it frees, nothing asks about again.
     #[mutants::skip]
-    fn prune(&mut self, speaker: Speaker) {
-        if let Some(turn) = self.turns.get_mut(&speaker) {
+    fn prune(&mut self, speaker: &Speaker) {
+        if let Some(turn) = self.turns.get_mut(speaker) {
             turn.transcript.prune();
         }
         self.finishing
-            .retain(|(whose, _), open| *whose != speaker || !open.settled());
+            .retain(|(whose, _), open| whose != speaker || !open.settled());
     }
 }
 

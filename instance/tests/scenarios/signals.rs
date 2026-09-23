@@ -4,7 +4,7 @@
 //! tools that watch and stop watching; and the brief said every turn.
 
 use stageman_channel::Reaction;
-use stageman_core::{Channel, JobId, Place, Progress, Room, Uuid};
+use stageman_core::{Channel, JobId, Place, Progress, Room};
 use stageman_instance::{Request, Response};
 
 use crate::simulation::{
@@ -247,10 +247,8 @@ fn a_job_started_from_a_signal_invites_nobody_and_is_announced_in_the_signals_th
 
     let said = text_of(world.tool_answer(asked).expect("answered"));
     assert!(said.starts_with("started job "), "{said}");
-    let job = JobId::from_uuid(
-        Uuid::parse_str(said.trim_start_matches("started job ")).expect("an identifier"),
-    );
-    let recorded = instance.state().job(job).expect("the job");
+    let job = JobId::parse(said.trim_start_matches("started job ")).expect("a name");
+    let recorded = instance.state().job(&job).expect("the job");
     assert_eq!(recorded.asked_by, None, "a signal is nobody asking");
     assert!(
         world.invited().is_empty(),
@@ -381,8 +379,12 @@ fn a_room_is_watched_by_asking_the_foreman_in_it_and_unwatched_the_same_way() {
 fn a_job_may_not_watch_a_room() {
     let mut world = Simulation::new();
     let working = job(1);
-    world.holding(&watching_a_channel(&[(working, Progress::Working, 1)]));
-    let (name, held) = Simulation::ours(&stageman_job::container(working));
+    world.holding(&watching_a_channel(&[(
+        working.clone(),
+        Progress::Working,
+        1,
+    )]));
+    let (name, held) = Simulation::ours(&stageman_job::container(&working));
     world.container(&name, held);
     let mut instance = world.wake(seed(1));
     world.run_until(&mut instance, 10);

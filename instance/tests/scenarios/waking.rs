@@ -8,7 +8,7 @@ use stageman_agent::Command;
 use stageman_agent::{Answer, StopReason};
 use stageman_core::{JobId, Outcome, Progress, ProjectId, State, Uuid, Waiting};
 
-fn progress_of(state: &State, id: JobId) -> Progress {
+fn progress_of(state: &State, id: &JobId) -> Progress {
     state.job(id).expect("the job").progress.clone()
 }
 
@@ -117,7 +117,7 @@ fn an_instance_writes_once_on_waking_and_then_only_when_something_changed() {
 fn what_a_session_reported_is_recorded_beside_the_kit() {
     let mut world = Simulation::new();
     world.holding(&watching(&[(job(1), Progress::Working)]));
-    let (name, held) = Simulation::ours(&stageman_job::container(job(1)));
+    let (name, held) = Simulation::ours(&stageman_job::container(&job(1)));
     world.container(&name, held);
     world.next_turn_ends(Ok(Answer {
         text: "done".to_owned(),
@@ -132,7 +132,7 @@ fn what_a_session_reported_is_recorded_beside_the_kit() {
 
     let reported = |state: &stageman_core::State| {
         state
-            .job(job(1))
+            .job(&job(1))
             .expect("the job")
             .reported
             .get("model")
@@ -151,8 +151,8 @@ fn what_a_session_reported_is_recorded_beside_the_kit() {
 fn a_working_job_with_a_container_is_resumed_and_its_ending_recorded() {
     let mut world = Simulation::new();
     let working = job(1);
-    world.holding(&watching(&[(working, Progress::Working)]));
-    let (name, held) = Simulation::ours(&stageman_job::container(working));
+    world.holding(&watching(&[(working.clone(), Progress::Working)]));
+    let (name, held) = Simulation::ours(&stageman_job::container(&working));
     world.container(&name, held);
 
     let mut instance = world.wake(seed(1));
@@ -167,11 +167,11 @@ fn a_working_job_with_a_container_is_resumed_and_its_ending_recorded() {
         world.talks()
     );
     assert_eq!(
-        progress_of(instance.state(), working),
+        progress_of(instance.state(), &working),
         Progress::Idle(Waiting::Silent)
     );
     assert_eq!(
-        world.disk().map(|state| progress_of(&state, working)),
+        world.disk().map(|state| progress_of(&state, &working)),
         Some(Progress::Idle(Waiting::Silent)),
         "the ending reached the disk"
     );
@@ -191,15 +191,15 @@ fn a_working_job_with_a_container_is_resumed_and_its_ending_recorded() {
 fn a_resumed_turn_that_fails_is_recorded_as_failed() {
     let mut world = Simulation::new();
     let working = job(1);
-    world.holding(&watching(&[(working, Progress::Working)]));
-    let (name, held) = Simulation::ours(&stageman_job::container(working));
+    world.holding(&watching(&[(working.clone(), Progress::Working)]));
+    let (name, held) = Simulation::ours(&stageman_job::container(&working));
     world.container(&name, held);
     world.next_turn_ends(Err("the credential was refused".to_owned()));
 
     let mut instance = world.wake(seed(1));
     world.run_until(&mut instance, 2_000);
 
-    let Progress::Idle(Waiting::Failed(why)) = progress_of(instance.state(), working) else {
+    let Progress::Idle(Waiting::Failed(why)) = progress_of(instance.state(), &working) else {
         panic!("an agent that died is a failed turn");
     };
     assert!(why.contains("the credential was refused"), "{why}");
@@ -210,15 +210,15 @@ fn a_resumed_turn_that_fails_is_recorded_as_failed() {
 fn a_turn_cut_short_is_a_failure_that_names_the_reason() {
     let mut world = Simulation::new();
     let working = job(1);
-    world.holding(&watching(&[(working, Progress::Working)]));
-    let (name, held) = Simulation::ours(&stageman_job::container(working));
+    world.holding(&watching(&[(working.clone(), Progress::Working)]));
+    let (name, held) = Simulation::ours(&stageman_job::container(&working));
     world.container(&name, held);
     world.next_turn_ends(Ok(ended(StopReason::MaxTokens)));
 
     let mut instance = world.wake(seed(1));
     world.run_until(&mut instance, 2_000);
 
-    let Progress::Idle(Waiting::Failed(why)) = progress_of(instance.state(), working) else {
+    let Progress::Idle(Waiting::Failed(why)) = progress_of(instance.state(), &working) else {
         panic!("a turn cut short is not a finished job");
     };
     assert!(why.contains("MaxTokens"), "{why}");
@@ -232,22 +232,22 @@ fn a_job_whose_container_is_gone_is_lost_once() {
     let working = job(1);
     let idle = job(2);
     world.holding(&watching(&[
-        (working, Progress::Working),
-        (idle, Progress::Idle(Waiting::Proposed)),
+        (working.clone(), Progress::Working),
+        (idle.clone(), Progress::Idle(Waiting::Proposed)),
     ]));
 
     let mut instance = world.wake(seed(1));
     world.run_until(&mut instance, 10);
 
-    for lost in [working, idle] {
+    for lost in [working.clone(), idle.clone()] {
         assert_eq!(
-            progress_of(instance.state(), lost),
+            progress_of(instance.state(), &lost),
             Progress::Retired(Outcome::Lost)
         );
     }
     let disk = world.disk().expect("a file");
     assert_eq!(
-        progress_of(&disk, working),
+        progress_of(&disk, &working),
         Progress::Retired(Outcome::Lost)
     );
 
@@ -258,7 +258,7 @@ fn a_job_whose_container_is_gone_is_lost_once() {
         "a second waking finds nothing to lose"
     );
     assert_eq!(
-        progress_of(again.state(), idle),
+        progress_of(again.state(), &idle),
         Progress::Retired(Outcome::Lost)
     );
 }
@@ -272,12 +272,15 @@ fn waking_removes_what_is_ours_and_over_and_leaves_the_rest() {
     let theirs = job(3);
     let unlabelled = job(4);
     let gone_project = ProjectId::from_uuid(Uuid::from_u128(404));
-    world.holding(&watching(&[(retired, Progress::Retired(Outcome::Done))]));
+    world.holding(&watching(&[(
+        retired.clone(),
+        Progress::Retired(Outcome::Done),
+    )]));
 
     for name in [
-        stageman_job::container(retired),
-        stageman_job::container(forgotten),
-        "stageman-job-from-an-older-scheme".to_owned(),
+        stageman_job::container(&retired),
+        stageman_job::container(&forgotten),
+        "stageman-job-from_an_older_scheme".to_owned(),
         stageman_foreman::container(project()),
         stageman_foreman::container(gone_project),
     ] {
@@ -285,11 +288,11 @@ fn waking_removes_what_is_ours_and_over_and_leaves_the_rest() {
         world.container(&name, held);
     }
     world.container(
-        &stageman_job::container(theirs),
+        &stageman_job::container(&theirs),
         Simulation::theirs(Some(another_instance()), true),
     );
     world.container(
-        &stageman_job::container(unlabelled),
+        &stageman_job::container(&unlabelled),
         Simulation::theirs(None, false),
     );
 
@@ -297,23 +300,23 @@ fn waking_removes_what_is_ours_and_over_and_leaves_the_rest() {
     world.run_until(&mut instance, 10);
 
     assert!(
-        !world.exists(&stageman_job::container(retired)),
+        !world.exists(&stageman_job::container(&retired)),
         "over, so removed"
     );
     assert!(
-        !world.exists(&stageman_job::container(forgotten)),
+        !world.exists(&stageman_job::container(&forgotten)),
         "ours and unknown, so removed"
     );
     assert!(
-        world.exists(&stageman_job::container(theirs)),
+        world.exists(&stageman_job::container(&theirs)),
         "another instance's, left alone"
     );
     assert!(
-        world.exists(&stageman_job::container(unlabelled)),
+        world.exists(&stageman_job::container(&unlabelled)),
         "cannot be attributed, left alone"
     );
     assert!(
-        !world.exists("stageman-job-from-an-older-scheme"),
+        !world.exists("stageman-job-from_an_older_scheme"),
         "ours under an old name, removed"
     );
     assert!(
@@ -353,35 +356,39 @@ fn settling_stops_what_shows_nothing_and_keeps_what_shows_something() {
     let silent = job(2);
     let working = job(3);
     world.holding(&watching(&[
-        (showing, Progress::Idle(Waiting::Proposed)),
-        (silent, Progress::Idle(Waiting::Asked)),
-        (working, Progress::Working),
+        (showing.clone(), Progress::Idle(Waiting::Proposed)),
+        (silent.clone(), Progress::Idle(Waiting::Asked)),
+        (working.clone(), Progress::Working),
     ]));
-    for (id, serving) in [(showing, true), (silent, false), (working, false)] {
-        world.container(&stageman_job::container(id), Simulation::up(serving));
+    for (id, serving) in [
+        (showing.clone(), true),
+        (silent.clone(), false),
+        (working.clone(), false),
+    ] {
+        world.container(&stageman_job::container(&id), Simulation::up(serving));
     }
 
     let mut instance = world.wake(seed(1));
     // Waking probes what is up and idle. The working job's container is
     // resumed, not probed.
     world.run_until(&mut instance, 10);
-    assert!(world.is_running(&stageman_job::container(showing)));
-    assert!(!world.is_running(&stageman_job::container(silent)));
-    assert!(world.is_running(&stageman_job::container(working)));
+    assert!(world.is_running(&stageman_job::container(&showing)));
+    assert!(!world.is_running(&stageman_job::container(&silent)));
+    assert!(world.is_running(&stageman_job::container(&working)));
 
     // Later the turn ends and its container is probed, and settling comes
     // round to find the showing one still showing.
     world.run_until(&mut instance, 61_000);
     assert!(
-        world.is_running(&stageman_job::container(showing)),
+        world.is_running(&stageman_job::container(&showing)),
         "still showing, still up"
     );
     assert!(
-        !world.is_running(&stageman_job::container(working)),
+        !world.is_running(&stageman_job::container(&working)),
         "its turn ended showing nothing"
     );
     assert_eq!(
-        progress_of(instance.state(), working),
+        progress_of(instance.state(), &working),
         Progress::Idle(Waiting::Silent)
     );
     // After waking — from the first settling timer, which waking sets —
@@ -414,21 +421,21 @@ fn settling_asks_only_about_what_is_ours() {
     let theirs = job(2);
     world.holding(&watching(&[]));
     world.container(
-        &stageman_job::container(theirs),
+        &stageman_job::container(&theirs),
         Simulation::theirs(Some(another_instance()), true),
     );
     let mut instance = world.wake(seed(1));
     // Appears after waking, as a container another process of this instance
     // might have started: no record, our label.
-    world.container(&stageman_job::container(ours), Simulation::up(false));
+    world.container(&stageman_job::container(&ours), Simulation::up(false));
     world.run_until(&mut instance, 61_000);
 
     assert!(
-        !world.is_running(&stageman_job::container(ours)),
+        !world.is_running(&stageman_job::container(&ours)),
         "ours, so asked and stopped"
     );
     assert!(
-        world.is_running(&stageman_job::container(theirs)),
+        world.is_running(&stageman_job::container(&theirs)),
         "theirs, so left running"
     );
 }
@@ -442,11 +449,11 @@ fn the_same_seed_gives_the_same_trace_across_a_crash() {
         let one = job(1);
         let two = job(2);
         world.holding(&watching(&[
-            (one, Progress::Working),
-            (two, Progress::Working),
+            (one.clone(), Progress::Working),
+            (two.clone(), Progress::Working),
         ]));
-        for id in [one, two] {
-            let (name, held) = Simulation::ours(&stageman_job::container(id));
+        for id in [one.clone(), two.clone()] {
+            let (name, held) = Simulation::ours(&stageman_job::container(&id));
             world.container(&name, held);
         }
 
@@ -457,8 +464,8 @@ fn the_same_seed_gives_the_same_trace_across_a_crash() {
         (
             world.shape(),
             world.talks().to_vec(),
-            progress_of(instance.state(), one),
-            progress_of(instance.state(), two),
+            progress_of(instance.state(), &one),
+            progress_of(instance.state(), &two),
         )
     }
 
@@ -495,8 +502,8 @@ fn the_same_seed_gives_the_same_trace_across_a_crash() {
 fn a_turn_carries_what_the_world_is_handed_and_its_warrant_lives_as_long_as_it_does() {
     let mut world = Simulation::new();
     let working = job(1);
-    world.holding(&watching(&[(working, Progress::Working)]));
-    let (name, held) = Simulation::ours(&stageman_job::container(working));
+    world.holding(&watching(&[(working.clone(), Progress::Working)]));
+    let (name, held) = Simulation::ours(&stageman_job::container(&working));
     world.container(&name, held);
 
     let mut instance = world.wake(seed(1));

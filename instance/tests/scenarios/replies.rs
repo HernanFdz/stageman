@@ -8,7 +8,7 @@ use crate::simulation::{
 };
 use stageman_core::{JobId, Outcome, Place, Progress, State, Waiting};
 
-fn progress_of(state: &State, id: JobId) -> Progress {
+fn progress_of(state: &State, id: &JobId) -> Progress {
     state.job(id).expect("the job").progress.clone()
 }
 
@@ -20,11 +20,11 @@ fn a_reply_to_an_idle_job_resumes_it_after_the_record_lands() {
     let mut world = Simulation::new();
     let idle = job(1);
     world.holding(&watching_a_channel(&[(
-        idle,
+        idle.clone(),
         Progress::Idle(Waiting::Asked),
         1,
     )]));
-    let (name, held) = Simulation::ours(&stageman_job::container(idle));
+    let (name, held) = Simulation::ours(&stageman_job::container(&idle));
     world.container(&name, held);
     let mut instance = world.wake(seed(1));
     world.run_until(&mut instance, 10);
@@ -46,7 +46,7 @@ fn a_reply_to_an_idle_job_resumes_it_after_the_record_lands() {
     assert!(run.was_told("A person replied on the channel:"), "{run:?}");
     assert!(run.was_told("use postgres"), "{run:?}");
     assert_eq!(
-        progress_of(instance.state(), idle),
+        progress_of(instance.state(), &idle),
         Progress::Idle(Waiting::Silent)
     );
     assert_eq!(
@@ -74,11 +74,11 @@ fn a_dropped_turn_forgets_only_its_own_warrant() {
     let idle = job(1);
     let running = job(2);
     world.holding(&watching_a_channel(&[
-        (idle, Progress::Idle(Waiting::Asked), 1),
-        (running, Progress::Working, 2),
+        (idle.clone(), Progress::Idle(Waiting::Asked), 1),
+        (running.clone(), Progress::Working, 2),
     ]));
-    for which in [idle, running] {
-        let (name, held) = Simulation::ours(&stageman_job::container(which));
+    for which in [idle.clone(), running.clone()] {
+        let (name, held) = Simulation::ours(&stageman_job::container(&which));
         world.container(&name, held);
     }
     let mut instance = world.wake(seed(1));
@@ -97,7 +97,7 @@ fn a_dropped_turn_forgets_only_its_own_warrant() {
 
     assert!(
         matches!(
-            progress_of(instance.state(), idle),
+            progress_of(instance.state(), &idle),
             Progress::Idle(Waiting::Failed(_))
         ),
         "the turn that was not started is recorded as such"
@@ -106,7 +106,7 @@ fn a_dropped_turn_forgets_only_its_own_warrant() {
         instance.warranted(kept.as_str()).is_some(),
         "the other speaker's warrant still answers"
     );
-    assert_eq!(progress_of(instance.state(), running), Progress::Working);
+    assert_eq!(progress_of(instance.state(), &running), Progress::Working);
 }
 
 // What a message to a working job leads to, and two arriving together, are
@@ -120,7 +120,7 @@ fn a_reply_to_a_job_that_is_over_is_refused_with_its_own_notice() {
     let mut world = Simulation::new();
     let over = job(1);
     world.holding(&watching_a_channel(&[(
-        over,
+        over.clone(),
         Progress::Retired(Outcome::Done),
         1,
     )]));
@@ -134,7 +134,7 @@ fn a_reply_to_a_job_that_is_over_is_refused_with_its_own_notice() {
         [(in_room(1), stageman_foreman::over_notice().to_owned())]
     );
     assert_eq!(
-        progress_of(instance.state(), over),
+        progress_of(instance.state(), &over),
         Progress::Retired(Outcome::Done),
         "a verdict is never overwritten"
     );
@@ -149,11 +149,11 @@ fn a_mention_in_a_thread_of_a_jobs_room_is_answered_there_and_noticed_at_the_roo
     let mut world = Simulation::new();
     let idle = job(1);
     world.holding(&watching_a_channel(&[(
-        idle,
+        idle.clone(),
         Progress::Idle(Waiting::Silent),
         1,
     )]));
-    let (name, held) = Simulation::ours(&stageman_job::container(idle));
+    let (name, held) = Simulation::ours(&stageman_job::container(&idle));
     world.container(&name, held);
     let mut instance = world.wake(seed(1));
 
@@ -217,11 +217,11 @@ fn a_mention_in_a_thread_belonging_to_no_job_reaches_the_foreman() {
     let mut world = Simulation::new();
     let idle = job(1);
     world.holding(&watching_a_channel(&[(
-        idle,
+        idle.clone(),
         Progress::Idle(Waiting::Silent),
         1,
     )]));
-    let (name, held) = Simulation::ours(&stageman_job::container(idle));
+    let (name, held) = Simulation::ours(&stageman_job::container(&idle));
     world.container(&name, held);
     let mut instance = world.wake(seed(1));
 
@@ -253,7 +253,7 @@ fn a_mention_in_a_thread_belonging_to_no_job_reaches_the_foreman() {
         world.talks()
     );
     assert_eq!(
-        progress_of(instance.state(), idle),
+        progress_of(instance.state(), &idle),
         Progress::Idle(Waiting::Silent),
         "not the job's thread, so not the job's"
     );
@@ -267,11 +267,11 @@ fn what_is_not_a_persons_mention_reaches_nobody() {
     let mut world = Simulation::new();
     let idle = job(1);
     world.holding(&watching_a_channel(&[(
-        idle,
+        idle.clone(),
         Progress::Idle(Waiting::Silent),
         1,
     )]));
-    let (name, held) = Simulation::ours(&stageman_job::container(idle));
+    let (name, held) = Simulation::ours(&stageman_job::container(&idle));
     world.container(&name, held);
     let mut instance = world.wake(seed(1));
 
@@ -286,7 +286,7 @@ fn what_is_not_a_persons_mention_reaches_nobody() {
     assert!(world.posts().is_empty());
     assert!(world.talks().is_empty(), "{:?}", world.talks());
     assert_eq!(
-        progress_of(instance.state(), idle),
+        progress_of(instance.state(), &idle),
         Progress::Idle(Waiting::Silent)
     );
 }
@@ -299,11 +299,11 @@ fn a_crash_before_the_record_lands_loses_the_reply_but_not_the_job() {
     let mut world = Simulation::new();
     let idle = job(1);
     world.holding(&watching_a_channel(&[(
-        idle,
+        idle.clone(),
         Progress::Idle(Waiting::Silent),
         1,
     )]));
-    let (name, held) = Simulation::ours(&stageman_job::container(idle));
+    let (name, held) = Simulation::ours(&stageman_job::container(&idle));
     world.container(&name, held);
     let mut instance = world.wake(seed(1));
 
@@ -311,11 +311,11 @@ fn a_crash_before_the_record_lands_loses_the_reply_but_not_the_job() {
     // The reply is taken at 100 and its write lands at 101; the daemon dies
     // in between.
     world.run_until(&mut instance, 100);
-    assert_eq!(progress_of(instance.state(), idle), Progress::Working);
+    assert_eq!(progress_of(instance.state(), &idle), Progress::Working);
     let mut instance = world.crash(seed(2));
 
     assert_eq!(
-        progress_of(instance.state(), idle),
+        progress_of(instance.state(), &idle),
         Progress::Idle(Waiting::Silent),
         "the disk never learned of the reply"
     );
@@ -337,11 +337,11 @@ fn a_failed_write_fails_the_turn_before_it_starts() {
     let mut world = Simulation::new();
     let idle = job(1);
     world.holding(&watching_a_channel(&[(
-        idle,
+        idle.clone(),
         Progress::Idle(Waiting::Silent),
         1,
     )]));
-    let (name, held) = Simulation::ours(&stageman_job::container(idle));
+    let (name, held) = Simulation::ours(&stageman_job::container(&idle));
     world.container(&name, held);
     let mut instance = world.wake(seed(1));
     world.next_write_fails("the disk is full");
@@ -350,12 +350,12 @@ fn a_failed_write_fails_the_turn_before_it_starts() {
     world.run_until(&mut instance, 5_000);
 
     assert!(world.talks().is_empty(), "{:?}", world.talks());
-    let Progress::Idle(Waiting::Failed(why)) = progress_of(instance.state(), idle) else {
+    let Progress::Idle(Waiting::Failed(why)) = progress_of(instance.state(), &idle) else {
         panic!("the turn that never started is a failure");
     };
     assert!(why.contains("could not be written"), "{why}");
     assert_eq!(
-        world.disk().map(|state| progress_of(&state, idle)),
+        world.disk().map(|state| progress_of(&state, &idle)),
         Some(Progress::Idle(Waiting::Failed(why))),
         "the next write carried the record"
     );

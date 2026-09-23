@@ -20,8 +20,8 @@ use stageman_instance::{Request, Response};
 use super::error::{DashboardError, DashboardResult};
 use super::live::Live;
 use crate::ui::{
-    Badge, BadgeTone, Button, ButtonVariant, Card, EmptyState, Icon, Modal, Reference, Skeleton,
-    TextArea, Tooltip, When,
+    Badge, BadgeTone, Button, ButtonVariant, Card, EmptyState, FIELD, Field, Icon, Modal,
+    Reference, Skeleton, TextArea, Tooltip, When,
 };
 
 pub use stageman_wire::{Ending, Job, Offered, Standing, Working};
@@ -79,10 +79,23 @@ pub async fn jobs(project: String) -> DashboardResult<Working> {
 /// # Errors
 ///
 /// Fails if the project is unknown, if the work is empty, or if the project
-/// offers no kit under that name.
+/// offers no kit under that name. A blank title is the first words of the
+/// work, per `docs/decisions/0074-a-jobs-identifier-is-its-name.md`.
 #[post("/api/projects/{project}/jobs/start")]
-pub async fn start(project: String, kit: String, work: String) -> DashboardResult<Working> {
-    match super::ask(Request::Start { project, kit, work }).await? {
+pub async fn start(
+    project: String,
+    kit: String,
+    work: String,
+    title: String,
+) -> DashboardResult<Working> {
+    match super::ask(Request::Start {
+        project,
+        kit,
+        work,
+        title,
+    })
+    .await?
+    {
         Response::Jobs(working) => Ok(working),
         other => Err(super::unexpected(&other)),
     }
@@ -180,6 +193,7 @@ pub fn ProjectJobsView(project: String) -> Element {
                                         draft.set(Wanted {
                                             kit: first.clone().unwrap_or_default(),
                                             work: String::new(),
+                                            title: String::new(),
                                         });
                                         failure.set(None);
                                         starting.set(true);
@@ -235,7 +249,7 @@ pub fn ProjectJobsView(project: String) -> Element {
                                         let identifier = identifier.clone();
                                         let asked = draft();
                                         async move {
-                                            match start(identifier, asked.kit, asked.work).await {
+                                            match start(identifier, asked.kit, asked.work, asked.title).await {
                                                 Ok(fresh) => {
                                                     failure.set(None);
                                                     reading.set(Some(Ok(fresh)));
@@ -494,15 +508,20 @@ pub(super) fn JobControls(
 
 /// What starting a job asks for.
 ///
-/// The work and which kit, and nothing else. Not the instruction: that is
-/// composed from this, and composing it here would put an author of
-/// instructions outside the one crate allowed to be one.
+/// The work, which kit, and a title if the person has one — and nothing
+/// else. Not the instruction: that is composed from this, and composing it
+/// here would put an author of instructions outside the one crate allowed
+/// to be one.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Wanted {
     /// Which of the project's kits should do it, by name.
     pub kit: String,
     /// What to do, in the operator's own words.
     pub work: String,
+    /// A few words naming it, which its name is made from; blank for the
+    /// first words of the work — see
+    /// `docs/decisions/0074-a-jobs-identifier-is-its-name.md`.
+    pub title: String,
 }
 
 impl Wanted {
@@ -556,28 +575,60 @@ fn JobForm(draft: Signal<Wanted>, kits: Vec<Offered>) -> Element {
                     }
                 }
             }
-            label { class: "flex flex-col gap-1",
-                span { class: "text-xs font-medium text-muted-foreground", "The work" }
+            // Label, line, control, per `docs/conventions.md` §3: the
+            // instruction the placeholder used to carry is the line now,
+            // and the placeholder is an example.
+            Field {
+                label: "The work",
+                note: "In your own words. Say what done looks like, and name anything the agent \
+                       should read first.",
+                info: "The agent is told where the repository is, that nothing is checked out, \
+                       that its tools are already signed in, and to stop at a proposal rather \
+                       than merge anything. You are describing the work, not writing the \
+                       instruction.",
                 TextArea {
                     class: "min-h-40",
-                    placeholder: "What needs doing, in your own words. Say what \"done\" looks \
-                                  like, and name anything the agent should read first.",
+                    placeholder: "Fix the login timeout on the settings page: it logs people out \
+                                  after a minute. Done is a pull request with a test for it.",
                     value: draft().work,
                     oninput: move |event: FormEvent| draft.with_mut(|draft| draft.work = event.value()),
                 }
             }
-            p { class: "text-xs text-faint-foreground",
-                "The agent is told where the repository is, that nothing is checked out, that \
-                 its tools are already signed in, and to stop at a proposal rather than merge \
-                 anything. You are describing the work, not writing the instruction."
+            // After the work, because its default is made from the work: the
+            // placeholder shows what the job will be called if this is left
+            // blank, as it is typed above — see
+            // `docs/decisions/0074-a-jobs-identifier-is-its-name.md`.
+            Field {
+                label: "Title",
+                note: "Optional. The job is named after it; the first words of the work otherwise.",
+                info: "A few words, as you would read them in a sidebar. Folded to a slug and \
+                       given a short suffix, they become the job's name: its address here, its \
+                       Slack channel, and the host it shows its work on.",
+                input {
+                    class: FIELD,
+                    placeholder: default_title(&draft().work),
+                    value: "{draft().title}",
+                    oninput: move |event: FormEvent| draft.with_mut(|draft| draft.title = event.value()),
+                }
             }
         }
     }
 }
 
+/// What a job with no title is called: the first words of its work, and an
+/// example while there are none, so the box never reads as empty.
+fn default_title(work: &str) -> String {
+    let titled = stageman_wire::titled(work);
+    if titled.is_empty() {
+        "Fix the login timeout".to_owned()
+    } else {
+        titled
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Standing, Toned as _, Wanted};
+    use super::{Standing, Toned as _, Wanted, default_title};
     use crate::ui::BadgeTone;
 
     /// Every standing there is.
@@ -635,6 +686,7 @@ mod tests {
         let complete = Wanted {
             kit: "Claude".to_owned(),
             work: "document the three missing variables".to_owned(),
+            title: String::new(),
         };
         assert!(complete.is_complete());
 
@@ -656,8 +708,21 @@ mod tests {
         let asked = Wanted {
             kit: "Claude".to_owned(),
             work: "  \n\t ".to_owned(),
+            title: String::new(),
         };
 
         assert!(!asked.is_complete());
+    }
+
+    /// The title's placeholder is what the job will be called if it is
+    /// left blank: the first words of the work, and an example before any.
+    #[test]
+    fn the_title_defaults_to_the_first_words_of_the_work() {
+        assert_eq!(
+            default_title("Fix the flaky parser test before the release ships"),
+            "Fix the flaky parser test before"
+        );
+        assert_eq!(default_title(""), "Fix the login timeout");
+        assert_eq!(default_title("   "), "Fix the login timeout");
     }
 }

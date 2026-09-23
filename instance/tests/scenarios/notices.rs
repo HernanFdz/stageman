@@ -12,11 +12,11 @@ use stageman_core::{JobId, Place, Progress, Waiting};
 fn a_job_with_a_room(world: &mut Simulation) -> (stageman_instance::Instance, JobId) {
     let idle = job(1);
     world.holding(&watching_a_channel(&[(
-        idle,
+        idle.clone(),
         Progress::Idle(Waiting::Asked),
         1,
     )]));
-    let (name, held) = Simulation::ours(&stageman_job::container(idle));
+    let (name, held) = Simulation::ours(&stageman_job::container(&idle));
     world.container(&name, held);
     let mut instance = world.wake(seed(1));
     world.run_until(&mut instance, 10);

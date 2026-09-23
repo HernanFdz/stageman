@@ -484,6 +484,21 @@ pub fn distinct(kits: &[KitDraft]) -> bool {
 
 // ------------------------------------------------------------------ jobs
 
+/// A title for a job started by hand, when a person gave none: the first
+/// few words of the work, which is what a person would read in a sidebar.
+///
+/// Here rather than on the server alone because the form that starts a job
+/// shows it as the placeholder of the title it asks for, so both halves
+/// have to agree on what leaving it blank means — see
+/// `docs/decisions/0074-a-jobs-identifier-is-its-name.md`.
+#[must_use]
+pub fn titled(work: &str) -> String {
+    work.split_whitespace()
+        .take(6)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Where a job has got to, as a page sees it.
 ///
 /// **Flat, where the domain's is two levels.** The domain nests because its
@@ -899,7 +914,20 @@ impl Refusal {
 mod tests {
     use super::{
         ChannelDraft, Draft, Filling, Fitted, KitDraft, Refusal, Standing, VariableDraft, distinct,
+        titled,
     };
+
+    /// A job started by hand with no title is titled by the first words of
+    /// its work, and the form shows the same words as the default.
+    #[test]
+    fn a_job_started_by_hand_is_titled_by_its_first_words() {
+        assert_eq!(
+            titled("Fix the flaky parser test before the release ships"),
+            "Fix the flaky parser test before"
+        );
+        assert_eq!(titled("  one   thing  "), "one thing");
+        assert_eq!(titled(""), "");
+    }
 
     fn as_it_comes() -> Fitted {
         Fitted {

@@ -46,7 +46,17 @@ pub enum BeginError {
     /// What the job's agent may see could not be decided.
     #[error("what the job's agent may see could not be decided")]
     Handout(#[source] HandoutError),
+    /// No name could be minted for it: every one tried was taken. Bounded
+    /// rather than tried for ever, and never reached by any seed — see
+    /// `docs/decisions/0074-a-jobs-identifier-is-its-name.md`.
+    #[error("no name could be minted for the job: every one tried was taken")]
+    Unnamed,
 }
+
+/// How many names are minted for a job before giving up. Eight hex clash
+/// once in four billion, so the second is never needed; the bound is there
+/// so that a loop cannot stand still.
+const NAMING_ATTEMPTS: usize = 8;
 
 impl Running {
     /// Records a job on a project and sets it going.
@@ -104,23 +114,23 @@ impl Running {
             .channel(channel)
             .cloned()
             .ok_or(BeginError::NoChannel(project))?;
-        // Minted before the instruction, because the instruction names where
-        // this job can be reached and that address is built from the
-        // identifier — and before the room's name, for the same reason.
-        let job = JobId::from_uuid(crate::mint(&mut self.rng));
+        // Named before the instruction, because the instruction names where
+        // this job can be reached and that address is built from the name —
+        // and before the room's name, for the same reason.
+        let job = self.name_job(title)?;
         let variables: Vec<_> = handout.variable_names().cloned().collect();
         let kickoff = stageman_foreman::kickoff(
             &repository,
             work,
-            &crate::tunnel::address(&self.domain, job, self.serving),
+            &crate::tunnel::address(&self.domain, &job, self.serving),
             &variables,
         );
-        let name = stageman_channel::room_name(channel, &called, title, job);
+        let name = stageman_channel::room_name(channel, &called, &job);
 
         if let Some(watched) = self.state.projects.get_mut(&project) {
             let mut recorded = Job::new(handout.kit().clone(), reason.to_owned(), kickoff, at);
             recorded.asked_by = origin.as_ref().and_then(|origin| origin.user.clone());
-            watched.jobs.insert(job, recorded);
+            watched.jobs.insert(job.clone(), recorded);
             self.dirty = true;
         }
 
@@ -129,8 +139,23 @@ impl Running {
         // agent it can reach a person, and running it anyway would make
         // that quietly false. It is also the cheapest moment to fail — no
         // container exists yet.
-        self.create_room(job, channel, &speaking, &name, origin);
+        self.create_room(job.clone(), channel, &speaking, &name, origin);
         Ok(job)
+    }
+
+    /// A name for a new job — its title and eight hex minted for it — that
+    /// no job of this instance already has, minted again while one does.
+    /// Checked across the instance rather than the project, because the
+    /// tunnel's host is the instance's — see
+    /// `docs/decisions/0074-a-jobs-identifier-is-its-name.md`.
+    fn name_job(&mut self, title: &str) -> Result<JobId, BeginError> {
+        for _ in 0..NAMING_ATTEMPTS {
+            let named = JobId::named(title, &crate::mint(&mut self.rng));
+            if self.state.project_of(&named).is_none() {
+                return Ok(named);
+            }
+        }
+        Err(BeginError::Unnamed)
     }
 
     /// The room a job's conversation will happen in, or why it could not be
@@ -144,7 +169,7 @@ impl Running {
     /// here.
     pub fn room_created(
         &mut self,
-        job: JobId,
+        job: &JobId,
         origin: Option<Origin>,
         outcome: Result<String, String>,
     ) {
@@ -167,7 +192,7 @@ impl Running {
         let Some((channel, speaking, repository, reason)) =
             self.state.projects.get(&project).and_then(|watched| {
                 let (channel, bound) = watched.channels.iter().next()?;
-                let recorded = watched.jobs.get(&job)?;
+                let recorded = watched.jobs.get(job)?;
                 Some((
                     *channel,
                     bound.speaking(),
@@ -187,7 +212,7 @@ impl Running {
         let tunnel = crate::tunnel::address(&self.domain, job, self.serving);
         let dashboard = crate::tunnel::dashboard(&self.domain, self.serving);
         self.describe_room(
-            job,
+            job.clone(),
             channel,
             &speaking,
             &room.id,
@@ -195,7 +220,7 @@ impl Running {
             &format!("Showing at {tunnel} · dashboard at {dashboard}"),
         );
         if let Some(user) = origin.as_ref().and_then(|origin| origin.user.as_deref()) {
-            self.invite_into(job, channel, &speaking, &room.id, user);
+            self.invite_into(job.clone(), channel, &speaking, &room.id, user);
         }
         let mention = self.own_mention(project, channel);
         self.say(
@@ -238,7 +263,7 @@ impl Running {
     /// across the room being made: the record holds the kit and the
     /// kickoff, and a handout is what a process is about to be handed, never
     /// state.
-    fn start(&mut self, job: JobId) {
+    fn start(&mut self, job: &JobId) {
         let Some(project) = self.state.project_of(job) else {
             return;
         };
@@ -278,8 +303,8 @@ impl Running {
                 return;
             }
         };
-        let speaker = Speaker::Job(job);
-        let warrant = self.warrant(speaker, room.map(Place::root), None);
+        let speaker = Speaker::Job(job.clone());
+        let warrant = self.warrant(&speaker, room.map(Place::root), None);
         let run = Run::Begin {
             container: stageman_job::container(job),
             agent: handout.agent(),

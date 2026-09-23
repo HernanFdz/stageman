@@ -61,7 +61,7 @@ pub enum Accepted {
 /// finds it working and waits. That is what makes one turn per job at a time
 /// the inbox's property, as `docs/decisions/0044-a-listener-only-listens.md`
 /// asks of arrival order and 0069 asks of the inbox.
-pub fn accepting(state: &mut State, job: JobId, errand: Errand, now: Timestamp) -> Accepted {
+pub fn accepting(state: &mut State, job: &JobId, errand: Errand, now: Timestamp) -> Accepted {
     let Some(recorded) = state.job_mut(job) else {
         return Accepted::Unknown;
     };
@@ -126,7 +126,7 @@ impl Running {
         match self.state.recipient(project, channel, &arriving) {
             Recipient::Job(job) => {
                 tracing::info!(%job, "handing a reply to the job whose room it is in");
-                self.replied(project, job, channel, message);
+                self.replied(project, &job, channel, message);
             }
             Recipient::Foreman(project) => {
                 if let Some(app) = &message.app {
@@ -151,7 +151,7 @@ impl Running {
     /// `docs/decisions/0068-a-mention-is-shown-its-thread.md`, when it was
     /// in one — and one that found it working is handed to the turn if that
     /// can be done now. A job that is over refuses, and says so.
-    fn replied(&mut self, project: ProjectId, job: JobId, channel: Channel, message: &Message) {
+    fn replied(&mut self, project: ProjectId, job: &JobId, channel: Channel, message: &Message) {
         let now = self.stamp();
         match accepting(&mut self.state, job, errand_of(channel, message), now) {
             Accepted::Started { interrupted } => {
@@ -183,7 +183,7 @@ impl Running {
     pub(crate) fn start_given(
         &mut self,
         project: ProjectId,
-        job: JobId,
+        job: &JobId,
         channel: Channel,
         finding: Finding,
     ) {
@@ -197,8 +197,11 @@ impl Running {
         };
         let reading = in_thread(&errand)
             && self.read_thread(
-                Speaker::Job(job),
-                crate::threads::Pending::Job { job, finding },
+                Speaker::Job(job.clone()),
+                crate::threads::Pending::Job {
+                    job: job.clone(),
+                    finding,
+                },
                 &errand.thread.room,
                 &errand.thread.id,
             );
@@ -218,7 +221,7 @@ impl Running {
     pub fn resume_job(
         &mut self,
         project: ProjectId,
-        job: JobId,
+        job: &JobId,
         channel: Channel,
         finding: Finding,
     ) {
@@ -231,9 +234,9 @@ impl Running {
             return;
         };
         let (place, target, link) = self.addressed(project, channel, &errand);
-        let speaker = Speaker::Job(job);
+        let speaker = Speaker::Job(job.clone());
         // A job's session is resumed, so it remembers what it was shown.
-        let context = self.thread_taken(speaker).and_then(|read| {
+        let context = self.thread_taken(&speaker).and_then(|read| {
             crate::threads::thread_context(&read, channel, false, handling(&errand))
         });
         let Some((_, kit)) = self.recorded(job) else {
@@ -243,7 +246,7 @@ impl Running {
             job,
             &stageman_foreman::turn_notice(&stageman_foreman::Because::Message(link.as_deref())),
         );
-        let warrant = self.warrant(speaker, Some(place), None);
+        let warrant = self.warrant(&speaker, Some(place), None);
         // Resuming starts the container, which publishes its tunnel
         // on a fresh port.
         self.forget_tunnel(job);
@@ -270,8 +273,8 @@ impl Running {
     /// record: a crash after the handing finds it in hand and says it again
     /// on resuming, as one that may or may not have been seen, rather than
     /// delivering it twice as new.
-    pub(crate) fn try_deliver(&mut self, project: ProjectId, job: JobId, channel: Channel) {
-        let speaker = Speaker::Job(job);
+    pub(crate) fn try_deliver(&mut self, project: ProjectId, job: &JobId, channel: Channel) {
+        let speaker = Speaker::Job(job.clone());
         if self.pending_threads.contains_key(&speaker) {
             return;
         }
@@ -296,7 +299,7 @@ impl Running {
         let reading = in_thread(&errand)
             && self.read_thread(
                 speaker,
-                crate::threads::Pending::Steer { job },
+                crate::threads::Pending::Steer { job: job.clone() },
                 &errand.thread.room,
                 &errand.thread.id,
             );
@@ -310,8 +313,8 @@ impl Running {
     /// hand. What the adapter answers comes back through the conversation.
     /// A turn that can no longer take it — ended meanwhile — hands it back
     /// to wait for the next.
-    pub(crate) fn steer_given(&mut self, project: ProjectId, job: JobId, channel: Channel) {
-        let speaker = Speaker::Job(job);
+    pub(crate) fn steer_given(&mut self, project: ProjectId, job: &JobId, channel: Channel) {
+        let speaker = Speaker::Job(job.clone());
         let Some(errand) = self
             .state
             .job(job)
@@ -321,7 +324,7 @@ impl Running {
             return;
         };
         let (_, target, _) = self.addressed(project, channel, &errand);
-        let context = self.thread_taken(speaker).and_then(|read| {
+        let context = self.thread_taken(&speaker).and_then(|read| {
             crate::threads::thread_context(&read, channel, false, handling(&errand))
         });
         let text =
@@ -382,7 +385,7 @@ impl Running {
     /// Says something at the root of a job's room, if it has one, once
     /// whatever this step changed is on the disk — which for a refusal is
     /// nothing, so it goes at once.
-    pub(crate) fn notice(&mut self, job: JobId, text: &str) {
+    pub(crate) fn notice(&mut self, job: &JobId, text: &str) {
         if let Some((speaking, place)) = speaking_for(&self.state, job) {
             self.say(&speaking, &place, text);
         }
@@ -437,7 +440,7 @@ mod tests {
                 credentials: BTreeMap::new(),
                 channels: BTreeMap::new(),
                 jobs: BTreeMap::from([(
-                    job,
+                    job.clone(),
                     Job::new(
                         Kit::defaults(Agent::Claude),
                         "started by hand".to_owned(),
@@ -464,10 +467,10 @@ mod tests {
         let (mut state, job) = an_instance_with_a_job();
 
         assert_eq!(
-            accepting(&mut state, job, said("first"), Timestamp::UNIX_EPOCH),
+            accepting(&mut state, &job, said("first"), Timestamp::UNIX_EPOCH),
             Accepted::Waiting
         );
-        let recorded = state.job(job).expect("the job");
+        let recorded = state.job(&job).expect("the job");
         assert_eq!(recorded.progress, Progress::Working, "already working");
         assert!(
             recorded.inbox.given.is_empty(),
@@ -475,13 +478,13 @@ mod tests {
         );
         assert_eq!(recorded.inbox.waiting.len(), 1);
 
-        state.job_mut(job).expect("the job").inbox.drain();
-        state.job_mut(job).expect("the job").progress = Progress::Idle(Waiting::Silent);
+        state.job_mut(&job).expect("the job").inbox.drain();
+        state.job_mut(&job).expect("the job").progress = Progress::Idle(Waiting::Silent);
         assert_eq!(
-            accepting(&mut state, job, said("second"), Timestamp::UNIX_EPOCH),
+            accepting(&mut state, &job, said("second"), Timestamp::UNIX_EPOCH),
             Accepted::Started { interrupted: false }
         );
-        let recorded = state.job(job).expect("the job");
+        let recorded = state.job(&job).expect("the job");
         assert_eq!(recorded.progress, Progress::Working);
         assert_eq!(
             recorded
@@ -497,10 +500,10 @@ mod tests {
 
         // Starting it once is what stops a second starting it as well.
         assert_eq!(
-            accepting(&mut state, job, said("third"), Timestamp::UNIX_EPOCH),
+            accepting(&mut state, &job, said("third"), Timestamp::UNIX_EPOCH),
             Accepted::Waiting
         );
-        let recorded = state.job(job).expect("the job");
+        let recorded = state.job(&job).expect("the job");
         assert_eq!(recorded.inbox.given.len(), 1);
         assert_eq!(
             recorded.inbox.next().map(|next| next.said.as_str()),
@@ -520,15 +523,18 @@ mod tests {
             Waiting::Failed("the credential had expired".to_owned()),
         ] {
             let (mut state, job) = an_instance_with_a_job();
-            state.job_mut(job).expect("the job").progress = Progress::Idle(waiting.clone());
+            state.job_mut(&job).expect("the job").progress = Progress::Idle(waiting.clone());
 
             let interrupted = waiting == Waiting::Paused;
             assert_eq!(
-                accepting(&mut state, job, said("go on"), Timestamp::UNIX_EPOCH),
+                accepting(&mut state, &job, said("go on"), Timestamp::UNIX_EPOCH),
                 Accepted::Started { interrupted },
                 "{waiting:?}"
             );
-            assert_eq!(state.job(job).expect("the job").progress, Progress::Working);
+            assert_eq!(
+                state.job(&job).expect("the job").progress,
+                Progress::Working
+            );
         }
     }
 
@@ -537,14 +543,14 @@ mod tests {
     fn a_reply_to_a_job_that_is_over_is_refused_and_changes_nothing() {
         for outcome in [Outcome::Done, Outcome::Discarded, Outcome::Lost] {
             let (mut state, job) = an_instance_with_a_job();
-            state.job_mut(job).expect("the job").progress = Progress::Retired(outcome);
+            state.job_mut(&job).expect("the job").progress = Progress::Retired(outcome);
 
             assert_eq!(
-                accepting(&mut state, job, said("go on"), Timestamp::UNIX_EPOCH),
+                accepting(&mut state, &job, said("go on"), Timestamp::UNIX_EPOCH),
                 Accepted::Over,
                 "{outcome:?}"
             );
-            let recorded = state.job(job).expect("the job");
+            let recorded = state.job(&job).expect("the job");
             assert_eq!(recorded.progress, Progress::Retired(outcome));
             assert!(
                 recorded.inbox.is_empty(),
@@ -560,7 +566,7 @@ mod tests {
         assert_eq!(
             accepting(
                 &mut state,
-                JobId::from_uuid(Uuid::from_u128(99)),
+                &JobId::from_uuid(Uuid::from_u128(99)),
                 said("anyone?"),
                 Timestamp::UNIX_EPOCH
             ),

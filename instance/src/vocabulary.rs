@@ -57,7 +57,7 @@ pub struct Container {
 /// runs for each at a time, which is why a turn needs no identifier of its
 /// own: the speaker is the key, and a completion for a speaker with no turn
 /// in flight is one from before a crash.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Speaker {
     /// The one agent a project's foreman thinks with.
     Foreman(ProjectId),

@@ -128,9 +128,11 @@ channel for its foreman, named after the project, where everything the
 foreman says and does appears as it happens: which message it is handling,
 what it decided, and why.
 
-**Every job gets a channel of its own**, named after the project, the job's
-title and a short identifier, and described with why the job exists and where
-it is showing its work. It is created when the job is, whoever asked for the
+**Every job gets a channel of its own**, named after the project and the job
+— a job is named by the title it was given and a short suffix that makes the
+name unique, and that name is also its address on the dashboard and the host
+it shows its work on — and described with why the job exists and where it is
+showing its work. It is created when the job is, whoever asked for the
 job is invited into it, and a mention there reaches that job, even while it
 is working: it reads the message at once and carries on. Everything the
 job's agent writes appears there as it works, with what it ran and edited
