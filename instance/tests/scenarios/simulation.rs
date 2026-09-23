@@ -32,8 +32,9 @@ use stageman_vocabulary::{
     Named as _, Probed, RequestId as Asked, Responded,
 };
 
-/// Virtual milliseconds.
-pub type Now = u64;
+/// Virtual milliseconds: the vocabulary's own count, which every step is
+/// told.
+pub use stageman_vocabulary::Now;
 
 /// Where every simulated instance keeps its file.
 const INSTANCE_FILE: &str = "/sim/instance.json";
@@ -931,7 +932,6 @@ impl Simulation {
                         .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
                         .collect(),
                     peer: peer.to_owned(),
-                    at: 1_757_000_000_000,
                 },
             },
         );
@@ -1186,7 +1186,7 @@ impl Simulation {
         {
             self.seen.extend(named);
         }
-        let effects = instance.step(event.clone());
+        let effects = instance.step(self.now, event.clone());
         if let Some(recorder) = &mut self.recorder {
             recorder.turned(self.now, event, effects.clone(), instance.snapshot());
         }
@@ -2042,7 +2042,7 @@ impl Simulation {
     /// remembered by the platform.
     pub fn person_says(&mut self, at: Now, room: &str, id: &str, thread: Option<&str>, text: &str) {
         let socket = self.live_socket();
-        let event = self.frame_on(socket, at, room, id, thread, text, Spoken::Plain);
+        let event = self.frame_on(socket, room, id, thread, text, Spoken::Plain);
         self.schedule(at, event);
     }
 
@@ -2050,7 +2050,7 @@ impl Simulation {
     /// platform remembers of it in a thread.
     pub fn we_said(&mut self, at: Now, room: &str, id: &str, thread: Option<&str>, text: &str) {
         let socket = self.live_socket();
-        let event = self.frame_on(socket, at, room, id, thread, text, Spoken::Ours);
+        let event = self.frame_on(socket, room, id, thread, text, Spoken::Ours);
         self.schedule(at, event);
     }
 
@@ -2189,7 +2189,7 @@ impl Simulation {
         // than hang, which a scenario can see. Everything else is answered
         // at once, which is what the scenarios' timings were written to.
         let at = if edited { self.now + 1 } else { self.now };
-        self.schedule(at, Event::Responded { id, responded, at });
+        self.schedule(at, Event::Responded { id, responded });
     }
 
     /// Opens a socket the instance asked for: the platform greets on it at
@@ -2202,7 +2202,6 @@ impl Simulation {
                 Event::Disconnected {
                     id,
                     disconnected: Disconnected::Failed(why),
-                    at: self.now,
                 },
             );
             return;
@@ -2213,7 +2212,6 @@ impl Simulation {
             Event::Frame {
                 id,
                 text: r#"{"type":"hello","num_connections":1}"#.to_owned(),
-                at: self.now,
             },
         );
     }
@@ -2250,7 +2248,6 @@ impl Simulation {
             Event::Disconnected {
                 id,
                 disconnected: Disconnected::Closed,
-                at,
             },
         );
     }
@@ -2267,14 +2264,9 @@ impl Simulation {
 
     /// One message as the platform delivers it: a frame on a socket, in an
     /// envelope of its own.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "a frame is exactly these, and a struct would name the same seven things once more"
-    )]
     fn frame_on(
         &mut self,
         socket: EffectId,
-        at: Now,
         room: &str,
         id: &str,
         in_thread: Option<&str>,
@@ -2320,7 +2312,6 @@ impl Simulation {
             text: format!(
                 r#"{{"envelope_id":"{envelope}","type":"events_api","payload":{{"event":{{"type":"{kind}","channel":"{room}",{speaker},"text":{text},"ts":"{id}"{thread_ts}}}}}}}"#
             ),
-            at,
         }
     }
 
@@ -2331,7 +2322,6 @@ impl Simulation {
     /// profile on its root and not on itself.
     fn app_frame(
         &mut self,
-        at: Now,
         room: &str,
         id: &str,
         under: Option<&str>,
@@ -2392,20 +2382,19 @@ impl Simulation {
                 "payload": {"event": serde_json::Value::Object(event)},
             })
             .to_string(),
-            at,
         }
     }
 
     /// Another app posting at the root of a room, at an instant.
     pub fn app_posts(&mut self, at: Now, room: &str, id: &str, headline: &str, body: &str) {
-        let event = self.app_frame(at, room, id, None, headline, body);
+        let event = self.app_frame(room, id, None, headline, body);
         self.schedule(at, event);
     }
 
     /// Another app following up under an earlier message of its own, at an
     /// instant.
     pub fn app_follows_up(&mut self, at: Now, room: &str, id: &str, under: &str, headline: &str) {
-        let event = self.app_frame(at, room, id, Some(under), headline, "");
+        let event = self.app_frame(room, id, Some(under), headline, "");
         self.schedule(at, event);
     }
 
@@ -2414,7 +2403,6 @@ impl Simulation {
         let socket = self.live_socket();
         let event = self.frame_on(
             socket,
-            at,
             CHANNEL,
             "1788000099.000001",
             Some(&self::thread(thread).id),
@@ -2431,7 +2419,6 @@ impl Simulation {
         let socket = self.live_socket();
         let event = self.frame_on(
             socket,
-            at,
             CHANNEL,
             &self::thread(n).id,
             None,
@@ -2447,7 +2434,6 @@ impl Simulation {
     pub fn says_at_root_on(&mut self, socket: EffectId, at: Now, n: u32, text: &str) {
         let event = self.frame_on(
             socket,
-            at,
             CHANNEL,
             &self::thread(n).id,
             None,
@@ -2463,7 +2449,6 @@ impl Simulation {
         let socket = self.live_socket();
         let event = self.frame_on(
             socket,
-            at,
             &room(n).id,
             "1788000099.000004",
             None,
@@ -2480,7 +2465,6 @@ impl Simulation {
         let socket = self.live_socket();
         let event = self.frame_on(
             socket,
-            at,
             &room(n).id,
             id,
             None,
@@ -2496,7 +2480,6 @@ impl Simulation {
         let socket = self.live_socket();
         let event = self.frame_on(
             socket,
-            at,
             &room(n).id,
             id,
             Some(thread),
@@ -2512,7 +2495,6 @@ impl Simulation {
         let socket = self.live_socket();
         let event = self.frame_on(
             socket,
-            at,
             &room(n).id,
             "1788000099.000005",
             Some(thread),
@@ -2527,16 +2509,7 @@ impl Simulation {
     /// instance's own post.
     pub fn said_in_room(&mut self, n: u32, text: &str, spoken: Spoken) -> Event {
         let socket = self.live_socket();
-        let now = self.now;
-        self.frame_on(
-            socket,
-            now,
-            &room(n).id,
-            "1788000099.000006",
-            None,
-            text,
-            spoken,
-        )
+        self.frame_on(socket, &room(n).id, "1788000099.000006", None, text, spoken)
     }
 
     /// The platform warns, at an instant, that it is about to close the
@@ -2548,7 +2521,6 @@ impl Simulation {
             Event::Frame {
                 id: socket,
                 text: r#"{"type":"disconnect","reason":"warning"}"#.to_owned(),
-                at,
             },
         );
     }

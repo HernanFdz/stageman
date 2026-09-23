@@ -82,14 +82,7 @@ pub async fn jobs(project: String) -> DashboardResult<Working> {
 /// offers no kit under that name.
 #[post("/api/projects/{project}/jobs/start")]
 pub async fn start(project: String, kit: String, work: String) -> DashboardResult<Working> {
-    match super::ask(Request::Start {
-        project,
-        kit,
-        work,
-        at: stageman_core::Timestamp::now(),
-    })
-    .await?
-    {
+    match super::ask(Request::Start { project, kit, work }).await? {
         Response::Jobs(working) => Ok(working),
         other => Err(super::unexpected(&other)),
     }
@@ -309,7 +302,11 @@ fn RanJob(
                 }
                 span { class: "ml-auto flex shrink-0 items-baseline gap-2 font-mono text-xs text-faint-foreground",
                     "{job.kit}"
-                    When { at: job.created_at.clone() }
+                    // How long it has been this way; a job the last release
+                    // wrote says only that it waits.
+                    if let Some(since) = job.since.clone() {
+                        When { at: since }
+                    }
                 }
             }
             if let Standing::Failed { why } = &job.standing {

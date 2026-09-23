@@ -183,7 +183,11 @@ fn Placed(placed: ProjectJob) -> Element {
             }
             span { class: "ml-auto flex shrink-0 items-baseline gap-3",
                 span { class: "font-mono text-xs text-faint-foreground", "{job.kit}" }
-                When { at: job.created_at.clone() }
+                // How long it has been this way; a job the last release
+                // wrote says only that it waits.
+                if let Some(since) = job.since.clone() {
+                    When { at: since }
+                }
                 if let Some(verb) = job.standing.asks() {
                     Link {
                         to: to_job,

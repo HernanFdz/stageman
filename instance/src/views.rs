@@ -481,6 +481,7 @@ fn job_view(
         kickoff: job.kickoff.clone(),
         created_at: job.created_at.to_string(),
         standing: standing(&job.progress),
+        since: job.since.map(|moment| moment.to_string()),
         tunnel: address(domain, id, serving),
         pull_requests: job
             .pull_requests
@@ -497,35 +498,43 @@ fn job_view(
 /// working one, newest first, then the projects — see
 /// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
 ///
-/// Ordered by when each job was made, until the moment a standing changed is
-/// recorded: the record asks for it, and it arrives with the job's page.
+/// Ordered by the moment each job's standing last changed. A job with no
+/// moment kept changed its standing before this build's first stamp, so it
+/// has waited longer than any job that carries one: it comes first among
+/// those waiting and last among those working, and among its own kind by
+/// when it was made.
 pub fn home(
     state: &State,
     identities: &Identities,
     domain: &Domain,
     serving: u16,
 ) -> stageman_wire::Home {
-    let mut needs_you = Vec::new();
-    let mut working = Vec::new();
+    let mut idle: Vec<(ProjectId, &Project, JobId, &Job)> = Vec::new();
+    let mut running: Vec<(ProjectId, &Project, JobId, &Job)> = Vec::new();
     for (project_id, project) in &state.projects {
         for (id, job) in &project.jobs {
-            let placed = || stageman_wire::ProjectJob {
-                project: project_id.to_string(),
-                project_name: project.name.clone(),
-                job: job_view(*id, job, &project.repository, domain, serving),
-            };
             match &job.progress {
-                Progress::Idle(_) => needs_you.push(placed()),
-                Progress::Working => working.push(placed()),
+                Progress::Idle(_) => idle.push((*project_id, project, *id, job)),
+                Progress::Working => running.push((*project_id, project, *id, job)),
                 Progress::Retired(_) => {}
             }
         }
     }
-    needs_you.sort_by(|one, other| one.job.created_at.cmp(&other.job.created_at));
-    working.sort_by(|one, other| other.job.created_at.cmp(&one.job.created_at));
+    // A moment that is none sorts before every moment that is some, and an
+    // earlier moment before a later one, which is longest waiting first.
+    let changed = |job: &Job| (job.since, job.created_at);
+    idle.sort_by_key(|placed| changed(placed.3));
+    running.sort_by_key(|placed| std::cmp::Reverse(changed(placed.3)));
+    let placed = |(project_id, project, id, job): (ProjectId, &Project, JobId, &Job)| {
+        stageman_wire::ProjectJob {
+            project: project_id.to_string(),
+            project_name: project.name.clone(),
+            job: job_view(id, job, &project.repository, domain, serving),
+        }
+    };
     stageman_wire::Home {
-        needs_you,
-        working,
+        needs_you: idle.into_iter().map(placed).collect(),
+        working: running.into_iter().map(placed).collect(),
         projects: watching(state, identities),
     }
 }
@@ -815,7 +824,10 @@ mod tests {
     /// The first page lists what a person does something about, longest
     /// waiting first; then what is working, newest first; and never what is
     /// over. The partition is the domain's own outer state, so this is the
-    /// one place it is turned into an order.
+    /// one place it is turned into an order — by the moment a standing
+    /// changed, and a job with no moment kept, which changed before this
+    /// build's first stamp, comes first among those waiting and last among
+    /// those working whatever its record says it was made at.
     #[test]
     fn the_first_page_partitions_jobs_by_what_the_system_does_with_them() {
         let mut state = watching("aviary");
@@ -823,12 +835,14 @@ mod tests {
             .projects
             .get_mut(&ProjectId::from_uuid(Uuid::nil()))
             .expect("the project");
-        for (which, second, progress) in [
-            (1_u128, 30_i64, Progress::Idle(Waiting::Proposed)),
-            (2, 10, Progress::Idle(Waiting::Asked)),
-            (3, 20, Progress::Working),
-            (4, 40, Progress::Working),
-            (5, 50, Progress::Retired(Outcome::Done)),
+        for (which, second, progress, kept) in [
+            (1_u128, 30_i64, Progress::Idle(Waiting::Proposed), true),
+            (2, 10, Progress::Idle(Waiting::Asked), true),
+            (3, 20, Progress::Working, true),
+            (4, 40, Progress::Working, true),
+            (5, 50, Progress::Retired(Outcome::Done), true),
+            (6, 60, Progress::Idle(Waiting::Silent), false),
+            (7, 70, Progress::Working, false),
         ] {
             let mut job = Job::new(
                 Kit::defaults(Agent::Claude),
@@ -837,6 +851,9 @@ mod tests {
                 Timestamp::from_second(second).expect("a time"),
             );
             job.progress = progress;
+            if !kept {
+                job.since = None;
+            }
             watched
                 .jobs
                 .insert(JobId::from_uuid(Uuid::from_u128(which)), job);
@@ -854,10 +871,20 @@ mod tests {
         let id = |which: u128| JobId::from_uuid(Uuid::from_u128(which)).to_string();
         assert_eq!(
             named(&shown.needs_you),
-            [id(2), id(1)],
-            "longest waiting first"
+            [id(6), id(2), id(1)],
+            "longest waiting first, and a job with no moment kept first of all"
         );
-        assert_eq!(named(&shown.working), [id(4), id(3)], "newest first");
+        assert_eq!(
+            named(&shown.working),
+            [id(4), id(3), id(7)],
+            "newest first, and a job with no moment kept last of all"
+        );
+        assert_eq!(shown.needs_you[0].job.since, None);
+        assert_eq!(
+            shown.needs_you[1].job.since.as_deref(),
+            Some("1970-01-01T00:00:10Z"),
+            "the moment crosses as the wire spells a time"
+        );
         assert_eq!(shown.projects.len(), 1);
         assert!(
             shown

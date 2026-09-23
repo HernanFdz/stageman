@@ -3,22 +3,24 @@
 //! and a stop that lands between steps.
 
 use stageman_agent::Command;
-use stageman_core::{JobId, Progress, Timestamp, Uuid, Waiting};
+use stageman_core::{JobId, Progress, Uuid, Waiting};
 use stageman_instance::{Instance, Request, Response};
 
 use crate::simulation::{Simulation, job, project, request, seed, watching_a_channel};
 
 /// Asks for a job by hand, and performs what asking caused.
 fn asking(sim: &mut Simulation, instance: &mut Instance, id: u64, work: &str) {
-    for effect in instance.step(request(
-        id,
-        Request::Start {
-            project: project().to_string(),
-            kit: "Claude".to_owned(),
-            work: work.to_owned(),
-            at: Timestamp::UNIX_EPOCH,
-        },
-    )) {
+    for effect in instance.step(
+        sim.now(),
+        request(
+            id,
+            Request::Start {
+                project: project().to_string(),
+                kit: "Claude".to_owned(),
+                work: work.to_owned(),
+            },
+        ),
+    ) {
         sim.perform(effect);
     }
 }
@@ -172,13 +174,16 @@ fn a_stop_before_the_agent_speaks_ends_the_turn_at_its_next_step() {
     // it is asked for, so there is something to mark.
     let job = started(&mut sim, &mut instance, 1, "one thing");
     assert!(sim.talks().is_empty(), "not yet spoken to");
-    for effect in instance.step(request(
-        2,
-        Request::Stop {
-            project: project().to_string(),
-            job: job.to_string(),
-        },
-    )) {
+    for effect in instance.step(
+        sim.now(),
+        request(
+            2,
+            Request::Stop {
+                project: project().to_string(),
+                job: job.to_string(),
+            },
+        ),
+    ) {
         sim.perform(effect);
     }
     sim.run_until(&mut instance, 5_000);

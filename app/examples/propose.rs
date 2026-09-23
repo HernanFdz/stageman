@@ -25,7 +25,7 @@ use std::time::Duration;
 use stageman::world::{Asking, Performer};
 use stageman_core::{
     Agent, AgentConfig, JobId, Key, Kit, KitConfig, KitName, NONCE_LEN, Platform, Project,
-    ProjectId, Secret, State, Timestamp, Uuid,
+    ProjectId, Secret, State, Uuid,
 };
 use stageman_instance::{Instance, Request, Response, Seed, Target};
 use stageman_vocabulary::Environment;
@@ -130,7 +130,6 @@ async fn propose() -> Result<(), String> {
             project: project.to_string(),
             kit: "Claude".to_owned(),
             work: WORK.to_owned(),
-            at: Timestamp::now(),
         })
         .await;
     let job = match asked {

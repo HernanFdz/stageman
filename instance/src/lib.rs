@@ -53,7 +53,7 @@ use stageman_agent::Command;
 use stageman_core::{
     Agent, InstanceId, JobId, Key, Kit, Place, Progress, ProjectId, Room, State, Timestamp, Uuid,
 };
-use stageman_vocabulary::{Effect as Generic, EffectId, Environment, Finished};
+use stageman_vocabulary::{Effect as Generic, EffectId, Environment, Finished, Now};
 
 pub use boot::KeySource;
 pub use file::LoadError;
@@ -186,19 +186,21 @@ impl Instance {
         )
     }
 
-    /// Handles one event and answers with what to do about it.
+    /// Handles one event and answers with what to do about it, told the
+    /// time as the world hands the event over — see
+    /// `docs/decisions/0073-the-world-tells-the-instance-the-time-with-every-step.md`.
     ///
     /// While booting, an answer moves booting along and anything of the
     /// application's own waits; the moment the instance is awake, whatever
-    /// waited is handled in the order it arrived.
-    pub fn step(&mut self, event: Event) -> Vec<Effect> {
+    /// waited is handled in the order it arrived, at the time it woke.
+    pub fn step(&mut self, at: Now, event: Event) -> Vec<Effect> {
         match &mut self.stage {
-            Stage::Awake(running) => running.step(event),
-            Stage::Booting(booting) => match booting.step(event) {
+            Stage::Awake(running) => running.step(at, event),
+            Stage::Booting(booting) => match booting.step(at, event) {
                 boot::Booting::Asking(effects) => effects,
                 boot::Booting::Awake(mut running, mut effects, waiting) => {
                     for event in waiting {
-                        effects.extend(running.step(Event::App(event)));
+                        effects.extend(running.step(at, Event::App(event)));
                     }
                     self.stage = Stage::Awake(running);
                     effects
@@ -325,8 +327,8 @@ impl stageman_vocabulary::Deciding for Instance {
         Self::boot(seed, environment, target)
     }
 
-    fn step(&mut self, event: Event) -> Vec<Effect> {
-        Self::step(self, event)
+    fn step(&mut self, at: Now, event: Event) -> Vec<Effect> {
+        Self::step(self, at, event)
     }
 
     fn snapshot(&self) -> serde_json::Value {
@@ -453,6 +455,9 @@ pub struct Facts {
     pub runtime_environment: Environment,
     /// The port the tools are served on, which is what a container is told.
     pub tools: u16,
+    /// The time the world told the step that woke it, which the waking
+    /// sweep's records are stamped with.
+    pub now: Now,
     /// The listener they arrive on, where one was taken.
     pub tools_listener: Option<EffectId>,
     /// The listener a person's requests arrive on.
@@ -469,6 +474,10 @@ pub struct Facts {
 pub struct Running {
     /// What is kept.
     state: State,
+    /// The time the world told this step, in its milliseconds: the one clock
+    /// the instance has, per
+    /// `docs/decisions/0073-the-world-tells-the-instance-the-time-with-every-step.md`.
+    now: Now,
     /// Which instance this is.
     id: InstanceId,
     /// What seals the file.
@@ -599,6 +608,7 @@ impl Running {
             runtime,
             runtime_environment,
             tools,
+            now,
             tools_listener,
             dashboard_listener,
             presenting,
@@ -611,6 +621,7 @@ impl Running {
             minted
         });
         Self {
+            now,
             state,
             id,
             key,
@@ -923,8 +934,22 @@ impl Running {
         id
     }
 
-    /// Handles one event and answers with what to do about it.
-    pub fn step(&mut self, event: Event) -> Vec<Effect> {
+    /// Handles one event and answers with what to do about it, at the time
+    /// the world said it was.
+    ///
+    /// A time earlier than the last step's is a fault in the world, which
+    /// stamps as it hands over and so should never produce one; it is said
+    /// and taken as given, because the world is the authority on the clock
+    /// and the instance has no other.
+    pub fn step(&mut self, at: Now, event: Event) -> Vec<Effect> {
+        if at < self.now {
+            tracing::warn!(
+                at,
+                before = self.now,
+                "the world's clock ran backwards between two steps"
+            );
+        }
+        self.now = at;
         let mut effects = Vec::new();
         match event {
             Event::Written { id, outcome } => self.written(id, outcome, &mut effects),
@@ -942,15 +967,13 @@ impl Running {
             Event::Line { id, line } => self.line(id, &line, &mut effects),
             Event::Ended { id, ended } => self.process_ended(id, &ended, &mut effects),
             Event::Probed { id, probed } => self.probed(id, probed, &mut effects),
-            Event::Responded { id, responded, at } => {
+            Event::Responded { id, responded } => {
                 self.responded(id, &responded, at, &mut effects);
             }
-            Event::Frame { id, text, at } => self.frame(id, &text, at, &mut effects),
-            Event::Disconnected {
-                id,
-                disconnected,
-                at,
-            } => self.disconnected(id, &disconnected, at, &mut effects),
+            Event::Frame { id, text } => self.frame(id, &text, at, &mut effects),
+            Event::Disconnected { id, disconnected } => {
+                self.disconnected(id, &disconnected, at, &mut effects);
+            }
             Event::Read { .. } | Event::Bound { .. } => {
                 tracing::warn!(
                     "answered something this instance did not ask for while awake; ignored"
@@ -1142,10 +1165,18 @@ impl Running {
 
     /// Writes what became of a job.
     fn record(&mut self, job: JobId, progress: Progress) {
+        let since = self.stamp();
         if let Some(recorded) = self.state.job_mut(job) {
             recorded.progress = progress;
+            recorded.since = Some(since);
             self.dirty = true;
         }
+    }
+
+    /// The step's time, as the domain spells one: what every moment the
+    /// instance records is stamped with.
+    fn stamp(&self) -> Timestamp {
+        tools::stamped(self.now)
     }
 
     /// Writes down what a job's session reported it was set to, this turn.

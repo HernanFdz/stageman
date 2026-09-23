@@ -124,6 +124,11 @@ fn Shown(page: JobPage, failure: Signal<Option<DashboardError>>) -> Element {
                     // beside it.
                     Row { icon: Icon::Standing, says: "Where it has got to",
                         Badge { tone: job.standing.tone(), "{job.standing.label()}" }
+                        // Since when; a job the last release wrote says
+                        // only that it waits.
+                        if let Some(since) = job.since.clone() {
+                            When { at: since }
+                        }
                         if let Standing::Failed { why } = &job.standing {
                             span { class: "text-sm text-failed", "{why}" }
                         }

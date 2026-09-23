@@ -313,7 +313,7 @@ fn a_room_is_watched_by_asking_the_foreman_in_it_and_unwatched_the_same_way() {
     );
 
     // Shown on the dashboard, by identifier.
-    for effect in instance.step(request(7, Request::Projects)) {
+    for effect in instance.step(world.now(), request(7, Request::Projects)) {
         world.perform(effect);
     }
     world.run_until(&mut instance, 5_100);

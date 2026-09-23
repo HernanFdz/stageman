@@ -838,6 +838,19 @@ pub struct Job {
     /// as what this one does.
     #[serde(deserialize_with = "progress_or_older")]
     pub progress: Progress,
+    /// When its progress last changed — what a job that needs a person has
+    /// been waiting since, per
+    /// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+    ///
+    /// Written whenever the progress is, from the time the world told the
+    /// instance with the step, per
+    /// `docs/decisions/0073-the-world-tells-the-instance-the-time-with-every-step.md`.
+    /// None for every job the last release wrote, which is why it is
+    /// defaulted: such a job says only that it waits, and it has waited
+    /// longer than any job that carries a moment, since its last change was
+    /// before this build's first stamp.
+    #[serde(default)]
+    pub since: Option<Timestamp>,
     /// The room its conversation happens in, once there is one.
     ///
     /// Recorded for the lookup in the other direction: a reply arrives naming
@@ -1006,6 +1019,7 @@ impl Job {
             kickoff,
             created_at,
             progress: Progress::Working,
+            since: Some(created_at),
             room: None,
             asked_by: None,
             reported: BTreeMap::new(),
@@ -3442,6 +3456,10 @@ mod tests {
             assert!(
                 job.pull_requests.is_empty(),
                 "a job written before it could claim one claimed none"
+            );
+            assert_eq!(
+                job.since, None,
+                "a job written before the moment was kept says only that it waits"
             );
         }
     }

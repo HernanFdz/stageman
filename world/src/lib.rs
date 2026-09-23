@@ -253,7 +253,11 @@ pub fn run<D, P>(
         }
         while let Some(event) = events.recv().await {
             tracing::trace!(kind = event.kind(), "stepping");
-            for effect in deciding.step(event) {
+            // The clock is read here and nowhere else on the way to the
+            // instance, as the event is handed over: every step is told the
+            // time, and the times never run backwards — see
+            // `docs/decisions/0073-the-world-tells-the-instance-the-time-with-every-step.md`.
+            for effect in deciding.step(now(), event) {
                 perform(&world, &performer, effect).await;
             }
         }
@@ -404,11 +408,7 @@ fn requesting<A: App>(
     let world = Arc::clone(world);
     drop(tokio::spawn(async move {
         let responded = request(&world.client, &method, &url, &headers, body, within).await;
-        world.send(Event::Responded {
-            id,
-            responded,
-            at: now(),
-        });
+        world.send(Event::Responded { id, responded });
     }));
 }
 
@@ -468,7 +468,6 @@ fn connect<A: App>(world: &Arc<World<A>>, id: EffectId, url: String) {
                 world.send(Event::Disconnected {
                     id,
                     disconnected: Disconnected::Failed(why.to_string()),
-                    at: now(),
                 });
                 return;
             }
@@ -476,21 +475,13 @@ fn connect<A: App>(world: &Arc<World<A>>, id: EffectId, url: String) {
         let (frames, queued) = tokio::sync::mpsc::unbounded_channel::<String>();
         drop(world.sockets.lock().insert(id, Socketed { frames }));
         let disconnected = spoken(socket, queued, |text| {
-            world.send(Event::Frame {
-                id,
-                text,
-                at: now(),
-            });
+            world.send(Event::Frame { id, text });
         })
         .await;
         // Gone from the map, so a frame sent now is dropped rather than
         // queued for nobody.
         drop(world.sockets.lock().remove(&id));
-        world.send(Event::Disconnected {
-            id,
-            disconnected,
-            at: now(),
-        });
+        world.send(Event::Disconnected { id, disconnected });
     }));
 }
 
@@ -939,7 +930,6 @@ async fn asked<A: App>(
             .map_or_else(|| parts.uri.path().to_owned(), ToString::to_string),
         headers: named(&parts.headers),
         peer: peer.to_string(),
-        at: now(),
     };
 
     let (answering, mut answered) = tokio::sync::oneshot::channel();
@@ -1463,11 +1453,6 @@ mod tests {
             Some("stageman.test")
         );
         assert!(request.peer.starts_with("127.0.0.1:"), "{}", request.peer);
-        assert!(
-            request.at > 1_700_000_000_000,
-            "stamped with the time rather than with a number: {}",
-            request.at
-        );
 
         answering(
             &world,
@@ -1999,17 +1984,9 @@ mod tests {
         )
         .await;
         match next(events).await {
-            Event::Frame {
-                id: whose,
-                text,
-                at,
-            } => {
+            Event::Frame { id: whose, text } => {
                 assert_eq!(whose, id);
                 assert_eq!(text, "hello", "the first frame is the greeting");
-                assert!(
-                    at > 1_700_000_000_000,
-                    "stamped with the time rather than with a number: {at}"
-                );
             }
             other => panic!("expected the greeting: {}", other.kind()),
         }

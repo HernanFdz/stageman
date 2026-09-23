@@ -223,12 +223,15 @@ fn forgetting_a_project_disconnects_its_channel() {
     let mut instance = world.wake(seed(1));
     assert_eq!(world.listening(), 1);
 
-    for effect in instance.step(crate::simulation::request(
-        1,
-        stageman_instance::Request::Forget {
-            project: project().to_string(),
-        },
-    )) {
+    for effect in instance.step(
+        world.now(),
+        crate::simulation::request(
+            1,
+            stageman_instance::Request::Forget {
+                project: project().to_string(),
+            },
+        ),
+    ) {
         world.perform(effect);
     }
     world.run_until(&mut instance, 5_000);
@@ -282,7 +285,7 @@ fn a_channel_bound_under_a_failed_write_is_listened_to_after_the_wait() {
         credential: "xoxb-not-a-real-token".to_owned(),
         listen_credential: "xapp-not-a-real-token".to_owned(),
     };
-    for effect in instance.step(request(1, Request::Create { draft })) {
+    for effect in instance.step(world.now(), request(1, Request::Create { draft })) {
         world.perform(effect);
     }
     world.run_until(&mut instance, 100);

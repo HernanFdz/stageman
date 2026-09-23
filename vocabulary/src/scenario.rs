@@ -52,7 +52,8 @@ pub struct Init<D: Deciding> {
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct Turn<A: App> {
-    /// When the event arrived, on the recording world's clock.
+    /// When the event was handed over, on the recording world's clock: what
+    /// the deciding half was told the time was for this step.
     pub at: u64,
     /// The event.
     pub event: Event<A>,
@@ -266,7 +267,7 @@ pub fn replay<D: Deciding>(scenario: &Scenario<D>) -> Result<(), Mismatch> {
         });
     }
     for (turn, recorded) in scenario.turns.iter().enumerate() {
-        let effects = deciding.step(recorded.event.clone());
+        let effects = deciding.step(recorded.at, recorded.event.clone());
         let (wanted, caused) = (value(&recorded.effects)?, value(&effects)?);
         if caused != wanted {
             return Err(Mismatch::Effects {
@@ -371,7 +372,7 @@ mod tests {
             },
         ];
         for (at, event) in (0_u64..).zip(arrivals) {
-            let effects = bell.step(event.clone());
+            let effects = bell.step(0, event.clone());
             recorder.turned(at, event, effects, bell.snapshot());
         }
         recorder.finished()

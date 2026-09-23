@@ -1143,9 +1143,11 @@ impl Running {
         // message, as a reply does for a failed job. In hand and working
         // first, as receiving does for a message that finds the job idle.
         if next {
+            let since = self.stamp();
             if let Some(recorded) = self.state.job_mut(job) {
                 recorded.inbox.give();
                 recorded.progress = Progress::Working;
+                recorded.since = Some(since);
                 self.dirty = true;
             }
             self.start_given(project, job, channel, Finding::AtRest);

@@ -735,7 +735,7 @@ impl Running {
                     Called {
                         nearby: nearby(&request.peer),
                         bearer: presented(request),
-                        at: stamped(request.at),
+                        at: self.stamp(),
                     },
                 );
                 effects.push(Effect::Answer {
@@ -1085,8 +1085,8 @@ fn presented(request: &Arrival) -> Option<String> {
         .map(|presented| presented.trim().to_owned())
 }
 
-/// When a request arrived, as the domain spells a time.
-fn stamped(millis: u64) -> Timestamp {
+/// A moment on the world's clock, as the domain spells a time.
+pub fn stamped(millis: u64) -> Timestamp {
     let Ok(millis) = i64::try_from(millis) else {
         return Timestamp::UNIX_EPOCH;
     };
@@ -1111,7 +1111,6 @@ mod tests {
                 .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
                 .collect(),
             peer: peer.to_owned(),
-            at: 1_757_000_000_000,
         }
     }
 

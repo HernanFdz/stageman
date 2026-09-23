@@ -140,9 +140,10 @@ and ends with a stop reason and what was reported. The channel's lifecycle
 becomes instance state driven by frames, closes and a timer. Two locks become
 held state: the build in flight, and the handle that stops a turn.
 
-**Every arrival is stamped with the time by the world**, because a generic
-world cannot know which handlers keep it. The instance ignores the stamp
-where it does not.
+**Every arrival was stamped with the time by the world**, because a generic
+world cannot know which handlers keep it — which is the argument
+`docs/decisions/0073-the-world-tells-the-instance-the-time-with-every-step.md`
+made for every event, so the stamp is on the step now and on no arrival.
 
 **The vocabulary serialises in full and formats not at all.** Serialisation
 is the contract: a scenario is a file of events, a trace is a file of

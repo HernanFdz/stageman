@@ -156,7 +156,7 @@ fn a_port_that_can_have_moved_is_looked_up_again() {
 
     // A reply resumes the job, which restarts the container on a fresh port.
     let reply = sim.said_in_room(1, "go on", Spoken::Mention);
-    for effect in instance.step(reply) {
+    for effect in instance.step(sim.now(), reply) {
         sim.perform(effect);
     }
     let until = sim.now() + 5;

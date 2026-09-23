@@ -21,7 +21,7 @@
 
 use stageman_core::{
     Arriving, Channel, Errand, JobId, Place, Progress, ProjectId, Recipient, Room, State, Thread,
-    Waiting,
+    Timestamp, Waiting,
 };
 use stageman_foreman::Finding;
 
@@ -61,7 +61,7 @@ pub enum Accepted {
 /// finds it working and waits. That is what makes one turn per job at a time
 /// the inbox's property, as `docs/decisions/0044-a-listener-only-listens.md`
 /// asks of arrival order and 0069 asks of the inbox.
-pub fn accepting(state: &mut State, job: JobId, errand: Errand) -> Accepted {
+pub fn accepting(state: &mut State, job: JobId, errand: Errand, now: Timestamp) -> Accepted {
     let Some(recorded) = state.job_mut(job) else {
         return Accepted::Unknown;
     };
@@ -78,6 +78,7 @@ pub fn accepting(state: &mut State, job: JobId, errand: Errand) -> Accepted {
             recorded.inbox.receive(errand);
             recorded.inbox.give();
             recorded.progress = Progress::Working;
+            recorded.since = Some(now);
             Accepted::Started { interrupted }
         }
     }
@@ -151,7 +152,8 @@ impl Running {
     /// in one — and one that found it working is handed to the turn if that
     /// can be done now. A job that is over refuses, and says so.
     fn replied(&mut self, project: ProjectId, job: JobId, channel: Channel, message: &Message) {
-        match accepting(&mut self.state, job, errand_of(channel, message)) {
+        let now = self.stamp();
+        match accepting(&mut self.state, job, errand_of(channel, message), now) {
             Accepted::Started { interrupted } => {
                 // `accepting` wrote the state; this is the one writer that
                 // does not go through `record`, so it says so itself.
@@ -461,7 +463,10 @@ mod tests {
     fn a_message_starts_an_idle_job_and_waits_behind_a_working_one() {
         let (mut state, job) = an_instance_with_a_job();
 
-        assert_eq!(accepting(&mut state, job, said("first")), Accepted::Waiting);
+        assert_eq!(
+            accepting(&mut state, job, said("first"), Timestamp::UNIX_EPOCH),
+            Accepted::Waiting
+        );
         let recorded = state.job(job).expect("the job");
         assert_eq!(recorded.progress, Progress::Working, "already working");
         assert!(
@@ -473,7 +478,7 @@ mod tests {
         state.job_mut(job).expect("the job").inbox.drain();
         state.job_mut(job).expect("the job").progress = Progress::Idle(Waiting::Silent);
         assert_eq!(
-            accepting(&mut state, job, said("second")),
+            accepting(&mut state, job, said("second"), Timestamp::UNIX_EPOCH),
             Accepted::Started { interrupted: false }
         );
         let recorded = state.job(job).expect("the job");
@@ -491,7 +496,10 @@ mod tests {
         assert!(recorded.inbox.waiting.is_empty());
 
         // Starting it once is what stops a second starting it as well.
-        assert_eq!(accepting(&mut state, job, said("third")), Accepted::Waiting);
+        assert_eq!(
+            accepting(&mut state, job, said("third"), Timestamp::UNIX_EPOCH),
+            Accepted::Waiting
+        );
         let recorded = state.job(job).expect("the job");
         assert_eq!(recorded.inbox.given.len(), 1);
         assert_eq!(
@@ -516,7 +524,7 @@ mod tests {
 
             let interrupted = waiting == Waiting::Paused;
             assert_eq!(
-                accepting(&mut state, job, said("go on")),
+                accepting(&mut state, job, said("go on"), Timestamp::UNIX_EPOCH),
                 Accepted::Started { interrupted },
                 "{waiting:?}"
             );
@@ -532,7 +540,7 @@ mod tests {
             state.job_mut(job).expect("the job").progress = Progress::Retired(outcome);
 
             assert_eq!(
-                accepting(&mut state, job, said("go on")),
+                accepting(&mut state, job, said("go on"), Timestamp::UNIX_EPOCH),
                 Accepted::Over,
                 "{outcome:?}"
             );
@@ -553,7 +561,8 @@ mod tests {
             accepting(
                 &mut state,
                 JobId::from_uuid(Uuid::from_u128(99)),
-                said("anyone?")
+                said("anyone?"),
+                Timestamp::UNIX_EPOCH
             ),
             Accepted::Unknown
         );

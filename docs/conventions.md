@@ -455,8 +455,11 @@ Record the near-miss too: the term you rejected, and what it would have implied.
 - **event** — one thing the world tells the instance: a message heard, a
   turn ended, a request arrived, a timer gone off, bytes landed on the disk.
   Plain data, and the only way anything reaches the instance at all. An
-  event carries a time only when its handler keeps one, which is why most do
-  not. Not *message*, which is what a person says on a channel, and not
+  event never carries a time: the world tells the instance the time with
+  every **step**, stamped as it hands the event over, and a fact's own time
+  — a platform's timestamp — is data inside the payload; see
+  `docs/decisions/0073-the-world-tells-the-instance-the-time-with-every-step.md`.
+  Not *message*, which is what a person says on a channel, and not
   *command*, which would suggest the world tells the instance what to do
   rather than what happened.
 
@@ -723,7 +726,7 @@ justify is usually obsolete.
 
 - **Nothing inside the instance performs an effect, reads a clock, or draws on
   entropy of its own.** No I/O, no async, no threads, no locks, and every map
-  ordered. Time arrives on the events whose handlers keep it; randomness comes
+  ordered. Time arrives with every step, from the world; randomness comes
   from a generator the world seeded at construction; the outside is reached by
   returning an effect and heard from by being handed an event. The reason is
   that determinism is then a property of the type rather than of anybody's

@@ -2,22 +2,24 @@
 //! starts, described and opened, a platform that refuses, and a record that
 //! never lands.
 
-use stageman_core::{JobId, Progress, Timestamp, Uuid, Waiting};
+use stageman_core::{JobId, Progress, Uuid, Waiting};
 use stageman_instance::{Instance, Request, Response};
 
 use crate::simulation::{Simulation, in_room, project, request, room, seed, watching_a_channel};
 
 /// Asks for a job by hand and performs what asking caused.
 fn asking(sim: &mut Simulation, instance: &mut Instance, id: u64, work: &str) {
-    for effect in instance.step(request(
-        id,
-        Request::Start {
-            project: project().to_string(),
-            kit: "Claude".to_owned(),
-            work: work.to_owned(),
-            at: Timestamp::UNIX_EPOCH,
-        },
-    )) {
+    for effect in instance.step(
+        sim.now(),
+        request(
+            id,
+            Request::Start {
+                project: project().to_string(),
+                kit: "Claude".to_owned(),
+                work: work.to_owned(),
+            },
+        ),
+    ) {
         sim.perform(effect);
     }
 }

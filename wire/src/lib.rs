@@ -582,6 +582,10 @@ pub struct Job {
     pub created_at: String,
     /// Where it has got to.
     pub standing: Standing,
+    /// When its standing last changed, where the instance kept the moment;
+    /// none for a job written before it did, which says only that it waits
+    /// — see `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+    pub since: Option<String>,
     /// Where to look at whatever it is showing. Always present, and it
     /// promises nothing: the port is published when the container is
     /// created, whether or not the agent ever uses it.

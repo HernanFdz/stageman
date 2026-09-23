@@ -26,7 +26,7 @@ use rand::rngs::StdRng;
 use rand::{Rng as _, SeedableRng as _};
 use stageman_agent::{Command, Label, Target};
 use stageman_core::{Agent, InstanceId, Key, State};
-use stageman_vocabulary::{Bytes, Effect as Generic, EffectId, Environment, Finished, Seed};
+use stageman_vocabulary::{Bytes, Effect as Generic, EffectId, Environment, Finished, Now, Seed};
 
 use crate::tunnel::Domain;
 use crate::vocabulary::{AppEvent, Container};
@@ -111,6 +111,10 @@ pub struct Boot {
     tools: Option<u16>,
     /// The application's own events that arrived meanwhile, in order.
     waiting: Vec<AppEvent>,
+    /// The time the world told the latest step, handed to the awake
+    /// instance so that what waking records is stamped — see
+    /// `docs/decisions/0073-the-world-tells-the-instance-the-time-with-every-step.md`.
+    now: Now,
     /// What there is to show while nothing is known.
     empty: State,
 }
@@ -174,6 +178,7 @@ impl Boot {
                     tools_asked: (0, None),
                     tools: Some(0),
                     waiting: Vec::new(),
+                    now: 0,
                     empty: State::default(),
                 };
                 return (
@@ -205,6 +210,7 @@ impl Boot {
             tools_asked: (tools_port, None),
             tools: None,
             waiting: Vec::new(),
+            now: 0,
             empty: State::default(),
         };
         let mut effects = boot.try_candidate(0);
@@ -328,7 +334,8 @@ impl Boot {
 
     /// Handles one event: an answer to what was asked, or something of the
     /// application's own to keep for later.
-    pub fn step(&mut self, event: Event) -> Booting {
+    pub fn step(&mut self, at: Now, event: Event) -> Booting {
+        self.now = at;
         match event {
             Event::App(AppEvent::Presenting { port }) => {
                 self.presenting = Some(port);
@@ -794,6 +801,7 @@ impl Boot {
         );
         let waiting = std::mem::take(&mut self.waiting);
         let mut running = Running::woken(crate::Facts {
+            now: self.now,
             state,
             named,
             key,

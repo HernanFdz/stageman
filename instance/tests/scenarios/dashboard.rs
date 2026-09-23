@@ -3,7 +3,7 @@
 
 use stageman_agent::Command;
 use stageman_channel::Call;
-use stageman_core::{Agent, JobId, Outcome, Progress, ProjectId, Timestamp, Uuid, Waiting};
+use stageman_core::{Agent, JobId, Outcome, Progress, ProjectId, Uuid, Waiting};
 use stageman_instance::{Instance, Request, Response};
 use stageman_wire::{ChannelDraft, Draft, Ending, Fitted, KitDraft, Refusal, Standing};
 
@@ -13,7 +13,7 @@ use crate::simulation::{
 
 /// Asks, performs, and lets the write land and the answer follow.
 fn ask(sim: &mut Simulation, instance: &mut Instance, id: u64, asked: Request) -> Response {
-    for effect in instance.step(request(id, asked)) {
+    for effect in instance.step(sim.now(), request(id, asked)) {
         sim.perform(effect);
     }
     let until = sim.now() + 5;
@@ -446,7 +446,6 @@ fn starting_a_job_by_hand_runs_its_first_turn_once_the_record_has_landed() {
             project: id.clone(),
             kit: "Claude".to_owned(),
             work: " fix the build ".to_owned(),
-            at: Timestamp::UNIX_EPOCH,
         },
     ) else {
         panic!("the project's screen");
@@ -474,7 +473,6 @@ fn starting_a_job_by_hand_runs_its_first_turn_once_the_record_has_landed() {
                 project: id.clone(),
                 kit: "gpt".to_owned(),
                 work: "anything".to_owned(),
-                at: Timestamp::UNIX_EPOCH,
             },
         ),
         Response::Refused(Refusal::KitNotOnProject {
@@ -491,7 +489,6 @@ fn starting_a_job_by_hand_runs_its_first_turn_once_the_record_has_landed() {
                 project: id,
                 kit: "Claude".to_owned(),
                 work: "  ".to_owned(),
-                at: Timestamp::UNIX_EPOCH,
             },
         ),
         Response::Refused(Refusal::Incomplete {
@@ -517,7 +514,6 @@ fn a_job_started_by_hand_on_a_bound_project_has_its_room_made_first() {
             project: project().to_string(),
             kit: "Claude".to_owned(),
             work: "fix the build".to_owned(),
-            at: Timestamp::UNIX_EPOCH,
         },
     ) else {
         panic!("the project's screen");
@@ -556,7 +552,6 @@ fn a_jobs_page_says_what_it_is_and_links_only_what_is_true() {
             project: project().to_string(),
             kit: "Claude".to_owned(),
             work: "fix the build".to_owned(),
-            at: Timestamp::UNIX_EPOCH,
         },
     ) else {
         panic!("the project's screen");
@@ -625,13 +620,16 @@ fn stopping_a_job_ends_its_turn_and_leaves_it_paused() {
     sim.run_until(&mut instance, 3);
     let id = project().to_string();
 
-    for effect in instance.step(request(
-        1,
-        Request::Stop {
-            project: id.clone(),
-            job: job(1).to_string(),
-        },
-    )) {
+    for effect in instance.step(
+        sim.now(),
+        request(
+            1,
+            Request::Stop {
+                project: id.clone(),
+                job: job(1).to_string(),
+            },
+        ),
+    ) {
         sim.perform(effect);
     }
     let Some(Response::Jobs(shown)) = sim.response(1).cloned() else {
@@ -799,7 +797,6 @@ fn the_same_requests_leave_the_same_trace() {
                 project: project().to_string(),
                 kit: "Claude".to_owned(),
                 work: "fix the build".to_owned(),
-                at: Timestamp::UNIX_EPOCH,
             },
         );
         sim.run_until(&mut instance, 5_000);
@@ -827,7 +824,6 @@ fn starting_a_job_on_a_project_with_no_binding_is_refused_by_name() {
                 project: project().to_string(),
                 kit: "Claude".to_owned(),
                 work: "fix the build".to_owned(),
-                at: Timestamp::UNIX_EPOCH,
             },
         ),
         Response::Refused(Refusal::ChannelMissing {

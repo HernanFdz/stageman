@@ -186,7 +186,7 @@ fn an_answer_to_another_question_moves_nothing() {
     let mut walked = |at: &str, stray_event: Event, real: Event| {
         assert_eq!(instance.snapshot(), serde_json::json!({ "booting": at }));
         assert!(
-            instance.step(stray_event).is_empty(),
+            instance.step(0, stray_event).is_empty(),
             "a stray answer asked for something at {at}"
         );
         assert_eq!(
@@ -194,7 +194,7 @@ fn an_answer_to_another_question_moves_nothing() {
             serde_json::json!({ "booting": at }),
             "a stray answer moved booting on from {at}"
         );
-        instance.step(real)
+        instance.step(0, real)
     };
 
     let asked = walked(
@@ -261,10 +261,13 @@ fn an_answer_to_another_question_moves_nothing() {
     );
     assert!(
         instance
-            .step(Event::Ran {
-                id: stray,
-                finished: exited(),
-            })
+            .step(
+                0,
+                Event::Ran {
+                    id: stray,
+                    finished: exited(),
+                }
+            )
             .is_empty(),
         "a stray answer asked for something while listing"
     );
@@ -352,6 +355,7 @@ fn the_deciding_half_a_replay_drives_is_this_instance() {
 
     let caused = Deciding::step(
         &mut instance,
+        0,
         Event::Ran {
             id: *id,
             finished: exited(),
@@ -429,28 +433,40 @@ fn waking_waits_for_every_address_it_was_promised() {
             panic!("a runtime question and two binds, and this is not them");
         };
 
-        let asked = instance.step(Event::Ran {
-            id: *version,
-            finished: exited(),
-        });
+        let asked = instance.step(
+            0,
+            Event::Ran {
+                id: *version,
+                finished: exited(),
+            },
+        );
         let [Effect::Read { id: file, .. }] = asked.as_slice() else {
             panic!("the key is in the environment, so the file is next");
         };
-        let asked = instance.step(Event::Read {
-            id: *file,
-            contents: Ok(None),
-        });
+        let asked = instance.step(
+            0,
+            Event::Read {
+                id: *file,
+                contents: Ok(None),
+            },
+        );
         let [Effect::Run { id: all, .. }, Effect::Run { id: up, .. }] = asked.as_slice() else {
             panic!("both listings, asked at once");
         };
-        instance.step(Event::Ran {
-            id: *all,
-            finished: exited(),
-        });
-        instance.step(Event::Ran {
-            id: *up,
-            finished: exited(),
-        });
+        instance.step(
+            0,
+            Event::Ran {
+                id: *all,
+                finished: exited(),
+            },
+        );
+        instance.step(
+            0,
+            Event::Ran {
+                id: *up,
+                finished: exited(),
+            },
+        );
 
         let pages = || AppEvent::Presenting { port: 9000 }.into();
         let took = |id: &stageman_vocabulary::EffectId, port| Event::Bound {
@@ -462,15 +478,18 @@ fn waking_waits_for_every_address_it_was_promised() {
             "the dashboard" => (pages(), took(tools, 47_999)),
             _ => (pages(), took(dashboard, 8080)),
         };
-        instance.step(first);
-        instance.step(second);
+        instance.step(0, first);
+        instance.step(0, second);
 
         // An answer to somebody else's bind is not an answer to one of
         // these, either.
-        instance.step(Event::Bound {
-            id: EffectId(9999),
-            outcome: Ok(1234),
-        });
+        instance.step(
+            0,
+            Event::Bound {
+                id: EffectId(9999),
+                outcome: Ok(1234),
+            },
+        );
         assert_eq!(
             instance.snapshot(),
             serde_json::json!({ "booting": "ready" }),
@@ -482,7 +501,7 @@ fn waking_waits_for_every_address_it_was_promised() {
             "the dashboard" => took(dashboard, 8080),
             _ => took(tools, 47_999),
         };
-        instance.step(last);
+        instance.step(0, last);
         assert!(
             instance.snapshot().get("held").is_some(),
             "{missing} was the last of them, and it did not wake: {}",
@@ -512,17 +531,23 @@ fn one_listing_is_not_both() {
     else {
         panic!("a runtime question and two binds, and this is not them");
     };
-    let asked = instance.step(Event::Ran {
-        id: *version,
-        finished: exited(),
-    });
+    let asked = instance.step(
+        0,
+        Event::Ran {
+            id: *version,
+            finished: exited(),
+        },
+    );
     let [Effect::Read { id: file, .. }] = asked.as_slice() else {
         panic!("the key is in the environment, so the file is next");
     };
-    let asked = instance.step(Event::Read {
-        id: *file,
-        contents: Ok(None),
-    });
+    let asked = instance.step(
+        0,
+        Event::Read {
+            id: *file,
+            contents: Ok(None),
+        },
+    );
     let [Effect::Run { id: all, .. }, Effect::Run { id: up, .. }] = asked.as_slice() else {
         panic!("both listings, asked at once");
     };
@@ -531,28 +556,37 @@ fn one_listing_is_not_both() {
     assert_eq!(instance.snapshot(), listing);
     assert!(
         instance
-            .step(Event::Ran {
-                id: stray,
-                finished: exited(),
-            })
+            .step(
+                0,
+                Event::Ran {
+                    id: stray,
+                    finished: exited(),
+                }
+            )
             .is_empty()
     );
     assert_eq!(instance.snapshot(), listing, "a stray answer was counted");
 
-    instance.step(Event::Ran {
-        id: *all,
-        finished: exited(),
-    });
+    instance.step(
+        0,
+        Event::Ran {
+            id: *all,
+            finished: exited(),
+        },
+    );
     assert_eq!(
         instance.snapshot(),
         listing,
         "one listing answered is not both"
     );
 
-    instance.step(Event::Ran {
-        id: *up,
-        finished: exited(),
-    });
+    instance.step(
+        0,
+        Event::Ran {
+            id: *up,
+            finished: exited(),
+        },
+    );
     assert_eq!(
         instance.snapshot(),
         serde_json::json!({ "booting": "ready" }),

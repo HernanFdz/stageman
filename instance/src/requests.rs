@@ -15,7 +15,7 @@ use std::fmt;
 
 use stageman_core::{
     AgentConfig, Channel, ChannelConfig, JobId, Kit, KitConfig, KitName, Outcome, Platform,
-    Progress, Project, ProjectId, RepositoryAddress, Secret, State, Timestamp, VariableName,
+    Progress, Project, ProjectId, RepositoryAddress, Secret, State, VariableName,
 };
 use stageman_wire::{ChannelDraft, Draft, Ending, KitDraft, Refusal, VariableDraft};
 
@@ -93,8 +93,6 @@ pub enum Request {
         kit: String,
         /// What to do, in the operator's own words.
         work: String,
-        /// When it was asked.
-        at: Timestamp,
     },
     /// Stop the turn running in a job, keeping everything.
     Stop {
@@ -144,17 +142,11 @@ impl fmt::Debug for Request {
                 .field("project", project)
                 .field("job", job)
                 .finish(),
-            Self::Start {
-                project,
-                kit,
-                work,
-                at,
-            } => f
+            Self::Start { project, kit, work } => f
                 .debug_struct("Start")
                 .field("project", project)
                 .field("kit", kit)
                 .field("work", work)
-                .field("at", at)
                 .finish(),
             Self::Stop { project, job } => f
                 .debug_struct("Stop")
@@ -222,12 +214,7 @@ impl Running {
             Request::Forget { project } => self.forget(&project),
             Request::Jobs { project } => self.jobs(&project),
             Request::Job { project, job } => self.job_page(&project, &job),
-            Request::Start {
-                project,
-                kit,
-                work,
-                at,
-            } => self.start_by_hand(&project, &kit, &work, at),
+            Request::Start { project, kit, work } => self.start_by_hand(&project, &kit, &work),
             Request::Stop { project, job } => self.stop(&project, &job, effects),
             Request::Retire {
                 project,
@@ -451,13 +438,8 @@ impl Running {
     /// A project's kits are the only kits, by hand as much as by the foreman,
     /// so a name outside them is a request this instance refuses rather than
     /// a handout it cannot decide.
-    fn start_by_hand(
-        &mut self,
-        project: &str,
-        kit: &str,
-        work: &str,
-        at: Timestamp,
-    ) -> Result<Response, Refusal> {
+    fn start_by_hand(&mut self, project: &str, kit: &str, work: &str) -> Result<Response, Refusal> {
+        let at = self.stamp();
         let work = work.trim();
         if work.is_empty() {
             return Err(Refusal::Incomplete {
@@ -539,6 +521,7 @@ impl Running {
         let identifier = views::identify(&self.state, project)?;
         let named = identify_job(&self.state, identifier, job)
             .ok_or_else(|| Refusal::UnknownJob { id: job.to_owned() })?;
+        let since = self.stamp();
         let Some(recorded) = self.state.job_mut(named) else {
             return Err(Refusal::UnknownJob { id: job.to_owned() });
         };
@@ -550,6 +533,7 @@ impl Running {
                     Ending::Done => Outcome::Done,
                     Ending::Discarded => Outcome::Discarded,
                 });
+                recorded.since = Some(since);
                 self.dirty = true;
             }
         }
@@ -1244,7 +1228,6 @@ mod tests {
                     project: "p".to_owned(),
                     kit: "Claude".to_owned(),
                     work: "fix it".to_owned(),
-                    at: Timestamp::UNIX_EPOCH,
                 },
                 "Start",
             ),

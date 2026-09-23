@@ -338,13 +338,16 @@ fn a_cancel_nobody_answers_closes_the_process() {
     let (mut instance, working) = a_working_job(&mut world);
 
     world.run_until(&mut instance, 200);
-    for effect in instance.step(request(
-        7,
-        Request::Stop {
-            project: project().to_string(),
-            job: working.to_string(),
-        },
-    )) {
+    for effect in instance.step(
+        world.now(),
+        request(
+            7,
+            Request::Stop {
+                project: project().to_string(),
+                job: working.to_string(),
+            },
+        ),
+    ) {
         world.perform(effect);
     }
     world.run_until(&mut instance, 20_000);
@@ -381,13 +384,16 @@ fn a_stop_is_a_cancel_and_tells_what_was_waiting() {
     world.says_in_room_as(100, 1, FIRST, "first");
     world.says_in_room_as(150, 1, SECOND, "second");
     world.run_until(&mut instance, 300);
-    for effect in instance.step(request(
-        7,
-        Request::Stop {
-            project: project().to_string(),
-            job: working.to_string(),
-        },
-    )) {
+    for effect in instance.step(
+        world.now(),
+        request(
+            7,
+            Request::Stop {
+                project: project().to_string(),
+                job: working.to_string(),
+            },
+        ),
+    ) {
         world.perform(effect);
     }
     world.run_until(&mut instance, 5_000);
@@ -540,13 +546,16 @@ fn a_stop_before_the_turn_is_registered_is_held_and_takes_effect() {
         "received, and its thread not yet read: {:?}",
         world.shape()
     );
-    for effect in instance.step(request(
-        7,
-        Request::Stop {
-            project: project().to_string(),
-            job: idle.to_string(),
-        },
-    )) {
+    for effect in instance.step(
+        world.now(),
+        request(
+            7,
+            Request::Stop {
+                project: project().to_string(),
+                job: idle.to_string(),
+            },
+        ),
+    ) {
         world.perform(effect);
     }
     world.run_until(&mut instance, 5_000);
