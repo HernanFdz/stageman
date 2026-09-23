@@ -31,7 +31,12 @@ kickoff card, where the instruction is folded under it, and what the
 session reported it was set to is shown on the page alone; the rules a row
 and the page keep are in `docs/conventions.md` §3. A job that is over
 shows no tunnel: the standing itself is the fact the probe never kept,
-since nothing is behind the tunnel of a job whose container is gone.
+since nothing is behind the tunnel of a job whose container is gone. And
+the panel below is kept for a confirmation *and* for a transaction that
+is over in one action — starting a job, pasting a file of variables per
+`docs/decisions/0075-a-variable-says-what-it-is-for.md` — which is not
+configuration and has nothing to return to; configuration is still a
+page.
 
 ## Context
 

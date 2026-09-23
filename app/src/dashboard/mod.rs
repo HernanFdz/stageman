@@ -35,6 +35,7 @@
 )]
 
 pub(crate) mod agents_view;
+mod env_file;
 mod error;
 mod home_view;
 mod job_view;

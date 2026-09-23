@@ -52,8 +52,8 @@ pub fn exposed(state: &State) -> Value {
                         "listen_credential": bound.listen_credential.expose(),
                     }))
                 })),
-                "variables": keyed(project.variables.iter().map(|(name, secret)| {
-                    (name, secret.expose().to_owned())
+                "variables": keyed(project.variables.iter().map(|(name, variable)| {
+                    (name, json!({ "value": variable.value.expose(), "note": variable.note }))
                 })),
                 "jobs": value(&project.jobs),
                 "attending": value(&project.attending),

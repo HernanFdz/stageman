@@ -296,10 +296,15 @@ pub fn projected(
             .keys()
             .map(|channel| wire_channel(*channel).to_owned())
             .collect(),
+        // Names and notes, never values — see
+        // `docs/decisions/0075-a-variable-says-what-it-is-for.md`.
         variables: project
             .variables
-            .keys()
-            .map(std::string::ToString::to_string)
+            .iter()
+            .map(|(name, variable)| stageman_wire::Variable {
+                name: name.to_string(),
+                note: variable.note.clone(),
+            })
             .collect(),
         brief: project.brief.clone(),
         watched: project.watched.iter().map(|room| room.id.clone()).collect(),

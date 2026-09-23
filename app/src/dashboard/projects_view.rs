@@ -220,8 +220,26 @@ fn WatchedProject(project: Project, available: Vec<Agent>, shapes: Vec<Shape>) -
         notes.push(format!("watching {}", project.watched.join(", ")));
     }
     let notes = notes.join(" · ");
-    // The variables, by name, a hover away: names and never values.
-    let variables = project.variables.join("\n");
+    // The variables a hover away, by name and by what each is for, and
+    // never a value.
+    let variables = project
+        .variables
+        .iter()
+        .map(|variable| {
+            if variable.note.is_empty() {
+                variable.name.clone()
+            } else {
+                format!("{} — {}", variable.name, variable.note)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let named = project
+        .variables
+        .iter()
+        .map(|variable| variable.name.clone())
+        .collect::<Vec<_>>()
+        .join(", ");
     let counted = format!("{} variable(s)", project.variables.len());
 
     rsx! {
@@ -269,7 +287,7 @@ fn WatchedProject(project: Project, available: Vec<Agent>, shapes: Vec<Shape>) -
                     }
                     if !project.variables.is_empty() {
                         Tooltip { text: variables,
-                            Badge { tabindex: "0", aria_label: "{counted}: {project.variables.join(\", \")}",
+                            Badge { tabindex: "0", aria_label: "{counted}: {named}",
                                 "{counted}"
                             }
                         }

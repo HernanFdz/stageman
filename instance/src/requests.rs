@@ -15,7 +15,7 @@ use std::fmt;
 
 use stageman_core::{
     AgentConfig, Channel, ChannelConfig, JobId, Kit, KitConfig, KitName, Outcome, Platform,
-    Progress, Project, ProjectId, RepositoryAddress, Secret, State, VariableName,
+    Progress, Project, ProjectId, RepositoryAddress, Secret, State, Variable, VariableName,
 };
 use stageman_wire::{ChannelDraft, Draft, Ending, KitDraft, Refusal, VariableDraft};
 
@@ -615,9 +615,9 @@ pub fn offered(project: &Project, name: &str) -> Option<Kit> {
 /// because the mistake this most often catches is a credential pasted into a
 /// name box.
 pub fn resolved(
-    held: &BTreeMap<VariableName, Secret>,
+    held: &BTreeMap<VariableName, Variable>,
     rows: &[VariableDraft],
-) -> Result<BTreeMap<VariableName, Secret>, Refusal> {
+) -> Result<BTreeMap<VariableName, Variable>, Refusal> {
     let mut wanted = BTreeMap::new();
     // Counted from one, because the operator is looking at a list; by the
     // range rather than by adding to an index.
@@ -638,12 +638,19 @@ pub fn resolved(
         let given = row.value.trim();
         let value = if given.is_empty() {
             held.get(&name)
-                .cloned()
+                .map(|kept| kept.value.clone())
                 .ok_or(Refusal::VariableValueMissing)?
         } else {
             Secret::new(given.to_owned())
         };
-        wanted.insert(name, value);
+        // The note is resubmitted whole, like the brief, so blank is blank.
+        wanted.insert(
+            name,
+            Variable {
+                value,
+                note: row.note.trim().to_owned(),
+            },
+        );
     }
     Ok(wanted)
 }
@@ -779,7 +786,7 @@ mod tests {
     use stageman_core::{
         Agent, AgentConfig, Channel, ChannelConfig, ClaudeEffort, ClaudeModel, Job, JobId, Kit,
         KitConfig, KitName, Platform, Progress, Project, ProjectId, Secret, State, Timestamp, Uuid,
-        VariableName, Waiting,
+        Variable, VariableName, Waiting,
     };
     use stageman_wire::{ChannelDraft, Fitted, KitDraft, Refusal, VariableDraft};
     use std::collections::BTreeMap;
@@ -847,25 +854,60 @@ mod tests {
         VariableDraft {
             name: name.to_owned(),
             value: value.to_owned(),
+            note: String::new(),
         }
     }
 
-    fn holding_variables(pairs: &[(&str, &str)]) -> BTreeMap<VariableName, Secret> {
+    fn holding_variables(pairs: &[(&str, &str)]) -> BTreeMap<VariableName, Variable> {
         pairs
             .iter()
             .map(|(name, value)| {
                 (
                     VariableName::new(*name).expect("a deliverable name"),
-                    Secret::new((*value).to_owned()),
+                    Variable::unexplained(Secret::new((*value).to_owned())),
                 )
             })
             .collect()
     }
 
-    fn settled(map: &BTreeMap<VariableName, Secret>) -> Vec<(String, String)> {
+    fn settled(map: &BTreeMap<VariableName, Variable>) -> Vec<(String, String)> {
         map.iter()
-            .map(|(name, value)| (name.to_string(), value.expose().to_owned()))
+            .map(|(name, variable)| (name.to_string(), variable.value.expose().to_owned()))
             .collect()
+    }
+
+    /// A note is kept with its variable, trimmed, and blank is blank: it is
+    /// shown in full and resubmitted, so nothing is inherited from the
+    /// project as a value is.
+    #[test]
+    fn a_variables_note_is_kept_trimmed_and_blank_is_blank() {
+        let held = holding_variables(&[("STRIPE_API_KEY", "sk-test-not-a-real-key")]);
+        let explained = resolved(
+            &held,
+            &[VariableDraft {
+                name: "STRIPE_API_KEY".to_owned(),
+                value: String::new(),
+                note: "  the payment provider, in test mode  ".to_owned(),
+            }],
+        )
+        .expect("a name it already has");
+        let variable = explained.values().next().expect("the one variable");
+        assert_eq!(variable.note, "the payment provider, in test mode");
+        assert_eq!(
+            variable.value.expose(),
+            "sk-test-not-a-real-key",
+            "blank keeps the value"
+        );
+
+        let unsaid = resolved(&explained, &[row("STRIPE_API_KEY", "")]).expect("kept again");
+        assert_eq!(
+            unsaid
+                .values()
+                .next()
+                .map(|variable| variable.note.as_str()),
+            Some(""),
+            "a note left blank is blank, not the one before"
+        );
     }
 
     /// A repository is kept as the address this project writes, whatever was

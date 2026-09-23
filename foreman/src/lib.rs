@@ -847,7 +847,12 @@ pub fn thought_line(text: &str) -> String {
 /// reach a running job, and it still does not say that: a job that asks
 /// stops, because nobody answers this session while it runs.
 #[must_use]
-pub fn kickoff(repository: &str, work: &str, tunnel: &str, variables: &[VariableName]) -> String {
+pub fn kickoff(
+    repository: &str,
+    work: &str,
+    tunnel: &str,
+    variables: &[(VariableName, String)],
+) -> String {
     let port = stageman_agent::TUNNEL_PORT;
     // Two things this has to get across, and the second is the one that fails
     // silently. A server bound inside the container to loopback is reachable
@@ -900,16 +905,23 @@ one and do not guess.";
     let supplied = if variables.is_empty() {
         String::new()
     } else {
-        let named = variables
+        // One line per variable, with what it is for where the operator
+        // said — see `docs/decisions/0075-a-variable-says-what-it-is-for.md`.
+        // Names and notes, and never a value: the type of the argument is
+        // what keeps that true.
+        let listed = variables
             .iter()
-            .map(VariableName::as_str)
+            .map(|(name, note)| match note.trim() {
+                "" => format!("- {name}"),
+                said => format!("- {name} — {said}"),
+            })
             .collect::<Vec<_>>()
-            .join(", ");
+            .join("\n");
         format!(
-            "\n\nSome of what this project needs is already in your environment: {named}. \
-Nothing here knows what any of them is for, so follow whatever the repository says about them. \
-Treat each as a credential — do not print one, do not write one into a file, and never include \
-one in a change you propose."
+            "\n\nSome of what this project needs is already in your environment. What each is for \
+is beside it, where the operator said:\n\n{listed}\n\nBeyond that, follow whatever the \
+repository says about them. Treat each as a credential — do not print one, do not write one into \
+a file, and never include one in a change you propose."
         )
     };
 
@@ -961,7 +973,7 @@ mod tests {
     /// Named rather than written as an empty slice at each call, because what
     /// these assertions are pinning is that such a project's prompt is
     /// byte-for-byte what it was before variables existed at all.
-    const NONE: &[VariableName] = &[];
+    const NONE: &[(VariableName, String)] = &[];
 
     /// Asserted as literal text, per `docs/conventions.md` §4. Prompt text is
     /// the only kind of code here that changes behaviour without changing
@@ -990,17 +1002,24 @@ Then carry on with the work you were given."
     /// than probed for substrings.
     ///
     /// Note the three things the paragraph does, each load-bearing. Naming the
-    /// variables is what makes an agent reach for one at all. Saying nothing
-    /// here knows what they are for is honest — this project never reads one —
-    /// and points at the repository, which is where
-    /// `docs/decisions/0019-a-projects-tooling-is-the-projects-business.md`
-    /// puts that knowledge. And the last sentence is the only thing standing
-    /// between a credential and a pull request description.
+    /// variables is what makes an agent reach for one at all. Saying what
+    /// each is for where the operator said, and pointing at the repository
+    /// for the rest — this project never reads one, and the repository is
+    /// where `docs/decisions/0019-a-projects-tooling-is-the-projects-business.md`
+    /// puts that knowledge — is honest about what is known. And the last
+    /// sentence is the only thing standing between a credential and a pull
+    /// request description.
     #[test]
     fn a_kickoff_with_variables_reads_exactly_as_written() {
         let variables = [
-            VariableName::new("STRIPE_API_KEY").expect("a deliverable name"),
-            VariableName::new("DATABASE_URL").expect("a deliverable name"),
+            (
+                VariableName::new("STRIPE_API_KEY").expect("a deliverable name"),
+                "the payment provider, in test mode".to_owned(),
+            ),
+            (
+                VariableName::new("DATABASE_URL").expect("a deliverable name"),
+                String::new(),
+            ),
         ];
 
         assert_eq!(
@@ -1026,10 +1045,14 @@ and not to localhost: a server on localhost answers you from inside this contain
 reachable from nowhere else. Say where to look, because nobody finds that address on their \
 own.
 
-Some of what this project needs is already in your environment: STRIPE_API_KEY, DATABASE_URL. \
-Nothing here knows what any of them is for, so follow whatever the repository says about them. \
-Treat each as a credential — do not print one, do not write one into a file, and never include \
-one in a change you propose.
+Some of what this project needs is already in your environment. What each is for is beside it, \
+where the operator said:
+
+- STRIPE_API_KEY — the payment provider, in test mode
+- DATABASE_URL
+
+Beyond that, follow whatever the repository says about them. Treat each as a credential — do not \
+print one, do not write one into a file, and never include one in a change you propose.
 
 When you have a change to propose, open a pull request and stop there. Do not merge it, do not \
 deploy anything, and do not push to the default branch. Somebody reads what you propose before \
@@ -1078,7 +1101,10 @@ again before you stop: the first call no longer counts."
     /// written to the snapshot in the clear.
     #[test]
     fn a_kickoff_names_a_variable_and_says_it_is_a_credential() {
-        let variables = [VariableName::new("STRIPE_API_KEY").expect("a deliverable name")];
+        let variables = [(
+            VariableName::new("STRIPE_API_KEY").expect("a deliverable name"),
+            String::new(),
+        )];
         let prompt = super::kickoff(
             "https://example.invalid/repo",
             "anything",

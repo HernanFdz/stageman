@@ -118,7 +118,12 @@ impl Running {
         // this job can be reached and that address is built from the name —
         // and before the room's name, for the same reason.
         let job = self.name_job(title)?;
-        let variables: Vec<_> = handout.variable_names().cloned().collect();
+        // Names and what each is for, never a value: the handout has no
+        // method that would hand a value to a prompt.
+        let variables: Vec<_> = handout
+            .variables_told()
+            .map(|(name, note)| (name.clone(), note.to_owned()))
+            .collect();
         let kickoff = stageman_foreman::kickoff(
             &repository,
             work,

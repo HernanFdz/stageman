@@ -396,7 +396,10 @@ fn watching(name: &str, repository: &str) -> State {
                 )]),
                 variables: BTreeMap::from([(
                     stageman_core::VariableName::new("STRIPE_API_KEY").expect("a deliverable name"),
-                    Secret::new(VARIABLE_VALUE.to_owned()),
+                    stageman_core::Variable {
+                        value: Secret::new(VARIABLE_VALUE.to_owned()),
+                        note: "the payment provider, in test mode".to_owned(),
+                    },
                 )]),
                 jobs: BTreeMap::new(),
                 attending: stageman_core::Attending::default(),

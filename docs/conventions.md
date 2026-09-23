@@ -393,12 +393,17 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   a person correcting the foreman in a room is still a message.
 
 - **variable** — one name and one value an operator gives a project, set in the
-  environment of every container that project's jobs run in. What makes it a
+  environment of every container that project's jobs run in, and since
+  `docs/decisions/0075-a-variable-says-what-it-is-for.md` a **note** beside
+  them: what it is for, in the operator's words, told to the job's agent
+  next to the name and read by nothing here. What makes it a
   concept of its own rather than a loose platform credential is that **this
   project never reads it**: nothing here parses the value, infers anything from
   the name, or needs code in order to support one — which is precisely what a
   platform and a channel do need, and why both of those are closed sets. See
-  `docs/decisions/0046-a-projects-variables-are-carried-never-read.md`.
+  `docs/decisions/0046-a-projects-variables-are-carried-never-read.md`. A
+  project's variables are typed a row at a time or pasted as a `.env` file,
+  the comment above a line becoming its note.
 
   The word names the mechanism, which this section usually rejects — the
   argument against *checkout*. It survives for the reason **tunnel** does, and

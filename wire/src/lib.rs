@@ -113,8 +113,8 @@ pub struct Project {
     /// The channels bound to it. Empty is valid: a project with nowhere to
     /// escalate can still run work that never needs to ask.
     pub channels: Vec<String>,
-    /// The variables its jobs are given, by name. Names and never values.
-    pub variables: Vec<String>,
+    /// The variables its jobs are given: names and notes, and never values.
+    pub variables: Vec<Variable>,
     /// What its operator wrote for its foreman, as the form edits it.
     pub brief: String,
     /// The rooms its foreman watches, by the platform's identifier: shown
@@ -304,6 +304,11 @@ pub struct VariableDraft {
     pub name: String,
     /// What it is set to, or empty to keep what the project holds.
     pub value: String,
+    /// What it is for, in the operator's words, told to the agent — see
+    /// `docs/decisions/0075-a-variable-says-what-it-is-for.md`. Blank is
+    /// blank: it is shown in full and resubmitted, like the brief.
+    #[serde(default)]
+    pub note: String,
 }
 
 impl fmt::Debug for VariableDraft {
@@ -311,6 +316,7 @@ impl fmt::Debug for VariableDraft {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("VariableDraft")
             .field("name", &self.name)
+            .field("note", &self.note)
             .field("value", &"<redacted>")
             .finish()
     }
@@ -671,6 +677,17 @@ pub struct JobPage {
     pub job: Job,
 }
 
+/// One of a project's variables, as a list shows it: its name and what it
+/// is for, and never its value — see
+/// `docs/decisions/0075-a-variable-says-what-it-is-for.md`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Variable {
+    /// What it is called in the container.
+    pub name: String,
+    /// What it is for, in the operator's words; empty when nobody said.
+    pub note: String,
+}
+
 /// One kit a project offers, as much of it as a page needs to offer it back.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Offered {
@@ -978,6 +995,7 @@ mod tests {
             variables: vec![VariableDraft {
                 name: "STRIPE_API_KEY".to_owned(),
                 value: "sk-test-not-a-real-key".to_owned(),
+                note: String::new(),
             }],
         }
     }
@@ -1049,6 +1067,7 @@ mod tests {
             draft.variables = vec![VariableDraft {
                 name: "DATABASE_URL".to_owned(),
                 value: String::new(),
+                note: String::new(),
             }];
         });
         assert!(!added.is_complete(&amending(), NOTHING_HELD));
@@ -1058,6 +1077,7 @@ mod tests {
             draft.variables = vec![VariableDraft {
                 name: "STRIPE_API_KEY".to_owned(),
                 value: String::new(),
+                note: String::new(),
             }];
         });
         assert!(kept.is_complete(&amending(), &["STRIPE_API_KEY".to_owned()]));
@@ -1066,6 +1086,7 @@ mod tests {
             draft.variables = vec![VariableDraft {
                 name: "STRIPE_API_KEY_V2".to_owned(),
                 value: String::new(),
+                note: String::new(),
             }];
         });
         assert!(!renamed.is_complete(&amending(), &["STRIPE_API_KEY".to_owned()]));

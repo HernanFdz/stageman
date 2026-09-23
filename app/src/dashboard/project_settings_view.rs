@@ -160,9 +160,10 @@ fn starting(watching: &Watching, filling: &Filling) -> Draft {
                 variables: project
                     .variables
                     .iter()
-                    .map(|name| VariableDraft {
-                        name: name.clone(),
+                    .map(|variable| VariableDraft {
+                        name: variable.name.clone(),
                         value: String::new(),
+                        note: variable.note.clone(),
                     })
                     .collect(),
                 brief: project.brief.clone(),
@@ -243,6 +244,12 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
     let mut tried = use_signal(|| false);
     let mut refused = use_signal(|| None::<DashboardError>);
     let mut forgetting = use_signal(|| false);
+    // A file being pasted into the variables: the box, its text, and what
+    // could not be read from it — see
+    // `docs/decisions/0075-a-variable-says-what-it-is-for.md`.
+    let mut pasting = use_signal(|| false);
+    let mut pasted = use_signal(String::new);
+    let mut unread = use_signal(|| None::<String>);
     let creating = filling.creating();
 
     // What the project holds now, which decides whether an empty value box
@@ -253,7 +260,13 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
             .projects
             .iter()
             .find(|project| &project.id == id)
-            .map(|project| project.variables.clone())
+            .map(|project| {
+                project
+                    .variables
+                    .iter()
+                    .map(|variable| variable.name.clone())
+                    .collect()
+            })
             .unwrap_or_default(),
         Filling::Creating => Vec::new(),
     };
@@ -553,25 +566,39 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
             }
 
             Card {
-                title: "Variables",
+                title: "Environment",
                 note: "Set in every container this project's jobs run in. stageman never reads one.",
                 Field {
                     label: "Variables",
-                    note: "Names and values, as an environment carries them. Removing a row takes the variable away.",
-                    info: "Told to the agent by name so it knows they are there, and never read \
-                           here: what they mean is the repository's business. Leaving a value \
-                           empty keeps the one already stored.",
+                    note: "Names and values, as an environment carries them, and what each is for. Removing a row takes the variable away.",
+                    info: "Told to the agent by name, with your note beside it, so it knows what \
+                           is there and what it is for; never read here. Leaving a value empty \
+                           keeps the one already stored. Paste a .env file to add many at once.",
                     problem: saying(Part::Variables),
                     aside: rsx! {
-                        Tooltip { text: "Add a variable",
-                            Button {
-                                variant: ButtonVariant::Secondary,
-                                class: BESIDE,
-                                aria_label: "Add a variable",
-                                onclick: move |_| {
-                                    draft.with_mut(|draft| draft.variables.push(VariableDraft::default()));
-                                },
-                                {Icon::Add.draw(16)}
+                        div { class: "flex items-center gap-2",
+                            Tooltip { text: "Paste a .env file",
+                                Button {
+                                    variant: ButtonVariant::Secondary,
+                                    class: BESIDE,
+                                    aria_label: "Paste a .env file",
+                                    onclick: move |_| {
+                                        pasting.set(true);
+                                        unread.set(None);
+                                    },
+                                    {Icon::Paste.draw(16)}
+                                }
+                            }
+                            Tooltip { text: "Add a variable",
+                                Button {
+                                    variant: ButtonVariant::Secondary,
+                                    class: BESIDE,
+                                    aria_label: "Add a variable",
+                                    onclick: move |_| {
+                                        draft.with_mut(|draft| draft.variables.push(VariableDraft::default()));
+                                    },
+                                    {Icon::Add.draw(16)}
+                                }
                             }
                         }
                     },
@@ -598,6 +625,63 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
                                     });
                                 },
                             }
+                        }
+                    }
+                }
+            }
+
+            // A file, pasted, in a dialog of its own — as starting a job is:
+            // a transaction with one action, taken and gone. Every line it
+            // can read becomes a row in the list, and what it cannot read
+            // stays in the box, as it was, with the dialog open, so nothing
+            // is dropped unseen. The browser only fills rows; what is refused
+            // is refused as before, by row, when the form is saved — see
+            // `docs/decisions/0075-a-variable-says-what-it-is-for.md`.
+            if pasting() {
+                Modal {
+                    title: "Paste a .env file",
+                    onclose: move |()| {
+                        pasting.set(false);
+                        unread.set(None);
+                    },
+                    actions: rsx! {
+                        Tooltip { text: "Add them as variables",
+                            Button {
+                                class: "px-2",
+                                aria_label: "Add them as variables",
+                                disabled: pasted().trim().is_empty(),
+                                onclick: move |_| {
+                                    let read = super::env_file::read(&pasted());
+                                    if read.variables.is_empty() {
+                                        unread.set(Some("No NAME=value line in it.".to_owned()));
+                                        return;
+                                    }
+                                    draft.with_mut(|draft| draft.variables.extend(read.variables));
+                                    if read.left.is_empty() {
+                                        pasted.set(String::new());
+                                        unread.set(None);
+                                        pasting.set(false);
+                                    } else {
+                                        unread.set(Some(format!(
+                                            "{} line(s) that are not NAME=value stay here.",
+                                            read.left.len()
+                                        )));
+                                        pasted.set(read.left.join("\n"));
+                                    }
+                                },
+                                {Icon::Save.draw(16)}
+                            }
+                        }
+                    },
+                    Field {
+                        label: "The file",
+                        note: "One NAME=value per line. A comment above a line becomes its note.",
+                        problem: unread(),
+                        TextArea {
+                            class: "min-h-48 font-mono",
+                            placeholder: "# the payment provider, in test mode\nSTRIPE_API_KEY=sk_test_not_a_real_key\nexport DATABASE_URL=\"postgres://…\"",
+                            value: pasted(),
+                            oninput: move |event: FormEvent| pasted.set(event.value()),
                         }
                     }
                 }
@@ -714,7 +798,8 @@ fn Kit(
     }
 }
 
-/// One variable's row: its name, its value, and the way to take it away.
+/// One variable's row: its name, its value, what it is for, and the way to
+/// take it away.
 #[component]
 fn Variable(
     position: usize,
@@ -747,8 +832,20 @@ fn Variable(
                     placeholder: if kept { "leave empty to keep" } else { "its value" },
                     aria_label: "Value of variable {position + 1}",
                     value: "{row.value}",
+                    oninput: {
+                        let row = row.clone();
+                        move |event| onchange.call(VariableDraft { value: event.value(), ..row.clone() })
+                    },
+                }
+                // What it is for, told to the agent beside the name — see
+                // `docs/decisions/0075-a-variable-says-what-it-is-for.md`.
+                input {
+                    class: FIELD,
+                    placeholder: "what it is for",
+                    aria_label: "Note of variable {position + 1}",
+                    value: "{row.note}",
                     oninput: move |event| {
-                        onchange.call(VariableDraft { value: event.value(), ..row.clone() });
+                        onchange.call(VariableDraft { note: event.value(), ..row.clone() });
                     },
                 }
                 Tooltip { text: "Remove",
@@ -966,7 +1063,10 @@ mod tests {
                 }],
                 platforms: vec!["github".to_owned()],
                 channels: vec!["Slack".to_owned()],
-                variables: vec!["STRIPE_API_KEY".to_owned()],
+                variables: vec![stageman_wire::Variable {
+                    name: "STRIPE_API_KEY".to_owned(),
+                    note: "the payment provider, in test mode".to_owned(),
+                }],
                 brief: "be careful".to_owned(),
                 watched: Vec::new(),
                 foreman_room: None,

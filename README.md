@@ -307,11 +307,13 @@ single instance manages several projects, and a job belongs to exactly one of
 them: it cannot see another project's repository, credentials or channels.
 
 A project can also carry **variables** of its own — names and values you choose,
-set in every container its jobs run in. That is how a job reaches something
-stageman has never heard of: a payment provider in test mode, a private
-registry, a staging database. stageman never reads one and never infers anything
-from its name; it stores each encrypted, hands them over, and tells the agent
-which are there. What they mean is the repository's business.
+set in every container its jobs run in, each with a note saying what it is
+for. That is how a job reaches something stageman has never heard of: a
+payment provider in test mode, a private registry, a staging database.
+stageman never reads one and never infers anything from its name; it stores
+each encrypted, hands them over, and tells the agent which are there and, in
+your words, what each is for. Paste a `.env` file into the project's settings
+and its lines become variables, the comment above each its note.
 
 All state lives in one human-readable file, rewritten whenever anything changes,
 with credentials encrypted under the key described above. Back up that file and

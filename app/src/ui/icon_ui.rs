@@ -15,8 +15,8 @@
 use dioxus::prelude::*;
 use lucide_dioxus::{
     Activity, ArrowLeft, Bot, Calendar, Check, ChevronRight, CircleCheck, CircleOff, CircleX,
-    ExternalLink, Eye, EyeOff, GitPullRequest, Hammer, HardHat, Info, LoaderCircle, Moon, Pencil,
-    Plus, Square, Sun, SunMoon, Trash2, X,
+    ClipboardPaste, ExternalLink, Eye, EyeOff, GitPullRequest, Hammer, HardHat, Info, LoaderCircle,
+    Moon, Pencil, Plus, Square, Sun, SunMoon, Trash2, X,
 };
 
 /// A concept a screen can point at, and nothing about how it is drawn.
@@ -78,6 +78,9 @@ pub enum Icon {
     /// There is more here, folded away: the trigger of a disclosure, which
     /// turns to point down at what it opened.
     Disclose,
+    /// Paste a file's worth of something, rather than typing it a row at
+    /// a time.
+    Paste,
 }
 
 impl Icon {
@@ -112,6 +115,7 @@ impl Icon {
         Self::Back,
         Self::PullRequest,
         Self::Disclose,
+        Self::Paste,
     ];
 
     /// Drawn at `size` pixels, in the current text colour.
@@ -159,6 +163,7 @@ impl Icon {
             Self::Back => rsx! { ArrowLeft { size, class } },
             Self::PullRequest => rsx! { GitPullRequest { size, class } },
             Self::Disclose => rsx! { ChevronRight { size, class } },
+            Self::Paste => rsx! { ClipboardPaste { size, class } },
         }
     }
 }

@@ -1635,7 +1635,7 @@ pub struct Project {
     /// written to disk in the clear and printed on a screen.
     ///
     /// May be empty, which is most projects.
-    pub variables: BTreeMap<VariableName, Secret>,
+    pub variables: BTreeMap<VariableName, Variable>,
     /// Its jobs, past and present.
     ///
     /// Nested rather than held globally so that "a job belongs to exactly one
@@ -1971,7 +1971,15 @@ impl State {
                 let variables = project
                     .variables
                     .iter()
-                    .map(|(name, secret)| Ok((name.to_string(), secret.seal(key, nonces())?)))
+                    .map(|(name, variable)| {
+                        Ok((
+                            name.to_string(),
+                            SealedVariable {
+                                value: variable.value.seal(key, nonces())?,
+                                note: variable.note.clone(),
+                            },
+                        ))
+                    })
                     .collect::<Result<BTreeMap<_, _>, SealError>>()?;
                 Ok((
                     *id,
@@ -2158,6 +2166,79 @@ pub enum OpenError {
     KitName(#[source] KitNameError),
 }
 
+/// One of a project's variables: its value, and what it is for.
+///
+/// The value is a [`Secret`] and never read here, per
+/// `docs/decisions/0046-a-projects-variables-are-carried-never-read.md`.
+/// The note is the operator's words on what the variable is for, told to a
+/// job's agent beside the name and read by nothing here either — see
+/// `docs/decisions/0075-a-variable-says-what-it-is-for.md`. It is kept in
+/// the clear, on the terms the name is: prose the operator typed in order
+/// to have it read back, and never a value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Variable {
+    /// What it is set to.
+    pub value: Secret,
+    /// What it is for, in the operator's words; empty when nobody said.
+    pub note: String,
+}
+
+impl Variable {
+    /// A variable with a value and nothing said about it.
+    #[must_use]
+    pub const fn unexplained(value: Secret) -> Self {
+        Self {
+            value,
+            note: String::new(),
+        }
+    }
+}
+
+/// A variable as it appears on disk: its value sealed, its note in the
+/// clear beside it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SealedVariable {
+    /// The value, sealed.
+    pub value: SealedSecret,
+    /// What it is for, as the operator wrote it.
+    #[serde(default)]
+    pub note: String,
+}
+
+/// A variable in either shape a snapshot may hold: with its note, or as the
+/// bare sealed value the last release wrote, which opens as one with no
+/// note — the bridge `docs/conventions.md` §4 asks for, from that release's
+/// shape and no older.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SealedVariableOrOlder {
+    /// The shape written now.
+    Noted(SealedVariable),
+    /// The shape the last release wrote: the sealed value alone.
+    Bare(SealedSecret),
+}
+
+/// Reads a project's variables in either shape.
+fn variables_or_older<'de, D>(deserializer: D) -> Result<BTreeMap<String, SealedVariable>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let read: BTreeMap<String, SealedVariableOrOlder> = BTreeMap::deserialize(deserializer)?;
+    Ok(read
+        .into_iter()
+        .map(|(name, either)| {
+            let variable = match either {
+                SealedVariableOrOlder::Noted(variable) => variable,
+                SealedVariableOrOlder::Bare(value) => SealedVariable {
+                    value,
+                    note: String::new(),
+                },
+            };
+            (name, variable)
+        })
+        .collect())
+}
+
 /// A credential as it appears on disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SealedSecret {
@@ -2320,9 +2401,10 @@ pub struct SealedProject {
     /// nothing: an added field is free *with* a default and loses every
     /// existing instance without one. The empty map is the true answer rather
     /// than a substitute for one, because a file written before variables
-    /// existed described a project that had none.
-    #[serde(default)]
-    pub variables: BTreeMap<String, SealedSecret>,
+    /// existed described a project that had none. Read in either shape: the
+    /// value with its note, or the bare sealed value the last release wrote.
+    #[serde(default, deserialize_with = "variables_or_older")]
+    pub variables: BTreeMap<String, SealedVariable>,
     /// Its jobs, which hold nothing needing sealing.
     pub jobs: BTreeMap<JobId, Job>,
     /// What its foreman was doing, which holds nothing needing sealing either:
@@ -2434,7 +2516,13 @@ impl Snapshot {
                     .into_iter()
                     .map(|(name, sealed)| {
                         let name = VariableName::new(name).map_err(OpenError::VariableName)?;
-                        Ok((name, sealed.open(key)?))
+                        Ok((
+                            name,
+                            Variable {
+                                value: sealed.value.open(key)?,
+                                note: sealed.note,
+                            },
+                        ))
                     })
                     .collect::<Result<BTreeMap<_, _>, OpenError>>()?;
                 // Where a kit's name stops being believed, on the same terms.
@@ -2630,7 +2718,7 @@ pub struct Handout {
     repository: Option<String>,
     agent_credential: Secret,
     platforms: BTreeMap<Platform, Secret>,
-    variables: BTreeMap<VariableName, Secret>,
+    variables: BTreeMap<VariableName, Variable>,
     channels: BTreeMap<Channel, Speaking>,
     place: Option<Place>,
 }
@@ -2801,10 +2889,12 @@ impl Handout {
     /// Ordered because the map is, which is what lets an adapter's argument
     /// list be asserted as literal text rather than as a set.
     pub fn variables(&self) -> impl Iterator<Item = (&VariableName, &Secret)> {
-        self.variables.iter()
+        self.variables
+            .iter()
+            .map(|(name, variable)| (name, &variable.value))
     }
 
-    /// The names alone, for the instruction a job begins from.
+    /// The names alone, for whatever must never carry a value.
     ///
     /// Separate from [`Handout::variables`] because the caller is different in
     /// kind: a prompt names them and must never carry a value, since a kickoff
@@ -2813,6 +2903,16 @@ impl Handout {
     /// wrong at the call site rather than merely easy to get right.
     pub fn variable_names(&self) -> impl Iterator<Item = &VariableName> {
         self.variables.keys()
+    }
+
+    /// The names with what each is for, for the instruction a job begins
+    /// from: the note the operator wrote, and never the value, on the same
+    /// terms as [`Handout::variable_names`] — see
+    /// `docs/decisions/0075-a-variable-says-what-it-is-for.md`.
+    pub fn variables_told(&self) -> impl Iterator<Item = (&VariableName, &str)> {
+        self.variables
+            .iter()
+            .map(|(name, variable)| (name, variable.note.as_str()))
     }
 
     /// How this process reaches one channel, if it is bound to one.
@@ -2907,7 +3007,7 @@ mod tests {
         ClaudeModel, Errand, Handout, HandoutError, Inbox, Inconsistent, Job, JobId, Key, Kit,
         KitConfig, KitName, KitNameError, NONCE_LEN, Nonce, OpenError, Outcome, Place, Platform,
         Progress, Project, ProjectId, Recipient, RepositoryAddress, RepositoryError, Room, Secret,
-        Snapshot, State, Taken, Thread, VariableName, VariableNameError, Waiting,
+        Snapshot, State, Taken, Thread, Variable, VariableName, VariableNameError, Waiting,
     };
     use base64::Engine as _;
     use jiff::Timestamp;
@@ -2986,7 +3086,10 @@ mod tests {
             channels,
             variables: BTreeMap::from([(
                 VariableName::new(VARIABLE).expect("a deliverable name"),
-                Secret::new(VARIABLE_VALUE.to_owned()),
+                Variable {
+                    value: Secret::new(VARIABLE_VALUE.to_owned()),
+                    note: "the staging database, read-only".to_owned(),
+                },
             )]),
             jobs,
             attending: Attending::default(),
@@ -3829,7 +3932,7 @@ mod tests {
                   "channels": {{
                     "Slack": {{ "address": "C0123456789", "credential": {sealed} }}
                   }},
-                  "variables": {{}},
+                  "variables": {{ "STRIPE_API_KEY": {sealed} }},
                   "jobs": {{
                     "00000000-0000-0000-0000-000000000009": {{
                       "kit": {{ "Claude": {{ "model": {{ "Default": {{ "effort": "Default" }} }} }} }},
@@ -3901,6 +4004,15 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["Claude".to_owned()],
         );
+        // The last release wrote a variable as its sealed value alone, which
+        // opens as one with nothing said about it — the bridge
+        // `docs/decisions/0075-a-variable-says-what-it-is-for.md` keeps.
+        let variable = project
+            .variables
+            .get(&VariableName::new("STRIPE_API_KEY").expect("a deliverable name"))
+            .expect("the variable survived");
+        assert_eq!(variable.value.expose(), "agent-token");
+        assert_eq!(variable.note, "", "a bare value has no note");
         assert!(
             project.channels.is_empty(),
             "a binding without the credential that listens is no binding"
@@ -4240,7 +4352,7 @@ mod tests {
         // had different names would pass it by accident.
         other.variables.insert(
             VariableName::new(VARIABLE).expect("a deliverable name"),
-            Secret::new(ALIEN_VARIABLE_VALUE.to_owned()),
+            Variable::unexplained(Secret::new(ALIEN_VARIABLE_VALUE.to_owned())),
         );
         state.projects.insert(theirs, other);
 
