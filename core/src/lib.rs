@@ -646,7 +646,11 @@ pub enum Platform {
 /// would be wrong quietly. A project written before this existed may hold
 /// text that does not parse; it is opened and shown, and nothing is composed
 /// from it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Serialises, because the instance holds one while a credential is
+/// checked against it and a scenario's snapshot walks what is held; it is
+/// an address and never a secret.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepositoryAddress {
     /// Who owns it, as the platform spells it.
     pub owner: String,

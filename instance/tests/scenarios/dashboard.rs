@@ -5,6 +5,7 @@ use stageman_agent::Command;
 use stageman_channel::Call;
 use stageman_core::{Agent, JobId, Outcome, Progress, ProjectId, Uuid, Waiting};
 use stageman_instance::{Instance, Request, Response};
+use stageman_platform::Call as PlatformCall;
 use stageman_wire::{ChannelDraft, Draft, Ending, Fitted, KitDraft, Refusal, Standing};
 
 use crate::simulation::{
@@ -12,7 +13,7 @@ use crate::simulation::{
 };
 
 /// Asks, performs, and lets the write land and the answer follow.
-fn ask(sim: &mut Simulation, instance: &mut Instance, id: u64, asked: Request) -> Response {
+pub fn ask(sim: &mut Simulation, instance: &mut Instance, id: u64, asked: Request) -> Response {
     for effect in instance.step(sim.now(), request(id, asked)) {
         sim.perform(effect);
     }
@@ -79,7 +80,7 @@ fn removals(sim: &Simulation) -> usize {
         .count()
 }
 
-fn first(sim: &Simulation, what: &str) -> usize {
+pub fn first(sim: &Simulation, what: &str) -> usize {
     let found = sim.trace().iter().position(|line| line.contains(what));
     assert!(
         found.is_some(),
@@ -89,11 +90,30 @@ fn first(sim: &Simulation, what: &str) -> usize {
     found.expect("asserted above")
 }
 
-fn count(sim: &Simulation, what: &str) -> usize {
+pub fn count(sim: &Simulation, what: &str) -> usize {
     sim.trace()
         .iter()
         .filter(|line| line.contains(what))
         .count()
+}
+
+/// Where in the trace the n-th line mentioning something is, counting from
+/// nought: what tells a request's own write from the wake's.
+pub fn nth(sim: &Simulation, what: &str, n: usize) -> usize {
+    let found = sim
+        .trace()
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains(what))
+        .nth(n)
+        .map(|(at, _)| at);
+    assert!(
+        found.is_some(),
+        "fewer than {} lines in the trace say {what}: {:#?}",
+        n + 1,
+        sim.trace()
+    );
+    found.expect("asserted above")
 }
 
 #[test]
@@ -235,6 +255,7 @@ fn creating_a_project_listens_on_its_channel_once_the_record_has_landed() {
         credential: "xoxb-not-a-real-token".to_owned(),
         listen_credential: "xapp-not-a-real-token".to_owned(),
     };
+    let writes_before = count(&sim, "-> Write");
     let Response::Projects(shown) = ask(&mut sim, &mut instance, 1, Request::Create { draft })
     else {
         panic!("the projects screen");
@@ -253,13 +274,33 @@ fn creating_a_project_listens_on_its_channel_once_the_record_has_landed() {
         1,
         "listened to from the moment the record landed"
     );
-    // Listening begins by asking the platform who this instance is, and
-    // only once the record has landed.
-    let asked = sim
-        .first_call(|call| matches!(call, Call::WhoAmI { .. }))
-        .expect("the platform was asked");
-    assert!(first(&sim, "-> Write") < asked);
-    assert!(asked < first(&sim, "-> Respond"));
+    // The token and both of the binding's credentials were checked before
+    // anything was written — see
+    // `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`
+    // — and listening then begins by asking the platform who this instance
+    // is again, only once the record has landed.
+    let written = nth(&sim, "-> Write", writes_before);
+    let read = sim
+        .platform_calls()
+        .iter()
+        .find(|(_, call)| matches!(call, PlatformCall::Repository { .. }))
+        .map(|(at, _)| *at)
+        .expect("the token was checked against the repository");
+    let introduced: Vec<usize> = sim
+        .channel_calls()
+        .iter()
+        .filter(|(_, call)| matches!(call, Call::WhoAmI { .. }))
+        .map(|(at, _)| *at)
+        .collect();
+    let [checked, listening] = introduced.as_slice() else {
+        panic!("checked, then introduced: {introduced:?}");
+    };
+    assert!(
+        read < written && *checked < written,
+        "checked before written"
+    );
+    assert!(written < *listening, "introduced once the record landed");
+    assert!(*listening < first(&sim, "-> Respond"));
     assert!(sim.disk().expect("landed").projects.contains_key(&created));
 
     let mut blank = a_draft("blank");

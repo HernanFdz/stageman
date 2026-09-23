@@ -25,6 +25,7 @@
 
 mod boot;
 mod channel;
+mod checks;
 mod file;
 mod foreman;
 mod jobs;
@@ -542,6 +543,14 @@ pub struct Running {
     /// Tunnels being asked whether anything is behind them, by the
     /// identifier the answer carries: whose each probe is.
     probes: BTreeMap<EffectId, JobId>,
+    /// Requests held while the credentials they carry are checked against
+    /// their platforms, by the identifier the world holds each open under
+    /// — see
+    /// `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`.
+    checking: BTreeMap<vocabulary::RequestId, checks::Held>,
+    /// Credentials being checked, by the identifier the answer carries:
+    /// which held request each is for, and what it is a check of.
+    checks: BTreeMap<EffectId, (vocabulary::RequestId, checks::Check)>,
     /// Requests made to a channel, by the identifier the answer carries:
     /// what each was sent for.
     sent: BTreeMap<EffectId, channel::Sent>,
@@ -645,6 +654,8 @@ impl Running {
             tunnels: BTreeMap::new(),
             routing: BTreeMap::new(),
             probes: BTreeMap::new(),
+            checking: BTreeMap::new(),
+            checks: BTreeMap::new(),
             sent: BTreeMap::new(),
             deferred: VecDeque::new(),
             immediate: Vec::new(),
@@ -963,7 +974,12 @@ impl Running {
             Event::Ended { id, ended } => self.process_ended(id, &ended, &mut effects),
             Event::Probed { id, probed } => self.probed(id, probed, &mut effects),
             Event::Responded { id, responded } => {
-                self.responded(id, &responded, at, &mut effects);
+                // A credential's check first, since it is answered to a
+                // held request rather than to a channel; everything else
+                // was sent for a channel's sake.
+                if !self.checked(id, &responded, &mut effects) {
+                    self.responded(id, &responded, at, &mut effects);
+                }
             }
             Event::Frame { id, text } => self.frame(id, &text, at, &mut effects),
             Event::Disconnected { id, disconnected } => {

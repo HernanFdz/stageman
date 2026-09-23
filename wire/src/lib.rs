@@ -134,6 +134,10 @@ pub struct Project {
     pub working: usize,
     /// How many jobs it has had, running or finished.
     pub jobs: usize,
+    /// Where the platform's form for a token is, filled in and named for
+    /// this project: the guide beside the box that takes one — see
+    /// `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`.
+    pub token_form: String,
 }
 
 impl Project {
@@ -164,6 +168,23 @@ pub struct Watching {
     /// What each of those can be set to. Built by the instance from the
     /// domain's closed sets, because the browser's half cannot name them.
     pub shapes: Vec<Shape>,
+    /// Where each platform's own form is, filled in, for a project that
+    /// does not exist yet.
+    pub guides: Guides,
+}
+
+/// Where the platforms' own forms are, filled in as this project would
+/// have them.
+///
+/// Links composed on the server from tracked text, and never in the
+/// browser — see
+/// `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Guides {
+    /// The form that mints a repository token, named for no project.
+    pub token_form: String,
+    /// The form that creates the channel's app, with the manifest in it.
+    pub app_form: String,
 }
 
 /// One agent, set a particular way, as a browser edits it.
@@ -380,8 +401,10 @@ pub enum Part {
     Kit(usize),
     /// The token for the repository.
     Credential,
-    /// The Slack binding.
+    /// The Slack binding, and its bot token in particular.
     Channel,
+    /// The Slack binding's app-level token, which listens.
+    Listening,
     /// The variables, as a set.
     Variables,
     /// One variable, counting from nought.
@@ -781,6 +804,42 @@ pub enum Refusal {
     /// A project was drafted without a whole channel binding.
     #[error("a project needs a Slack bot token and an app-level token")]
     ChannelIncomplete,
+    /// The platform would not have the token, or could not see the
+    /// repository with it — see
+    /// `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`.
+    #[error("the token was not kept: {why}")]
+    TokenRefused {
+        /// What the platform said, as a clause for the box.
+        why: String,
+    },
+    /// The platform could not be asked about the token, so it was not
+    /// kept: not wrong, and not known to be right.
+    #[error("the token was not kept, because it could not be checked: {why}")]
+    TokenUnchecked {
+        /// What went wrong on the way there.
+        why: String,
+    },
+    /// The channel would not have one of the binding's credentials.
+    #[error("the {} token was not kept: {why}", which(*.listening))]
+    ChannelRefused {
+        /// Whether it was the credential that listens, rather than the one
+        /// that speaks.
+        listening: bool,
+        /// What the channel said, as a clause for the box.
+        why: String,
+    },
+    /// The channel could not be asked about one of the binding's
+    /// credentials, so it was not kept.
+    #[error(
+        "the {} token was not kept, because it could not be checked: {why}",
+        which(*.listening)
+    )]
+    ChannelUnchecked {
+        /// Whether it was the credential that listens.
+        listening: bool,
+        /// What went wrong on the way there.
+        why: String,
+    },
     /// A job was asked for on a project that has no channel bound, which only
     /// a project the last release wrote can lack.
     #[error("{project} has no Slack binding, so a job on it would have nowhere to speak")]
@@ -869,6 +928,11 @@ pub enum Refusal {
     Failed,
 }
 
+/// Which of a binding's two credentials, as the form labels them.
+const fn which(listening: bool) -> &'static str {
+    if listening { "app-level" } else { "bot" }
+}
+
 impl Refusal {
     /// The HTTP status this answers with.
     ///
@@ -898,7 +962,13 @@ impl Refusal {
             | Self::VariableReserved { .. }
             | Self::VariableRepeated { .. }
             | Self::VariableValueMissing
-            | Self::ChannelIncomplete => 400,
+            | Self::ChannelIncomplete
+            | Self::TokenRefused { .. }
+            | Self::ChannelRefused { .. } => 400,
+            // The platform behind the credential could not be reached, which
+            // is what a bad gateway means: not the request's fault, and not
+            // this instance's.
+            Self::TokenUnchecked { .. } | Self::ChannelUnchecked { .. } => 502,
             // The request is well formed and the instance is in a state that
             // forbids it, which is what a conflict means.
             Self::AgentInUse { .. }
@@ -922,6 +992,14 @@ impl Refusal {
             Self::RepositoryRefused { .. } => Some(Part::Repository),
             Self::KitsMissing | Self::KitNameTaken { .. } => Some(Part::Kits),
             Self::ChannelIncomplete => Some(Part::Channel),
+            Self::TokenRefused { .. } | Self::TokenUnchecked { .. } => Some(Part::Credential),
+            Self::ChannelRefused { listening, .. } | Self::ChannelUnchecked { listening, .. } => {
+                Some(if *listening {
+                    Part::Listening
+                } else {
+                    Part::Channel
+                })
+            }
             Self::VariableNameRefused { position, .. } | Self::VariableRepeated { position } => {
                 position.checked_sub(1).map(Part::Variable)
             }
@@ -1184,6 +1262,38 @@ mod tests {
         );
         assert_eq!(Refusal::VariableRepeated { position: 0 }.part(), None);
         assert_eq!(Refusal::JobWorking.part(), None);
+        // A checked credential's refusal points at the box it was typed
+        // in, the two Slack boxes apart.
+        assert_eq!(
+            Refusal::TokenRefused {
+                why: "GitHub does not accept it".to_owned()
+            }
+            .part(),
+            Some(Part::Credential)
+        );
+        assert_eq!(
+            Refusal::TokenUnchecked {
+                why: "GitHub could not be reached: dns".to_owned()
+            }
+            .part(),
+            Some(Part::Credential)
+        );
+        assert_eq!(
+            Refusal::ChannelRefused {
+                listening: false,
+                why: "Slack refused it (invalid_auth)".to_owned()
+            }
+            .part(),
+            Some(Part::Channel)
+        );
+        assert_eq!(
+            Refusal::ChannelUnchecked {
+                listening: true,
+                why: "Slack could not be reached: dns".to_owned()
+            }
+            .part(),
+            Some(Part::Listening)
+        );
         assert_eq!(
             Refusal::RepositoryRefused {
                 rule: "it has to be on github.com".to_owned()
@@ -1354,6 +1464,59 @@ mod tests {
             404
         );
         assert_eq!(Refusal::Failed.status(), 500);
+        assert_eq!(
+            Refusal::TokenRefused {
+                why: "GitHub does not accept it".to_owned()
+            }
+            .status(),
+            400
+        );
+        assert_eq!(
+            Refusal::ChannelUnchecked {
+                listening: true,
+                why: "Slack could not be reached: dns".to_owned()
+            }
+            .status(),
+            502
+        );
+    }
+
+    /// What a box says when a credential was not kept, asserted whole per
+    /// `docs/conventions.md` §4: the box, and then the platform's clause.
+    #[test]
+    fn a_credential_not_kept_says_which_and_why() {
+        assert_eq!(
+            Refusal::TokenRefused {
+                why: "GitHub does not accept it".to_owned()
+            }
+            .to_string(),
+            "the token was not kept: GitHub does not accept it"
+        );
+        assert_eq!(
+            Refusal::TokenUnchecked {
+                why: "GitHub could not be reached: dns error".to_owned()
+            }
+            .to_string(),
+            "the token was not kept, because it could not be checked: GitHub could not be \
+             reached: dns error"
+        );
+        assert_eq!(
+            Refusal::ChannelRefused {
+                listening: false,
+                why: "Slack refused it (invalid_auth)".to_owned()
+            }
+            .to_string(),
+            "the bot token was not kept: Slack refused it (invalid_auth)"
+        );
+        assert_eq!(
+            Refusal::ChannelUnchecked {
+                listening: true,
+                why: "Slack could not be reached: dns error".to_owned()
+            }
+            .to_string(),
+            "the app-level token was not kept, because it could not be checked: Slack could \
+             not be reached: dns error"
+        );
     }
 
     #[test]
@@ -1375,6 +1538,7 @@ mod tests {
             attending: false,
             working: 0,
             jobs: 3,
+            token_form: String::new(),
         };
         assert!(project.idle());
         assert!(

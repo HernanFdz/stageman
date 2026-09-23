@@ -38,6 +38,14 @@ is over in one action — starting a job, pasting a file of variables per
 configuration and has nothing to return to; configuration is still a
 page.
 
+Narrowed by
+`docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`,
+which checks a credential against its platform before it is kept. The
+rejection below of checking a *claim* stands: that probe would have the
+daemon act in a job's stead, unattended, in place of a person's reading. A
+credential check is one read with the credential the operator just typed,
+on their behalf, while they are at the form, and keeps nothing.
+
 ## Context
 
 Four pages, flat: the instance, the agents, the projects, and one project's

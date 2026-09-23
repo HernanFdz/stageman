@@ -534,6 +534,20 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   which is what a channel posts to a person; not an *update*, which would
   claim to carry the change.
 
+- **guide** — a link beside a box that takes a credential, opening the
+  platform's own form with what this project knows filled in: the token's
+  name and permissions, the app's manifest. A link and nothing more,
+  composed on the server from tracked text, per
+  `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`.
+  What the box then takes is **checked** against its platform before it is
+  kept — one read with the credential, on the operator's behalf, at the
+  form — and refused beside the box otherwise. Not a *wizard*, which would
+  be a form of this project's own restating the platform's; not a *setup*,
+  which names the whole of what a new operator does and would leave nothing
+  to call the link; and not a *validation* for the check, which reads as
+  something this project does to the text, where the platform is the one
+  that answers.
+
 ## 3. House rules
 
 Anything someone would otherwise get wrong: framework versions and their
@@ -698,7 +712,11 @@ justify is usually obsolete.
   else's release cadence. The same holds for a channel, for the same reason:
   what is sent to a platform and what its answers mean are the **channel**
   crate's, per
-  `docs/decisions/0058-a-channels-adapter-is-a-crate-beside-the-agents.md`.
+  `docs/decisions/0058-a-channels-adapter-is-a-crate-beside-the-agents.md`;
+  and for a platform the daemon asks something of itself — what a
+  credential is checked with, what the answer means, and where the
+  platform's own form is — which is the **platform** crate's, per
+  `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`.
 - **Packages carry a prefix; directories do not.** The directories are named
   for the concepts in `docs/architecture.md` §1, and the packages inside them
   are `stageman-core`, `stageman-foreman` and `stageman-job`, with the app

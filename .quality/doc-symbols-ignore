@@ -9,3 +9,6 @@
 #
 # Example:
 #   jsQR          # JavaScript QR-decoding library, called from the browser
+
+missing_scope           # Slack's own error word for a token without a scope, quoted from its documentation in record 0076
+not_allowed_token_type  # Slack's own error word for a token of the wrong kind, quoted the same way

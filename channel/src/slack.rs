@@ -37,9 +37,24 @@
 //! and the identifier it comes back with is what a reply names — see
 //! `docs/decisions/0029-a-reply-is-routed-by-its-thread.md`.
 
+use percent_encoding::utf8_percent_encode;
 use stageman_core::{Channel, JobId, ProjectId, Secret, Speaking, Uuid, slug};
 
-use crate::{Call, ChannelError, Identity, Incoming, Message, Reaction, Request, ThreadRead};
+use crate::{
+    Call, ChannelError, Identity, Incoming, Message, QUERY, Reaction, Request, ThreadRead,
+};
+
+/// The manifest the app a project speaks through is created from: the
+/// scopes this module's calls need, and the events the listener reads.
+/// Tracked text, and the one source of it — `README.md` shows a reader the
+/// same block, and a test below pins the two equal — so that the link a
+/// page offers is composed from it and never copied, per
+/// `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`.
+pub const MANIFEST: &str = include_str!("slack/manifest.yaml");
+
+/// Where the platform creates an app from a manifest carried in the
+/// address, URL-encoded, per its documentation.
+const NEW_APP: &str = "https://api.slack.com/apps?new_app=1&manifest_yaml=";
 
 /// Where Slack takes a message.
 const POST_MESSAGE: &str = "https://slack.com/api/chat.postMessage";
@@ -348,6 +363,11 @@ pub fn room_link(room: &str) -> String {
 /// notifies them of.
 pub fn mention(user: &str) -> String {
     format!("<@{user}>")
+}
+
+/// Where the platform's form for a new app is, with the manifest filled in.
+pub fn app_form() -> String {
+    format!("{NEW_APP}{}", utf8_percent_encode(MANIFEST, QUERY))
 }
 
 /// Renders asking who this instance is, with the credential that speaks.

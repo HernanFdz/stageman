@@ -21,7 +21,17 @@ mod slack;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC};
 use stageman_core::{Channel, JobId, ProjectId, Secret, Speaking};
+
+/// What a query string carries as it is: the unreserved characters, and
+/// nothing else. Everything else is percent-encoded, spaces and line ends
+/// included, so a whole manifest survives an address bar.
+const QUERY: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~');
 
 /// Who this instance is on a channel, so it can recognise itself.
 ///
@@ -445,6 +455,29 @@ pub fn mention(channel: Channel, user: &str) -> String {
     }
 }
 
+/// The manifest a project's app on a channel is created from, as tracked
+/// text: the scopes the adapter's calls need and the events its listener
+/// reads.
+#[must_use]
+pub const fn manifest(channel: Channel) -> &'static str {
+    match channel {
+        Channel::Slack => slack::MANIFEST,
+    }
+}
+
+/// Where the channel's own form for a new app is, with the manifest filled
+/// in.
+///
+/// The guide a page offers beside the boxes that take the app's
+/// credentials, per
+/// `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`.
+#[must_use]
+pub fn app_form(channel: Channel) -> String {
+    match channel {
+        Channel::Slack => slack::app_form(),
+    }
+}
+
 /// Renders asking a channel who this instance is on it.
 ///
 /// Once per connection rather than once per message, and with the
@@ -651,13 +684,46 @@ pub enum ChannelError {
 #[cfg(test)]
 mod tests {
     use super::{
-        Call, ChannelError, Identity, Incoming, Reaction, ThreadRead, acknowledgement, archive,
-        create_room, decode, done, foreman_room_name, identity, invite, mention, open_socket,
-        permalink, pieces, post, posted, react, reference, referenced, replies, room_address,
-        room_created, room_link, room_name, set_purpose, set_topic, socket_url, thread_read,
-        update, who_am_i,
+        Call, ChannelError, Identity, Incoming, Reaction, ThreadRead, acknowledgement, app_form,
+        archive, create_room, decode, done, foreman_room_name, identity, invite, manifest, mention,
+        open_socket, permalink, pieces, post, posted, react, reference, referenced, replies,
+        room_address, room_created, room_link, room_name, set_purpose, set_topic, socket_url,
+        thread_read, update, who_am_i,
     };
     use stageman_core::{Channel, JobId, ProjectId, Secret, Speaking, Uuid};
+
+    /// The form link carries the whole manifest, encoded so that it
+    /// survives an address bar and decodes back to the text it came from.
+    #[test]
+    fn the_app_form_carries_the_manifest_whole() {
+        let link = app_form(Channel::Slack);
+        let (form, carried) = link
+            .split_once("&manifest_yaml=")
+            .expect("the manifest is the last parameter");
+        assert_eq!(form, "https://api.slack.com/apps?new_app=1");
+        assert!(
+            !carried.contains('\n') && !carried.contains(' '),
+            "{carried}"
+        );
+        assert_eq!(
+            percent_encoding::percent_decode_str(carried).decode_utf8_lossy(),
+            manifest(Channel::Slack)
+        );
+    }
+
+    /// The manifest `README.md` shows a reader is this crate's, word for
+    /// word: the link is composed from one text, and the other is pinned
+    /// to it rather than kept in step by hand.
+    #[test]
+    fn the_readme_shows_the_manifest_the_app_is_created_from() {
+        let readme = include_str!("../../README.md");
+        let (_, after) = readme
+            .split_once("## Talking to it on Slack")
+            .expect("the README's Slack section");
+        let (_, block) = after.split_once("```yaml\n").expect("a YAML block in it");
+        let (shown, _) = block.split_once("```").expect("the block ends");
+        assert_eq!(shown, manifest(Channel::Slack));
+    }
 
     fn speaking() -> Speaking {
         Speaking {

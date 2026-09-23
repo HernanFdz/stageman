@@ -13,6 +13,7 @@
 
 mod booting;
 mod channel;
+mod checks;
 mod dashboard;
 mod foreman;
 mod foreman_room;

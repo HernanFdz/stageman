@@ -27,6 +27,11 @@ pub struct TooltipProps {
     /// name, which is one line by nature.
     #[props(default = false)]
     pub wrap: bool,
+    /// Whether it hangs from the control's end rather than its centre: for
+    /// a control at the end of a line, so that the text runs back over the
+    /// page instead of off it.
+    #[props(default = false)]
+    pub at_end: bool,
     /// The control it sits under.
     pub children: Element,
 }
@@ -53,6 +58,11 @@ pub fn Tooltip(props: TooltipProps) -> Element {
                      group-has-[:focus-visible]:opacity-100",
                     if props.wrap {
                         "w-max max-w-sm whitespace-normal text-left"
+                    } else {
+                        ""
+                    },
+                    if props.at_end {
+                        "left-auto right-0 translate-x-0"
                     } else {
                         ""
                     }

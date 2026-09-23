@@ -24,7 +24,7 @@ use super::error::DashboardError;
 use super::live::Live;
 use super::projects_view::{amend, create, forget, projects};
 use crate::ui::{
-    BESIDE, Button, ButtonVariant, Card, FIELD, Field, Icon, Modal, PageHeader, Segmented,
+    BESIDE, Button, ButtonVariant, Card, FIELD, Field, Guide, Icon, Modal, PageHeader, Segmented,
     Skeleton, TextArea, Tooltip,
 };
 
@@ -250,6 +250,11 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
     let mut pasting = use_signal(|| false);
     let mut pasted = use_signal(String::new);
     let mut unread = use_signal(|| None::<String>);
+    // Whether a save is out, so the control says what it waits for and
+    // cannot be pressed twice: a credential is checked against its platform
+    // before it is kept, which takes a moment — see
+    // `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`.
+    let mut saving = use_signal(|| false);
     let creating = filling.creating();
 
     // What the project holds now, which decides whether an empty value box
@@ -279,6 +284,21 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
             .unwrap_or_default(),
         Filling::Creating => String::new(),
     };
+    // Where the platforms' own forms are, filled in: the token's is named
+    // for this project where it exists, and for none where it does not
+    // yet. Composed on the server, like every address a page links.
+    let token_form = match &filling {
+        Filling::Amending(id) => watching
+            .projects
+            .iter()
+            .find(|project| &project.id == id)
+            .map_or_else(
+                || watching.guides.token_form.clone(),
+                |project| project.token_form.clone(),
+            ),
+        Filling::Creating => watching.guides.token_form.clone(),
+    };
+    let app_form = watching.guides.app_form.clone();
 
     let problems = if tried() {
         draft().problems(&filling, &held)
@@ -326,11 +346,13 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
             }
             let filling = filling.clone();
             let navigator = navigator();
+            saving.set(true);
             spawn(async move {
                 let answered = match &filling {
                     Filling::Creating => create(asked).await,
                     Filling::Amending(project) => amend(project.clone(), asked).await,
                 };
+                saving.set(false);
                 match answered {
                     Ok(_) => {
                         refused.set(None);
@@ -372,7 +394,24 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
                             class: ButtonVariant::Secondary.styled(""),
                             "Cancel"
                         }
-                        Button { onclick: save, if creating { "Create" } else { "Save" } }
+                        Button {
+                            disabled: saving(),
+                            onclick: save,
+                            // Named for the wait while it lasts: a token or a
+                            // binding is being asked about, and that is what
+                            // takes the time.
+                            if saving() {
+                                if creating || !draft().credential.trim().is_empty() {
+                                    "Checking…"
+                                } else {
+                                    "Saving…"
+                                }
+                            } else if creating {
+                                "Create"
+                            } else {
+                                "Save"
+                            }
+                        }
                     }
                 }
             }
@@ -381,25 +420,12 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
             }
 
             Card { title: "About",
-                div { class: "flex flex-col gap-3",
-                    Field { label: "Name", problem: saying(Part::Name),
-                        input {
-                            class: FIELD,
-                            placeholder: "Closed Loop",
-                            value: "{draft().name}",
-                            oninput: move |event| draft.with_mut(|draft| draft.name = event.value()),
-                        }
-                    }
-                    Field {
-                        label: "Repository",
-                        note: "The address on GitHub its jobs work on.",
-                        problem: saying(Part::Repository),
-                        input {
-                            class: "{FIELD} font-mono",
-                            placeholder: "https://github.com/owner/repository",
-                            value: "{draft().repository}",
-                            oninput: move |event| draft.with_mut(|draft| draft.repository = event.value()),
-                        }
+                Field { label: "Name", problem: saying(Part::Name),
+                    input {
+                        class: FIELD,
+                        placeholder: "Closed Loop",
+                        value: "{draft().name}",
+                        oninput: move |event| draft.with_mut(|draft| draft.name = event.value()),
                     }
                 }
             }
@@ -498,19 +524,47 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
                 }
             }
 
+            // The repository and the token that reaches it, together: the
+            // token is granted the repository and checked against it, so
+            // the two boxes are one decision.
             Card { title: "GitHub",
+                div { class: "flex flex-col gap-3",
+                Field {
+                    label: "Repository",
+                    note: "The address on GitHub its jobs work on.",
+                    problem: saying(Part::Repository),
+                    input {
+                        class: "{FIELD} font-mono",
+                        placeholder: "https://github.com/owner/repository",
+                        value: "{draft().repository}",
+                        oninput: move |event| draft.with_mut(|draft| draft.repository = event.value()),
+                    }
+                }
                 Field {
                     label: "Token",
                     note: if creating {
-                        "A fine-grained token scoped to this repository, with contents and pull requests write."
+                        "A fine-grained token granted this repository alone, with contents, issues and pull requests write."
                     } else {
                         "Leave empty to keep the current one; a new one replaces it."
                     },
                     info: "Every job on this project holds this token, so a token that reaches \
-                           more than this repository is a token every job could misuse. Scope it \
-                           to the one repository, with contents and pull requests write and \
-                           nothing else.",
+                           more than this repository is a token every job could misuse. Grant it \
+                           the one repository, with contents, issues and pull requests write and \
+                           nothing else. It is checked against GitHub before it is kept: a token \
+                           GitHub does not accept, or one that cannot see the repository, is \
+                           refused here.",
                     problem: saying(Part::Credential),
+                    // The platform's own form, filled in — see
+                    // `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`.
+                    aside: rsx! {
+                        Guide {
+                            mark: "github",
+                            label: "New token",
+                            says: "Opens GitHub's form with the name and the permissions filled \
+                                   in. Choose the repository there; the form cannot be told which.",
+                            link: token_form,
+                        }
+                    },
                     input {
                         r#type: "password",
                         class: "{FIELD} font-mono",
@@ -518,6 +572,7 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
                         value: "{draft().credential}",
                         oninput: move |event| draft.with_mut(|draft| draft.credential = event.value()),
                     }
+                }
                 }
             }
 
@@ -529,10 +584,21 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
                 Card {
                     title: "Slack",
                     note: "Every project talks on Slack, through an app of its own.",
+                    aside: rsx! {
+                        Guide {
+                            mark: "slack",
+                            label: "New app",
+                            says: "Opens Slack's form with the app's manifest filled in. Install \
+                                   the app to the workspace and copy its bot token; then generate \
+                                   an app-level token under Basic Information, with the \
+                                   connections:write scope, and copy that.",
+                            link: app_form,
+                        }
+                    },
                     div { class: "flex flex-col gap-3",
                         Field {
                             label: "Bot token",
-                            note: "What speaks. Starts with xoxb.",
+                            note: "What speaks. Starts with xoxb; on OAuth & Permissions once the app is installed.",
                             problem: saying(Part::Channel),
                             input {
                                 r#type: "password",
@@ -547,10 +613,14 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
                         Field {
                             label: "App-level token",
                             note: "What listens. Starts with xapp, with the connections:write scope.",
-                            info: "The app hears every channel it is invited to, and every job gets \
-                                   a channel of its own. Both tokens are required, because a job \
-                                   that asks needs somebody able to answer. The manifest to create \
-                                   the app from is in the README.",
+                            info: "Generated by hand on the app's Basic Information page, under \
+                                   App-Level Tokens, with the connections:write scope: the manifest \
+                                   cannot mint one, and neither can anything but a person. The app \
+                                   hears every channel it is invited to, and every job gets a \
+                                   channel of its own. Both tokens are required, because a job that \
+                                   asks needs somebody able to answer, and both are checked against \
+                                   Slack before they are kept.",
+                            problem: saying(Part::Listening),
                             input {
                                 r#type: "password",
                                 class: "{FIELD} font-mono",
@@ -1074,6 +1144,7 @@ mod tests {
                 attending: false,
                 working: 0,
                 jobs: 0,
+                token_form: String::new(),
             }],
             available: vec![Agent {
                 id: "claude".to_owned(),
@@ -1083,6 +1154,7 @@ mod tests {
                 used_by: Vec::new(),
             }],
             shapes: vec![claude()],
+            guides: stageman_wire::Guides::default(),
         };
 
         let fresh = starting(&watching, &Filling::Creating);

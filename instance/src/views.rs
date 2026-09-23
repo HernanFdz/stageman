@@ -258,7 +258,7 @@ const fn wire_platform(platform: Platform) -> &'static str {
 }
 
 /// What a screen calls a channel.
-const fn wire_channel(channel: Channel) -> &'static str {
+pub const fn wire_channel(channel: Channel) -> &'static str {
     match channel {
         Channel::Slack => "Slack",
     }
@@ -321,6 +321,10 @@ pub fn projected(
             .filter(|job| job.progress == Progress::Working)
             .count(),
         jobs: project.jobs.len(),
+        // Composed here and never in the browser, like every address a
+        // page links — see
+        // `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`.
+        token_form: stageman_platform::token_form(Platform::GitHub, Some(&project.name)),
     }
 }
 
@@ -580,6 +584,10 @@ pub fn watching_now(state: &State, identities: &Identities) -> stageman_wire::Wa
             .filter(|agent| state.agents.contains_key(agent))
             .map(|agent| shape_of(*agent))
             .collect(),
+        guides: stageman_wire::Guides {
+            token_form: stageman_platform::token_form(Platform::GitHub, None),
+            app_form: stageman_channel::app_form(Channel::Slack),
+        },
     }
 }
 

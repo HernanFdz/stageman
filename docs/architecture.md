@@ -63,6 +63,17 @@ first.
   dispatching on the channel at its surface so that nothing outside names a
   platform. See
   `docs/decisions/0058-a-channels-adapter-is-a-crate-beside-the-agents.md`.
+- **platform** — the contract every platform is asked on by this daemon,
+  and the adapters that implement it: what is asked of a platform, what its
+  answer means, and where its own forms are, as pure functions the
+  **instance** renders and reads and the world carries. One question so
+  far — whether a credential reaches a repository, asked once before the
+  credential is kept — and beside **agent** and **channel** for the reason
+  those are beside each other: `Platform` is the domain's third closed set,
+  closed because reaching one needs code. A job still reaches a platform
+  through the platform's own tools and never through this, per
+  `docs/decisions/0009-jobs-hold-their-own-platform-credentials.md`. See
+  `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`.
 - **foreman** — the deciding, for one project. Watches that project's
   channels and judges what each signal deserves. One per project rather than
   one per instance, because watching needs the project's own credentials and a
@@ -165,20 +176,22 @@ first.
   to be read rather than tested, which is the point of the two crates being
   separate.
 
-Dependencies point inward. **core** names nothing. **agent** and **channel**
-may name **core**, and never each other. **foreman** and **job** may name
+Dependencies point inward. **core** names nothing. **agent**, **channel**
+and **platform** may name **core**, and never one another. **foreman** and
+**job** may name
 **core** and **agent** — both run agents, for different shapes of work — and
 may never name each other; everything they share is a type in **core**, which
 is what keeps the deciding and the doing from growing into one another.
 **vocabulary** names nothing but serialisation. **instance** may name the
-four, **channel**, **wire** and **vocabulary**, for their types and their pure
-functions, and nothing that can perform an effect. **wire** names nothing.
+four, **channel**, **platform**, **wire** and **vocabulary**, for their types
+and their pure functions, and nothing that can perform an effect. **wire** names nothing.
 **world** names **vocabulary** and the async runtime, and no crate of this
 project's above it. **app** may name all of them; nothing may name **app**.
 
 There is one more direction, and it is inside **app** rather than between
 crates: **nothing served to a browser may name any of the four, nor
-**channel**, nor the instance; wire is the one crate it may.** The rule looks like the same one and
+**channel**, nor **platform**, nor the instance; wire is the one crate it
+may.** The rule looks like the same one and
 is not — the others are about what a crate is allowed to know, and this one is
 about what leaves the machine.
 

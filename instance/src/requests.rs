@@ -198,8 +198,23 @@ pub enum Response {
 }
 
 impl Running {
-    /// Answers a request, once whatever it changed is on the disk.
+    /// Answers a request, once whatever it changed is on the disk — or
+    /// holds it while the credentials it carries are checked against their
+    /// platforms, and answers it once they have, per
+    /// `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`.
     pub fn requested(&mut self, id: RequestId, request: Request, effects: &mut Vec<Effect>) {
+        match self.hold_for_checks(id, &request, effects) {
+            Ok(true) => {}
+            Ok(false) => self.respond(id, request, effects),
+            Err(refusal) => self.defer(AppEffect::Respond {
+                id,
+                response: Response::Refused(refusal),
+            }),
+        }
+    }
+
+    /// Answers a request now, once whatever it changed is on the disk.
+    pub(crate) fn respond(&mut self, id: RequestId, request: Request, effects: &mut Vec<Effect>) {
         let answered = match request {
             Request::Instance => Ok(Response::Instance(views::instance(
                 &self.state,
@@ -282,14 +297,16 @@ impl Running {
     /// Asked of a copy before it is asked of the instance, so that a refusal
     /// leaves nothing changed.
     fn create(&mut self, draft: &Draft) -> Result<Response, Refusal> {
-        let name = required("name", &draft.name)?;
-        let repository = addressed(&draft.repository)?;
-        let foreman_kit = views::kit_of(&draft.foreman)?;
-        let credential = required("credential", &draft.credential)?;
-        let kits = kits_of(&draft.kits)?;
-        let channels = binding(&draft.channel)?;
-        let variables = resolved(&BTreeMap::new(), &draft.variables)?;
-        let brief = draft.brief.trim().to_owned();
+        let Drafted {
+            name,
+            repository,
+            foreman_kit,
+            credential,
+            kits,
+            channels,
+            variables,
+            brief,
+        } = drafted(draft, None)?;
 
         let mut candidate = self.state.clone();
         let created = ProjectId::from_uuid(crate::mint(&mut self.rng));
@@ -297,10 +314,15 @@ impl Running {
             created,
             Project {
                 name,
-                repository,
+                repository: repository.https(),
                 foreman_kit,
                 kits,
-                credentials: BTreeMap::from([(Platform::GitHub, Secret::new(credential))]),
+                // Required of a new project, so never empty here; an option
+                // only because an amendment may leave the box blank.
+                credentials: credential
+                    .into_iter()
+                    .map(|token| (Platform::GitHub, token))
+                    .collect(),
                 channels,
                 variables,
                 jobs: BTreeMap::new(),
@@ -334,10 +356,6 @@ impl Running {
     /// nowhere on the wire for the current value, so the box always starts
     /// empty. The channel is not offered at all, for the same reason.
     fn amend(&mut self, project: &str, draft: &Draft) -> Result<Response, Refusal> {
-        let name = required("name", &draft.name)?;
-        let repository = addressed(&draft.repository)?;
-        let foreman_kit = views::kit_of(&draft.foreman)?;
-        let kits = kits_of(&draft.kits)?;
         let identifier = views::identify(&self.state, project)?;
 
         let mut candidate = self.state.clone();
@@ -346,15 +364,25 @@ impl Running {
                 id: project.to_owned(),
             });
         };
-        watched.variables = resolved(&watched.variables, &draft.variables)?;
-        amended(
-            watched,
+        let Drafted {
             name,
             repository,
             foreman_kit,
+            credential,
             kits,
-            draft.credential.trim(),
-            draft.brief.trim().to_owned(),
+            variables,
+            brief,
+            ..
+        } = drafted(draft, Some(watched))?;
+        watched.variables = variables;
+        amended(
+            watched,
+            name,
+            repository.https(),
+            foreman_kit,
+            kits,
+            credential,
+            brief,
         );
         candidate
             .check()
@@ -601,6 +629,79 @@ pub fn offered(project: &Project, name: &str) -> Option<Kit> {
     project.kits.get(&wanted).map(|offered| offered.kit.clone())
 }
 
+/// A draft resolved to what a project would hold, before any of it is
+/// checked against a platform or kept.
+///
+/// One resolution for both creating and amending, so that the refusals a
+/// draft earns on its own are decided once and in one order, whether the
+/// draft goes on to be checked or kept — see
+/// `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`.
+///
+/// Deriving `Debug` is safe: the one credential in it redacts itself.
+#[derive(Debug)]
+pub struct Drafted {
+    /// What to call it.
+    pub name: String,
+    /// Where its jobs work, as an address on the platform.
+    pub repository: RepositoryAddress,
+    /// How its foreman's agent is set.
+    pub foreman_kit: Kit,
+    /// The token for the repository: required of a new project, and what
+    /// was typed for one that exists — blank means the one already held.
+    pub credential: Option<Secret>,
+    /// The kits its jobs may run on.
+    pub kits: BTreeMap<KitName, KitConfig>,
+    /// Its channel bindings, whole. Empty for an amendment, which never
+    /// offers them.
+    pub channels: BTreeMap<Channel, ChannelConfig>,
+    /// Its variables, with a blank value resolved against what it holds.
+    pub variables: BTreeMap<VariableName, Variable>,
+    /// What its foreman is told every turn.
+    pub brief: String,
+}
+
+/// Resolves a draft: for a project that does not exist yet when `held` is
+/// none, and for the one given otherwise.
+///
+/// # Errors
+///
+/// Fails if anything required is missing, if the repository is not an
+/// address on the platform, if a kit describes settings this build does not
+/// know, if a new project's binding is half given, or if a variable's row
+/// is refused.
+pub fn drafted(draft: &Draft, held: Option<&Project>) -> Result<Drafted, Refusal> {
+    let name = required("name", &draft.name)?;
+    let repository = addressed(&draft.repository)?;
+    let foreman_kit = views::kit_of(&draft.foreman)?;
+    let credential = if held.is_some() {
+        let typed = draft.credential.trim();
+        (!typed.is_empty()).then(|| typed.to_owned())
+    } else {
+        Some(required("credential", &draft.credential)?)
+    }
+    .map(Secret::new);
+    let kits = kits_of(&draft.kits)?;
+    let channels = match held {
+        None => binding(&draft.channel)?,
+        Some(_) => BTreeMap::new(),
+    };
+    let nothing = BTreeMap::new();
+    let variables = resolved(
+        held.map_or(&nothing, |project| &project.variables),
+        &draft.variables,
+    )?;
+    Ok(Drafted {
+        name,
+        repository,
+        foreman_kit,
+        credential,
+        kits,
+        channels,
+        variables,
+        brief: draft.brief.trim().to_owned(),
+    })
+}
+
 /// What a project's variables become, from the rows the form came back with.
 ///
 /// Four refusals, each a silent wrong answer avoided: a name a container
@@ -657,17 +758,17 @@ pub fn resolved(
 
 /// Applies what the form came back with to the project it names.
 ///
-/// Blank means the credential already held, never none. A project that had
-/// none and is amended with a blank box still has none. The brief is the
-/// one text where blank means blank: it is shown in full and resubmitted,
-/// so an empty box is an operator taking it away.
+/// No credential means the one already held, never none. A project that
+/// had none and is amended with a blank box still has none. The brief is
+/// the one text where blank means blank: it is shown in full and
+/// resubmitted, so an empty box is an operator taking it away.
 pub fn amended(
     watched: &mut Project,
     name: String,
     repository: String,
     foreman_kit: Kit,
     kits: BTreeMap<KitName, KitConfig>,
-    credential: &str,
+    credential: Option<Secret>,
     brief: String,
 ) {
     watched.name = name;
@@ -677,10 +778,8 @@ pub fn amended(
     watched.foreman_kit = foreman_kit;
     watched.kits = kits;
     watched.brief = brief;
-    if !credential.is_empty() {
-        watched
-            .credentials
-            .insert(Platform::GitHub, Secret::new(credential.to_owned()));
+    if let Some(token) = credential {
+        watched.credentials.insert(Platform::GitHub, token);
     }
 }
 
@@ -748,21 +847,20 @@ pub fn binding(channel: &ChannelDraft) -> Result<BTreeMap<Channel, ChannelConfig
     )]))
 }
 
-/// The repository, required, and written as this project writes an address:
-/// an owner and a name on the platform, with what was pasted beside them
-/// forgiven — see `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+/// The repository, required, and read as an address: an owner and a name
+/// on the platform, with what was pasted beside them forgiven — see
+/// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+/// What is kept is the address as this project writes it.
 ///
 /// # Errors
 ///
 /// Fails if nothing was given, or if what was given is not an address on
 /// the platform, saying which rule it broke.
-pub fn addressed(given: &str) -> Result<String, Refusal> {
+pub fn addressed(given: &str) -> Result<RepositoryAddress, Refusal> {
     let text = required("repository", given)?;
-    RepositoryAddress::parse(&text)
-        .map(|address| address.https())
-        .map_err(|why| Refusal::RepositoryRefused {
-            rule: why.to_string(),
-        })
+    RepositoryAddress::parse(&text).map_err(|why| Refusal::RepositoryRefused {
+        rule: why.to_string(),
+    })
 }
 
 /// A field that has to say something.
@@ -788,6 +886,7 @@ mod tests {
         KitConfig, KitName, Platform, Progress, Project, ProjectId, Secret, State, Timestamp, Uuid,
         Variable, VariableName, Waiting,
     };
+    use stageman_wire::Draft;
     use stageman_wire::{ChannelDraft, Fitted, KitDraft, Refusal, VariableDraft};
     use std::collections::BTreeMap;
 
@@ -915,7 +1014,7 @@ mod tests {
     #[test]
     fn a_repository_is_written_as_an_address_or_refused_by_rule() {
         assert_eq!(
-            addressed("https://github.com/HernanFdz/stageman.git/"),
+            addressed("https://github.com/HernanFdz/stageman.git/").map(|address| address.https()),
             Ok("https://github.com/HernanFdz/stageman".to_owned())
         );
         assert_eq!(
@@ -967,7 +1066,7 @@ mod tests {
                 model: ClaudeModel::Haiku,
             },
             BTreeMap::from([(KitName::new("deep").expect("a name"), deep.clone())]),
-            "",
+            None,
             "Ignore alerts below error.".to_owned(),
         );
         assert_eq!(project.name, "renamed");
@@ -999,7 +1098,7 @@ mod tests {
             "https://example.invalid/renamed".to_owned(),
             Kit::defaults(Agent::Claude),
             one_kit(),
-            "ghp-the-new-one",
+            Some(Secret::new("ghp-the-new-one".to_owned())),
             String::new(),
         );
         assert_eq!(
@@ -1019,10 +1118,78 @@ mod tests {
             "https://example.invalid/aviary".to_owned(),
             Kit::defaults(Agent::Claude),
             one_kit(),
-            "",
+            None,
             String::new(),
         );
         assert!(none.credentials.is_empty(), "blank leaves none as none");
+    }
+
+    /// One resolution for both forms: a new project needs its token and a
+    /// whole binding, and an existing one takes a blank token as the one
+    /// it holds, a typed one as new, and no binding at all.
+    #[test]
+    fn a_draft_is_resolved_once_for_creating_and_for_amending() {
+        let mut draft = Draft {
+            name: " aviary ".to_owned(),
+            repository: "https://github.com/example/aviary.git".to_owned(),
+            foreman: stageman_wire::Fitted {
+                agent: "claude".to_owned(),
+                model: "default".to_owned(),
+                effort: "default".to_owned(),
+            },
+            kits: vec![kit_row("Claude", "General-purpose.", "default", "default")],
+            credential: String::new(),
+            channel: ChannelDraft {
+                credential: "xoxb-not-a-real-token".to_owned(),
+                listen_credential: "xapp-not-a-real-token".to_owned(),
+            },
+            variables: vec![row("HELD", "")],
+            brief: " be brief ".to_owned(),
+        };
+        assert!(
+            matches!(
+                super::drafted(&draft, None),
+                Err(Refusal::Incomplete { ref field }) if field == "credential"
+            ),
+            "a new project needs its token"
+        );
+
+        let mut held = holding(&[]);
+        held.variables = holding_variables(&[("HELD", "kept")]);
+        let amending = super::drafted(&draft, Some(&held)).expect("resolved against the project");
+        assert_eq!(amending.name, "aviary");
+        assert_eq!(
+            amending.repository.https(),
+            "https://github.com/example/aviary"
+        );
+        assert!(amending.credential.is_none(), "blank keeps");
+        assert!(amending.channels.is_empty(), "never offered when amending");
+        assert_eq!(
+            settled(&amending.variables),
+            vec![("HELD".to_owned(), "kept".to_owned())]
+        );
+        assert_eq!(amending.brief, "be brief");
+
+        draft.credential = " github_pat_not_a_real_token ".to_owned();
+        let creating =
+            super::drafted(&draft, None).expect_err("a new project holds no HELD to keep");
+        assert_eq!(creating, Refusal::VariableValueMissing);
+        draft.variables.clear();
+        let creating = super::drafted(&draft, None).expect("a whole draft");
+        assert_eq!(
+            creating.credential.as_ref().map(Secret::expose),
+            Some("github_pat_not_a_real_token"),
+            "trimmed, and kept"
+        );
+        assert!(creating.channels.contains_key(&Channel::Slack));
+        assert_eq!(
+            super::drafted(&draft, Some(&held))
+                .expect("typed replaces")
+                .credential
+                .as_ref()
+                .map(Secret::expose),
+            Some("github_pat_not_a_real_token")
+        );
     }
 
     /// What a form describes becomes the project's kits, and what the domain

@@ -1,0 +1,24 @@
+display_information:
+  name: stageman
+features:
+  bot_user:
+    display_name: stageman
+    always_online: false
+oauth_config:
+  scopes:
+    bot:
+      - chat:write
+      - channels:history
+      - groups:history
+      - app_mentions:read
+      - channels:manage      # a channel per job, archived when the job is retired
+      - reactions:write      # an eyes reaction says your message was received
+settings:
+  event_subscriptions:
+    bot_events:
+      - message.channels
+      - message.groups
+      - app_mention
+  socket_mode_enabled: true
+  org_deploy_enabled: false
+  token_rotation_enabled: false

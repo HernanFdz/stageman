@@ -1,0 +1,33 @@
+# The contract every platform is asked on by this daemon, and the adapters
+# that implement it: what is asked of a platform, what its answers mean and
+# where its own forms are, as pure functions the instance renders and reads.
+# Beside `stageman-agent` and `stageman-channel` for the reason those exist —
+# reaching a platform needs code, and code that knows one platform's shape
+# belongs in one place, on that platform's release cadence rather than this
+# project's. See
+# `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`.
+#
+# May name the domain and nothing that performs an effect: no async runtime,
+# nothing that opens a socket. What it renders is carried by the world, and
+# what it reads was carried back.
+
+[package]
+name = "stageman-platform"
+description = "What stageman asks a platform and what the platform says back, as pure functions. Internal to the workspace."
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# For the one address this crate composes with words in it: a platform's
+# own form, filled in through its query string.
+percent-encoding = "2.3.2"
+serde_json = "1.0.151"
+stageman-core.workspace = true
+thiserror = "2.0.20"
+
+[lints]
+workspace = true
