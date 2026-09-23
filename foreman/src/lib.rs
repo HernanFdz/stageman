@@ -509,25 +509,46 @@ to check it."
 /// room, whatever thread the exchange was in, because it is about the job
 /// and the root is the job's timeline. See
 /// `docs/decisions/0062-what-this-instance-says-is-markdown.md`.
+///
+/// The pull requests the job has said it opened come along whichever way it
+/// stopped, as Markdown references the caller composed — linked where the
+/// repository is an address — because a draft opened before a question is
+/// still something to look at, per
+/// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
 #[must_use]
-pub fn stopped_notice(waiting: &Waiting, asked_by: Option<&str>, mention: &str) -> String {
+pub fn stopped_notice(
+    waiting: &Waiting,
+    asked_by: Option<&str>,
+    mention: &str,
+    opened: &[String],
+) -> String {
+    let opened = if opened.is_empty() {
+        String::new()
+    } else {
+        format!(" Opened {}.", opened.join(", "))
+    };
     match waiting {
         Waiting::Asked => asked_by.map_or_else(
-            || format!("❓ **Waiting for an answer.** Mention {mention} here to reply."),
-            |who| format!("❓ **Waiting for an answer**, {who}. Mention {mention} here to reply."),
+            || format!("❓ **Waiting for an answer.**{opened} Mention {mention} here to reply."),
+            |who| {
+                format!(
+                    "❓ **Waiting for an answer**, {who}.{opened} Mention {mention} here to reply."
+                )
+            },
         ),
-        Waiting::Proposed => {
-            format!("✅ **Ready for review.** Mention {mention} here to send it back for changes.")
-        }
+        Waiting::Proposed => format!(
+            "✅ **Ready for review.**{opened} Mention {mention} here to send it back for changes."
+        ),
         Waiting::Paused => {
-            format!("⏸️ **Stopped by an operator.** Mention {mention} here to carry on.")
+            format!("⏸️ **Stopped by an operator.**{opened} Mention {mention} here to carry on.")
         }
         Waiting::Failed(why) => format!(
-            "❌ **Failed:** `{why}`. Mention {mention} here to try again once that is fixed."
+            "❌ **Failed:** `{why}`.{opened} Mention {mention} here to try again once that is \
+             fixed."
         ),
-        Waiting::Silent => {
-            format!("⏹️ **Stopped without saying why.** Mention {mention} here to carry on.")
-        }
+        Waiting::Silent => format!(
+            "⏹️ **Stopped without saying why.**{opened} Mention {mention} here to carry on."
+        ),
     }
 }
 
@@ -914,9 +935,10 @@ lets you work unattended.
 Before you stop, call the `stopping` tool, every time and last of all. Say \
 `ready_for_review` if you have done what was asked and there is something for a \
 person to look at, or `waiting_for_an_answer` if you need something from a \
-person before you can go on. Nothing else tells anybody which of the two this \
-is, so a job that stops without calling it is recorded as having stopped for \
-reasons nobody knows. If a message interrupts you after you have called it, \
+person before you can go on, and give it the numbers of any pull requests you \
+opened, whichever of the two it is. Nothing else tells anybody which of the two \
+this is, so a job that stops without calling it is recorded as having stopped \
+for reasons nobody knows. If a message interrupts you after you have called it, \
 call it again before you stop: the first call no longer counts."
     )
 }
@@ -1024,10 +1046,11 @@ session, so do not wait for one and do not guess.
 
 Before you stop, call the `stopping` tool, every time and last of all. Say `ready_for_review` if \
 you have done what was asked and there is something for a person to look at, or \
-`waiting_for_an_answer` if you need something from a person before you can go on. Nothing else \
-tells anybody which of the two this is, so a job that stops without calling it is recorded as \
-having stopped for reasons nobody knows. If a message interrupts you after you have called it, \
-call it again before you stop: the first call no longer counts."
+`waiting_for_an_answer` if you need something from a person before you can go on, and give it \
+the numbers of any pull requests you opened, whichever of the two it is. Nothing else tells \
+anybody which of the two this is, so a job that stops without calling it is recorded as having \
+stopped for reasons nobody knows. If a message interrupts you after you have called it, call it \
+again before you stop: the first call no longer counts."
         );
     }
 
@@ -1113,10 +1136,11 @@ session, so do not wait for one and do not guess.
 
 Before you stop, call the `stopping` tool, every time and last of all. Say `ready_for_review` if \
 you have done what was asked and there is something for a person to look at, or \
-`waiting_for_an_answer` if you need something from a person before you can go on. Nothing else \
-tells anybody which of the two this is, so a job that stops without calling it is recorded as \
-having stopped for reasons nobody knows. If a message interrupts you after you have called it, \
-call it again before you stop: the first call no longer counts."
+`waiting_for_an_answer` if you need something from a person before you can go on, and give it \
+the numbers of any pull requests you opened, whichever of the two it is. Nothing else tells \
+anybody which of the two this is, so a job that stops without calling it is recorded as having \
+stopped for reasons nobody knows. If a message interrupts you after you have called it, call it \
+again before you stop: the first call no longer counts."
         );
     }
 
@@ -1333,33 +1357,57 @@ it; anything else said here is between people._"
     #[test]
     fn the_notices_read_exactly_as_written() {
         assert_eq!(
-            super::stopped_notice(&Waiting::Asked, Some("<@U0HUMAN>"), "<@U0BOT>"),
+            super::stopped_notice(&Waiting::Asked, Some("<@U0HUMAN>"), "<@U0BOT>", &[]),
             "❓ **Waiting for an answer**, <@U0HUMAN>. Mention <@U0BOT> here to reply."
         );
         assert_eq!(
-            super::stopped_notice(&Waiting::Asked, None, "<@U0BOT>"),
+            super::stopped_notice(&Waiting::Asked, None, "<@U0BOT>", &[]),
             "❓ **Waiting for an answer.** Mention <@U0BOT> here to reply."
         );
         assert_eq!(
-            super::stopped_notice(&Waiting::Proposed, Some("<@U0HUMAN>"), "<@U0BOT>"),
+            super::stopped_notice(&Waiting::Proposed, Some("<@U0HUMAN>"), "<@U0BOT>", &[]),
             "✅ **Ready for review.** Mention <@U0BOT> here to send it back for changes."
         );
         assert_eq!(
-            super::stopped_notice(&Waiting::Paused, None, "<@U0BOT>"),
+            super::stopped_notice(&Waiting::Paused, None, "<@U0BOT>", &[]),
             "⏸️ **Stopped by an operator.** Mention <@U0BOT> here to carry on."
         );
         assert_eq!(
             super::stopped_notice(
                 &Waiting::Failed("the credential had expired".to_owned()),
                 None,
-                "<@U0BOT>"
+                "<@U0BOT>",
+                &[]
             ),
             "❌ **Failed:** `the credential had expired`. Mention <@U0BOT> here to try again once \
 that is fixed."
         );
         assert_eq!(
-            super::stopped_notice(&Waiting::Silent, None, "<@U0BOT>"),
+            super::stopped_notice(&Waiting::Silent, None, "<@U0BOT>", &[]),
             "⏹️ **Stopped without saying why.** Mention <@U0BOT> here to carry on."
+        );
+        assert_eq!(
+            super::stopped_notice(
+                &Waiting::Proposed,
+                None,
+                "<@U0BOT>",
+                &[
+                    "[#12](https://github.com/owner/name/pull/12)".to_owned(),
+                    "#13".to_owned()
+                ]
+            ),
+            "✅ **Ready for review.** Opened [#12](https://github.com/owner/name/pull/12), #13. \
+             Mention <@U0BOT> here to send it back for changes."
+        );
+        assert_eq!(
+            super::stopped_notice(
+                &Waiting::Asked,
+                Some("<@U0HUMAN>"),
+                "<@U0BOT>",
+                &["#7".to_owned()]
+            ),
+            "❓ **Waiting for an answer**, <@U0HUMAN>. Opened #7. Mention <@U0BOT> here to reply.",
+            "a draft opened before a question is still something to look at"
         );
         assert_eq!(
             super::stuck_notice("the agent would not start"),
@@ -1484,7 +1532,7 @@ here."
         ];
         let lines: Vec<String> = readings
             .iter()
-            .map(|waiting| super::stopped_notice(waiting, Some("<@U0HUMAN>"), "<@U0BOT>"))
+            .map(|waiting| super::stopped_notice(waiting, Some("<@U0HUMAN>"), "<@U0BOT>", &[]))
             .collect();
 
         for (i, line) in lines.iter().enumerate() {

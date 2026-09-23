@@ -886,6 +886,18 @@ pub struct Job {
     /// release wrote, which is why it is defaulted.
     #[serde(default)]
     pub inbox: Inbox,
+    /// The pull requests it said it opened, by number on the project's
+    /// repository — see
+    /// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+    ///
+    /// The union of every number ever claimed, sorted, so that a forgetful
+    /// later turn cannot erase an earlier one; whether any is still open is
+    /// the platform's to know. A number names a pull request on this
+    /// project's repository and nowhere else, which is why it is a number
+    /// and not an address. Empty for a job that claimed none, and for every
+    /// job the last release wrote, which is why it is defaulted.
+    #[serde(default)]
+    pub pull_requests: BTreeSet<u64>,
 }
 
 /// The messages a job has been sent and has not finished with.
@@ -998,6 +1010,7 @@ impl Job {
             asked_by: None,
             reported: BTreeMap::new(),
             inbox: Inbox::new(),
+            pull_requests: BTreeSet::new(),
         }
     }
 
@@ -3426,6 +3439,10 @@ mod tests {
             let job: Job = serde_json::from_str(&older)
                 .unwrap_or_else(|why| panic!("{written} must still parse: {why}"));
             assert_eq!(job.progress, expected);
+            assert!(
+                job.pull_requests.is_empty(),
+                "a job written before it could claim one claimed none"
+            );
         }
     }
 

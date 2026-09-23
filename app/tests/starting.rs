@@ -1013,10 +1013,11 @@ fn a_job_has_a_page_of_its_own() {
         .jobs
         // Over already, so that the waking sweep — which finds no container
         // for it and would otherwise record it lost — leaves it as written.
-        .insert(
-            JobId::from_uuid(uuid::Uuid::from_u128(7)),
-            job(Progress::Retired(Outcome::Done)),
-        );
+        .insert(JobId::from_uuid(uuid::Uuid::from_u128(7)), {
+            let mut done = job(Progress::Retired(Outcome::Done));
+            done.pull_requests.insert(7);
+            done
+        });
     written(&snapshot, &watched);
     let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
 
@@ -1033,6 +1034,10 @@ fn a_job_has_a_page_of_its_own() {
     assert!(
         page.contains(r#"href="https://github.com/example/aviary""#),
         "the repository is a link where it is an address: {page}"
+    );
+    assert!(
+        page.contains(r#"href="https://github.com/example/aviary/pull/7""#),
+        "a pull request it opened is linked by number: {page}"
     );
 
     let missing = running.get(

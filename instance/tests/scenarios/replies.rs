@@ -59,7 +59,7 @@ fn a_reply_to_an_idle_job_resumes_it_after_the_record_lands() {
             (in_room(1), "done".to_owned()),
             (
                 in_room(1),
-                stageman_foreman::stopped_notice(&Waiting::Silent, None, "<@U0BOT>")
+                stageman_foreman::stopped_notice(&Waiting::Silent, None, "<@U0BOT>", &[])
             ),
         ],
         "why the turn started, what the agent said, and that it ended, at the root in order"
@@ -194,7 +194,7 @@ fn a_mention_in_a_thread_of_a_jobs_room_is_answered_there_and_noticed_at_the_roo
             (in_room(1), "done".to_owned()),
             (
                 in_room(1),
-                stageman_foreman::stopped_notice(&Waiting::Silent, None, "<@U0BOT>")
+                stageman_foreman::stopped_notice(&Waiting::Silent, None, "<@U0BOT>", &[])
             ),
             (
                 Place {

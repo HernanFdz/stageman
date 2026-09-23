@@ -18,7 +18,7 @@ use super::error::{DashboardError, DashboardResult};
 use super::jobs_view::{JobControls, Showing, Toned as _};
 use super::live::Live;
 use super::projects_view::read_as;
-use crate::ui::{Badge, Card, Icon, Info, KitChip, PageHeader, Reference, Skeleton, When};
+use crate::ui::{Badge, Card, Chip, Icon, Info, KitChip, PageHeader, Reference, Skeleton, When};
 
 pub use stageman_wire::JobPage;
 use stageman_wire::{Standing, Working};
@@ -155,6 +155,16 @@ fn Shown(page: JobPage, failure: Signal<Option<DashboardError>>) -> Element {
                     Row { icon: Icon::Made, says: "When it was made",
                         When { at: job.created_at.clone() }
                     }
+                    // Every pull request it ever said it opened, by number,
+                    // linked where the repository is an address; whether
+                    // any is still open is the platform's to say.
+                    if !job.pull_requests.is_empty() {
+                        Row { icon: Icon::PullRequest, says: "The pull requests it opened",
+                            for opened in job.pull_requests.iter() {
+                                PullRequestChip { key: "{opened.number}", number: opened.number, link: opened.link.clone() }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -165,6 +175,20 @@ fn Shown(page: JobPage, failure: Signal<Option<DashboardError>>) -> Element {
                     "{job.kickoff}"
                 }
             }
+        }
+    }
+}
+
+/// One pull request, as a chip: the number, going where it is.
+#[component]
+pub(super) fn PullRequestChip(number: u64, link: Option<String>) -> Element {
+    let says = link
+        .clone()
+        .unwrap_or_else(|| format!("Pull request {number}"));
+    rsx! {
+        Chip { says, link,
+            {Icon::PullRequest.draw(12)}
+            "#{number}"
         }
     }
 }

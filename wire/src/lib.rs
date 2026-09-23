@@ -586,6 +586,23 @@ pub struct Job {
     /// promises nothing: the port is published when the container is
     /// created, whether or not the agent ever uses it.
     pub tunnel: String,
+    /// The pull requests it said it opened, in order, each with its address
+    /// where the repository is one — see
+    /// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+    pub pull_requests: Vec<PullRequest>,
+}
+
+/// One pull request a job said it opened: the number, and where it is.
+///
+/// The address is composed on the server from the repository and the
+/// platform when the repository is an address. Whether it is still open is
+/// the platform's to know, and nothing here says.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequest {
+    /// The number, as the platform counts them.
+    pub number: u64,
+    /// Where it is, when that can be said.
+    pub link: Option<String>,
 }
 
 /// One job's page: the job, the project it is on, and what the page links to.

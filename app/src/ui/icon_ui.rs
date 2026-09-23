@@ -15,8 +15,8 @@
 use dioxus::prelude::*;
 use lucide_dioxus::{
     Activity, ArrowLeft, Bot, Calendar, Check, CircleCheck, CircleOff, CircleX, ExternalLink, Eye,
-    EyeOff, Hammer, HardHat, Info, LoaderCircle, Moon, Pencil, Plus, Square, Sun, SunMoon, Trash2,
-    X,
+    EyeOff, GitPullRequest, Hammer, HardHat, Info, LoaderCircle, Moon, Pencil, Plus, Square, Sun,
+    SunMoon, Trash2, X,
 };
 
 /// A concept a screen can point at, and nothing about how it is drawn.
@@ -73,6 +73,8 @@ pub enum Icon {
     Made,
     /// The way back to where a page was reached from.
     Back,
+    /// A pull request a job opened.
+    PullRequest,
 }
 
 impl Icon {
@@ -105,6 +107,7 @@ impl Icon {
         Self::Standing,
         Self::Made,
         Self::Back,
+        Self::PullRequest,
     ];
 
     /// Drawn at `size` pixels, in the current text colour.
@@ -150,6 +153,7 @@ impl Icon {
             Self::Standing => rsx! { Activity { size, class } },
             Self::Made => rsx! { Calendar { size, class } },
             Self::Back => rsx! { ArrowLeft { size, class } },
+            Self::PullRequest => rsx! { GitPullRequest { size, class } },
         }
     }
 }

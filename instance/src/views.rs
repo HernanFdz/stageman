@@ -387,7 +387,7 @@ pub fn working(
     let mut jobs: Vec<stageman_wire::Job> = watched
         .jobs
         .iter()
-        .map(|(id, job)| job_view(*id, job, domain, serving))
+        .map(|(id, job)| job_view(*id, job, &watched.repository, domain, serving))
         .collect();
     jobs.sort_by(|one, other| other.created_at.cmp(&one.created_at));
 
@@ -438,7 +438,7 @@ pub fn job_page(
         project_name: watched.name.clone(),
         repository: watched.repository.clone(),
         repository_link: linked(&watched.repository),
-        job: job_view(named, recorded, domain, serving),
+        job: job_view(named, recorded, &watched.repository, domain, serving),
         fitted: fitted(recorded.kit()),
         agent_name: shown(agent),
         shape: shape_of(agent),
@@ -451,8 +451,24 @@ pub fn job_page(
     })
 }
 
+/// Where a pull request is, when the repository is an address: composed
+/// here and never in the browser, per
+/// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`,
+/// because the shape of an address is the platform's knowledge.
+pub fn pull_request_link(repository: &str, number: u64) -> Option<String> {
+    RepositoryAddress::parse(repository)
+        .ok()
+        .map(|address| format!("{}/pull/{number}", address.https()))
+}
+
 /// One job, as a page sees it.
-fn job_view(id: JobId, job: &Job, domain: &Domain, serving: u16) -> stageman_wire::Job {
+fn job_view(
+    id: JobId,
+    job: &Job,
+    repository: &str,
+    domain: &Domain,
+    serving: u16,
+) -> stageman_wire::Job {
     stageman_wire::Job {
         id: id.to_string(),
         kit: described(job.kit()),
@@ -466,6 +482,14 @@ fn job_view(id: JobId, job: &Job, domain: &Domain, serving: u16) -> stageman_wir
         created_at: job.created_at.to_string(),
         standing: standing(&job.progress),
         tunnel: address(domain, id, serving),
+        pull_requests: job
+            .pull_requests
+            .iter()
+            .map(|number| stageman_wire::PullRequest {
+                number: *number,
+                link: pull_request_link(repository, *number),
+            })
+            .collect(),
     }
 }
 
@@ -488,7 +512,7 @@ pub fn home(
             let placed = || stageman_wire::ProjectJob {
                 project: project_id.to_string(),
                 project_name: project.name.clone(),
-                job: job_view(*id, job, domain, serving),
+                job: job_view(*id, job, &project.repository, domain, serving),
             };
             match &job.progress {
                 Progress::Idle(_) => needs_you.push(placed()),
@@ -955,6 +979,20 @@ mod tests {
         assert!(
             working(&state, "nope", &domain, 8080).is_err(),
             "a project nobody watches"
+        );
+    }
+
+    /// A pull request's address is the repository's with the number, where
+    /// the repository is an address, and nothing otherwise.
+    #[test]
+    fn a_pull_request_is_addressed_on_the_repository_or_not_at_all() {
+        assert_eq!(
+            super::pull_request_link("https://github.com/owner/name.git", 12).as_deref(),
+            Some("https://github.com/owner/name/pull/12")
+        );
+        assert_eq!(
+            super::pull_request_link("https://example.invalid/name", 12),
+            None
         );
     }
 }

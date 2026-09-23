@@ -36,6 +36,7 @@
 //! left. This used to be a lock in the world; it is held state here.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use stageman_agent::{
@@ -209,6 +210,12 @@ pub struct Turn {
     pub stopping: bool,
     /// What the agent said about why it is stopping, if it has said.
     pub claimed: Option<Waiting>,
+    /// The pull requests it said it opened during this turn, by number.
+    /// Kept when the turn ends whichever way it ends and however many
+    /// messages were steered into it: a pull request is a fact about the
+    /// platform, not about the turn — see
+    /// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+    pub pull_requests: BTreeSet<u64>,
     /// Where anything was posted during this turn, by the agent through the
     /// tool or by this instance, among the places it could have been asked
     /// in: what decides whether a thread it was asked in is signposted to
@@ -245,6 +252,7 @@ impl Turn {
         Self {
             stopping: false,
             claimed: None,
+            pull_requests: BTreeSet::new(),
             spoke_in: Vec::new(),
             delivery: Delivery::Open,
             notify: false,
@@ -259,6 +267,7 @@ impl Turn {
         Self {
             stopping: false,
             claimed: None,
+            pull_requests: BTreeSet::new(),
             spoke_in: Vec::new(),
             delivery: Delivery::Open,
             notify: true,
@@ -337,6 +346,32 @@ pub fn outcome(answer: &Answer, claimed: Option<Waiting>) -> Progress {
             answer.stop_reason
         )))
     }
+}
+
+/// The pull requests a job has said it opened, as Markdown references for
+/// a notice: linked where the repository is an address, and the bare number
+/// otherwise. Composed here and never by the browser, per
+/// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+pub fn pull_requests_of(state: &State, job: JobId) -> Vec<String> {
+    let Some(recorded) = state.job(job) else {
+        return Vec::new();
+    };
+    let repository = state
+        .project_of(job)
+        .and_then(|project| state.projects.get(&project))
+        .map(|project| project.repository.as_str());
+    recorded
+        .pull_requests
+        .iter()
+        .map(|number| {
+            repository
+                .and_then(|repository| crate::views::pull_request_link(repository, *number))
+                .map_or_else(
+                    || format!("#{number}"),
+                    |link| format!("[#{number}]({link})"),
+                )
+        })
+        .collect()
 }
 
 /// Where to speak on a job's behalf, if it has anywhere: the root of its
@@ -973,6 +1008,17 @@ impl Running {
         // Whether the turn handled what it was given: neither a stopped turn
         // nor a failed one did, and neither gets the check mark.
         let handled = !turn.stopping && !matches!(progress, Progress::Idle(Waiting::Failed(_)));
+        // What it said it opened is kept whichever way the turn ended, as
+        // the union of everything ever claimed: a pull request is a fact
+        // about the platform, and a later turn that forgets one cannot
+        // erase it. Written with the record below.
+        if !turn.pull_requests.is_empty()
+            && let Some(recorded) = self.state.job_mut(job)
+        {
+            recorded
+                .pull_requests
+                .extend(turn.pull_requests.iter().copied());
+        }
         self.record(job, progress);
 
         // What the turn was given is finished with, per 0069. A message
@@ -1019,10 +1065,11 @@ impl Running {
                 || "@stageman".to_owned(),
                 |project| self.own_mention(project, channel),
             );
+            let opened = pull_requests_of(&self.state, job);
             self.say(
                 &speaking,
                 &root,
-                &stageman_foreman::stopped_notice(&waiting, asked_by.as_deref(), &mention),
+                &stageman_foreman::stopped_notice(&waiting, asked_by.as_deref(), &mention, &opened),
             );
         }
 

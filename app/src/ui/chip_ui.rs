@@ -1,13 +1,53 @@
-//! A kit, in a chip: whose, which model, and how hard.
+//! A chip: one thing shown inline and compact, and usually a link.
 //!
 //! A chip says which and where and carries no verdict — `docs/conventions.md`
-//! §2. This one says what a job runs on, or a foreman thinks with, in the
+//! §2. The kit's says what a job runs on, or a foreman thinks with, in the
 //! space a sentence used to take: the agent's mark, the model's name, and
-//! the effort as a meter, with the whole sentence a hover away.
+//! the effort as a meter, with the whole sentence a hover away. The plain
+//! one says a number and goes somewhere: a pull request on a job's row.
 
 use dioxus::prelude::*;
 
 use super::{Mark, Tooltip};
+
+/// What every chip looks like.
+const CHIP: &str = "inline-flex items-center gap-1.5 rounded-full border border-border bg-surface \
+                    px-2 py-0.5 text-xs text-foreground";
+
+/// Properties for [`Chip`].
+#[derive(Props, PartialEq, Clone)]
+pub struct ChipProps {
+    /// What it stands for, in words: the tooltip, and the name for whoever
+    /// cannot see it.
+    pub says: String,
+    /// Where it goes, when it goes somewhere.
+    #[props(default)]
+    pub link: Option<String>,
+    /// What it shows.
+    pub children: Element,
+}
+
+/// A chip that links where it can, and only says otherwise.
+#[component]
+pub fn Chip(props: ChipProps) -> Element {
+    rsx! {
+        Tooltip { text: props.says.clone(),
+            if let Some(link) = props.link {
+                a {
+                    href: "{link}",
+                    target: "_blank",
+                    rel: "noopener noreferrer",
+                    class: "{CHIP} hover:border-border-strong hover:bg-surface-muted \
+                            focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
+                    aria_label: "{props.says}",
+                    {props.children}
+                }
+            } else {
+                span { class: CHIP, tabindex: "0", aria_label: "{props.says}", {props.children} }
+            }
+        }
+    }
+}
 
 /// Properties for [`KitChip`].
 #[derive(Props, PartialEq, Eq, Clone)]
@@ -48,8 +88,7 @@ pub fn KitChip(props: KitChipProps) -> Element {
     rsx! {
         Tooltip { text: saying.clone(),
             span {
-                class: "inline-flex items-center gap-1.5 rounded-full border border-border bg-surface \
-                        px-2 py-0.5 text-xs text-foreground",
+                class: CHIP,
                 tabindex: "0",
                 aria_label: "{saying}",
                 if let Some(name) = props.name {

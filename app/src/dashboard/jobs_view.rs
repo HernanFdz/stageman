@@ -304,6 +304,9 @@ fn RanJob(
                     class: "text-sm hover:underline",
                     "{job.reason}"
                 }
+                for opened in job.pull_requests.iter() {
+                    super::job_view::PullRequestChip { key: "{opened.number}", number: opened.number, link: opened.link.clone() }
+                }
                 span { class: "ml-auto flex shrink-0 items-baseline gap-2 font-mono text-xs text-faint-foreground",
                     "{job.kit}"
                     When { at: job.created_at.clone() }

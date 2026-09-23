@@ -38,7 +38,7 @@ mod when_ui;
 pub use badge_ui::{Badge, BadgeTone};
 pub use button_ui::{Button, ButtonVariant};
 pub use card_ui::Card;
-pub use chip_ui::KitChip;
+pub use chip_ui::{Chip, KitChip};
 pub use empty_state_ui::EmptyState;
 pub use field_ui::{BESIDE, FIELD, Field};
 pub use icon_ui::Icon;

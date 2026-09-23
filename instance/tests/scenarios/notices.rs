@@ -49,7 +49,7 @@ fn a_reply_at_the_root_is_noticed_before_the_agent_speaks() {
             (in_room(1), "done".to_owned()),
             (
                 in_room(1),
-                stageman_foreman::stopped_notice(&Waiting::Silent, None, "<@U0BOT>")
+                stageman_foreman::stopped_notice(&Waiting::Silent, None, "<@U0BOT>", &[])
             ),
         ]
     );
@@ -78,7 +78,7 @@ fn a_thread_the_job_never_answered_in_is_signposted() {
             (in_room(1), "done".to_owned()),
             (
                 in_room(1),
-                stageman_foreman::stopped_notice(&Waiting::Silent, None, "<@U0BOT>")
+                stageman_foreman::stopped_notice(&Waiting::Silent, None, "<@U0BOT>", &[])
             ),
             (
                 asked_in,

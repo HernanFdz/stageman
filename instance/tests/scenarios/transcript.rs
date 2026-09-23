@@ -37,7 +37,7 @@ fn root_reads(world: &Simulation) -> Vec<String> {
 }
 
 fn the_notice() -> String {
-    stageman_foreman::stopped_notice(&Waiting::Silent, None, "<@U0BOT>")
+    stageman_foreman::stopped_notice(&Waiting::Silent, None, "<@U0BOT>", &[])
 }
 
 /// What the root is told first: why the turn started, linking the reply.
