@@ -636,6 +636,32 @@ pub enum Platform {
     GitHub,
 }
 
+/// An App this instance owns on a platform.
+///
+/// What it registered there once, from the dashboard, and mints tokens with
+/// from then on — see
+/// `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
+/// One per platform, held by the instance rather than by a project, because
+/// a project installs it and does not own it. The client secret and the
+/// webhook secret the registration also answered with are not kept: nothing
+/// here authorises a user or receives a webhook, and a secret kept for
+/// nothing is a secret to leak for nothing.
+///
+/// Deriving `Debug` is safe and deliberate: the one credential in it redacts
+/// itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlatformApp {
+    /// The App's identifier on the platform.
+    pub id: u64,
+    /// Its slug, which every address on the platform is made from.
+    pub slug: String,
+    /// Its client identifier, which the platform takes as the issuer of the
+    /// token this instance signs.
+    pub client_id: String,
+    /// Its private key, PEM, which signs that token.
+    pub private_key: Secret,
+}
+
 /// Where a project's repository is, as the platform names it: an owner and
 /// a name on GitHub.
 ///
@@ -1679,6 +1705,10 @@ pub struct State {
     pub agents: BTreeMap<Agent, AgentConfig>,
     /// The projects it watches.
     pub projects: BTreeMap<ProjectId, Project>,
+    /// The Apps it owns on each platform, at most one per platform. May be
+    /// empty: a project reaches its repository with a pasted token until an
+    /// App is registered, and after.
+    pub apps: BTreeMap<Platform, PlatformApp>,
 }
 
 // Deliberately absent: where the container runtime lives. It was a field here
@@ -1945,6 +1975,22 @@ impl State {
             })
             .collect::<Result<BTreeMap<_, _>, SealError>>()?;
 
+        let apps = self
+            .apps
+            .iter()
+            .map(|(platform, app)| {
+                Ok((
+                    *platform,
+                    SealedPlatformApp {
+                        id: app.id,
+                        slug: app.slug.clone(),
+                        client_id: app.client_id.clone(),
+                        private_key: app.private_key.seal(key, nonces())?,
+                    },
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, SealError>>()?;
+
         let projects = self
             .projects
             .iter()
@@ -2020,6 +2066,7 @@ impl State {
             instance: None,
             agents,
             projects,
+            apps,
         })
     }
 }
@@ -2305,6 +2352,20 @@ pub struct SealedAgentConfig {
     pub auth_token: SealedSecret,
 }
 
+/// An App this instance owns, as it appears on disk: everything in the
+/// clear but the key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SealedPlatformApp {
+    /// The App's identifier on the platform.
+    pub id: u64,
+    /// Its slug.
+    pub slug: String,
+    /// Its client identifier.
+    pub client_id: String,
+    /// Its private key, sealed.
+    pub private_key: SealedSecret,
+}
+
 /// A channel binding as it appears on disk.
 ///
 /// The last release wrote an `address` beside these, the one room a project
@@ -2455,6 +2516,30 @@ pub struct Snapshot {
     pub agents: BTreeMap<Agent, SealedAgentConfig>,
     /// The projects, sealed.
     pub projects: BTreeMap<ProjectId, SealedProject>,
+    /// The Apps the instance owns, sealed. Defaulted, because a file the
+    /// last release wrote has none, which is the true answer: it had none.
+    #[serde(default)]
+    pub apps: BTreeMap<Platform, SealedPlatformApp>,
+}
+
+/// The Apps of a file, their keys opened.
+fn opened_apps(
+    apps: BTreeMap<Platform, SealedPlatformApp>,
+    key: &Key,
+) -> Result<BTreeMap<Platform, PlatformApp>, OpenError> {
+    apps.into_iter()
+        .map(|(platform, sealed)| {
+            Ok((
+                platform,
+                PlatformApp {
+                    id: sealed.id,
+                    slug: sealed.slug,
+                    client_id: sealed.client_id,
+                    private_key: sealed.private_key.open(key)?,
+                },
+            ))
+        })
+        .collect()
 }
 
 impl Snapshot {
@@ -2471,6 +2556,7 @@ impl Snapshot {
             instance: _,
             agents,
             projects,
+            apps,
         } = self;
 
         let agents = agents
@@ -2484,6 +2570,8 @@ impl Snapshot {
                 ))
             })
             .collect::<Result<BTreeMap<_, _>, OpenError>>()?;
+
+        let apps = opened_apps(apps, key)?;
 
         let projects = projects
             .into_iter()
@@ -2559,7 +2647,11 @@ impl Snapshot {
             })
             .collect::<Result<BTreeMap<_, _>, OpenError>>()?;
 
-        let state = State { agents, projects };
+        let state = State {
+            agents,
+            projects,
+            apps,
+        };
         // A file is untrusted input, so this is where believing it stops.
         state.check().map_err(OpenError::Inconsistent)?;
         Ok(state)
@@ -3048,6 +3140,7 @@ mod tests {
     /// An instance with an agent configured and nothing else.
     fn configured() -> State {
         State {
+            apps: std::collections::BTreeMap::new(),
             agents: BTreeMap::from([(
                 Agent::Claude,
                 AgentConfig {

@@ -3182,6 +3182,7 @@ mod tests {
     /// An instance with one agent configured and nothing else.
     fn instance(credential: &str) -> State {
         State {
+            apps: std::collections::BTreeMap::new(),
             agents: BTreeMap::from([(
                 Agent::Claude,
                 AgentConfig {

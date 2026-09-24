@@ -121,7 +121,7 @@ fn Overview(home: Home) -> Element {
                     // requires: nothing can be named before it exists.
                     EmptyState {
                         title: "Nothing is being watched yet.",
-                        note: "Three steps, in this order.",
+                        note: "Four steps, in this order; the second is optional.",
                         action: rsx! {
                             ol { class: "list-decimal space-y-1 pl-5 text-xs text-muted-foreground",
                                 li {
@@ -129,8 +129,12 @@ fn Overview(home: Home) -> Element {
                                     ", so a project has something to think with."
                                 }
                                 li {
+                                    Link { to: super::Route::InstanceView {}, class: "underline", "Register the App on GitHub" }
+                                    ", if you would rather install it on a repository than paste a token."
+                                }
+                                li {
                                     Link { to: super::Route::ProjectsView {}, class: "underline", "Add a project" }
-                                    ": its repository, a token for it, and the Slack app it talks through."
+                                    ": its repository, a token for it or the App installed on it, and the Slack app it talks through."
                                 }
                                 li { "Invite the app into a channel, and mention it." }
                             }

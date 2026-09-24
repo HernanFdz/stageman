@@ -11,6 +11,7 @@
               report to; the virtual clock adds"
 )]
 
+mod apps;
 mod booting;
 mod channel;
 mod checks;

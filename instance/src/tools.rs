@@ -1440,6 +1440,7 @@ mod tests {
     #[test]
     fn a_kit_must_be_named_and_offered_or_it_is_refused() {
         let mut state = State {
+            apps: std::collections::BTreeMap::new(),
             agents: BTreeMap::from([(
                 Agent::Claude,
                 AgentConfig {

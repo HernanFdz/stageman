@@ -631,6 +631,7 @@ mod tests {
     fn watching() -> (State, ProjectId) {
         let project = ProjectId::from_uuid(Uuid::from_u128(11));
         let mut state = State {
+            apps: std::collections::BTreeMap::new(),
             agents: BTreeMap::from([(
                 Agent::Claude,
                 AgentConfig {

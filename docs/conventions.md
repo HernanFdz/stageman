@@ -548,6 +548,17 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   something this project does to the text, where the platform is the one
   that answers.
 
+- **App** — what this instance owns on a platform: registered once, from
+  the Instance page, by the platform's own flow, and kept sealed with its
+  key; a project *installs* it on a repository rather than holding a
+  token, and its jobs run on tokens minted per turn — see
+  `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
+  Capitalised as the platform capitalises it, so that a sentence can hold
+  it beside the **app** crate and a Slack *app* without a second word. The
+  instance's, never a project's: a project installs and does not own. Not
+  *integration*, refused under **channel**; not *platform-wide*, which
+  names the platform where the instance is meant.
+
 ## 3. House rules
 
 Anything someone would otherwise get wrong: framework versions and their
@@ -738,6 +749,17 @@ justify is usually obsolete.
   This is worth stating rather than discovering: the first thing anybody does
   with finished work is try to push it, and a rule enforced only by a remote's
   refusal teaches itself expensively.
+
+- **Two paths under the dashboard's host are the instance's own.** Where a
+  platform sends the browser back after an App is registered, and after it
+  is installed, the instance answers before the proxy, per
+  `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`:
+  it holds the request while the world asks the platform, and sends the
+  browser on to the page once the write has landed. They sit under the
+  Instance page's own path, where the framework serves nothing, so a path
+  the instance does not take falls through to the framework as it always
+  did. A state token minted here and spent on return is what makes a
+  browser's arrival a registration this instance began.
 
 - **Nothing posted is written in the platform's own markup.** Since
   `docs/decisions/0062-what-this-instance-says-is-markdown.md` the adapter

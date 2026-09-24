@@ -1320,6 +1320,7 @@ mod tests {
         let project = ProjectId::from_uuid(Uuid::from_u128(11));
         let job = JobId::from_uuid(Uuid::from_u128(12));
         let mut state = State {
+            apps: std::collections::BTreeMap::new(),
             agents: BTreeMap::from([(
                 Agent::Claude,
                 AgentConfig {

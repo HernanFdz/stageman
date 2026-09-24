@@ -25,6 +25,9 @@ repository.workspace = true
 # For the one address this crate composes with words in it: a platform's
 # own form, filled in through its query string.
 percent-encoding = "2.3.2"
+# The manifest is a struct serialised in its own field order, so that the
+# text is the same whatever a map does with its keys.
+serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.151"
 stageman-core.workspace = true
 thiserror = "2.0.20"

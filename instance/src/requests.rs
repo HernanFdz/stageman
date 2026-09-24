@@ -114,6 +114,22 @@ pub enum Request {
         /// The verdict.
         ending: Ending,
     },
+    /// The Instance page: the Apps this instance owns.
+    Apps,
+    /// A form to register an App with, minted for one attempt — see
+    /// `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
+    Registration {
+        /// The platform, by wire identifier.
+        platform: String,
+        /// Whether the App may be installed on any account, rather than on
+        /// its owner's only.
+        anywhere: bool,
+    },
+    /// Forget the App on a platform.
+    ForgetApp {
+        /// The platform, by wire identifier.
+        platform: String,
+    },
 }
 
 impl fmt::Debug for Request {
@@ -173,6 +189,16 @@ impl fmt::Debug for Request {
                 .field("job", job)
                 .field("ending", ending)
                 .finish(),
+            Self::Apps => f.write_str("Apps"),
+            Self::Registration { platform, anywhere } => f
+                .debug_struct("Registration")
+                .field("platform", platform)
+                .field("anywhere", anywhere)
+                .finish(),
+            Self::ForgetApp { platform } => f
+                .debug_struct("ForgetApp")
+                .field("platform", platform)
+                .finish(),
         }
     }
 }
@@ -193,6 +219,10 @@ pub enum Response {
     /// One job's page. Boxed, because a page carries the whole instruction
     /// and every other answer is a fraction of its size.
     Job(Box<stageman_wire::JobPage>),
+    /// The Instance page.
+    Apps(stageman_wire::Apps),
+    /// A form to register an App with.
+    Registration(stageman_wire::Registration),
     /// It was not done, and why.
     Refused(Refusal),
 }
@@ -251,6 +281,13 @@ impl Running {
                 job,
                 ending,
             } => self.retire(&project, &job, ending),
+            Request::Apps => Ok(Response::Apps(self.apps())),
+            Request::Registration { platform, anywhere } => views::platform_named(&platform)
+                .and_then(|platform| self.registration(platform, anywhere))
+                .map(Response::Registration),
+            Request::ForgetApp { platform } => {
+                views::platform_named(&platform).and_then(|platform| self.forget_app(platform))
+            }
         };
         let response = answered.unwrap_or_else(Response::Refused);
         self.defer(AppEffect::Respond { id, response });
@@ -1472,6 +1509,7 @@ mod tests {
     #[test]
     fn a_job_is_found_on_its_own_project_and_nowhere_else() {
         let mut state = State {
+            apps: std::collections::BTreeMap::new(),
             agents: BTreeMap::from([(
                 Agent::Claude,
                 AgentConfig {

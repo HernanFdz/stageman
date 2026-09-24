@@ -3941,6 +3941,7 @@ name = "stageman-platform"
 version = "0.0.0"
 dependencies = [
  "percent-encoding",
+ "serde",
  "serde_json",
  "stageman-core",
  "thiserror 2.0.20",

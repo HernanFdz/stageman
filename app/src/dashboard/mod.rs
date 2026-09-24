@@ -38,6 +38,7 @@ pub(crate) mod agents_view;
 mod env_file;
 mod error;
 mod home_view;
+mod instance_view;
 mod job_view;
 mod jobs_view;
 mod live;
@@ -52,6 +53,7 @@ use crate::ui::{THEME_SCRIPT, ThemeToggle};
 pub use agents_view::{Agent, AgentsView};
 pub use error::{DashboardError, DashboardResult};
 pub use home_view::{Home, HomeView, ProjectJob};
+pub use instance_view::{Apps, InstanceView, PlatformAppView, Registration};
 pub use job_view::{JobPage, ProjectJobView};
 pub use jobs_view::{Job, ProjectJobsView, Standing, Working};
 pub use live::{Live, LiveMark};
@@ -109,6 +111,12 @@ pub enum Route {
 
         #[route("/agents")]
         AgentsView {},
+
+        // What the instance configures about itself, after Agents in the
+        // order a new instance is set up — see
+        // `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
+        #[route("/instance")]
+        InstanceView {},
 
         #[route("/projects")]
         ProjectsView {},
@@ -186,6 +194,7 @@ pub fn Shell() -> Element {
                         NavLink { to: Route::HomeView {}, "Home" }
                         NavLink { to: Route::ProjectsView {}, "Projects" }
                         NavLink { to: Route::AgentsView {}, "Agents" }
+                        NavLink { to: Route::InstanceView {}, "Instance" }
                     }
                     div { class: "ml-auto flex items-center gap-4 self-center",
                         LiveMark { live }

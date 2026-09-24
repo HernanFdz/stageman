@@ -257,6 +257,20 @@ const fn wire_platform(platform: Platform) -> &'static str {
     }
 }
 
+/// The platform named by a wire identifier.
+///
+/// # Errors
+///
+/// Fails if nothing is called that.
+pub fn platform_named(identifier: &str) -> Result<Platform, Refusal> {
+    match identifier {
+        "github" => Ok(Platform::GitHub),
+        _ => Err(Refusal::AppMissing {
+            platform: identifier.to_owned(),
+        }),
+    }
+}
+
 /// What a screen calls a channel.
 pub const fn wire_channel(channel: Channel) -> &'static str {
     match channel {
@@ -745,6 +759,7 @@ mod tests {
 
     fn watching(name: &str) -> State {
         State {
+            apps: std::collections::BTreeMap::new(),
             agents: BTreeMap::from([(
                 Agent::Claude,
                 AgentConfig {

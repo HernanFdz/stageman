@@ -500,6 +500,7 @@ fn a_project(jobs: BTreeMap<JobId, Job>, bound: bool) -> Project {
 
 fn configured(project: Project) -> State {
     State {
+        apps: std::collections::BTreeMap::new(),
         agents: BTreeMap::from([(
             Agent::Claude,
             AgentConfig {
@@ -904,6 +905,20 @@ impl Simulation {
             .find(|(_, address)| address.starts_with("0.0.0.0:") == tools)
             .map(|(id, _)| *id)
             .expect("an address was taken before anything arrived on it")
+    }
+
+    /// Says the browser arrived at a path on the dashboard's listener, as
+    /// a platform's redirect brings it there.
+    pub fn visits_path(&mut self, at: Now, path: &str) -> Asked {
+        self.arriving(
+            self.listener(false),
+            at,
+            "GET",
+            path,
+            &[("host", "localhost")],
+            "127.0.0.1:50000",
+            "",
+        )
     }
 
     /// Says a request arrived on the tools' listener, and holds its body for
@@ -2261,18 +2276,25 @@ impl Simulation {
     /// repository, unless the next answer was scripted otherwise. False for
     /// a request that is not a platform's read.
     fn read_repository(&mut self, id: EffectId, request: &stageman_platform::Request) -> bool {
-        let Some(PlatformCall::Repository { owner, name, .. }) = PlatformCall::parse(request)
-        else {
+        let Some(call) = PlatformCall::parse(request) else {
             return false;
         };
         let responded = if let Some(why) = self.platform_failures.pop_front() {
             Responded::Failed(why)
         } else {
-            let (status, body) = self.platform_answers.pop_front().unwrap_or_else(|| {
-                (
+            let (status, body) = self.platform_answers.pop_front().unwrap_or_else(|| match call {
+                PlatformCall::Repository { owner, name, .. } => (
                     200,
                     format!(r#"{{"full_name":"{owner}/{name}","private":true}}"#),
-                )
+                ),
+                // An App created from a manifest, as the platform answers:
+                // the App object with the key beside it.
+                PlatformCall::Exchange { code, .. } => (
+                    201,
+                    format!(
+                        r#"{{"id":4242,"slug":"stageman-sim","client_id":"Iv1.sim{code}","pem":"-----BEGIN RSA PRIVATE KEY-----\nsim\n-----END RSA PRIVATE KEY-----\n","client_secret":"not-kept","webhook_secret":"not-kept","html_url":"https://github.com/apps/stageman-sim"}}"#
+                    ),
+                ),
             });
             Responded::Answered {
                 status,

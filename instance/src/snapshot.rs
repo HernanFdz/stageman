@@ -90,6 +90,9 @@ pub fn of(running: &Running) -> Value {
             "probes": value(&running.probes.iter().collect::<Vec<_>>()),
             "checks": value(&running.checks.iter().collect::<Vec<_>>()),
             "checking": value(&running.checking.iter().collect::<Vec<_>>()),
+            "registrations": value(&running.registrations),
+            "exchanging": value(&running.exchanging.iter().collect::<Vec<_>>()),
+            "app_failure": value(&running.app_failure),
             "sent": value(&running.sent.iter().collect::<Vec<_>>()),
             "listeners": keyed(running.listeners.iter().map(|(project, listener)| {
                 (project, json!({

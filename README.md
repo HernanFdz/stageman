@@ -62,6 +62,14 @@ a token pasted back is checked against GitHub before it is kept, as every
 credential you give a project is: a wrong one is refused beside the box,
 rather than found by the first job that needed it.
 
+**Or install an App instead of pasting a token.** The Instance page
+registers a GitHub App of your own by GitHub's own form, which sends you
+back here with the App's key; the key stays sealed in the instance's file
+and never leaves the machine. A project then installs the App on its
+repository rather than holding a token, and its jobs run on tokens minted
+per turn, good for an hour and for that one repository. Register it under
+your account, or under an organisation whose repositories it should reach.
+
 **It needs nothing named in the environment either.** Its file is encrypted
 under a key, and a key cannot live in the file it protects — so on a first run
 stageman generates one, keeps it in the ordinary place for configuration on

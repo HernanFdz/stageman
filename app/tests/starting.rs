@@ -370,6 +370,7 @@ const VARIABLE_VALUE: &str = "not-a-real-third-party-key";
 /// the moment variables did.
 fn watching(name: &str, repository: &str) -> State {
     State {
+        apps: std::collections::BTreeMap::new(),
         agents: BTreeMap::from([(
             Agent::Claude,
             AgentConfig {

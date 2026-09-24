@@ -19,6 +19,7 @@
 //! name none; the module under each platform does.
 
 mod github;
+mod registration;
 
 use std::collections::BTreeMap;
 
@@ -92,6 +93,78 @@ pub fn token_form(platform: Platform, project: Option<&str>) -> String {
     }
 }
 
+/// The form the browser posts to register an App the instance owns.
+///
+/// Where it goes, with the state token the platform hands back — see
+/// `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
+#[must_use]
+pub fn register_form(platform: Platform, state: &str, organisation: Option<&str>) -> String {
+    match platform {
+        Platform::GitHub => registration::register_form(state, organisation),
+    }
+}
+
+/// The manifest that form carries, for an instance at `instance` — scheme
+/// and all — and an App installable anywhere or on its owner's account
+/// only.
+///
+/// # Errors
+///
+/// Fails only if the manifest would not serialise, which is a fault in
+/// this code rather than anything the caller did.
+pub fn manifest(
+    platform: Platform,
+    instance: &str,
+    anywhere: bool,
+) -> Result<String, serde_json::Error> {
+    match platform {
+        Platform::GitHub => registration::manifest(instance, anywhere),
+    }
+}
+
+/// The path under the instance's address the browser comes back to with
+/// the registration's code.
+#[must_use]
+pub const fn registered_path(platform: Platform) -> &'static str {
+    match platform {
+        Platform::GitHub => registration::REGISTERED_PATH,
+    }
+}
+
+/// Renders converting the code the browser came back with into the App.
+#[must_use]
+pub fn exchange(platform: Platform, code: &str) -> Request {
+    match platform {
+        Platform::GitHub => registration::exchange(code),
+    }
+}
+
+/// What the platform's answer to [`exchange`] means.
+///
+/// # Errors
+///
+/// Fails if the platform did not create the App, could not be reached, or
+/// answered with something this does not read as an App.
+pub fn registered(
+    platform: Platform,
+    status: u16,
+    body: &[u8],
+) -> Result<Registered, PlatformError> {
+    match platform {
+        Platform::GitHub => registration::registered(status, body),
+    }
+}
+
+/// Where an App is seen on the platform, by its slug.
+#[must_use]
+pub fn app_link(platform: Platform, slug: &str) -> String {
+    match platform {
+        Platform::GitHub => registration::app_link(slug),
+    }
+}
+
+pub use registration::Registered;
+
 /// What a person calls the platform.
 #[must_use]
 pub const fn shown(platform: Platform) -> &'static str {
@@ -116,13 +189,20 @@ pub enum Call {
         /// What it is called there.
         name: String,
     },
+    /// A registration's code converted into the App.
+    Exchange {
+        /// Which platform.
+        platform: Platform,
+        /// The code the browser came back with.
+        code: String,
+    },
 }
 
 impl Call {
     /// What a request asks, if it is one this crate renders.
     #[must_use]
     pub fn parse(request: &Request) -> Option<Self> {
-        github::call(request)
+        github::call(request).or_else(|| registration::call(request))
     }
 }
 
@@ -178,6 +258,21 @@ pub enum PlatformError {
         /// What it answered.
         status: u16,
     },
+    /// It answered, and does not know the code a registration came back
+    /// with: one is good for an hour, and once.
+    #[error("{} does not know that code — one is good for an hour, and once", shown(*.platform))]
+    Spent {
+        /// Which platform.
+        platform: Platform,
+    },
+    /// It answered with something this cannot read.
+    #[error("{} answered something unreadable: {why}", shown(*.platform))]
+    Unreadable {
+        /// Which platform.
+        platform: Platform,
+        /// What could not be read.
+        why: String,
+    },
 }
 
 impl PlatformError {
@@ -192,8 +287,91 @@ impl PlatformError {
 
 #[cfg(test)]
 mod tests {
-    use super::{Call, PlatformError, reach, reached, shown, token_form};
+    use super::{
+        Call, PlatformError, app_link, exchange, manifest, reach, reached, register_form,
+        registered, shown, token_form,
+    };
     use stageman_core::{Platform, RepositoryAddress, Secret};
+
+    /// The manifest, asserted whole per `docs/conventions.md` §4: a
+    /// document this project composes. No webhook in it, for the reason the
+    /// module gives; the two addresses hang off the instance's own.
+    #[test]
+    fn the_manifest_names_the_instance_and_declares_no_webhook() {
+        assert_eq!(
+            manifest(Platform::GitHub, "http://localhost:8080", false).expect("serialises"),
+            r#"{"name":"stageman","url":"http://localhost:8080","description":"Installed on a repository so that stageman's jobs can clone it, push a branch, open a pull request and work an issue. Owned by whoever runs the instance; nothing else can use it.","redirect_url":"http://localhost:8080/instance/apps/github/registered","setup_url":"http://localhost:8080/instance/apps/github/installed","setup_on_update":true,"public":false,"default_permissions":{"contents":"write","issues":"write","pull_requests":"write","metadata":"read"},"default_events":[]}"#
+        );
+        assert!(
+            manifest(Platform::GitHub, "https://stageman.example.com", true)
+                .expect("serialises")
+                .contains(r#""public":true"#)
+        );
+        assert_eq!(
+            register_form(Platform::GitHub, "f00d", None),
+            "https://github.com/settings/apps/new?state=f00d"
+        );
+        assert_eq!(
+            register_form(Platform::GitHub, "f00d", Some("acme")),
+            "https://github.com/organizations/acme/settings/apps/new?state=f00d"
+        );
+        assert_eq!(
+            app_link(Platform::GitHub, "stageman-acme"),
+            "https://github.com/apps/stageman-acme"
+        );
+    }
+
+    /// The exchange reads back as what it asked, and the platform's answer
+    /// is read status by status: the App with its key, a spent code, and
+    /// an App that came without a field.
+    #[test]
+    fn an_exchange_reads_back_and_its_answer_is_read() {
+        let asking = exchange(Platform::GitHub, "c0de");
+        assert_eq!(asking.method, "POST");
+        assert_eq!(
+            asking.url,
+            "https://api.github.com/app-manifests/c0de/conversions"
+        );
+        assert!(asking.headers.contains_key("user-agent"));
+        assert_eq!(
+            Call::parse(&asking),
+            Some(Call::Exchange {
+                platform: Platform::GitHub,
+                code: "c0de".to_owned(),
+            })
+        );
+        let created = r#"{"id":7,"slug":"stageman-acme","client_id":"Iv1.abc","pem":"-----BEGIN RSA PRIVATE KEY-----\nk\n-----END RSA PRIVATE KEY-----\n","client_secret":"s","webhook_secret":"w","html_url":"https://github.com/apps/stageman-acme"}"#;
+        let read = registered(Platform::GitHub, 201, created.as_bytes()).expect("an App");
+        assert_eq!(
+            (read.id, read.slug.as_str(), read.client_id.as_str()),
+            (7, "stageman-acme", "Iv1.abc")
+        );
+        assert!(read.private_key.expose().starts_with("-----BEGIN"));
+        assert_eq!(
+            registered(Platform::GitHub, 404, b"{}"),
+            Err(PlatformError::Spent {
+                platform: Platform::GitHub
+            })
+        );
+        assert_eq!(
+            registered(
+                Platform::GitHub,
+                201,
+                br#"{"id":7,"slug":"s","client_id":"c"}"#
+            ),
+            Err(PlatformError::Unreadable {
+                platform: Platform::GitHub,
+                why: "the App came without its pem".to_owned(),
+            })
+        );
+        assert_eq!(
+            PlatformError::Spent {
+                platform: Platform::GitHub
+            }
+            .to_string(),
+            "GitHub does not know that code — one is good for an hour, and once"
+        );
+    }
 
     fn repository() -> RepositoryAddress {
         RepositoryAddress::parse("https://github.com/owner/name").expect("an address")

@@ -395,30 +395,23 @@ Intended next steps, in order, each with its reason. Written as intentions, not
 progress: "next X, because Y" — never "X is 60% done", which is both derivable
 and wrong within a day.
 
-- Next, what the dashboard pass of
+- Next, the rest of
+  `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`,
+  in two chunks, because the App's registration landed first: fetched
+  credentials for the projects that exist — the job's own warrant, the
+  wrapper the instance writes into the container, the credential route on
+  the tools endpoint, the handout without a token, and the container test
+  that a job fetches its own project's credential and is refused another's
+  — so that every existing project stops carrying its token; then
+  installations — the settings card's install route, the setup redirect,
+  the repository derived from the installation, minting and caching, and
+  the older-file bridges. Then the small things the dashboard pass of
   `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md` left:
-  the small things seen and not yet done — the projects list's rows padding
-  themselves on a rule that always matches, which the job rows had and
-  fixed on the list item; and whether the dialog takes focus when it opens
-  in a headed browser, which a headless one said it did not. Then a GitHub
-  App the operator owns, which is the destination
-  `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`
-  names for the guides and a record of its own, because it changes what a
-  project holds. The platform documents the whole flow: the settings page
-  posts a form to the platform with a manifest naming the App, its
-  permissions — contents, issues and pull requests — and a redirect
-  address of this instance's own, with webhooks declared and switched off,
-  since signals arrive through Slack; the browser comes back with a code
-  the instance exchanges within the hour for the App's identifier and
-  private key, kept sealed like every credential; the operator installs
-  the App on the one repository and comes back again with the
-  installation's identifier; and from then on a token is minted per turn,
-  good for an hour and scoped to that installation, so nothing is pasted
-  and nothing long-lived leaves the file. It answers the open question
-  above on scoped, short-lived credentials for the one platform there is,
-  and it is worth checking first that the redirect reaches an instance on
-  localhost, which the platform's documentation neither promises nor
-  denies.
+  the projects list's rows padding themselves on a rule that always
+  matches, which the job rows had and fixed on the list item; and whether
+  the dialog takes focus when it opens in a headed browser, which a
+  headless one said it did not. Then the Slack app the instance owns, on
+  the same page, with its own record.
 
 - Then make the container tests a recorder, because what they check is what
   the pinned runtime and the pinned agent actually do, which is a recording

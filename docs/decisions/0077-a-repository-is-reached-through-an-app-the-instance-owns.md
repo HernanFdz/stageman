@@ -40,10 +40,13 @@ App, and sends the browser back to the manifest's redirect address with a
 code. One unauthenticated request converts the code into the App's
 identifier, slug, client credentials, webhook secret and private key. The
 manifest declares the App's permissions, whether it may be installed on
-any account or only its owner's, and a webhook address, which is required
-and can be declared inactive. The code is good for an hour. The
-documentation neither promises nor denies a redirect to an address on
-localhost, so the first build measures it with the operator's browser.
+any account or only its owner's, and, if the App is to have a webhook, its
+address. The code is good for an hour. Measured on 2026-09-24 with the
+operator's browser: the platform refuses a webhook address on localhost
+as unreachable over the public Internet even with the hook declared
+inactive, which the documentation does not say, so the manifest declares
+no webhook at all; and it did not refuse the redirect and setup addresses
+on localhost in the same breath, which the first build's retry settles.
 
 **An installation is what a project holds, and it says which repositories
 it covers.** Installing the App is a link on the platform, with a state
@@ -90,12 +93,16 @@ and never carries it.**
   posts the manifest to the platform: named *stageman*, which the
   platform's own form lets the operator change if the name is taken;
   homepage, redirect and setup addresses on this instance; contents,
-  issues and pull requests write, with metadata read; a webhook address on
-  this instance, declared inactive, since signals arrive through Slack;
-  redirect on installation updates; and installable on any account or on
-  the owner's only, which the operator chooses on the page, because a
-  private App cannot be installed on an organisation that did not register
-  it. An organisation's App is registered from the organisation's form,
+  issues and pull requests write, with metadata read; no webhook, since
+  signals arrive through Slack and the platform refuses an address it
+  cannot reach; redirect on installation updates; and installable on any
+  account or on the owner's only, which the operator chooses on the page.
+  A private App installs on the account that registered it and nowhere
+  else; a public one is installable by anyone, related to the owner or
+  not, which is what an organisation's repository or a collaborator's
+  needs, and it grants whoever installs it nothing on its own — only this
+  instance holds the key, and only a project here can use an installation.
+  An organisation's App is registered from the organisation's form,
   which is a box on the page. The browser comes back with a code and the
   state the instance minted; the instance holds that request as 0076 holds
   a check, exchanges the code, and keeps the App's identifier, slug, client

@@ -35,6 +35,47 @@ pub struct Agent {
     pub used_by: Vec<String>,
 }
 
+// ------------------------------------------------------------------ apps
+
+/// What the Instance page shows.
+///
+/// The Apps this instance owns on each platform, and what the last
+/// registration said if it failed — see
+/// `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Apps {
+    /// The GitHub App, if one is registered.
+    pub github: Option<PlatformAppView>,
+    /// Why the last registration was not kept, if the last one was not.
+    pub failed: Option<String>,
+}
+
+/// An App the instance owns, as much of it as a page may know: never its
+/// key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlatformAppView {
+    /// Its slug, which is what a person reads.
+    pub slug: String,
+    /// Where it is seen on the platform.
+    pub link: String,
+}
+
+/// The form that registers an App, as the browser posts it.
+///
+/// Where to, and the manifest it carries, with the state token minted for
+/// this one attempt. Composed on the server, like every address a page
+/// uses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Registration {
+    /// Where the form posts to.
+    pub action: String,
+    /// The manifest, as the form's one field.
+    pub manifest: String,
+    /// The state token the platform hands back, for the page to show and
+    /// nobody to type.
+    pub state: String,
+}
+
 // -------------------------------------------------------------- instance
 
 /// One instance, as the line at the foot of every page shows it: this
@@ -923,6 +964,13 @@ pub enum Refusal {
     /// A turn is running in that job, so it cannot be retired yet.
     #[error("that job is still working — stop it before retiring it")]
     JobWorking,
+    /// No App is registered on that platform, so there is nothing to
+    /// forget.
+    #[error("no App is registered on {platform}")]
+    AppMissing {
+        /// The platform, as the screen names it.
+        platform: String,
+    },
     /// Something went wrong that the operator cannot act on from here.
     #[error("that did not work — the server log says why")]
     Failed,
@@ -944,9 +992,10 @@ impl Refusal {
     pub const fn status(&self) -> u16 {
         match self {
             Self::Failed => 500,
-            Self::UnknownAgent { .. } | Self::UnknownProject { .. } | Self::UnknownJob { .. } => {
-                404
-            }
+            Self::UnknownAgent { .. }
+            | Self::UnknownProject { .. }
+            | Self::UnknownJob { .. }
+            | Self::AppMissing { .. } => 404,
             // Well-formed requests that describe something invalid, which
             // the operator can fix by typing something different.
             Self::CredentialMissing
@@ -1016,6 +1065,7 @@ impl Refusal {
             | Self::ProjectBusy { .. }
             | Self::UnknownJob { .. }
             | Self::JobWorking
+            | Self::AppMissing { .. }
             | Self::Failed => None,
         }
     }

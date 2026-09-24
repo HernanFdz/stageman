@@ -23,6 +23,7 @@
 //! first write is the one a start depends on: it is what says the file can be
 //! written at all, and the address is announced only once it has landed.
 
+mod apps;
 mod boot;
 mod channel;
 mod checks;
@@ -558,6 +559,15 @@ pub struct Running {
     /// Credentials being checked, by the identifier the answer carries:
     /// which held request each is for, and what it is a check of.
     checks: BTreeMap<EffectId, (vocabulary::RequestId, checks::Check)>,
+    /// Registrations begun from the dashboard and not yet come back, oldest
+    /// first: the state token minted for each — see
+    /// `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
+    registrations: apps::Registrations,
+    /// Codes being converted into an App, by the identifier the answer
+    /// carries: the browser's request held for the answer.
+    exchanging: apps::Exchanging,
+    /// Why the last registration was not kept, until the next one is.
+    app_failure: Option<String>,
     /// Requests made to a channel, by the identifier the answer carries:
     /// what each was sent for.
     sent: BTreeMap<EffectId, channel::Sent>,
@@ -663,6 +673,9 @@ impl Running {
             probes: BTreeMap::new(),
             checking: BTreeMap::new(),
             checks: BTreeMap::new(),
+            registrations: apps::Registrations::new(),
+            exchanging: apps::Exchanging::new(),
+            app_failure: None,
             sent: BTreeMap::new(),
             deferred: VecDeque::new(),
             immediate: Vec::new(),
@@ -981,10 +994,12 @@ impl Running {
             Event::Ended { id, ended } => self.process_ended(id, &ended, &mut effects),
             Event::Probed { id, probed } => self.probed(id, probed, &mut effects),
             Event::Responded { id, responded } => {
-                // A credential's check first, since it is answered to a
-                // held request rather than to a channel; everything else
-                // was sent for a channel's sake.
-                if !self.checked(id, &responded, &mut effects) {
+                // A registration's exchange and a credential's check first,
+                // since each is answered to a held request rather than to a
+                // channel; everything else was sent for a channel's sake.
+                if !self.exchanged(id, &responded, &mut effects)
+                    && !self.checked(id, &responded, &mut effects)
+                {
                     self.responded(id, &responded, at, &mut effects);
                 }
             }

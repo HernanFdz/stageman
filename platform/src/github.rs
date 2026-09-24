@@ -87,7 +87,7 @@ pub fn reached(
 
 /// What the platform said, when it said anything: the message every
 /// refusal of its carries, or that it carried none.
-fn message(body: &[u8]) -> String {
+pub fn message(body: &[u8]) -> String {
     serde_json::from_slice::<serde_json::Value>(body)
         .ok()
         .and_then(|told| {
