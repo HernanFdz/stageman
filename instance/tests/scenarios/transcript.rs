@@ -13,11 +13,11 @@ use stageman_core::{JobId, Progress, Waiting};
 fn a_job_replied_to(world: &mut Simulation) -> (stageman_instance::Instance, JobId) {
     let idle = job(1);
     world.holding(&watching_a_channel(&[(
-        idle,
+        idle.clone(),
         Progress::Idle(Waiting::Asked),
         1,
     )]));
-    let (name, held) = Simulation::ours(&stageman_job::container(idle));
+    let (name, held) = Simulation::ours(&stageman_job::container(&idle));
     world.container(&name, held);
     let mut instance = world.wake(seed(1));
     world.run_until(&mut instance, 10);
@@ -37,7 +37,7 @@ fn root_reads(world: &Simulation) -> Vec<String> {
 }
 
 fn the_notice() -> String {
-    stageman_foreman::stopped_notice(&Waiting::Silent, None, "<@U0BOT>")
+    stageman_foreman::stopped_notice(&Waiting::Silent, None, "<@U0BOT>", &[])
 }
 
 /// What the root is told first: why the turn started, linking the reply.

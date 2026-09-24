@@ -288,11 +288,8 @@ fn a_foreman_starts_a_job_whose_room_is_made_before_its_agent_speaks() {
     assert!(!is_error(answer), "{answer:?}");
     let said = text_of(answer);
     assert!(said.starts_with("started job "), "{said}");
-    let started = said
-        .trim_start_matches("started job ")
-        .parse()
-        .expect("an identifier");
-    let started = stageman_core::JobId::from_uuid(started);
+    let started =
+        stageman_core::JobId::parse(said.trim_start_matches("started job ")).expect("a name");
 
     let shape = world.shape();
     let persisted = shape
@@ -304,7 +301,7 @@ fn a_foreman_starts_a_job_whose_room_is_made_before_its_agent_speaks() {
     let opened = world
         .first_call(|call| matches!(call, Call::CreateRoom { .. }))
         .expect("made");
-    let talks = world.talks_in(&stageman_job::container(started));
+    let talks = world.talks_in(&stageman_job::container(&started));
     let [run] = talks.as_slice() else {
         panic!("the job's agent was spoken to once: {talks:?}");
     };
@@ -321,7 +318,7 @@ fn a_foreman_starts_a_job_whose_room_is_made_before_its_agent_speaks() {
 
     let recorded = instance
         .state()
-        .job(started)
+        .job(&started)
         .expect("the job is on the record");
     assert_eq!(recorded.reason, "the parser is flaky");
     assert_eq!(
@@ -376,6 +373,7 @@ fn a_foreman_starts_a_job_whose_room_is_made_before_its_agent_speaks() {
                         &Waiting::Silent,
                         Some("<@U0HUMAN>"),
                         "<@U0BOT>",
+                        &[],
                     )
         }),
         "its room was told when the turn ended: {:?}",
@@ -416,11 +414,11 @@ fn starting_is_refused_to_a_job_and_for_a_kit_the_project_does_not_offer() {
     let mut world = Simulation::new();
     let idle = job(1);
     world.holding(&watching_a_channel(&[(
-        idle,
+        idle.clone(),
         Progress::Idle(Waiting::Asked),
         1,
     )]));
-    let (name, held) = Simulation::ours(&stageman_job::container(idle));
+    let (name, held) = Simulation::ours(&stageman_job::container(&idle));
     world.container(&name, held);
     let mut instance = world.wake(seed(1));
     world.says_in_room(100, 1, "go on");
@@ -549,11 +547,11 @@ fn a_jobs_claim_is_recorded_when_its_turn_ends() {
     let mut world = Simulation::new();
     let idle = job(1);
     world.holding(&watching_a_channel(&[(
-        idle,
+        idle.clone(),
         Progress::Idle(Waiting::Asked),
         1,
     )]));
-    let (name, held) = Simulation::ours(&stageman_job::container(idle));
+    let (name, held) = Simulation::ours(&stageman_job::container(&idle));
     world.container(&name, held);
     let mut instance = world.wake(seed(1));
     world.says_in_room(100, 1, "go on");
@@ -587,7 +585,7 @@ fn a_jobs_claim_is_recorded_when_its_turn_ends() {
         text_of(refused)
     );
     assert_eq!(
-        instance.state().job(idle).expect("the job").progress,
+        instance.state().job(&idle).expect("the job").progress,
         Progress::Idle(Waiting::Proposed),
         "the claim was read when the turn ended"
     );
@@ -616,6 +614,99 @@ fn a_jobs_claim_is_recorded_when_its_turn_ends() {
         world.tool_answer(asked4).map(|a| a.0),
         Some(403),
         "the turn ended, the warrant with it"
+    );
+}
+
+/// The pull requests a job says it opened are kept when its turn ends, as
+/// the union of everything ever claimed, and said in its room; a list that
+/// is not one of positive integers is refused with why — see
+/// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+#[test]
+fn a_jobs_pull_requests_are_kept_as_the_union_of_everything_claimed() {
+    let mut world = Simulation::new();
+    let idle = job(1);
+    world.holding(&watching_a_channel(&[(
+        idle.clone(),
+        Progress::Idle(Waiting::Asked),
+        1,
+    )]));
+    let (name, held) = Simulation::ours(&stageman_job::container(&idle));
+    world.container(&name, held);
+    let mut instance = world.wake(seed(1));
+    world.says_in_room(100, 1, "go on");
+    world.run_until(&mut instance, 150);
+    let warrant = world.warrants().last().expect("the job's warrant").clone();
+
+    let refused = world.calls(
+        200,
+        &warrant,
+        &call(
+            "stopping",
+            serde_json::json!({"because": "ready_for_review", "pull_requests": [12, 0]}),
+        ),
+    );
+    let noted = world.calls(
+        201,
+        &warrant,
+        &call(
+            "stopping",
+            serde_json::json!({"because": "ready_for_review", "pull_requests": [3, 1, 3]}),
+        ),
+    );
+    world.run_until(&mut instance, 5_000);
+
+    let answer = world.tool_answer(refused).expect("answered");
+    assert!(is_error(answer));
+    assert!(
+        text_of(answer).contains("0 is not a positive integer"),
+        "{}",
+        text_of(answer)
+    );
+    assert_eq!(
+        text_of(world.tool_answer(noted).expect("answered")),
+        "noted"
+    );
+    let recorded = instance.state().job(&idle).expect("the job");
+    assert_eq!(recorded.progress, Progress::Idle(Waiting::Proposed));
+    assert_eq!(
+        recorded.pull_requests.iter().copied().collect::<Vec<u64>>(),
+        [1, 3],
+        "sorted, and each once"
+    );
+    assert!(
+        world
+            .posts()
+            .iter()
+            .any(|(_, text)| text.contains("**Ready for review.** Opened #1, #3.")),
+        "its room was told what it opened, bare numbers where the repository is not an address: {:?}",
+        world.posts()
+    );
+
+    // A later turn that names only what is new cannot erase what came
+    // before, and a call that forgets the list changes nothing.
+    world.says_in_room(6_000, 1, "and the other one");
+    world.run_until(&mut instance, 6_100);
+    let again = world.warrants().last().expect("the next warrant").clone();
+    assert_ne!(again, warrant, "a new turn, a new warrant");
+    let later = world.calls(
+        6_200,
+        &again,
+        &call(
+            "stopping",
+            serde_json::json!({"because": "waiting_for_an_answer", "pull_requests": [2]}),
+        ),
+    );
+    world.run_until(&mut instance, 12_000);
+    assert_eq!(
+        text_of(world.tool_answer(later).expect("answered")),
+        "noted"
+    );
+    let recorded = instance.state().job(&idle).expect("the job");
+    assert_eq!(recorded.progress, Progress::Idle(Waiting::Asked));
+    assert_eq!(
+        recorded.pull_requests.iter().copied().collect::<Vec<u64>>(),
+        [1, 2, 3],
+        "the union of everything ever claimed"
     );
 }
 

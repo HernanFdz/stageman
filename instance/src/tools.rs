@@ -81,7 +81,7 @@ pub fn tools(warranted: &Warranted, kits: &[(String, String)]) -> Vec<Tool> {
     // thing a foreman and a job both do.
     let say = Tool {
         name: "say",
-        description: say_description(warranted.speaker).to_owned(),
+        description: say_description(&warranted.speaker).to_owned(),
         schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -170,8 +170,9 @@ pub fn tools(warranted: &Warranted, kits: &[(String, String)]) -> Vec<Tool> {
                     "title": {
                         "type": "string",
                         "description": "A few words naming the job, as a person would read \
-                                        them in a sidebar: the room it reports in is named \
-                                        after them.",
+                                        them in a sidebar. Its name is made from them, folded \
+                                        and given a short suffix, and its room, its page and \
+                                        its container are named after that.",
                     },
                 },
                 "required": ["reason", "instructions", "kit", "title"],
@@ -188,7 +189,7 @@ pub fn tools(warranted: &Warranted, kits: &[(String, String)]) -> Vec<Tool> {
 /// so for a job the tool is for the thread a person asked in; a foreman's
 /// reaches a room of its own, where the person who asked is not, so for a
 /// foreman the tool is how the person is answered.
-const fn say_description(speaker: Speaker) -> &'static str {
+const fn say_description(speaker: &Speaker) -> &'static str {
     match speaker {
         Speaker::Foreman(_) => {
             "Say something to the people on this project's channel, in Markdown: it \
@@ -221,9 +222,10 @@ fn stopping() -> Tool {
     Tool {
         name: STOPPING,
         description: "Call this immediately before you stop, every time, to say why you are \
-                      stopping. It is the only way anybody learns whether you are waiting on \
-                      them or offering them something to look at: a turn that ends without it \
-                      is recorded as having stopped for reasons nobody knows."
+                      stopping and which pull requests you opened. It is the only way anybody \
+                      learns whether you are waiting on them or offering them something to \
+                      look at: a turn that ends without it is recorded as having stopped for \
+                      reasons nobody knows."
             .to_owned(),
         schema: serde_json::json!({
             "type": "object",
@@ -235,6 +237,15 @@ fn stopping() -> Tool {
                                     there is something for a person to look at. \
                                     \"waiting_for_an_answer\" if you need something from a \
                                     person before you can go on.",
+                },
+                "pull_requests": {
+                    "type": "array",
+                    "items": { "type": "integer", "minimum": 1 },
+                    "description": "The numbers of the pull requests you opened on this \
+                                    project's repository, if any: #12 is 12. Give every one \
+                                    you opened, whichever reason you are stopping for — a \
+                                    draft opened before a question is still something to \
+                                    look at.",
                 },
             },
             "required": ["because"],
@@ -264,8 +275,9 @@ pub enum Call {
         /// The message to reply under, as the agent was shown it.
         to: Option<String>,
     },
-    /// Saying why this turn is about to end, spelled as it arrived.
-    Stopping(String),
+    /// Saying why this turn is about to end, and which pull requests it
+    /// opened.
+    Stopping(Stopping),
     /// Asking to watch, or to stop watching, the room this turn was asked in.
     Watching(Watching),
     /// A tool this instance does not serve, by name.
@@ -340,6 +352,17 @@ impl From<Claim> for Waiting {
             Claim::Proposed => Self::Proposed,
         }
     }
+}
+
+/// What a call saying why a turn is about to end carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stopping {
+    /// Why, spelled as it arrived.
+    pub because: String,
+    /// The pull requests it opened, by number — or why the list it gave
+    /// cannot be read, which the call is answered with rather than half of
+    /// the list being kept.
+    pub pull_requests: Result<Vec<u64>, String>,
 }
 
 /// What a request to start a job carries.
@@ -420,7 +443,13 @@ fn calling(params: &serde_json::Value) -> Call {
         };
     }
     if name == STOPPING {
-        return Call::Stopping(field("because"));
+        let pull_requests = arguments
+            .and_then(|given| given.get("pull_requests"))
+            .map_or_else(|| Ok(Vec::new()), pull_requests_of);
+        return Call::Stopping(Stopping {
+            because: field("because"),
+            pull_requests,
+        });
     }
     if name == WATCH_ROOM {
         return Call::Watching(Watching::Start);
@@ -437,6 +466,28 @@ fn calling(params: &serde_json::Value) -> Call {
         kit: field("kit"),
         title: field("title"),
     })
+}
+
+/// The pull requests a stopping call names, as positive integers, or why
+/// the list cannot be read: the schema says integers from one, and a call
+/// that says otherwise is told so rather than having half its list kept.
+fn pull_requests_of(given: &serde_json::Value) -> Result<Vec<u64>, String> {
+    let Some(listed) = given.as_array() else {
+        return Err(format!(
+            "pull_requests must be a list of numbers, and {given} is not one"
+        ));
+    };
+    listed
+        .iter()
+        .map(|item| {
+            item.as_u64().filter(|number| *number > 0).ok_or_else(|| {
+                format!(
+                    "{item} is not a positive integer; a pull request is named by its \
+                     number, so #12 is 12"
+                )
+            })
+        })
+        .collect()
 }
 
 /// One successful answer, in the protocol's envelope.
@@ -600,8 +651,8 @@ impl Running {
                     self.asking.insert(id, incoming.id);
                 }
             }
-            Call::Stopping(because) => {
-                let result = self.stopping_because(&warranted, &because);
+            Call::Stopping(stopping) => {
+                let result = self.stopping_because(&warranted, &stopping);
                 self.answer(
                     id,
                     OK,
@@ -685,7 +736,7 @@ impl Running {
                     Called {
                         nearby: nearby(&request.peer),
                         bearer: presented(request),
-                        at: stamped(request.at),
+                        at: self.stamp(),
                     },
                 );
                 effects.push(Effect::Answer {
@@ -752,8 +803,8 @@ impl Running {
 
     /// Which project a bearer belongs to.
     fn project_of(&self, warranted: &Warranted) -> Option<ProjectId> {
-        match warranted.speaker {
-            Speaker::Foreman(project) => Some(project),
+        match &warranted.speaker {
+            Speaker::Foreman(project) => Some(*project),
             Speaker::Job(job) => self.state.project_of(job),
         }
     }
@@ -841,9 +892,9 @@ impl Running {
             return Err("nothing was said, so nothing was posted".to_owned());
         }
         // Where the speaker's own words go: the root of the room it owns.
-        let own = match warranted.speaker {
+        let own = match &warranted.speaker {
             Speaker::Job(job) => crate::turns::speaking_for(&self.state, job),
-            Speaker::Foreman(project) => self.state.projects.get(&project).and_then(|watched| {
+            Speaker::Foreman(project) => self.state.projects.get(project).and_then(|watched| {
                 let room = watched.foreman_room.clone()?;
                 let bound = watched.channels.get(&room.channel)?;
                 Some((bound.speaking(), Place::root(room)))
@@ -933,29 +984,35 @@ impl Running {
         Ok(said)
     }
 
-    /// Records what a job says about why it is about to stop.
+    /// Records what a job says about why it is about to stop, and which
+    /// pull requests it opened.
     ///
     /// **Recording a claim is not a state change.** A job stays working until
     /// its agent actually stops, because the reply gate leans on that to keep
     /// two replies from resuming one container; what this writes is consulted
     /// when the turn ends and never before. See
-    /// `docs/decisions/0055-a-job-says-why-it-stopped.md`.
+    /// `docs/decisions/0055-a-job-says-why-it-stopped.md`. The pull requests
+    /// are noted against the turn the same way, and kept on the job when it
+    /// ends whichever way it ends, per
+    /// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
     ///
     /// # Errors
     ///
     /// Fails for a foreman, which has no state between turns for a claim to
-    /// be recorded against; for a spelling that is not a claim; and for a job
+    /// be recorded against; for a spelling that is not a claim; for a list
+    /// of pull requests that is not one of positive integers; and for a job
     /// with no turn running, which is what a claim arriving after its own
     /// turn was stopped looks like.
     fn stopping_because(
         &mut self,
         warranted: &Warranted,
-        because: &str,
+        stopping: &Stopping,
     ) -> Result<&'static str, String> {
-        let Speaker::Job(job) = warranted.speaker else {
+        let Speaker::Job(job) = &warranted.speaker else {
             tracing::warn!("a foreman said why it was stopping");
             return Err(format!("this instance serves no tool called {STOPPING:?}"));
         };
+        let because = stopping.because.as_str();
         let Some(claim) = Claim::spelled(because) else {
             let offered = Claim::ALL
                 .iter()
@@ -966,8 +1023,10 @@ impl Running {
                 "{because:?} is not one of the reasons this takes. Use {offered}."
             ));
         };
-        if let Some(turn) = self.turns.get_mut(&Speaker::Job(job)) {
+        let opened = stopping.pull_requests.clone()?;
+        if let Some(turn) = self.turns.get_mut(&Speaker::Job(job.clone())) {
             turn.claimed = Some(claim.into());
+            turn.pull_requests.extend(opened);
             Ok("noted")
         } else {
             tracing::debug!(%job, "said why it was stopping, with no turn running");
@@ -1027,8 +1086,8 @@ fn presented(request: &Arrival) -> Option<String> {
         .map(|presented| presented.trim().to_owned())
 }
 
-/// When a request arrived, as the domain spells a time.
-fn stamped(millis: u64) -> Timestamp {
+/// A moment on the world's clock, as the domain spells a time.
+pub fn stamped(millis: u64) -> Timestamp {
     let Ok(millis) = i64::try_from(millis) else {
         return Timestamp::UNIX_EPOCH;
     };
@@ -1053,7 +1112,6 @@ mod tests {
                 .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
                 .collect(),
             peer: peer.to_owned(),
-            at: 1_757_000_000_000,
         }
     }
 
@@ -1126,7 +1184,9 @@ mod tests {
         );
     }
 
-    use super::{Call, Claim, Starting, Tool, Watching, calling, decode, named_kit, tools};
+    use super::{
+        Call, Claim, Starting, Stopping, Tool, Watching, calling, decode, named_kit, tools,
+    };
     use crate::vocabulary::{Speaker, Warranted};
     use stageman_core::{
         Agent, AgentConfig, Kit, KitConfig, KitName, Project, ProjectId, Secret, State, Thread,
@@ -1244,7 +1304,10 @@ mod tests {
             calling(
                 &serde_json::json!({"name": "stopping", "arguments": {"because": "ready_for_review"}})
             ),
-            Call::Stopping("ready_for_review".to_owned())
+            Call::Stopping(Stopping {
+                because: "ready_for_review".to_owned(),
+                pull_requests: Ok(Vec::new()),
+            })
         );
         assert_eq!(
             calling(&serde_json::json!({"name": "watch_room"})),
@@ -1268,6 +1331,45 @@ mod tests {
             }),
             "a missing argument is an empty one, refused where the job is created"
         );
+    }
+
+    /// A stopping call names the pull requests it opened as positive
+    /// integers, in the order given, or is told exactly why its list cannot
+    /// be read — so that half a list is never kept.
+    #[test]
+    fn a_stopping_call_names_its_pull_requests_or_is_told_why_not() {
+        assert_eq!(
+            calling(&serde_json::json!({
+                "name": "stopping",
+                "arguments": {"because": "waiting_for_an_answer", "pull_requests": [12, 3]}
+            })),
+            Call::Stopping(Stopping {
+                because: "waiting_for_an_answer".to_owned(),
+                pull_requests: Ok(vec![12, 3]),
+            }),
+            "the numbers as given; the job sorts and unites them"
+        );
+        for (given, why) in [
+            (
+                serde_json::json!({"pull_requests": [12, 0]}),
+                "0 is not a positive integer",
+            ),
+            (
+                serde_json::json!({"pull_requests": ["#12"]}),
+                "\"#12\" is not a positive integer",
+            ),
+            (serde_json::json!({"pull_requests": 12}), "12 is not one"),
+        ] {
+            let mut arguments = given;
+            arguments["because"] = serde_json::json!("ready_for_review");
+            let Call::Stopping(stopping) =
+                calling(&serde_json::json!({"name": "stopping", "arguments": arguments}))
+            else {
+                panic!("a stopping call");
+            };
+            let refused = stopping.pull_requests.expect_err("refused");
+            assert!(refused.contains(why), "{refused}");
+        }
     }
 
     /// A foreman is offered the tools that start jobs and watch rooms and a
@@ -1390,7 +1492,7 @@ mod tests {
     #[test]
     fn the_speaking_tool_is_described_to_each_speaker_exactly() {
         assert_eq!(
-            say_description(Speaker::Foreman(ProjectId::from_uuid(Uuid::from_u128(1)))),
+            say_description(&Speaker::Foreman(ProjectId::from_uuid(Uuid::from_u128(1)))),
             "Say something to the people on this project's channel, in Markdown: it is \
              rendered, so headings, lists, code, tables and links all show. It posts under \
              the message you name with `to`, which is how a person is answered where they \
@@ -1398,7 +1500,7 @@ mod tests {
              output already goes and the person who asked is not."
         );
         assert_eq!(
-            say_description(Speaker::Job(JobId::from_uuid(Uuid::from_u128(2)))),
+            say_description(&Speaker::Job(JobId::from_uuid(Uuid::from_u128(2)))),
             "Say something to the people in this job's room, in Markdown: it is rendered, \
              so headings, lists, code, tables and links all show. It posts at the root of \
              your room, or under a message when you name it with `to`, as each message is \

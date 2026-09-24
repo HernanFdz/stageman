@@ -8,7 +8,12 @@ spends the mechanism
 `docs/decisions/0034-tools-are-served-not-shipped.md` built. Since
 `docs/decisions/0069-a-message-reaches-a-working-job.md` a claim made
 in a turn is cleared when a message is steered into it, and the job is told
-to claim again before it stops.
+to claim again before it stops. Since
+`docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md` the same
+tool takes the pull requests the job opened, by number, which the job keeps
+as the union of everything ever claimed, whichever way the turn ends and
+however many messages were steered into it — a pull request is a fact about
+the platform, not about the turn — and which the notice below carries.
 
 ## Context
 

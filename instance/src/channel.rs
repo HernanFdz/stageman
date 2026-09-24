@@ -246,7 +246,7 @@ impl Running {
             let own_room = match speaker {
                 Speaker::Job(job) => {
                     self.state
-                        .job(*job)
+                        .job(job)
                         .and_then(|recorded| recorded.room.as_ref())
                         == Some(&place.room)
                 }
@@ -483,7 +483,7 @@ impl Running {
         self.keep(
             channel,
             stageman_channel::set_purpose(channel, speaking, room, purpose),
-            Keeping::Describing { job },
+            Keeping::Describing { job: job.clone() },
         );
         self.keep(
             channel,
@@ -514,13 +514,13 @@ impl Running {
     /// An archived room leaves the sidebar, stays readable, and takes no
     /// more posts — which is what makes a retired job's conversation
     /// finished on the platform as well as here.
-    pub fn archive_room_of(&mut self, job: JobId) {
+    pub fn archive_room_of(&mut self, job: &JobId) {
         let Some(project) = self.state.project_of(job) else {
             return;
         };
         let Some((channel, speaking, room)) =
             self.state.projects.get(&project).and_then(|watched| {
-                let room = watched.jobs.get(&job)?.room.clone()?;
+                let room = watched.jobs.get(job)?.room.clone()?;
                 let bound = watched.channels.get(&room.channel)?;
                 Some((room.channel, bound.speaking(), room.id))
             })
@@ -667,7 +667,7 @@ impl Running {
                     }
                     Responded::Failed(why) => Err(unreachable(why)),
                 };
-                self.room_created(job, origin, outcome);
+                self.room_created(&job, origin, outcome);
             }
             Purpose::ForemanRoom { project } => {
                 let outcome = match responded {
@@ -703,14 +703,14 @@ impl Running {
                     }
                     Responded::Failed(why) => Err(unreachable(why)),
                 };
-                self.run_grown(speaker, run, outcome);
+                self.run_grown(&speaker, run, outcome);
             }
             Purpose::Reading { speaker, room } => {
                 // Read as a frame is, given who this instance is on the
                 // channel, which its listener was told before it could hear
                 // the message this is for.
-                let us = match speaker {
-                    Speaker::Foreman(project) => Some(project),
+                let us = match &speaker {
+                    Speaker::Foreman(project) => Some(*project),
                     Speaker::Job(job) => self.state.project_of(job),
                 }
                 .and_then(|project| self.listeners.get(&project))
@@ -731,7 +731,7 @@ impl Running {
                     }
                     (Responded::Failed(why), _) => Err(unreachable(why)),
                 };
-                self.thread_read_back(speaker, outcome);
+                self.thread_read_back(&speaker, outcome);
             }
         }
     }
@@ -751,7 +751,7 @@ impl Running {
                     tracing::warn!(%why, "the room could not be spoken to");
                 }
             }
-            Post::Transcript { speaker, run } => self.run_posted(*speaker, *run, outcome),
+            Post::Transcript { speaker, run } => self.run_posted(speaker, *run, outcome),
             // Answered with the identifier of what was posted, as the agent
             // may name it later.
             Post::Saying { request } => {
@@ -787,7 +787,7 @@ impl Running {
                     self.next_post(room);
                 }
             }
-            Purpose::Creating { job, origin } => self.room_created(job, origin, Err(never())),
+            Purpose::Creating { job, origin } => self.room_created(&job, origin, Err(never())),
             Purpose::ForemanRoom { project } => {
                 self.foreman_room_made(project, sent.channel, Err(never()));
             }
@@ -797,7 +797,7 @@ impl Running {
             Purpose::Question(
                 Question::Introducing { project } | Question::Locating { project },
             ) => self.unasked(project, effects),
-            Purpose::Growing { speaker, run } => self.run_grown(speaker, run, Err(never())),
+            Purpose::Growing { speaker, run } => self.run_grown(&speaker, run, Err(never())),
             Purpose::Reading { speaker, .. } => self.thread_unasked(speaker),
         }
     }

@@ -42,7 +42,7 @@ use std::time::Duration;
 
 use stageman_core::{
     Agent, AgentConfig, Channel, ChannelConfig, Job, JobId, Key, Kit, KitConfig, KitName,
-    NONCE_LEN, Progress, Project, ProjectId, Secret, State, Timestamp, Waiting,
+    NONCE_LEN, Outcome, Progress, Project, ProjectId, Secret, State, Timestamp, Waiting,
 };
 
 /// A key, as an operator would supply it: thirty-two bytes of base64.
@@ -136,6 +136,16 @@ impl Serving {
         ))
     }
 
+    /// Opens a `GET` and hands back the socket with only the request sent,
+    /// for a response that does not end: the caller reads what it waits for.
+    fn opened(&self, path: &str) -> TcpStream {
+        let mut connection = TcpStream::connect(&self.address).expect("the dashboard accepts");
+        connection
+            .write_all(format!("GET {path} HTTP/1.1\r\nHost: {}\r\n\r\n", self.address).as_bytes())
+            .expect("the request is sent");
+        connection
+    }
+
     /// Writes a request and reads everything the server says back.
     fn request(&self, request: &str) -> String {
         let mut connection = TcpStream::connect(&self.address).expect("the dashboard accepts");
@@ -157,6 +167,27 @@ impl Serving {
         assert!(!response.is_empty(), "the connection closed saying nothing");
         String::from_utf8_lossy(&response).into_owned()
     }
+}
+
+/// Reads from an open response until `needle` has arrived, or gives up
+/// after the same patience a start is given.
+fn until(connection: &mut TcpStream, needle: &str) -> String {
+    connection
+        .set_read_timeout(Some(PATIENCE))
+        .expect("a timeout is set");
+    let mut seen = Vec::new();
+    let mut chunk = [0_u8; 4096];
+    while !String::from_utf8_lossy(&seen).contains(needle) {
+        match connection.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => seen.extend_from_slice(chunk.get(..read).unwrap_or_default()),
+            Err(failure) => panic!(
+                "waiting for {needle:?}: {failure}; seen so far: {}",
+                String::from_utf8_lossy(&seen)
+            ),
+        }
+    }
+    String::from_utf8_lossy(&seen).into_owned()
 }
 
 impl Drop for Serving {
@@ -365,7 +396,10 @@ fn watching(name: &str, repository: &str) -> State {
                 )]),
                 variables: BTreeMap::from([(
                     stageman_core::VariableName::new("STRIPE_API_KEY").expect("a deliverable name"),
-                    Secret::new(VARIABLE_VALUE.to_owned()),
+                    stageman_core::Variable {
+                        value: Secret::new(VARIABLE_VALUE.to_owned()),
+                        note: "the payment provider, in test mode".to_owned(),
+                    },
                 )]),
                 jobs: BTreeMap::new(),
                 attending: stageman_core::Attending::default(),
@@ -708,7 +742,7 @@ fn the_route_the_page_reads_through_answers_on_its_own() {
     written(&snapshot, &watched);
 
     let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
-    let answer = running.get("/api/instance");
+    let answer = running.get("/api/home");
 
     assert!(answer.contains("200 OK"), "{answer}");
     assert!(answer.contains("aviary"), "{answer}");
@@ -731,7 +765,13 @@ fn nothing_served_carries_a_credential() {
 
     let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
 
-    for served in [running.get("/"), running.get("/api/instance")] {
+    for served in [
+        running.get("/"),
+        running.get("/api/home"),
+        running.get("/api/instance"),
+        running.get("/projects/00000000-0000-0000-0000-000000000000/settings"),
+        running.get("/projects/00000000-0000-0000-0000-000000000000/jobs/00000000-0000-0000-0000-000000000007"),
+    ] {
         for secret in [
             VARIABLE_VALUE,
             "not-a-real-credential",
@@ -836,10 +876,48 @@ fn the_dashboard_counts_working_jobs_rather_than_all_of_them() {
     written(&snapshot, &state);
 
     let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
-    let answer = running.get("/api/instance");
+    let answer = running.get("/api/home");
 
     assert!(answer.contains(r#""working":0"#), "{answer}");
     assert!(answer.contains(r#""jobs":2"#), "{answer}");
+}
+
+/// The first page arrives with its three regions and the projects on it.
+///
+/// The fixture's two jobs are idle and have no container, so the waking
+/// sweep retires them as lost before anything serves a page — which is why
+/// nothing needs a person here, and why the count of jobs is still two. What
+/// goes under *needs you* is pinned where a job can be idle without a
+/// runtime, in the instance's own tests; this checks the page and the route
+/// agree about the instance a binary actually started from.
+#[test]
+fn the_first_page_arrives_with_its_regions_and_the_projects() {
+    let (_kept, snapshot) = scratch();
+    let mut state = watching("aviary", "https://example.invalid/aviary");
+    let project = state.projects.values_mut().next().expect("the project");
+    project.jobs.insert(
+        JobId::from_uuid(uuid::Uuid::from_u128(1)),
+        job(Progress::Idle(Waiting::Silent)),
+    );
+    project.jobs.insert(
+        JobId::from_uuid(uuid::Uuid::from_u128(2)),
+        job(Progress::Idle(Waiting::Failed(
+            "it did not work".to_owned(),
+        ))),
+    );
+    written(&snapshot, &state);
+
+    let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
+
+    let home = running.get("/api/home");
+    assert!(home.contains(r#""needs_you":[]"#), "{home}");
+    assert!(home.contains(r#""working":[]"#), "{home}");
+    assert!(home.contains(r#""jobs":2"#), "{home}");
+
+    let page = running.get("/");
+    for region in ["Needs you", "Working now", "Projects", "aviary"] {
+        assert!(page.contains(region), "no {region} on the page: {page}");
+    }
 }
 
 /// An agent a project still names cannot be forgotten.
@@ -889,6 +967,123 @@ fn a_credential_is_taken_once_and_never_returned() {
     }
 }
 
+/// A project is made and changed on pages of their own, at addresses of
+/// their own: the settings page shows what the project is, and a new project
+/// is that page with nothing filled in — see
+/// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+#[test]
+fn a_project_has_a_settings_page_and_a_new_one_is_that_page_empty() {
+    let (_kept, snapshot) = scratch();
+    let watched = watching("aviary", "https://example.invalid/aviary");
+    written(&snapshot, &watched);
+    let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
+
+    let fresh = running.get("/projects/new");
+    assert!(fresh.contains("200 OK"), "{fresh}");
+    assert!(fresh.contains("New project"), "{fresh}");
+    assert!(
+        !fresh.contains("no project has the identifier"),
+        "the static address was taken for an identifier: {fresh}"
+    );
+
+    let settings = running.get("/projects/00000000-0000-0000-0000-000000000000/settings");
+    assert!(settings.contains("200 OK"), "{settings}");
+    assert!(
+        settings.contains(r#"value="aviary""#),
+        "the name should be in its box: {settings}"
+    );
+    assert!(settings.contains("example.invalid/aviary"), "{settings}");
+    // A text area's value is its text and not an attribute, so a box the
+    // server rendered from an attribute alone arrives empty. The kit's
+    // description is the one text this helper fills.
+    assert!(
+        settings.contains("explains what it did.</textarea>"),
+        "a text area rendered on the server carries its value as its text: {settings}"
+    );
+}
+
+/// A job has a page of its own, at an address that keeps its identifier:
+/// its reason, what it was told, and its standing — see
+/// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+#[test]
+fn a_job_has_a_page_of_its_own() {
+    let (_kept, snapshot) = scratch();
+    let mut watched = watching("aviary", "https://github.com/example/aviary");
+    watched
+        .projects
+        .get_mut(&ProjectId::from_uuid(uuid::Uuid::nil()))
+        .expect("the project")
+        .jobs
+        // Over already, so that the waking sweep — which finds no container
+        // for it and would otherwise record it lost — leaves it as written.
+        .insert(JobId::from_uuid(uuid::Uuid::from_u128(7)), {
+            let mut done = job(Progress::Retired(Outcome::Done));
+            done.pull_requests.insert(7);
+            done
+        });
+    written(&snapshot, &watched);
+    let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
+
+    let page = running.get(
+        "/projects/00000000-0000-0000-0000-000000000000/jobs/00000000-0000-0000-0000-000000000007",
+    );
+    assert!(page.contains("200 OK"), "{page}");
+    assert!(page.contains("because a test said so"), "{page}");
+    assert!(page.contains("do the thing"), "{page}");
+    assert!(
+        page.contains("This job is over"),
+        "a job that is over offers the mark and no control: {page}"
+    );
+    assert!(
+        page.contains(r#"href="https://github.com/example/aviary""#),
+        "the repository is a link where it is an address: {page}"
+    );
+    assert!(
+        page.contains(r#"href="https://github.com/example/aviary/pull/7""#),
+        "a pull request it opened is linked by number: {page}"
+    );
+
+    let missing = running.get(
+        "/projects/00000000-0000-0000-0000-000000000000/jobs/00000000-0000-0000-0000-00000000dead",
+    );
+    assert!(missing.contains("no job here is"), "{missing}");
+}
+
+/// A page learns of change from a tick: a write that lands is told to every
+/// open stream, and nothing is told while nothing lands — see
+/// `docs/decisions/0071-a-page-learns-of-change-from-a-tick.md`.
+///
+/// Through the binary, because the stream crosses the forwarder the instance
+/// puts in front of the framework, and a forwarder that buffered it would
+/// deliver no tick, ever.
+#[test]
+fn a_write_that_lands_is_told_to_an_open_page_as_a_tick() {
+    let (_kept, snapshot) = scratch();
+    let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
+
+    let mut ticks = running.opened("/api/ticks");
+    // The head and the opening frame arrive at once, and then nothing: no
+    // write has landed since the stream was opened.
+    let opening = until(&mut ticks, "open");
+    assert!(opening.contains("200 OK"), "{opening}");
+    assert!(
+        !opening.contains("tick"),
+        "a tick before any write: {opening}"
+    );
+
+    let saved = running.post(
+        "/api/agents/configure",
+        r#"{"agent":"claude","credential":"sk-not-a-real-token"}"#,
+    );
+    assert!(saved.contains("200 OK"), "{saved}");
+
+    let heard = until(&mut ticks, "tick");
+    assert!(
+        heard.contains("tick"),
+        "the write that landed was not told: {heard}"
+    );
+}
+
 /// The navigation says which screen you are on.
 ///
 /// Checked through the served markup because that is the only place the answer
@@ -917,6 +1112,30 @@ fn the_navigation_marks_the_screen_being_looked_at() {
     assert!(
         !elsewhere.contains("font-medium"),
         "a screen you are not on should not be: {elsewhere}"
+    );
+}
+
+/// The look is chosen before the page paints, by a script the page carries.
+///
+/// The server renders no theme of its own: it does not know what the browser
+/// holds, and a class it guessed would flash — see
+/// `docs/decisions/0072-the-dashboard-has-a-dark-theme.md`. So the page must
+/// carry the script that decides, and must not carry a decision.
+#[test]
+fn the_page_carries_the_theme_script_and_no_theme_of_its_own() {
+    let (_kept, snapshot) = scratch();
+    let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
+
+    let page = running.get("/");
+
+    assert!(page.contains("stagemanTheme"), "no theme script: {page}");
+    assert!(
+        page.contains("prefers-color-scheme"),
+        "the script should follow the system: {page}"
+    );
+    assert!(
+        !page.contains(r#"class="dark""#),
+        "the server decided a theme: {page}"
     );
 }
 

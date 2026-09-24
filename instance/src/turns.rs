@@ -36,6 +36,7 @@
 //! left. This used to be a lock in the world; it is held state here.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use stageman_agent::{
@@ -209,6 +210,12 @@ pub struct Turn {
     pub stopping: bool,
     /// What the agent said about why it is stopping, if it has said.
     pub claimed: Option<Waiting>,
+    /// The pull requests it said it opened during this turn, by number.
+    /// Kept when the turn ends whichever way it ends and however many
+    /// messages were steered into it: a pull request is a fact about the
+    /// platform, not about the turn — see
+    /// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+    pub pull_requests: BTreeSet<u64>,
     /// Where anything was posted during this turn, by the agent through the
     /// tool or by this instance, among the places it could have been asked
     /// in: what decides whether a thread it was asked in is signposted to
@@ -245,6 +252,7 @@ impl Turn {
         Self {
             stopping: false,
             claimed: None,
+            pull_requests: BTreeSet::new(),
             spoke_in: Vec::new(),
             delivery: Delivery::Open,
             notify: false,
@@ -259,6 +267,7 @@ impl Turn {
         Self {
             stopping: false,
             claimed: None,
+            pull_requests: BTreeSet::new(),
             spoke_in: Vec::new(),
             delivery: Delivery::Open,
             notify: true,
@@ -339,12 +348,38 @@ pub fn outcome(answer: &Answer, claimed: Option<Waiting>) -> Progress {
     }
 }
 
+/// The pull requests a job has said it opened, as Markdown references for
+/// a notice: linked where the repository is an address, and the bare number
+/// otherwise. Composed here and never by the browser, per
+/// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+pub fn pull_requests_of(state: &State, job: &JobId) -> Vec<String> {
+    let Some(recorded) = state.job(job) else {
+        return Vec::new();
+    };
+    let repository = state
+        .project_of(job)
+        .and_then(|project| state.projects.get(&project))
+        .map(|project| project.repository.as_str());
+    recorded
+        .pull_requests
+        .iter()
+        .map(|number| {
+            repository
+                .and_then(|repository| crate::views::pull_request_link(repository, *number))
+                .map_or_else(
+                    || format!("#{number}"),
+                    |link| format!("[#{number}]({link})"),
+                )
+        })
+        .collect()
+}
+
 /// Where to speak on a job's behalf, if it has anywhere: the root of its
 /// room.
 ///
 /// The several ways of having nowhere — no project, no room, a room on a
 /// channel the project no longer binds — all answer nothing.
-pub fn speaking_for(state: &State, job: JobId) -> Option<(Speaking, Place)> {
+pub fn speaking_for(state: &State, job: &JobId) -> Option<(Speaking, Place)> {
     let project = state.project_of(job)?;
     let room = state.job(job)?.room.clone()?;
     let bound = state
@@ -445,8 +480,8 @@ impl Running {
         // — its thread being read, its room being made — takes effect now:
         // the turn ends at its first step, as one stopped before talking
         // does.
-        if let Speaker::Job(job) = speaker
-            && self.stops_held.remove(&job)
+        if let Speaker::Job(job) = &speaker
+            && self.stops_held.remove(job)
         {
             tracing::info!(%job, "a stop asked for before its turn was registered takes effect");
             turn.stopping = true;
@@ -456,13 +491,17 @@ impl Running {
                 &Command::Present {
                     image: image_of(*agent, *role),
                 },
-                Asked::Present { speaker },
+                Asked::Present {
+                    speaker: speaker.clone(),
+                },
             ),
             Run::Resume { container, .. } => self.ask(
                 &Command::Start {
                     name: container.clone(),
                 },
-                Asked::Started { speaker },
+                Asked::Started {
+                    speaker: speaker.clone(),
+                },
             ),
         };
         self.turns.insert(speaker, turn);
@@ -513,8 +552,8 @@ impl Running {
 
     /// A cancel's bound went off: a turn still talking, and still stopping,
     /// is closed the way a stop closed it before it was a cancel.
-    pub fn cancel_overdue(&mut self, speaker: Speaker, effects: &mut Vec<Effect>) {
-        if let Some(turn) = self.turns.get(&speaker)
+    pub fn cancel_overdue(&mut self, speaker: &Speaker, effects: &mut Vec<Effect>) {
+        if let Some(turn) = self.turns.get(speaker)
             && turn.stopping
             && let Stage::Talking { process, .. } = &turn.stage
         {
@@ -528,8 +567,8 @@ impl Running {
 
     /// Whether a turn was stopped before this step, in which case it ends
     /// here rather than going on to the next.
-    fn stopped_before(&mut self, speaker: Speaker, effects: &mut Vec<Effect>) -> bool {
-        let stopping = self.turns.get(&speaker).is_some_and(|turn| turn.stopping);
+    fn stopped_before(&mut self, speaker: &Speaker, effects: &mut Vec<Effect>) -> bool {
+        let stopping = self.turns.get(speaker).is_some_and(|turn| turn.stopping);
         if stopping {
             self.ended(speaker, Err("stopped".to_owned()), effects);
         }
@@ -541,7 +580,7 @@ impl Running {
     /// Nothing to complain about is the whole of what "it is there" means;
     /// anything else is an image to build.
     pub fn looked(&mut self, speaker: Speaker, finished: &Finished, effects: &mut Vec<Effect>) {
-        if self.stopped_before(speaker, effects) {
+        if self.stopped_before(&speaker, effects) {
             return;
         }
         let Some(Run::Begin { agent, role, .. }) = self.turns.get(&speaker).map(|turn| &turn.run)
@@ -591,7 +630,7 @@ impl Running {
                 None => self.make(speaker, effects),
                 Some(why) => {
                     tracing::warn!(%image, %why, "the image could not be built");
-                    self.ended(speaker, Err(why.clone()), effects);
+                    self.ended(&speaker, Err(why.clone()), effects);
                 }
             }
         }
@@ -600,7 +639,7 @@ impl Running {
     /// Asks for a turn's container to be made, with exactly the environment
     /// its handout decided.
     fn make(&mut self, speaker: Speaker, effects: &mut Vec<Effect>) {
-        if self.stopped_before(speaker, effects) {
+        if self.stopped_before(&speaker, effects) {
             return;
         }
         let Some(turn) = self.turns.get_mut(&speaker) else {
@@ -636,12 +675,12 @@ impl Running {
 
     /// The runtime said whether a turn's container was made.
     pub fn made(&mut self, speaker: Speaker, finished: &Finished, effects: &mut Vec<Effect>) {
-        if self.stopped_before(speaker, effects) {
+        if self.stopped_before(&speaker, effects) {
             return;
         }
         if complaint(finished).is_some() {
             let why = container_failure("creating the container", finished);
-            self.ended(speaker, Err(why), effects);
+            self.ended(&speaker, Err(why), effects);
             return;
         }
         self.hold(speaker, effects);
@@ -667,12 +706,12 @@ impl Running {
     /// see
     /// `docs/decisions/0050-the-repository-is-checked-out-before-the-first-turn.md`.
     pub fn held(&mut self, speaker: Speaker, finished: &Finished, effects: &mut Vec<Effect>) {
-        if self.stopped_before(speaker, effects) {
+        if self.stopped_before(&speaker, effects) {
             return;
         }
         if complaint(finished).is_some() {
             let why = container_failure("starting the container", finished);
-            self.ended(speaker, Err(why), effects);
+            self.ended(&speaker, Err(why), effects);
             return;
         }
         let Some(turn) = self.turns.get_mut(&speaker) else {
@@ -705,7 +744,7 @@ impl Running {
         finished: &Finished,
         effects: &mut Vec<Effect>,
     ) {
-        if self.stopped_before(speaker, effects) {
+        if self.stopped_before(&speaker, effects) {
             return;
         }
         if let Some(message) = complaint(finished) {
@@ -720,7 +759,7 @@ impl Running {
                 repository,
                 message,
             });
-            self.ended(speaker, Err(why), effects);
+            self.ended(&speaker, Err(why), effects);
             return;
         }
         self.open(speaker, effects);
@@ -765,7 +804,7 @@ impl Running {
     /// being over closes the process: its end is what ends the turn, so that
     /// there is one place a turn ends.
     pub fn line(&mut self, process: EffectId, line: &str, effects: &mut Vec<Effect>) {
-        let Some(speaker) = self.talking.get(&process).copied() else {
+        let Some(speaker) = self.talking.get(&process).cloned() else {
             tracing::warn!(
                 "a line arrived from a process this instance is not talking to; ignored"
             );
@@ -798,14 +837,14 @@ impl Running {
             }
         }
         for noticed in noticed {
-            self.noticed(speaker, noticed);
+            self.noticed(&speaker, noticed);
         }
         if let Some(steered) = steered {
-            self.steered(speaker, steered);
+            self.steered(&speaker, steered);
         }
         // A message that waited for the conversation to open is handed over
         // the moment it can be: this line may be the one that opened it.
-        if let Speaker::Job(job) = speaker
+        if let Speaker::Job(job) = &speaker
             && let Some((project, channel)) = self.bound(job)
         {
             self.try_deliver(project, job, channel);
@@ -822,11 +861,11 @@ impl Running {
     /// adapter refused — and the message waits again, for the turn's end to
     /// deliver; nothing more is handed to this turn, since the answer says
     /// it would not take it.
-    fn steered(&mut self, speaker: Speaker, steered: Steered) {
+    fn steered(&mut self, speaker: &Speaker, steered: Steered) {
         let Speaker::Job(job) = speaker else {
             return;
         };
-        let Some(turn) = self.turns.get_mut(&speaker) else {
+        let Some(turn) = self.turns.get_mut(speaker) else {
             return;
         };
         turn.delivery = Delivery::Open;
@@ -857,7 +896,7 @@ impl Running {
 
     /// The project a job belongs to and the channel its room is on, when it
     /// has one: what addressing anything about the job needs.
-    pub(crate) fn bound(&self, job: JobId) -> Option<(ProjectId, Channel)> {
+    pub(crate) fn bound(&self, job: &JobId) -> Option<(ProjectId, Channel)> {
         let project = self.state.project_of(job)?;
         let channel = self.state.job(job)?.room.as_ref()?.channel;
         Some((project, channel))
@@ -869,7 +908,7 @@ impl Running {
     /// turn's process is forgotten; a process whose turn is already gone is
     /// forgotten here, so that nothing is held for nobody.
     pub fn process_ended(&mut self, process: EffectId, ended: &Ended, effects: &mut Vec<Effect>) {
-        let Some(speaker) = self.talking.get(&process).copied() else {
+        let Some(speaker) = self.talking.get(&process).cloned() else {
             tracing::warn!("a process this instance did not open ended; ignored");
             return;
         };
@@ -882,7 +921,7 @@ impl Running {
             Stage::Talking { conversation, .. } => Err(ended_early(conversation, ended)),
             _ => Err("its process ended before it was spoken to".to_owned()),
         };
-        self.ended(speaker, outcome, effects);
+        self.ended(&speaker, outcome, effects);
     }
 
     /// What a turn ending means, and what follows from it.
@@ -892,11 +931,11 @@ impl Running {
     /// so a restart begins with none.
     pub fn ended(
         &mut self,
-        speaker: Speaker,
+        speaker: &Speaker,
         outcome: Result<Answer, String>,
         effects: &mut Vec<Effect>,
     ) {
-        let Some(mut turn) = self.turns.remove(&speaker) else {
+        let Some(mut turn) = self.turns.remove(speaker) else {
             tracing::debug!(
                 ?speaker,
                 "a turn this instance did not start ended; ignored"
@@ -913,15 +952,16 @@ impl Running {
         let asked_in = self
             .warrants
             .values()
-            .find(|known| known.speaker == speaker)
+            .find(|known| known.speaker == *speaker)
             .and_then(|known| known.place.clone());
-        self.warrants.retain(|_, known| known.speaker != speaker);
+        self.warrants.retain(|_, known| known.speaker != *speaker);
         // Whatever the agent said last is posted before anything said about
         // the turn's end, since both go to the same room in turn.
         let transcript = std::mem::take(&mut turn.transcript);
         self.finish(speaker, transcript);
         let job = match speaker {
             Speaker::Foreman(project) => {
+                let project = *project;
                 // Whether there is a container to rest: a resumed turn was
                 // inspected present before it began, and a begun one has a
                 // container from the moment it was made, which is every
@@ -939,9 +979,9 @@ impl Running {
                 self.foreman_ended(project, outcome, made, spoke_in_place, effects);
                 return;
             }
-            Speaker::Job(job) => job,
+            Speaker::Job(job) => job.clone(),
         };
-        self.job_ended(job, &turn, outcome, effects);
+        self.job_ended(&job, &turn, outcome, effects);
     }
 
     /// What a job's turn ending means: what is recorded, what the inbox is
@@ -949,7 +989,7 @@ impl Running {
     /// told.
     fn job_ended(
         &mut self,
-        job: JobId,
+        job: &JobId,
         turn: &Turn,
         outcome: Result<Answer, String>,
         effects: &mut Vec<Effect>,
@@ -973,6 +1013,17 @@ impl Running {
         // Whether the turn handled what it was given: neither a stopped turn
         // nor a failed one did, and neither gets the check mark.
         let handled = !turn.stopping && !matches!(progress, Progress::Idle(Waiting::Failed(_)));
+        // What it said it opened is kept whichever way the turn ended, as
+        // the union of everything ever claimed: a pull request is a fact
+        // about the platform, and a later turn that forgets one cannot
+        // erase it. Written with the record below.
+        if !turn.pull_requests.is_empty()
+            && let Some(recorded) = self.state.job_mut(job)
+        {
+            recorded
+                .pull_requests
+                .extend(turn.pull_requests.iter().copied());
+        }
         self.record(job, progress);
 
         // What the turn was given is finished with, per 0069. A message
@@ -997,7 +1048,7 @@ impl Running {
         // the two, as 0066 decides for a foreman draining its inbox.
         // Inward-facing, so it need not wait for the record to land.
         if !next {
-            self.probe(job, effects);
+            self.probe(job.clone(), effects);
         }
 
         // Said whichever way it went, with the reading the agent gave and
@@ -1019,10 +1070,11 @@ impl Running {
                 || "@stageman".to_owned(),
                 |project| self.own_mention(project, channel),
             );
+            let opened = pull_requests_of(&self.state, job);
             self.say(
                 &speaking,
                 &root,
-                &stageman_foreman::stopped_notice(&waiting, asked_by.as_deref(), &mention),
+                &stageman_foreman::stopped_notice(&waiting, asked_by.as_deref(), &mention, &opened),
             );
         }
 
@@ -1035,7 +1087,7 @@ impl Running {
     /// tells the rest; and the next turn, on the next message, at once.
     fn given_finished(
         &mut self,
-        job: JobId,
+        job: &JobId,
         turn: &Turn,
         handled: bool,
         given: &[stageman_core::Errand],
@@ -1096,9 +1148,11 @@ impl Running {
         // message, as a reply does for a failed job. In hand and working
         // first, as receiving does for a message that finds the job idle.
         if next {
+            let since = self.stamp();
             if let Some(recorded) = self.state.job_mut(job) {
                 recorded.inbox.give();
                 recorded.progress = Progress::Working;
+                recorded.since = Some(since);
                 self.dirty = true;
             }
             self.start_given(project, job, channel, Finding::AtRest);
@@ -1121,7 +1175,7 @@ impl Running {
         };
         self.stops_held.remove(&job);
         self.record(
-            job,
+            &job,
             Progress::Idle(Waiting::Failed(
                 "the instance could not be written, so the turn was not started".to_owned(),
             )),
@@ -1131,12 +1185,12 @@ impl Running {
         // job is idle again, and the next mention is what tries again.
         let unreached = self
             .state
-            .job_mut(job)
+            .job_mut(&job)
             .map_or_else(Vec::new, |recorded| recorded.inbox.drain());
-        let Some((project, channel)) = self.bound(job) else {
+        let Some((project, channel)) = self.bound(&job) else {
             return;
         };
-        let Some((speaking, _)) = speaking_for(&self.state, job) else {
+        let Some((speaking, _)) = speaking_for(&self.state, &job) else {
             return;
         };
         let mention = self.own_mention(project, channel);
@@ -1168,7 +1222,7 @@ fn under(channel: Channel, errand: &stageman_core::Errand) -> Place {
 /// and a test of which level a line is logged at would be a test of the
 /// logging.
 #[mutants::skip]
-fn said_about(job: JobId, progress: &Progress) {
+fn said_about(job: &JobId, progress: &Progress) {
     match progress {
         Progress::Idle(Waiting::Failed(why)) => {
             tracing::warn!(%job, %why, "the turn did not finish");
@@ -1287,7 +1341,7 @@ mod tests {
                 credentials: BTreeMap::new(),
                 channels: BTreeMap::new(),
                 jobs: BTreeMap::from([(
-                    job,
+                    job.clone(),
                     Job::new(
                         Kit::defaults(Agent::Claude),
                         "started by hand".to_owned(),
@@ -1303,9 +1357,9 @@ mod tests {
             },
         );
 
-        assert!(speaking_for(&state, job).is_none(), "no room");
+        assert!(speaking_for(&state, &job).is_none(), "no room");
 
-        state.job_mut(job).expect("the job").room = Some(Room {
+        state.job_mut(&job).expect("the job").room = Some(Room {
             channel: Channel::Slack,
             id: "C0JOBROOM01".to_owned(),
         });
@@ -1321,7 +1375,7 @@ mod tests {
                     listen_credential: Secret::new("xapp-not-a-real-token".to_owned()),
                 },
             );
-        let (bound, place) = speaking_for(&state, job).expect("somewhere to speak");
+        let (bound, place) = speaking_for(&state, &job).expect("somewhere to speak");
         assert_eq!(bound.credential.expose(), "xoxb-not-a-real-token");
         assert_eq!(place.room.id, "C0JOBROOM01");
         assert_eq!(place.thread, None, "at the root of its room");
@@ -1333,7 +1387,7 @@ mod tests {
             .channels
             .clear();
         assert!(
-            speaking_for(&state, job).is_none(),
+            speaking_for(&state, &job).is_none(),
             "a thread naming a channel the project no longer binds is nowhere again"
         );
     }

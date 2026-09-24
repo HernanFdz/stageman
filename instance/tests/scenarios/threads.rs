@@ -13,11 +13,11 @@ use stageman_foreman::{Shown, Voice};
 fn a_job_with_a_room(world: &mut Simulation) -> (stageman_instance::Instance, JobId) {
     let idle = job(1);
     world.holding(&watching_a_channel(&[(
-        idle,
+        idle.clone(),
         Progress::Idle(Waiting::Asked),
         1,
     )]));
-    let (name, held) = Simulation::ours(&stageman_job::container(idle));
+    let (name, held) = Simulation::ours(&stageman_job::container(&idle));
     world.container(&name, held);
     let mut instance = world.wake(seed(1));
     world.run_until(&mut instance, 10);
@@ -297,7 +297,7 @@ fn a_thread_is_not_asked_for_when_the_record_did_not_land() {
     assert!(world.first_turn().is_none(), "{:?}", world.shape());
     assert!(
         matches!(
-            instance.state().job(idle).expect("the job").progress,
+            instance.state().job(&idle).expect("the job").progress,
             Progress::Idle(Waiting::Failed(_))
         ),
         "the turn that was not started is recorded as such"

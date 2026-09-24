@@ -6,9 +6,12 @@
 //! decides what the browser calls it. A wire name is a contract, and
 //! deciding it deliberately is the point.
 
+use std::collections::BTreeMap;
+
+use stageman_channel::Identity;
 use stageman_core::{
-    Agent, Channel, ClaudeEffort, ClaudeModel, Inconsistent, Kit, Outcome, Platform, Progress,
-    Project, ProjectId, State, Waiting,
+    Agent, Attending, Channel, ClaudeEffort, ClaudeModel, Inconsistent, Job, JobId, Kit, Outcome,
+    Platform, Progress, Project, ProjectId, RepositoryAddress, Room, State, Waiting,
 };
 use stageman_wire::{Choice, Fitted, KitDraft, ModelChoice, Refusal, Shape, Standing};
 
@@ -175,22 +178,20 @@ pub fn shape_of(agent: Agent) -> Shape {
     }
 }
 
-/// A kit in the words a person reads on a job's row: the agent, and whatever
-/// differs from the agent's own defaults.
-pub fn described(kit: &Kit) -> String {
+/// A kit as a chip is drawn from it: the agent by identifier and by name,
+/// the model by name, and the effort by spelling and name where the model
+/// takes one — resolved here, because a job's kit is only ever read.
+pub fn kit_shown(kit: &Kit) -> stageman_wire::Kit {
     match kit {
-        Kit::Claude { model } => {
-            let mut parts = vec![wire_name(Agent::Claude).1.to_owned()];
-            if !matches!(model, ClaudeModel::Default { .. }) {
-                parts.push(wire_model(*model).1.to_owned());
-            }
-            if let Some(effort) = model.effort()
-                && effort != ClaudeEffort::Default
-            {
-                parts.push(wire_effort(effort).1.to_lowercase());
-            }
-            parts.join(" · ")
-        }
+        Kit::Claude { model } => stageman_wire::Kit {
+            agent: wire_name(Agent::Claude).0.to_owned(),
+            agent_name: wire_name(Agent::Claude).1.to_owned(),
+            model: wire_model(*model).1.to_owned(),
+            effort: model.effort().map(|effort| {
+                let (spelled, name) = wire_effort(effort);
+                (spelled.to_owned(), name.to_owned())
+            }),
+        },
     }
 }
 
@@ -211,6 +212,28 @@ pub fn identify(state: &State, identifier: &str) -> Result<ProjectId, Refusal> {
         .ok_or_else(|| Refusal::UnknownProject {
             id: identifier.to_owned(),
         })
+}
+
+/// Who this instance is on each project's channel, where the channel has
+/// said: what a room is linked from, and held rather than kept — see the
+/// amendment to
+/// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+pub type Identities = BTreeMap<ProjectId, Identity>;
+
+/// A room as an address a person can open, from where the channel said its
+/// workspace is. A caller with no identity to hand links nothing, so that a
+/// page links only what is true.
+fn room_address(us: &Identity, room: &Room) -> String {
+    stageman_channel::room_address(room.channel, us, &room.id)
+}
+
+/// The repository as an address a browser can open, when what a project
+/// holds is one; a project written before addresses were checked may hold
+/// text that is not, which is shown and linked to nothing.
+fn linked(repository: &str) -> Option<String> {
+    RepositoryAddress::parse(repository)
+        .ok()
+        .map(|address| address.https())
 }
 
 /// What a screen calls an agent.
@@ -235,7 +258,7 @@ const fn wire_platform(platform: Platform) -> &'static str {
 }
 
 /// What a screen calls a channel.
-const fn wire_channel(channel: Channel) -> &'static str {
+pub const fn wire_channel(channel: Channel) -> &'static str {
     match channel {
         Channel::Slack => "Slack",
     }
@@ -243,11 +266,16 @@ const fn wire_channel(channel: Channel) -> &'static str {
 
 /// One project, as the browser sees it: identifiers where it sends them back,
 /// names where a person reads them, and never a credential.
-pub fn projected(id: ProjectId, project: &Project) -> stageman_wire::Project {
+pub fn projected(
+    id: ProjectId,
+    project: &Project,
+    us: Option<&Identity>,
+) -> stageman_wire::Project {
     stageman_wire::Project {
         id: id.to_string(),
         name: project.name.clone(),
         repository: project.repository.clone(),
+        repository_link: linked(&project.repository),
         foreman: fitted(&project.foreman_kit),
         kits: project
             .kits
@@ -268,29 +296,44 @@ pub fn projected(id: ProjectId, project: &Project) -> stageman_wire::Project {
             .keys()
             .map(|channel| wire_channel(*channel).to_owned())
             .collect(),
+        // Names and notes, never values — see
+        // `docs/decisions/0075-a-variable-says-what-it-is-for.md`.
         variables: project
             .variables
-            .keys()
-            .map(std::string::ToString::to_string)
+            .iter()
+            .map(|(name, variable)| stageman_wire::Variable {
+                name: name.to_string(),
+                note: variable.note.clone(),
+            })
             .collect(),
         brief: project.brief.clone(),
         watched: project.watched.iter().map(|room| room.id.clone()).collect(),
         foreman_room: project.foreman_room.as_ref().map(|room| room.id.clone()),
+        foreman_room_link: project
+            .foreman_room
+            .as_ref()
+            .zip(us)
+            .map(|(room, us)| room_address(us, room)),
+        attending: !matches!(project.attending, Attending::Idle),
         working: project
             .jobs
             .values()
             .filter(|job| job.progress == Progress::Working)
             .count(),
         jobs: project.jobs.len(),
+        // Composed here and never in the browser, like every address a
+        // page links — see
+        // `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`.
+        token_form: stageman_platform::token_form(Platform::GitHub, Some(&project.name)),
     }
 }
 
 /// Every project this instance watches.
-pub fn watching(state: &State) -> Vec<stageman_wire::Project> {
+pub fn watching(state: &State, identities: &Identities) -> Vec<stageman_wire::Project> {
     state
         .projects
         .iter()
-        .map(|(id, project)| projected(*id, project))
+        .map(|(id, project)| projected(*id, project, identities.get(id)))
         .collect()
 }
 
@@ -336,6 +379,7 @@ pub fn standing(progress: &Progress) -> Standing {
 /// Fails if nothing is watched under that identifier.
 pub fn working(
     state: &State,
+    identities: &Identities,
     project: &str,
     domain: &Domain,
     serving: u16,
@@ -347,30 +391,19 @@ pub fn working(
         .ok_or_else(|| Refusal::UnknownProject {
             id: project.to_owned(),
         })?;
+    let us = identities.get(&identifier);
 
     let mut jobs: Vec<stageman_wire::Job> = watched
         .jobs
         .iter()
-        .map(|(id, job)| stageman_wire::Job {
-            id: id.to_string(),
-            kit: described(job.kit()),
-            reported: job
-                .reported
-                .iter()
-                .map(|(option, value)| (option.clone(), value.clone()))
-                .collect(),
-            reason: job.reason.clone(),
-            kickoff: job.kickoff.clone(),
-            created_at: job.created_at.to_string(),
-            standing: standing(&job.progress),
-            tunnel: address(domain, *id, serving),
-        })
+        .map(|(id, job)| job_view(id, job, &watched.repository, us, domain, serving))
         .collect();
     jobs.sort_by(|one, other| other.created_at.cmp(&one.created_at));
 
     Ok(stageman_wire::Working {
         name: watched.name.clone(),
         repository: watched.repository.clone(),
+        repository_link: linked(&watched.repository),
         kits: watched
             .kits
             .iter()
@@ -383,20 +416,165 @@ pub fn working(
     })
 }
 
-/// What the instance screen shows.
-pub fn overview(state: &State, runtime: &str) -> stageman_wire::Instance {
+/// One job's page — see
+/// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+///
+/// # Errors
+///
+/// Fails if nothing is watched under that identifier, or if the project
+/// holds no job under the other.
+pub fn job_page(
+    state: &State,
+    identities: &Identities,
+    project: &str,
+    job: &str,
+    domain: &Domain,
+    serving: u16,
+) -> Result<stageman_wire::JobPage, Refusal> {
+    let identifier = identify(state, project)?;
+    let watched = state
+        .projects
+        .get(&identifier)
+        .ok_or_else(|| Refusal::UnknownProject {
+            id: project.to_owned(),
+        })?;
+    let unknown = || Refusal::UnknownJob { id: job.to_owned() };
+    let named = crate::requests::identify_job(state, identifier, job).ok_or_else(unknown)?;
+    let recorded = watched.jobs.get(&named).ok_or_else(unknown)?;
+    Ok(stageman_wire::JobPage {
+        project: identifier.to_string(),
+        project_name: watched.name.clone(),
+        repository: watched.repository.clone(),
+        repository_link: linked(&watched.repository),
+        job: job_view(
+            &named,
+            recorded,
+            &watched.repository,
+            identities.get(&identifier),
+            domain,
+            serving,
+        ),
+    })
+}
+
+/// Where a pull request is, when the repository is an address: composed
+/// here and never in the browser, per
+/// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`,
+/// because the shape of an address is the platform's knowledge.
+pub fn pull_request_link(repository: &str, number: u64) -> Option<String> {
+    RepositoryAddress::parse(repository)
+        .ok()
+        .map(|address| format!("{}/pull/{number}", address.https()))
+}
+
+/// One job, as a page sees it: with its room as a link where the channel
+/// has said where its workspace is, and as its identifier otherwise.
+fn job_view(
+    id: &JobId,
+    job: &Job,
+    repository: &str,
+    us: Option<&Identity>,
+    domain: &Domain,
+    serving: u16,
+) -> stageman_wire::Job {
+    stageman_wire::Job {
+        id: id.to_string(),
+        kit: kit_shown(job.kit()),
+        reported: job
+            .reported
+            .iter()
+            .map(|(option, value)| (option.clone(), value.clone()))
+            .collect(),
+        reason: job.reason.clone(),
+        kickoff: job.kickoff.clone(),
+        created_at: job.created_at.to_string(),
+        standing: standing(&job.progress),
+        since: job.since.map(|moment| moment.to_string()),
+        tunnel: address(domain, id, serving),
+        room: job.room.as_ref().map(|room| room.id.clone()),
+        room_link: job
+            .room
+            .as_ref()
+            .zip(us)
+            .map(|(room, us)| room_address(us, room)),
+        pull_requests: job
+            .pull_requests
+            .iter()
+            .map(|number| stageman_wire::PullRequest {
+                number: *number,
+                link: pull_request_link(repository, *number),
+            })
+            .collect(),
+    }
+}
+
+/// The first page: every idle job, longest waiting first, then every
+/// working one, newest first, then the projects — see
+/// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+///
+/// Ordered by the moment each job's standing last changed. A job with no
+/// moment kept changed its standing before this build's first stamp, so it
+/// has waited longer than any job that carries one: it comes first among
+/// those waiting and last among those working, and among its own kind by
+/// when it was made.
+pub fn home(
+    state: &State,
+    identities: &Identities,
+    domain: &Domain,
+    serving: u16,
+) -> stageman_wire::Home {
+    let mut idle: Vec<(ProjectId, &Project, &JobId, &Job)> = Vec::new();
+    let mut running: Vec<(ProjectId, &Project, &JobId, &Job)> = Vec::new();
+    for (project_id, project) in &state.projects {
+        for (id, job) in &project.jobs {
+            match &job.progress {
+                Progress::Idle(_) => idle.push((*project_id, project, id, job)),
+                Progress::Working => running.push((*project_id, project, id, job)),
+                Progress::Retired(_) => {}
+            }
+        }
+    }
+    // A moment that is none sorts before every moment that is some, and an
+    // earlier moment before a later one, which is longest waiting first.
+    let changed = |job: &Job| (job.since, job.created_at);
+    idle.sort_by_key(|placed| changed(placed.3));
+    running.sort_by_key(|placed| std::cmp::Reverse(changed(placed.3)));
+    let placed = |(project_id, project, id, job): (ProjectId, &Project, &JobId, &Job)| {
+        stageman_wire::ProjectJob {
+            project: project_id.to_string(),
+            project_name: project.name.clone(),
+            job: job_view(
+                id,
+                job,
+                &project.repository,
+                identities.get(&project_id),
+                domain,
+                serving,
+            ),
+        }
+    };
+    stageman_wire::Home {
+        needs_you: idle.into_iter().map(placed).collect(),
+        working: running.into_iter().map(placed).collect(),
+        projects: watching(state, identities),
+    }
+}
+
+/// The line at the foot of every page: this machine, and this build.
+pub fn instance(state: &State, runtime: &str, domain: &Domain) -> stageman_wire::Instance {
     stageman_wire::Instance {
         container_runtime: runtime.to_owned(),
         agents: state.agents.len(),
-        projects: watching(state),
+        domain: domain.to_string(),
+        version: crate::release::described(),
     }
 }
 
 /// What the projects screen shows: the projects, the agents that may be
 /// named, and the shape of each of those.
-pub fn watching_now(state: &State) -> stageman_wire::Watching {
+pub fn watching_now(state: &State, identities: &Identities) -> stageman_wire::Watching {
     stageman_wire::Watching {
-        projects: watching(state),
+        projects: watching(state, identities),
         available: listed(state)
             .into_iter()
             .filter(|agent| agent.configured)
@@ -406,6 +584,10 @@ pub fn watching_now(state: &State) -> stageman_wire::Watching {
             .filter(|agent| state.agents.contains_key(agent))
             .map(|agent| shape_of(*agent))
             .collect(),
+        guides: stageman_wire::Guides {
+            token_form: stageman_platform::token_form(Platform::GitHub, None),
+            app_form: stageman_channel::app_form(Channel::Slack),
+        },
     }
 }
 
@@ -422,8 +604,8 @@ pub fn from_inconsistent(reason: &Inconsistent) -> Refusal {
 #[cfg(test)]
 mod tests {
     use super::{
-        Domain, dependents, described, fitted, identify, kit_of, listed, named, shape_of, shown,
-        standing, wire_channel, wire_name, wire_platform, working,
+        Domain, Identities, dependents, fitted, identify, kit_of, kit_shown, listed, named,
+        shape_of, shown, standing, wire_channel, wire_name, wire_platform, working,
     };
     use stageman_core::{
         Agent, AgentConfig, ClaudeEffort, ClaudeModel, Job, JobId, Kit, KitConfig, KitName,
@@ -529,30 +711,35 @@ mod tests {
         );
     }
 
+    /// A job's kit is shown with every name a chip needs, resolved here:
+    /// the agent by identifier and name, the model by name, and the effort
+    /// by spelling and name where the model takes one.
     #[test]
-    fn a_kit_is_described_by_what_differs_from_the_defaults() {
-        assert_eq!(described(&Kit::defaults(Agent::Claude)), "Claude");
+    fn a_kit_is_shown_with_its_names_resolved() {
+        let shown = kit_shown(&Kit::Claude {
+            model: ClaudeModel::Opus {
+                effort: ClaudeEffort::XHigh,
+            },
+        });
+        assert_eq!(shown.agent, "claude");
+        assert_eq!(shown.agent_name, "Claude");
+        assert_eq!(shown.model, "Opus");
         assert_eq!(
-            described(&Kit::Claude {
-                model: ClaudeModel::Opus {
-                    effort: ClaudeEffort::XHigh,
-                },
-            }),
-            "Claude · Opus · extra high"
+            shown.effort,
+            Some(("xhigh".to_owned(), "Extra high".to_owned()))
         );
         assert_eq!(
-            described(&Kit::Claude {
+            kit_shown(&Kit::defaults(Agent::Claude)).effort,
+            Some(("default".to_owned(), "Default".to_owned())),
+            "the agent's own default is a spelling the chip knows to leave unmetered"
+        );
+        assert_eq!(
+            kit_shown(&Kit::Claude {
                 model: ClaudeModel::Haiku,
-            }),
-            "Claude · Haiku"
-        );
-        assert_eq!(
-            described(&Kit::Claude {
-                model: ClaudeModel::Default {
-                    effort: ClaudeEffort::Low,
-                },
-            }),
-            "Claude · low"
+            })
+            .effort,
+            None,
+            "a model that takes no effort shows none"
         );
     }
 
@@ -658,10 +845,110 @@ mod tests {
                 .insert(JobId::from_uuid(Uuid::from_u128(which)), job);
         }
 
-        let shown = super::projected(ProjectId::from_uuid(Uuid::nil()), watched);
+        let shown = super::projected(ProjectId::from_uuid(Uuid::nil()), watched, None);
         assert_eq!(shown.working, 1);
         assert_eq!(shown.jobs, 3);
         assert_eq!(shown.name, "aviary");
+        assert!(!shown.attending, "nothing in hand");
+        assert_eq!(
+            shown.repository_link, None,
+            "text that is not an address on the platform links to nothing"
+        );
+
+        // On a message, and on a repository that is an address.
+        watched.attending.take(stageman_core::Errand {
+            said: "fix the build".to_owned(),
+            thread: stageman_core::Thread {
+                channel: stageman_core::Channel::Slack,
+                room: "C0123456789".to_owned(),
+                id: "1788000000.000001".to_owned(),
+            },
+            from: None,
+            message: None,
+            app: None,
+        });
+        watched.repository = "https://github.com/owner/aviary.git".to_owned();
+        let shown = super::projected(ProjectId::from_uuid(Uuid::nil()), watched, None);
+        assert!(shown.attending);
+        assert_eq!(
+            shown.repository_link.as_deref(),
+            Some("https://github.com/owner/aviary")
+        );
+    }
+
+    /// The first page lists what a person does something about, longest
+    /// waiting first; then what is working, newest first; and never what is
+    /// over. The partition is the domain's own outer state, so this is the
+    /// one place it is turned into an order — by the moment a standing
+    /// changed, and a job with no moment kept, which changed before this
+    /// build's first stamp, comes first among those waiting and last among
+    /// those working whatever its record says it was made at.
+    #[test]
+    fn the_first_page_partitions_jobs_by_what_the_system_does_with_them() {
+        let mut state = watching("aviary");
+        let watched = state
+            .projects
+            .get_mut(&ProjectId::from_uuid(Uuid::nil()))
+            .expect("the project");
+        for (which, second, progress, kept) in [
+            (1_u128, 30_i64, Progress::Idle(Waiting::Proposed), true),
+            (2, 10, Progress::Idle(Waiting::Asked), true),
+            (3, 20, Progress::Working, true),
+            (4, 40, Progress::Working, true),
+            (5, 50, Progress::Retired(Outcome::Done), true),
+            (6, 60, Progress::Idle(Waiting::Silent), false),
+            (7, 70, Progress::Working, false),
+        ] {
+            let mut job = Job::new(
+                Kit::defaults(Agent::Claude),
+                "because".to_owned(),
+                "do the thing".to_owned(),
+                Timestamp::from_second(second).expect("a time"),
+            );
+            job.progress = progress;
+            if !kept {
+                job.since = None;
+            }
+            watched
+                .jobs
+                .insert(JobId::from_uuid(Uuid::from_u128(which)), job);
+        }
+        let domain = Domain::parse("example.com").expect("a domain");
+
+        let shown = super::home(&state, &super::Identities::new(), &domain, 8080);
+
+        let named = |placed: &[stageman_wire::ProjectJob]| {
+            placed
+                .iter()
+                .map(|placed| placed.job.id.clone())
+                .collect::<Vec<_>>()
+        };
+        let id = |which: u128| JobId::from_uuid(Uuid::from_u128(which)).to_string();
+        assert_eq!(
+            named(&shown.needs_you),
+            [id(6), id(2), id(1)],
+            "longest waiting first, and a job with no moment kept first of all"
+        );
+        assert_eq!(
+            named(&shown.working),
+            [id(4), id(3), id(7)],
+            "newest first, and a job with no moment kept last of all"
+        );
+        assert_eq!(shown.needs_you[0].job.since, None);
+        assert_eq!(
+            shown.needs_you[1].job.since.as_deref(),
+            Some("1970-01-01T00:00:10Z"),
+            "the moment crosses as the wire spells a time"
+        );
+        assert_eq!(shown.projects.len(), 1);
+        assert!(
+            shown
+                .needs_you
+                .iter()
+                .chain(&shown.working)
+                .all(|placed| placed.project_name == "aviary"),
+            "every job says which project it is on"
+        );
     }
 
     /// The brief crosses as written, and the watched rooms cross as the
@@ -679,7 +966,7 @@ mod tests {
             id: "C0BT53FM079".to_owned(),
         });
 
-        let shown = super::projected(ProjectId::from_uuid(Uuid::nil()), watched);
+        let shown = super::projected(ProjectId::from_uuid(Uuid::nil()), watched, None);
         assert_eq!(shown.brief, "Ignore alerts below error.");
         assert_eq!(shown.watched, vec!["C0BT53FM079".to_owned()]);
     }
@@ -764,7 +1051,14 @@ mod tests {
         state.projects.insert(project, watched);
 
         let domain = Domain::parse("example.com").expect("a domain");
-        let shown = working(&state, &project.to_string(), &domain, 8080).expect("watched");
+        let shown = working(
+            &state,
+            &Identities::new(),
+            &project.to_string(),
+            &domain,
+            8080,
+        )
+        .expect("watched");
         assert_eq!(shown.jobs.len(), 2);
         for job in &shown.jobs {
             assert_eq!(job.tunnel, format!("https://{}.example.com", job.id));
@@ -772,8 +1066,22 @@ mod tests {
         }
         assert_eq!(shown.kits.len(), 1);
         assert!(
-            working(&state, "nope", &domain, 8080).is_err(),
+            working(&state, &Identities::new(), "nope", &domain, 8080).is_err(),
             "a project nobody watches"
+        );
+    }
+
+    /// A pull request's address is the repository's with the number, where
+    /// the repository is an address, and nothing otherwise.
+    #[test]
+    fn a_pull_request_is_addressed_on_the_repository_or_not_at_all() {
+        assert_eq!(
+            super::pull_request_link("https://github.com/owner/name.git", 12).as_deref(),
+            Some("https://github.com/owner/name/pull/12")
+        );
+        assert_eq!(
+            super::pull_request_link("https://example.invalid/name", 12),
+            None
         );
     }
 }

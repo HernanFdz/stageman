@@ -189,12 +189,15 @@ fn forgetting_the_project_archives_the_foremans_room() {
     world.run_until(&mut instance, 5_000);
     assert_eq!(world.rooms().len(), 1, "{:?}", world.rooms());
 
-    for effect in instance.step(request(
-        7,
-        Request::Forget {
-            project: project().to_string(),
-        },
-    )) {
+    for effect in instance.step(
+        world.now(),
+        request(
+            7,
+            Request::Forget {
+                project: project().to_string(),
+            },
+        ),
+    ) {
         world.perform(effect);
     }
     world.run_until(&mut instance, 6_000);

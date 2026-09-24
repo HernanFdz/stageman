@@ -170,7 +170,7 @@ impl Running {
         room: &str,
         thread: &str,
     ) -> bool {
-        let Some(project) = self.project_of_speaker(speaker) else {
+        let Some(project) = self.project_of_speaker(&speaker) else {
             return false;
         };
         let Some((channel, speaking)) = self
@@ -182,14 +182,14 @@ impl Running {
         else {
             return false;
         };
-        self.pending_threads.insert(speaker, pending);
+        self.pending_threads.insert(speaker.clone(), pending);
         self.ask_for_thread(speaker, channel, &speaking, room, thread);
         true
     }
 
     /// The platform answered about a thread, or could not: what was read is
     /// kept for the turn's frame, and the turn that waited starts.
-    pub fn thread_read_back(&mut self, speaker: Speaker, outcome: Result<ThreadRead, String>) {
+    pub fn thread_read_back(&mut self, speaker: &Speaker, outcome: Result<ThreadRead, String>) {
         let read = match outcome {
             Ok(ThreadRead {
                 messages,
@@ -211,16 +211,16 @@ impl Running {
                 }
             }
         };
-        self.threads_read.insert(speaker, read);
-        match self.pending_threads.remove(&speaker) {
+        self.threads_read.insert(speaker.clone(), read);
+        match self.pending_threads.remove(speaker) {
             Some(Pending::Job { job, finding }) => {
-                if let Some((project, channel)) = self.bound(job) {
-                    self.resume_job(project, job, channel, finding);
+                if let Some((project, channel)) = self.bound(&job) {
+                    self.resume_job(project, &job, channel, finding);
                 }
             }
             Some(Pending::Steer { job }) => {
-                if let Some((project, channel)) = self.bound(job) {
-                    self.steer_given(project, job, channel);
+                if let Some((project, channel)) = self.bound(&job) {
+                    self.steer_given(project, &job, channel);
                 }
             }
             Some(Pending::Foreman { project }) => self.inspect_before_turning(project),
@@ -240,7 +240,7 @@ impl Running {
                 if let Some(turn) = self.turns.get_mut(&speaker) {
                     turn.delivery = crate::turns::Delivery::Open;
                 }
-                if let Some(recorded) = self.state.job_mut(job) {
+                if let Some(recorded) = self.state.job_mut(&job) {
                     recorded.inbox.hand_back();
                     self.dirty = true;
                 }
@@ -255,14 +255,14 @@ impl Running {
     }
 
     /// What was read for a speaker, taken for the turn's frame.
-    pub fn thread_taken(&mut self, speaker: Speaker) -> Option<Read> {
-        self.threads_read.remove(&speaker)
+    pub fn thread_taken(&mut self, speaker: &Speaker) -> Option<Read> {
+        self.threads_read.remove(speaker)
     }
 
     /// Which project a speaker belongs to.
-    fn project_of_speaker(&self, speaker: Speaker) -> Option<ProjectId> {
+    fn project_of_speaker(&self, speaker: &Speaker) -> Option<ProjectId> {
         match speaker {
-            Speaker::Foreman(project) => Some(project),
+            Speaker::Foreman(project) => Some(*project),
             Speaker::Job(job) => self.state.project_of(job),
         }
     }

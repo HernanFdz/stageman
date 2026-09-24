@@ -64,15 +64,16 @@ web = ["dioxus/fullstack", "dioxus/router", "dioxus/web"]
 # Both halves. The renderer is selected by a feature above rather than here,
 # which is why this line names no platform at all.
 #
-# Pinned exactly, and to a version that is not the newest. `dx` generates the
-# glue this hydrates against, so the CLI and the library are one thing shipped
-# as two packages and a mismatch is reported on every start — see
-# `docs/conventions.md` §5. An ordinary caret requirement would let a routine
-# `cargo update` walk away from whichever `dx` is installed, silently, which is
-# the failure this is pinned to prevent rather than a preference for old code.
+# Pinned exactly, to the version of `dx` installed on the machines that build
+# the browser half. `dx` generates the glue this hydrates against, so the CLI
+# and the library are one thing shipped as two packages and a mismatch is
+# reported on every start — see `docs/conventions.md` §5. An ordinary caret
+# requirement would let a routine `cargo update` walk away from whichever `dx`
+# is installed, silently, which is the failure this is pinned to prevent.
 # Raising it means installing the matching `dx`, which is a deliberate act on
-# every machine that builds the browser half.
-dioxus = "=0.7.9"
+# every machine that builds the browser half — and the other way round: a
+# newer `dx` is what raises this.
+dioxus = "=0.7.10"
 # Both halves, and the reason the view has its own types: what crosses a server
 # function has to serialise, and what the browser is handed must be nothing
 # more than that.
@@ -99,15 +100,22 @@ mutants = "0.0.4"
 #
 # Not optional, unlike everything the daemon needs. An icon is drawn in the
 # browser, which is the half that has no features beyond the framework.
-# Icons are behind per-group features, and the groups are chosen to be the
-# smallest that cover what is drawn: `shapes` and `notifications` are 92 icons
-# between them, where the trash can that would have said *discard* is in a
-# group of 162 on its own.
+# Icons are behind per-group features, and the groups are the smallest set
+# covering what `app/src/ui/icon_ui.rs` draws — the one module that decides
+# which icon means what, per `docs/conventions.md` §3. What a group costs is
+# compile time rather than bundle size: a browser build strips every icon
+# nothing draws.
 lucide-dioxus = { version = "2.43.0", features = [
     "accessibility",
     "arrows",
+    "development",
+    "files",
+    "multimedia",
     "notifications",
     "shapes",
+    "text",
+    "time",
+    "tools",
 ] }
 
 parking_lot = { version = "0.12.5", optional = true }

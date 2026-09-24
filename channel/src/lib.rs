@@ -21,7 +21,17 @@ mod slack;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC};
 use stageman_core::{Channel, JobId, ProjectId, Secret, Speaking};
+
+/// What a query string carries as it is: the unreserved characters, and
+/// nothing else. Everything else is percent-encoded, spaces and line ends
+/// included, so a whole manifest survives an address bar.
+const QUERY: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~');
 
 /// Who this instance is on a channel, so it can recognise itself.
 ///
@@ -354,16 +364,17 @@ pub fn done(channel: Channel, status: u16, body: &[u8]) -> Result<(), ChannelErr
     }
 }
 
-/// The name a job's room is given on a channel: the project, a title, and
-/// the identifier's prefix, folded to what the channel allows.
+/// The name a job's room is given on a channel: the project's name, folded
+/// to what the channel allows, and the job's name whole — see
+/// `docs/decisions/0074-a-jobs-identifier-is-its-name.md`.
 ///
-/// Only the identifier is load-bearing. An archived room keeps its name for
-/// ever, so the name has to be unique for ever too, and the identifier is
-/// what makes it so; the rest is for a sidebar.
+/// Only the job's name is load-bearing. An archived room keeps its name for
+/// ever, so the name has to be unique for ever too, and the job's name is
+/// what makes it so; the project's part is for a sidebar.
 #[must_use]
-pub fn room_name(channel: Channel, project: &str, title: &str, job: JobId) -> String {
+pub fn room_name(channel: Channel, project: &str, job: &JobId) -> String {
     match channel {
-        Channel::Slack => slack::room_name(project, title, job),
+        Channel::Slack => slack::room_name(project, job),
     }
 }
 
@@ -426,11 +437,44 @@ pub fn permalink(
     }
 }
 
+/// A link to a room, as a person can open it, from where the channel said
+/// its workspace is — what a page links a room by, per
+/// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+#[must_use]
+pub fn room_address(channel: Channel, us: &Identity, room: &str) -> String {
+    match channel {
+        Channel::Slack => slack::room_address(us, room),
+    }
+}
+
 /// A mention of somebody, as the channel renders one inside a message.
 #[must_use]
 pub fn mention(channel: Channel, user: &str) -> String {
     match channel {
         Channel::Slack => slack::mention(user),
+    }
+}
+
+/// The manifest a project's app on a channel is created from, as tracked
+/// text: the scopes the adapter's calls need and the events its listener
+/// reads.
+#[must_use]
+pub const fn manifest(channel: Channel) -> &'static str {
+    match channel {
+        Channel::Slack => slack::MANIFEST,
+    }
+}
+
+/// Where the channel's own form for a new app is, with the manifest filled
+/// in.
+///
+/// The guide a page offers beside the boxes that take the app's
+/// credentials, per
+/// `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`.
+#[must_use]
+pub fn app_form(channel: Channel) -> String {
+    match channel {
+        Channel::Slack => slack::app_form(),
     }
 }
 
@@ -640,12 +684,46 @@ pub enum ChannelError {
 #[cfg(test)]
 mod tests {
     use super::{
-        Call, ChannelError, Identity, Incoming, Reaction, ThreadRead, acknowledgement, archive,
-        create_room, decode, done, foreman_room_name, identity, invite, mention, open_socket,
-        permalink, pieces, post, posted, react, reference, referenced, replies, room_created,
-        room_link, room_name, set_purpose, set_topic, socket_url, thread_read, update, who_am_i,
+        Call, ChannelError, Identity, Incoming, Reaction, ThreadRead, acknowledgement, app_form,
+        archive, create_room, decode, done, foreman_room_name, identity, invite, manifest, mention,
+        open_socket, permalink, pieces, post, posted, react, reference, referenced, replies,
+        room_address, room_created, room_link, room_name, set_purpose, set_topic, socket_url,
+        thread_read, update, who_am_i,
     };
     use stageman_core::{Channel, JobId, ProjectId, Secret, Speaking, Uuid};
+
+    /// The form link carries the whole manifest, encoded so that it
+    /// survives an address bar and decodes back to the text it came from.
+    #[test]
+    fn the_app_form_carries_the_manifest_whole() {
+        let link = app_form(Channel::Slack);
+        let (form, carried) = link
+            .split_once("&manifest_yaml=")
+            .expect("the manifest is the last parameter");
+        assert_eq!(form, "https://api.slack.com/apps?new_app=1");
+        assert!(
+            !carried.contains('\n') && !carried.contains(' '),
+            "{carried}"
+        );
+        assert_eq!(
+            percent_encoding::percent_decode_str(carried).decode_utf8_lossy(),
+            manifest(Channel::Slack)
+        );
+    }
+
+    /// The manifest `README.md` shows a reader is this crate's, word for
+    /// word: the link is composed from one text, and the other is pinned
+    /// to it rather than kept in step by hand.
+    #[test]
+    fn the_readme_shows_the_manifest_the_app_is_created_from() {
+        let readme = include_str!("../../README.md");
+        let (_, after) = readme
+            .split_once("## Talking to it on Slack")
+            .expect("the README's Slack section");
+        let (_, block) = after.split_once("```yaml\n").expect("a YAML block in it");
+        let (shown, _) = block.split_once("```").expect("the block ends");
+        assert_eq!(shown, manifest(Channel::Slack));
+    }
 
     fn speaking() -> Speaking {
         Speaking {
@@ -896,31 +974,32 @@ mod tests {
         ));
     }
 
-    /// A room's name is folded to what the channel allows, and its
-    /// identifier is the part that is always there.
+    /// A room's name is the project's part folded to what the channel
+    /// allows and the job's name whole, which is the part that is always
+    /// there — see `docs/decisions/0074-a-jobs-identifier-is-its-name.md`.
     #[test]
-    fn a_rooms_name_is_the_project_the_title_and_the_identifier() {
-        let job = JobId::from_uuid(Uuid::from_u128(0x3fa8_5f64_5717_4562_b3fc_2c96_3f66_afa6));
+    fn a_rooms_name_is_the_project_and_the_jobs_name() {
+        let minted = Uuid::from_u128(0x3fa8_5f64_5717_4562_b3fc_2c96_3f66_afa6);
+        let job = JobId::named("Fix the flaky parser test!", &minted);
         assert_eq!(
-            room_name(
-                Channel::Slack,
-                "Closed Loop",
-                "Fix the flaky parser test!",
-                job
-            ),
+            room_name(Channel::Slack, "Closed Loop", &job),
             "closed-loop--fix-the-flaky-parser-test--3fa85f64"
         );
         assert_eq!(
-            room_name(Channel::Slack, "aviary", "", job),
-            "aviary--3fa85f64",
-            "no title is no middle part rather than an empty one"
+            room_name(Channel::Slack, "", &job),
+            "fix-the-flaky-parser-test--3fa85f64",
+            "a project with nothing left in its part is left out"
         );
         assert_eq!(
-            room_name(Channel::Slack, "", "", job),
-            "job--3fa85f64",
+            room_name(Channel::Slack, "aviary", &JobId::named("", &minted)),
+            "aviary--job--3fa85f64",
             "a name with nothing to say still says what it is"
         );
-        let long = room_name(Channel::Slack, &"p".repeat(60), &"t".repeat(120), job);
+        let long = room_name(
+            Channel::Slack,
+            &"p".repeat(60),
+            &JobId::named(&"t ".repeat(120), &minted),
+        );
         assert!(long.len() <= 80, "{long}");
         assert!(long.ends_with("--3fa85f64"), "{long}");
         assert_eq!(
@@ -1060,6 +1139,20 @@ mod tests {
             ),
             "https://example.slack.com/archives/C0123456789/p1788000000000100",
             "a thread's parent is linked as itself"
+        );
+    }
+
+    /// A link to a room is a message's link without the message.
+    #[test]
+    fn a_link_to_a_room_is_the_workspaces_address_and_the_room() {
+        let us = Identity {
+            user: "U0BOT".to_owned(),
+            bot: "B0SELF".to_owned(),
+            url: "https://example.slack.com/".to_owned(),
+        };
+        assert_eq!(
+            room_address(Channel::Slack, &us, ROOM),
+            "https://example.slack.com/archives/C0123456789"
         );
     }
 

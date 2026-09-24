@@ -93,9 +93,172 @@ impl fmt::Display for Secret {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ProjectId(Uuid);
 
-/// Identifies a job.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct JobId(Uuid);
+/// Identifies a job, and names it.
+///
+/// One string, and it is the job's name wherever the job is met: the key
+/// here, the segment of its page's address, the suffix of its container's
+/// name, the bottom label of its tunnel's host, and the tail of its room's
+/// name — see `docs/decisions/0074-a-jobs-identifier-is-its-name.md`. It is
+/// the title the job was given, folded by [`slug`] and capped at
+/// [`JobId::TITLE_AT_MOST`], then [`JobId::SEPARATOR`] and
+/// [`JobId::SUFFIX_CHARS`] of hex minted for it. A job the last release
+/// wrote is named by its UUID, which fits the same grammar as it stands.
+///
+/// **Nothing parses one.** The title in it is for a reader and the hex is
+/// what made it unique; the only reader of its shape is [`JobId::parse`],
+/// which says whether a text is a name and never what it means.
+///
+/// Text rather than a UUID, so it is cloned where the UUID was copied.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct JobId(String);
+
+impl JobId {
+    /// The most a name may be, in characters: a title at its cap, the
+    /// separator, and the suffix. Under a DNS label's sixty-three, and
+    /// beside a project's part under a room's eighty.
+    pub const AT_MOST: usize = 50;
+    /// The most of a title a name carries.
+    pub const TITLE_AT_MOST: usize = 40;
+    /// What parts the title from the suffix: two hyphens, because a title
+    /// contains single ones.
+    pub const SEPARATOR: &'static str = "--";
+    /// How much of the minted hex a name carries: enough that two jobs of
+    /// one instance never collide in practice, short enough to read.
+    pub const SUFFIX_CHARS: usize = 8;
+    /// What a title with nothing left in it after folding reads as, so that
+    /// every name has its two parts.
+    const NAMELESS: &'static str = "job";
+
+    /// The name of a job identified by a UUID: the shape the last release
+    /// wrote, and the one tests mint from a number.
+    #[must_use]
+    pub fn from_uuid(value: Uuid) -> Self {
+        Self(value.hyphenated().to_string())
+    }
+
+    /// A name from a title and the hex minted for it.
+    ///
+    /// There is no constructor that mints: doing so needs randomness, and
+    /// this crate takes no effects. See the crate documentation.
+    #[must_use]
+    pub fn named(title: &str, minted: &Uuid) -> Self {
+        let mut name = slug(title, Self::TITLE_AT_MOST);
+        if name.is_empty() {
+            name.push_str(Self::NAMELESS);
+        }
+        name.push_str(Self::SEPARATOR);
+        name.extend(minted.simple().to_string().chars().take(Self::SUFFIX_CHARS));
+        Self(name)
+    }
+
+    /// Reads a name, refusing anything the grammar does not allow: lowercase
+    /// ASCII letters and digits in runs parted by hyphens, none at either
+    /// end, and no longer than [`JobId::AT_MOST`].
+    ///
+    /// # Errors
+    ///
+    /// Says which rule the text broke.
+    pub fn parse(text: &str) -> Result<Self, InvalidJobId> {
+        if text.is_empty() {
+            return Err(InvalidJobId::Empty);
+        }
+        if text.chars().count() > Self::AT_MOST {
+            return Err(InvalidJobId::TooLong);
+        }
+        if text.starts_with('-') || text.ends_with('-') {
+            return Err(InvalidJobId::HyphenAtAnEnd);
+        }
+        if let Some(character) = text
+            .chars()
+            .find(|c| !(c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '-'))
+        {
+            return Err(InvalidJobId::Character(character));
+        }
+        Ok(Self(text.to_owned()))
+    }
+
+    /// The name, as text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for JobId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl TryFrom<String> for JobId {
+    type Error = InvalidJobId;
+
+    fn try_from(text: String) -> Result<Self, Self::Error> {
+        Self::parse(&text)
+    }
+}
+
+impl From<JobId> for String {
+    fn from(name: JobId) -> Self {
+        name.0
+    }
+}
+
+/// Why a text is not a job's name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum InvalidJobId {
+    /// Nothing at all.
+    #[error("a job's name cannot be empty")]
+    Empty,
+    /// More than a name may be.
+    #[error("a job's name is at most {} characters", JobId::AT_MOST)]
+    TooLong,
+    /// A hyphen where a DNS label refuses one.
+    #[error("a job's name neither starts nor ends with a hyphen")]
+    HyphenAtAnEnd,
+    /// Something outside the alphabet every place a name goes shares.
+    #[error("a job's name is lowercase letters, digits and hyphens, and {0:?} is none of those")]
+    Character(char),
+}
+
+/// Folds text to a piece of a name.
+///
+/// Lowercase, with every run of anything but an ASCII letter or digit as
+/// one hyphen, no hyphen at either end, and no longer than `at_most` — cut
+/// back to the last whole word that fits when the cut would land inside
+/// one, and cut where it is when what is left is one word longer than the
+/// cap.
+///
+/// The one fold for everything named here: a job, and the project's part of
+/// a room's name in the channel crate — see
+/// `docs/decisions/0074-a-jobs-identifier-is-its-name.md`.
+#[must_use]
+pub fn slug(text: &str, at_most: usize) -> String {
+    let mut folded = String::new();
+    for character in text.chars() {
+        let lowered = character.to_ascii_lowercase();
+        if lowered.is_ascii_alphanumeric() {
+            folded.push(lowered);
+        } else if !folded.is_empty() && !folded.ends_with('-') {
+            folded.push('-');
+        }
+    }
+    // Every character kept is ASCII, so a length is a count and a cut at
+    // `at_most` lands on a character boundary. Whether there is a character
+    // at the cut is whether the fold is longer than the cap.
+    if let Some(at_the_cut) = folded.chars().nth(at_most) {
+        let inside_a_word = at_the_cut != '-';
+        folded.truncate(at_most);
+        if inside_a_word
+            && folded.ends_with(|c: char| c != '-')
+            && let Some(last_break) = folded.rfind('-')
+        {
+            folded.truncate(last_break);
+        }
+    }
+    folded.trim_end_matches('-').to_owned()
+}
 
 /// Identifies one instance of this program.
 ///
@@ -142,7 +305,6 @@ macro_rules! identifier {
 }
 
 identifier!(ProjectId);
-identifier!(JobId);
 identifier!(InstanceId);
 
 /// A coding agent this project knows how to run.
@@ -474,6 +636,91 @@ pub enum Platform {
     GitHub,
 }
 
+/// Where a project's repository is, as the platform names it: an owner and
+/// a name on GitHub.
+///
+/// Parsed from what an operator typed and refused when it is not an address
+/// on the platform, per
+/// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`: the
+/// dashboard composes addresses from it — the repository's own, and a pull
+/// request's by number — and an address composed from text that was not one
+/// would be wrong quietly. A project written before this existed may hold
+/// text that does not parse; it is opened and shown, and nothing is composed
+/// from it.
+///
+/// Serialises, because the instance holds one while a credential is
+/// checked against it and a scenario's snapshot walks what is held; it is
+/// an address and never a secret.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepositoryAddress {
+    /// Who owns it, as the platform spells it.
+    pub owner: String,
+    /// What it is called there.
+    pub name: String,
+}
+
+impl RepositoryAddress {
+    /// Parses an https address on GitHub, forgiving the two things people
+    /// paste along with one: a trailing `.git`, and a trailing slash.
+    ///
+    /// # Errors
+    ///
+    /// Fails if it is not https, not on GitHub, or not an owner and a name
+    /// and nothing more.
+    pub fn parse(text: &str) -> Result<Self, RepositoryError> {
+        let Some(rest) = text.trim().strip_prefix("https://") else {
+            return Err(RepositoryError::NotHttps);
+        };
+        let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+        if !host.eq_ignore_ascii_case("github.com") && !host.eq_ignore_ascii_case("www.github.com")
+        {
+            return Err(RepositoryError::NotOnGitHub);
+        }
+        let path = path.trim_end_matches('/');
+        let path = path.strip_suffix(".git").unwrap_or(path);
+        let mut parts = path.split('/');
+        match (parts.next(), parts.next(), parts.next()) {
+            (Some(owner), Some(name), None) if is_slug(owner) && is_slug(name) => Ok(Self {
+                owner: owner.to_owned(),
+                name: name.to_owned(),
+            }),
+            _ => Err(RepositoryError::NotOwnerAndName),
+        }
+    }
+
+    /// The address as this project writes it: https, no suffix, no slash.
+    #[must_use]
+    pub fn https(&self) -> String {
+        format!("https://github.com/{}/{}", self.owner, self.name)
+    }
+}
+
+/// Whether one part of a path is something the platform would call an owner
+/// or a repository: letters, digits, and the three marks it allows.
+fn is_slug(part: &str) -> bool {
+    !part.is_empty()
+        && part
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// Why some text is not a repository's address.
+///
+/// Says which rule was broken rather than merely refusing, because the
+/// operator is looking at the box they typed it into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum RepositoryError {
+    /// It does not start with the one scheme accepted.
+    #[error("it has to start with https://")]
+    NotHttps,
+    /// It is on some other host.
+    #[error("it has to be on github.com")]
+    NotOnGitHub,
+    /// Its path is not an owner and a name.
+    #[error("it has to name an owner and a repository, and nothing more")]
+    NotOwnerAndName,
+}
+
 /// The name of one variable a project gives its jobs.
 ///
 /// Validated on the way in, so that everything downstream is total: an adapter
@@ -757,6 +1004,19 @@ pub struct Job {
     /// as what this one does.
     #[serde(deserialize_with = "progress_or_older")]
     pub progress: Progress,
+    /// When its progress last changed — what a job that needs a person has
+    /// been waiting since, per
+    /// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+    ///
+    /// Written whenever the progress is, from the time the world told the
+    /// instance with the step, per
+    /// `docs/decisions/0073-the-world-tells-the-instance-the-time-with-every-step.md`.
+    /// None for every job the last release wrote, which is why it is
+    /// defaulted: such a job says only that it waits, and it has waited
+    /// longer than any job that carries a moment, since its last change was
+    /// before this build's first stamp.
+    #[serde(default)]
+    pub since: Option<Timestamp>,
     /// The room its conversation happens in, once there is one.
     ///
     /// Recorded for the lookup in the other direction: a reply arrives naming
@@ -805,6 +1065,18 @@ pub struct Job {
     /// release wrote, which is why it is defaulted.
     #[serde(default)]
     pub inbox: Inbox,
+    /// The pull requests it said it opened, by number on the project's
+    /// repository — see
+    /// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+    ///
+    /// The union of every number ever claimed, sorted, so that a forgetful
+    /// later turn cannot erase an earlier one; whether any is still open is
+    /// the platform's to know. A number names a pull request on this
+    /// project's repository and nowhere else, which is why it is a number
+    /// and not an address. Empty for a job that claimed none, and for every
+    /// job the last release wrote, which is why it is defaulted.
+    #[serde(default)]
+    pub pull_requests: BTreeSet<u64>,
 }
 
 /// The messages a job has been sent and has not finished with.
@@ -913,10 +1185,12 @@ impl Job {
             kickoff,
             created_at,
             progress: Progress::Working,
+            since: Some(created_at),
             room: None,
             asked_by: None,
             reported: BTreeMap::new(),
             inbox: Inbox::new(),
+            pull_requests: BTreeSet::new(),
         }
     }
 
@@ -1366,7 +1640,7 @@ pub struct Project {
     /// written to disk in the clear and printed on a screen.
     ///
     /// May be empty, which is most projects.
-    pub variables: BTreeMap<VariableName, Secret>,
+    pub variables: BTreeMap<VariableName, Variable>,
     /// Its jobs, past and present.
     ///
     /// Nested rather than held globally so that "a job belongs to exactly one
@@ -1503,7 +1777,7 @@ impl State {
                 .jobs
                 .iter()
                 .filter(|(_, job)| matches!(job.progress, Progress::Working))
-                .map(|(id, _)| *id)
+                .map(|(id, _)| id.clone())
         })
     }
 
@@ -1522,7 +1796,7 @@ impl State {
                 .jobs
                 .iter()
                 .filter(|(_, job)| !job.progress.is_retired())
-                .map(|(id, _)| *id)
+                .map(|(id, _)| id.clone())
         })
     }
 
@@ -1533,10 +1807,10 @@ impl State {
     /// container's name, which says the job and not the project, so it needs
     /// the search this does.
     #[must_use]
-    pub fn job(&self, job: JobId) -> Option<&Job> {
+    pub fn job(&self, job: &JobId) -> Option<&Job> {
         self.projects
             .values()
-            .find_map(|project| project.jobs.get(&job))
+            .find_map(|project| project.jobs.get(job))
     }
 
     /// Which project a job belongs to.
@@ -1547,18 +1821,18 @@ impl State {
     /// search for the rest. Whoever speaks on that job's behalf needs the
     /// project, because the channel binding is the project's.
     #[must_use]
-    pub fn project_of(&self, job: JobId) -> Option<ProjectId> {
+    pub fn project_of(&self, job: &JobId) -> Option<ProjectId> {
         self.projects
             .iter()
-            .find(|(_, project)| project.jobs.contains_key(&job))
+            .find(|(_, project)| project.jobs.contains_key(job))
             .map(|(id, _)| *id)
     }
 
     /// A job, for recording what became of it.
-    pub fn job_mut(&mut self, job: JobId) -> Option<&mut Job> {
+    pub fn job_mut(&mut self, job: &JobId) -> Option<&mut Job> {
         self.projects
             .values_mut()
-            .find_map(|project| project.jobs.get_mut(&job))
+            .find_map(|project| project.jobs.get_mut(job))
     }
 
     /// Who a message arriving on a channel is for.
@@ -1630,7 +1904,9 @@ impl State {
                     .as_ref()
                     .is_some_and(|room| room.channel == channel && room.id == arriving.room)
             })
-            .map_or(Recipient::Foreman(project), |(job, _)| Recipient::Job(*job))
+            .map_or(Recipient::Foreman(project), |(job, _)| {
+                Recipient::Job(job.clone())
+            })
     }
 
     /// Converts to the form that goes on disk, sealing every credential.
@@ -1700,7 +1976,15 @@ impl State {
                 let variables = project
                     .variables
                     .iter()
-                    .map(|(name, secret)| Ok((name.to_string(), secret.seal(key, nonces())?)))
+                    .map(|(name, variable)| {
+                        Ok((
+                            name.to_string(),
+                            SealedVariable {
+                                value: variable.value.seal(key, nonces())?,
+                                note: variable.note.clone(),
+                            },
+                        ))
+                    })
                     .collect::<Result<BTreeMap<_, _>, SealError>>()?;
                 Ok((
                     *id,
@@ -1887,6 +2171,79 @@ pub enum OpenError {
     KitName(#[source] KitNameError),
 }
 
+/// One of a project's variables: its value, and what it is for.
+///
+/// The value is a [`Secret`] and never read here, per
+/// `docs/decisions/0046-a-projects-variables-are-carried-never-read.md`.
+/// The note is the operator's words on what the variable is for, told to a
+/// job's agent beside the name and read by nothing here either — see
+/// `docs/decisions/0075-a-variable-says-what-it-is-for.md`. It is kept in
+/// the clear, on the terms the name is: prose the operator typed in order
+/// to have it read back, and never a value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Variable {
+    /// What it is set to.
+    pub value: Secret,
+    /// What it is for, in the operator's words; empty when nobody said.
+    pub note: String,
+}
+
+impl Variable {
+    /// A variable with a value and nothing said about it.
+    #[must_use]
+    pub const fn unexplained(value: Secret) -> Self {
+        Self {
+            value,
+            note: String::new(),
+        }
+    }
+}
+
+/// A variable as it appears on disk: its value sealed, its note in the
+/// clear beside it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SealedVariable {
+    /// The value, sealed.
+    pub value: SealedSecret,
+    /// What it is for, as the operator wrote it.
+    #[serde(default)]
+    pub note: String,
+}
+
+/// A variable in either shape a snapshot may hold: with its note, or as the
+/// bare sealed value the last release wrote, which opens as one with no
+/// note — the bridge `docs/conventions.md` §4 asks for, from that release's
+/// shape and no older.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SealedVariableOrOlder {
+    /// The shape written now.
+    Noted(SealedVariable),
+    /// The shape the last release wrote: the sealed value alone.
+    Bare(SealedSecret),
+}
+
+/// Reads a project's variables in either shape.
+fn variables_or_older<'de, D>(deserializer: D) -> Result<BTreeMap<String, SealedVariable>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let read: BTreeMap<String, SealedVariableOrOlder> = BTreeMap::deserialize(deserializer)?;
+    Ok(read
+        .into_iter()
+        .map(|(name, either)| {
+            let variable = match either {
+                SealedVariableOrOlder::Noted(variable) => variable,
+                SealedVariableOrOlder::Bare(value) => SealedVariable {
+                    value,
+                    note: String::new(),
+                },
+            };
+            (name, variable)
+        })
+        .collect())
+}
+
 /// A credential as it appears on disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SealedSecret {
@@ -2049,9 +2406,10 @@ pub struct SealedProject {
     /// nothing: an added field is free *with* a default and loses every
     /// existing instance without one. The empty map is the true answer rather
     /// than a substitute for one, because a file written before variables
-    /// existed described a project that had none.
-    #[serde(default)]
-    pub variables: BTreeMap<String, SealedSecret>,
+    /// existed described a project that had none. Read in either shape: the
+    /// value with its note, or the bare sealed value the last release wrote.
+    #[serde(default, deserialize_with = "variables_or_older")]
+    pub variables: BTreeMap<String, SealedVariable>,
     /// Its jobs, which hold nothing needing sealing.
     pub jobs: BTreeMap<JobId, Job>,
     /// What its foreman was doing, which holds nothing needing sealing either:
@@ -2163,7 +2521,13 @@ impl Snapshot {
                     .into_iter()
                     .map(|(name, sealed)| {
                         let name = VariableName::new(name).map_err(OpenError::VariableName)?;
-                        Ok((name, sealed.open(key)?))
+                        Ok((
+                            name,
+                            Variable {
+                                value: sealed.value.open(key)?,
+                                note: sealed.note,
+                            },
+                        ))
                     })
                     .collect::<Result<BTreeMap<_, _>, OpenError>>()?;
                 // Where a kit's name stops being believed, on the same terms.
@@ -2270,7 +2634,7 @@ pub struct Arriving<'a> {
 }
 
 /// Who an arriving message is for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Recipient {
     /// The job whose room it arrived in.
     Job(JobId),
@@ -2359,7 +2723,7 @@ pub struct Handout {
     repository: Option<String>,
     agent_credential: Secret,
     platforms: BTreeMap<Platform, Secret>,
-    variables: BTreeMap<VariableName, Secret>,
+    variables: BTreeMap<VariableName, Variable>,
     channels: BTreeMap<Channel, Speaking>,
     place: Option<Place>,
 }
@@ -2530,10 +2894,12 @@ impl Handout {
     /// Ordered because the map is, which is what lets an adapter's argument
     /// list be asserted as literal text rather than as a set.
     pub fn variables(&self) -> impl Iterator<Item = (&VariableName, &Secret)> {
-        self.variables.iter()
+        self.variables
+            .iter()
+            .map(|(name, variable)| (name, &variable.value))
     }
 
-    /// The names alone, for the instruction a job begins from.
+    /// The names alone, for whatever must never carry a value.
     ///
     /// Separate from [`Handout::variables`] because the caller is different in
     /// kind: a prompt names them and must never carry a value, since a kickoff
@@ -2542,6 +2908,16 @@ impl Handout {
     /// wrong at the call site rather than merely easy to get right.
     pub fn variable_names(&self) -> impl Iterator<Item = &VariableName> {
         self.variables.keys()
+    }
+
+    /// The names with what each is for, for the instruction a job begins
+    /// from: the note the operator wrote, and never the value, on the same
+    /// terms as [`Handout::variable_names`] — see
+    /// `docs/decisions/0075-a-variable-says-what-it-is-for.md`.
+    pub fn variables_told(&self) -> impl Iterator<Item = (&VariableName, &str)> {
+        self.variables
+            .iter()
+            .map(|(name, variable)| (name, variable.note.as_str()))
     }
 
     /// How this process reaches one channel, if it is bound to one.
@@ -2635,8 +3011,8 @@ mod tests {
         Agent, AgentConfig, Arriving, Attending, BASE64, Channel, ChannelConfig, ClaudeEffort,
         ClaudeModel, Errand, Handout, HandoutError, Inbox, Inconsistent, Job, JobId, Key, Kit,
         KitConfig, KitName, KitNameError, NONCE_LEN, Nonce, OpenError, Outcome, Place, Platform,
-        Progress, Project, ProjectId, Recipient, Room, Secret, Snapshot, State, Taken, Thread,
-        VariableName, VariableNameError, Waiting,
+        Progress, Project, ProjectId, Recipient, RepositoryAddress, RepositoryError, Room, Secret,
+        Snapshot, State, Taken, Thread, Variable, VariableName, VariableNameError, Waiting,
     };
     use base64::Engine as _;
     use jiff::Timestamp;
@@ -2715,7 +3091,10 @@ mod tests {
             channels,
             variables: BTreeMap::from([(
                 VariableName::new(VARIABLE).expect("a deliverable name"),
-                Secret::new(VARIABLE_VALUE.to_owned()),
+                Variable {
+                    value: Secret::new(VARIABLE_VALUE.to_owned()),
+                    note: "the staging database, read-only".to_owned(),
+                },
             )]),
             jobs,
             attending: Attending::default(),
@@ -2943,15 +3322,16 @@ mod tests {
         let mut state = configured();
         let project = ProjectId::from_uuid(Uuid::from_u128(3));
         state.projects.insert(project, a_project_with_a_job());
-        let job = *state
+        let job = state
             .projects
             .get(&project)
             .expect("just inserted")
             .jobs
             .keys()
             .next()
-            .expect("a job");
-        state.job_mut(job).expect("the job").room = Some(a_room());
+            .expect("a job")
+            .clone();
+        state.job_mut(&job).expect("the job").room = Some(a_room());
         (state, project, job)
     }
 
@@ -3032,7 +3412,7 @@ mod tests {
         for thread in [None, Some("1728312345.678901")] {
             assert_eq!(
                 state.recipient(project, Channel::Slack, &arriving(JOB_ROOM, thread)),
-                Recipient::Job(job),
+                Recipient::Job(job.clone()),
                 "{thread:?}"
             );
         }
@@ -3133,7 +3513,7 @@ mod tests {
     #[test]
     fn an_idle_jobs_room_still_routes_to_it() {
         let (mut state, project, job) = listening();
-        state.job_mut(job).expect("the job").progress = Progress::Idle(Waiting::Silent);
+        state.job_mut(&job).expect("the job").progress = Progress::Idle(Waiting::Silent);
 
         assert_eq!(
             state.recipient(project, Channel::Slack, &arriving(JOB_ROOM, None)),
@@ -3277,7 +3657,7 @@ mod tests {
     #[test]
     fn a_jobs_thread_survives_the_snapshot_boundary() {
         let mut state = populated();
-        let job = *state
+        let job = state
             .projects
             .values()
             .next()
@@ -3285,8 +3665,9 @@ mod tests {
             .jobs
             .keys()
             .next()
-            .expect("a job");
-        state.job_mut(job).expect("the job").room = Some(a_room());
+            .expect("a job")
+            .clone();
+        state.job_mut(&job).expect("the job").room = Some(a_room());
 
         let json = serde_json::to_string(
             &state
@@ -3298,7 +3679,7 @@ mod tests {
         let reopened = reopened.open(&key()).expect("and opens");
 
         let room = reopened
-            .job(job)
+            .job(&job)
             .expect("the job survived")
             .room
             .clone()
@@ -3345,6 +3726,14 @@ mod tests {
             let job: Job = serde_json::from_str(&older)
                 .unwrap_or_else(|why| panic!("{written} must still parse: {why}"));
             assert_eq!(job.progress, expected);
+            assert!(
+                job.pull_requests.is_empty(),
+                "a job written before it could claim one claimed none"
+            );
+            assert_eq!(
+                job.since, None,
+                "a job written before the moment was kept says only that it waits"
+            );
         }
     }
 
@@ -3435,7 +3824,7 @@ mod tests {
             .get_mut(&project)
             .expect("the project")
             .jobs
-            .insert(job, recorded);
+            .insert(job.clone(), recorded);
 
         let json = serde_json::to_string(
             &state
@@ -3445,7 +3834,7 @@ mod tests {
         .expect("a snapshot serialises");
         let reopened: Snapshot = serde_json::from_str(&json).expect("and parses back");
         let reopened = reopened.open(&key()).expect("and opens");
-        let survived = reopened.job(job).expect("the job survived");
+        let survived = reopened.job(&job).expect("the job survived");
 
         assert_eq!(
             *survived.kit(),
@@ -3548,7 +3937,7 @@ mod tests {
                   "channels": {{
                     "Slack": {{ "address": "C0123456789", "credential": {sealed} }}
                   }},
-                  "variables": {{}},
+                  "variables": {{ "STRIPE_API_KEY": {sealed} }},
                   "jobs": {{
                     "00000000-0000-0000-0000-000000000009": {{
                       "kit": {{ "Claude": {{ "model": {{ "Default": {{ "effort": "Default" }} }} }} }},
@@ -3620,6 +4009,15 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["Claude".to_owned()],
         );
+        // The last release wrote a variable as its sealed value alone, which
+        // opens as one with nothing said about it — the bridge
+        // `docs/decisions/0075-a-variable-says-what-it-is-for.md` keeps.
+        let variable = project
+            .variables
+            .get(&VariableName::new("STRIPE_API_KEY").expect("a deliverable name"))
+            .expect("the variable survived");
+        assert_eq!(variable.value.expose(), "agent-token");
+        assert_eq!(variable.note, "", "a bare value has no note");
         assert!(
             project.channels.is_empty(),
             "a binding without the credential that listens is no binding"
@@ -3959,7 +4357,7 @@ mod tests {
         // had different names would pass it by accident.
         other.variables.insert(
             VariableName::new(VARIABLE).expect("a deliverable name"),
-            Secret::new(ALIEN_VARIABLE_VALUE.to_owned()),
+            Variable::unexplained(Secret::new(ALIEN_VARIABLE_VALUE.to_owned())),
         );
         state.projects.insert(theirs, other);
 
@@ -4135,6 +4533,71 @@ mod tests {
         let named: Vec<&str> = handout.variable_names().map(VariableName::as_str).collect();
 
         assert_eq!(named, vec![VARIABLE]);
+        // What the kickoff is told: the name with its note, and never the
+        // value — see `docs/decisions/0075-a-variable-says-what-it-is-for.md`.
+        let told: Vec<(&str, &str)> = handout
+            .variables_told()
+            .map(|(name, note)| (name.as_str(), note))
+            .collect();
+        assert_eq!(told, vec![(VARIABLE, "the staging database, read-only")]);
+    }
+
+    /// The one grammar a name is read by, at each of its edges: the cap,
+    /// the ends, the alphabet — and a name reads back as the text it was.
+    #[test]
+    fn a_jobs_name_is_read_by_the_one_grammar_at_its_edges() {
+        let longest = "a".repeat(JobId::AT_MOST);
+        let read = JobId::parse(&longest).expect("exactly the cap is a name");
+        assert_eq!(read.as_str(), longest);
+        assert_eq!(read.to_string(), longest);
+        assert_eq!(
+            JobId::parse(&format!("{longest}a")),
+            Err(super::InvalidJobId::TooLong)
+        );
+        assert_eq!(JobId::parse(""), Err(super::InvalidJobId::Empty));
+        assert_eq!(
+            JobId::parse("-fix"),
+            Err(super::InvalidJobId::HyphenAtAnEnd)
+        );
+        assert_eq!(
+            JobId::parse("fix-"),
+            Err(super::InvalidJobId::HyphenAtAnEnd)
+        );
+        assert_eq!(
+            JobId::parse("Fix"),
+            Err(super::InvalidJobId::Character('F'))
+        );
+        assert_eq!(
+            JobId::parse("fix_it"),
+            Err(super::InvalidJobId::Character('_'))
+        );
+        assert_eq!(
+            JobId::parse("fix-login-timeout--3f9a2c1b").map(|name| name.to_string()),
+            Ok("fix-login-timeout--3f9a2c1b".to_owned())
+        );
+    }
+
+    /// The fold: lowercase, every run of anything else one hyphen, none at
+    /// either end, and a cut that lands inside a word steps back to the
+    /// last whole one — unless what is left is one word, which is cut where
+    /// it is.
+    #[test]
+    fn a_title_folds_to_a_slug_and_is_cut_on_a_word() {
+        assert_eq!(super::slug("Fix: the LOGIN!!", 40), "fix-the-login");
+        assert_eq!(super::slug("--fix  it--", 40), "fix-it");
+        assert_eq!(super::slug("", 40), "");
+        // Exactly the cap is left alone; one more is cut on a word.
+        assert_eq!(super::slug("fix the login", 13), "fix-the-login");
+        assert_eq!(super::slug("fix the login", 12), "fix-the");
+        assert_eq!(super::slug("fix the login", 9), "fix-the");
+        // A cut that lands on a hyphen, or just after one, keeps the words
+        // before it whole.
+        assert_eq!(super::slug("fix the login", 7), "fix-the");
+        assert_eq!(super::slug("fix the login", 8), "fix-the");
+        // One word longer than the cap is cut where it is; a word after a
+        // whole one is dropped.
+        assert_eq!(super::slug("abcdefghij", 5), "abcde");
+        assert_eq!(super::slug("abc defghij", 5), "abc");
     }
 
     /// `docs/conventions.md` §4, for the map added last.
@@ -4350,8 +4813,8 @@ mod tests {
         let waiting = JobId::from_uuid(Uuid::from_u128(22));
         let over = JobId::from_uuid(Uuid::from_u128(23));
         for (id, progress) in [
-            (going, Progress::Working),
-            (waiting, Progress::Idle(Waiting::Asked)),
+            (going.clone(), Progress::Working),
+            (waiting.clone(), Progress::Idle(Waiting::Asked)),
             (over, Progress::Retired(Outcome::Done)),
         ] {
             let mut job = Job::new(
@@ -4365,7 +4828,7 @@ mod tests {
         }
 
         let mut unfinished: Vec<JobId> = state.unfinished().collect();
-        unfinished.sort_by_key(|job| job.as_uuid().as_u128());
+        unfinished.sort();
         assert_eq!(unfinished, vec![going, waiting]);
     }
 
@@ -4422,7 +4885,7 @@ mod tests {
         let found: Vec<JobId> = state.working().collect();
 
         assert_eq!(found.len(), 1, "{found:?}");
-        assert!(state.job(found[0]).is_some());
+        assert!(state.job(&found[0]).is_some());
     }
 
     #[test]
@@ -4430,11 +4893,11 @@ mod tests {
         let mut state = populated();
         let id = state.working().next().expect("one to start with");
 
-        state.job_mut(id).expect("it is there").progress = Progress::Idle(Waiting::Silent);
+        state.job_mut(&id).expect("it is there").progress = Progress::Idle(Waiting::Silent);
 
         assert_eq!(state.working().count(), 0);
         assert!(
-            state.job(id).is_some(),
+            state.job(&id).is_some(),
             "finishing is not forgetting: the record stays"
         );
     }
@@ -4558,9 +5021,9 @@ mod tests {
     fn a_job_names_the_project_it_belongs_to() {
         let (state, project, job) = listening();
 
-        assert_eq!(state.project_of(job), Some(project));
+        assert_eq!(state.project_of(&job), Some(project));
         assert_eq!(
-            state.project_of(JobId::from_uuid(Uuid::from_u128(99))),
+            state.project_of(&JobId::from_uuid(Uuid::from_u128(99))),
             None
         );
     }
@@ -4569,7 +5032,7 @@ mod tests {
     fn a_job_this_instance_never_had_is_not_found() {
         let state = populated();
 
-        assert!(state.job(JobId::from_uuid(Uuid::from_u128(404))).is_none());
+        assert!(state.job(&JobId::from_uuid(Uuid::from_u128(404))).is_none());
     }
 
     /// A file describing an instance that cannot exist is refused where it is
@@ -4585,5 +5048,48 @@ mod tests {
             snapshot.open(&key()),
             Err(OpenError::Inconsistent(Inconsistent::NoKits(_)))
         ));
+    }
+
+    /// An address is what an operator pastes, with what they paste beside it
+    /// forgiven, and nothing else.
+    #[test]
+    fn a_repository_address_is_https_on_github_with_an_owner_and_a_name() {
+        let parsed = RepositoryAddress::parse(" https://github.com/HernanFdz/stageman.git/ ")
+            .expect("an address");
+        assert_eq!(parsed.owner, "HernanFdz");
+        assert_eq!(parsed.name, "stageman");
+        assert_eq!(parsed.https(), "https://github.com/HernanFdz/stageman");
+        assert_eq!(
+            RepositoryAddress::parse("https://WWW.GitHub.com/owner/name").map(|a| a.https()),
+            Ok("https://github.com/owner/name".to_owned()),
+            "the host is not case-sensitive"
+        );
+
+        assert_eq!(
+            RepositoryAddress::parse("http://github.com/owner/name"),
+            Err(RepositoryError::NotHttps)
+        );
+        assert_eq!(
+            RepositoryAddress::parse("git@github.com:owner/name.git"),
+            Err(RepositoryError::NotHttps)
+        );
+        assert_eq!(
+            RepositoryAddress::parse("https://example.invalid/owner/name"),
+            Err(RepositoryError::NotOnGitHub)
+        );
+        for path in [
+            "",
+            "owner",
+            "owner/",
+            "owner/name/tree/main",
+            "owner/na me",
+            "/name",
+        ] {
+            assert_eq!(
+                RepositoryAddress::parse(&format!("https://github.com/{path}")),
+                Err(RepositoryError::NotOwnerAndName),
+                "{path:?}"
+            );
+        }
     }
 }

@@ -37,8 +37,9 @@ pub struct Agent {
 
 // -------------------------------------------------------------- instance
 
-/// One instance, as much of it as a page is allowed to know: counts and
-/// names, and nothing that could be a credential.
+/// One instance, as the line at the foot of every page shows it: this
+/// machine and this build. Counts and names, and nothing that could be a
+/// credential.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Instance {
     /// Where this machine's container runtime was found. A path rather
@@ -48,8 +49,37 @@ pub struct Instance {
     /// How many agents are configured. A count and not a list, because an
     /// agent's configuration is a credential.
     pub agents: usize,
-    /// The projects this instance watches.
+    /// The domain the dashboard answers at and jobs are shown under.
+    pub domain: String,
+    /// Which build this is, as the startup block says it.
+    pub version: String,
+}
+
+// ------------------------------------------------------------------ home
+
+/// What the first page shows: the idle jobs of every project, the working
+/// ones, and the projects — see
+/// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Home {
+    /// Every idle job, longest waiting first: the ones a person does
+    /// something about, which is what *idle* means.
+    pub needs_you: Vec<ProjectJob>,
+    /// Every working job, newest first.
+    pub working: Vec<ProjectJob>,
+    /// Every project.
     pub projects: Vec<Project>,
+}
+
+/// One job beside the project it belongs to, for a list that spans projects.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectJob {
+    /// The project, by identifier.
+    pub project: String,
+    /// The project, by name.
+    pub project_name: String,
+    /// The job.
+    pub job: Job,
 }
 
 // -------------------------------------------------------------- projects
@@ -68,6 +98,10 @@ pub struct Project {
     pub name: String,
     /// Where its jobs work.
     pub repository: String,
+    /// The same, as an address a browser can open, when what it holds is
+    /// one. Absent for a project written before addresses were checked,
+    /// whose text is shown and linked to nothing.
+    pub repository_link: Option<String>,
     /// How its foreman's agent is set, as the identifiers a browser sends
     /// back — not the names a person reads.
     pub foreman: Fitted,
@@ -79,8 +113,8 @@ pub struct Project {
     /// The channels bound to it. Empty is valid: a project with nowhere to
     /// escalate can still run work that never needs to ask.
     pub channels: Vec<String>,
-    /// The variables its jobs are given, by name. Names and never values.
-    pub variables: Vec<String>,
+    /// The variables its jobs are given: names and notes, and never values.
+    pub variables: Vec<Variable>,
     /// What its operator wrote for its foreman, as the form edits it.
     pub brief: String,
     /// The rooms its foreman watches, by the platform's identifier: shown
@@ -90,10 +124,20 @@ pub struct Project {
     /// The room its foreman's transcript is posted in, by the platform's
     /// identifier, once one has been made.
     pub foreman_room: Option<String>,
+    /// The same, as an address a person can open, while the channel is
+    /// connected and has said where its workspace is — see
+    /// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+    pub foreman_room_link: Option<String>,
+    /// Whether its foreman is on a message right now.
+    pub attending: bool,
     /// How many of its jobs are still running.
     pub working: usize,
     /// How many jobs it has had, running or finished.
     pub jobs: usize,
+    /// Where the platform's form for a token is, filled in and named for
+    /// this project: the guide beside the box that takes one — see
+    /// `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`.
+    pub token_form: String,
 }
 
 impl Project {
@@ -124,6 +168,23 @@ pub struct Watching {
     /// What each of those can be set to. Built by the instance from the
     /// domain's closed sets, because the browser's half cannot name them.
     pub shapes: Vec<Shape>,
+    /// Where each platform's own form is, filled in, for a project that
+    /// does not exist yet.
+    pub guides: Guides,
+}
+
+/// Where the platforms' own forms are, filled in as this project would
+/// have them.
+///
+/// Links composed on the server from tracked text, and never in the
+/// browser — see
+/// `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Guides {
+    /// The form that mints a repository token, named for no project.
+    pub token_form: String,
+    /// The form that creates the channel's app, with the manifest in it.
+    pub app_form: String,
 }
 
 /// One agent, set a particular way, as a browser edits it.
@@ -264,6 +325,11 @@ pub struct VariableDraft {
     pub name: String,
     /// What it is set to, or empty to keep what the project holds.
     pub value: String,
+    /// What it is for, in the operator's words, told to the agent — see
+    /// `docs/decisions/0075-a-variable-says-what-it-is-for.md`. Blank is
+    /// blank: it is shown in full and resubmitted, like the brief.
+    #[serde(default)]
+    pub note: String,
 }
 
 impl fmt::Debug for VariableDraft {
@@ -271,6 +337,7 @@ impl fmt::Debug for VariableDraft {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("VariableDraft")
             .field("name", &self.name)
+            .field("note", &self.note)
             .field("value", &"<redacted>")
             .finish()
     }
@@ -319,41 +386,118 @@ impl fmt::Debug for Draft {
     }
 }
 
+/// One part of the project form a problem can point at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Part {
+    /// The name.
+    Name,
+    /// The repository.
+    Repository,
+    /// What the foreman thinks with.
+    Foreman,
+    /// The kits, as a set.
+    Kits,
+    /// One kit, counting from nought.
+    Kit(usize),
+    /// The token for the repository.
+    Credential,
+    /// The Slack binding, and its bot token in particular.
+    Channel,
+    /// The Slack binding's app-level token, which listens.
+    Listening,
+    /// The variables, as a set.
+    Variables,
+    /// One variable, counting from nought.
+    Variable(usize),
+}
+
+/// Something the form cannot be saved with, and where.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Problem {
+    /// Which part of the form.
+    pub part: Part,
+    /// What is wrong with it, for a person.
+    pub why: String,
+}
+
 impl Draft {
-    /// Whether this says everything a project needs.
+    /// Everything that stops this being saved, each pointing at where.
     ///
-    /// The same conditions the instance enforces, deliberately: the control
-    /// that submits is unavailable until pressing it would succeed. It is
-    /// not a second definition of validity — the instance still checks —
-    /// but it is the screen refusing to ask the question badly. Creating
-    /// needs a credential and a whole channel binding; amending needs
-    /// neither, because a blank credential there means the one already held
-    /// and the channel is not offered at all. A row of variables needs a
-    /// value unless the project already holds that name.
+    /// The same conditions the instance enforces, deliberately, so the form
+    /// can say which box before asking rather than after being refused. It is
+    /// not a second definition of validity — the instance still checks — but
+    /// it is the screen refusing to ask the question badly. Creating needs a
+    /// credential and a whole channel binding; amending needs neither,
+    /// because a blank credential there means the one already held and the
+    /// channel is not offered at all. A row of variables needs a value unless
+    /// the project already holds that name.
+    #[must_use]
+    pub fn problems(&self, filling: &Filling, held: &[String]) -> Vec<Problem> {
+        let mut found = Vec::new();
+        let mut problem = |part: Part, why: &str| {
+            found.push(Problem {
+                part,
+                why: why.to_owned(),
+            });
+        };
+        if self.name.trim().is_empty() {
+            problem(Part::Name, "It needs a name.");
+        }
+        if self.repository.trim().is_empty() {
+            problem(Part::Repository, "It needs the repository's address.");
+        }
+        if !self.foreman.is_complete() {
+            problem(Part::Foreman, "The foreman needs an agent and a model.");
+        }
+        if self.kits.is_empty() {
+            problem(Part::Kits, "It needs at least one kit its jobs can run on.");
+        }
+        for (position, kit) in self.kits.iter().enumerate() {
+            if kit.name.trim().is_empty() {
+                problem(Part::Kit(position), "A kit needs a name.");
+            }
+            if kit.description.trim().is_empty() {
+                problem(
+                    Part::Kit(position),
+                    "Say what this kit is for; the foreman chooses by it.",
+                );
+            }
+            if !kit.fitted.is_complete() {
+                problem(Part::Kit(position), "A kit needs an agent and a model.");
+            }
+        }
+        if !distinct(&self.kits) {
+            problem(
+                Part::Kits,
+                "Two kits share a name, and a name has to pick one out.",
+            );
+        }
+        if filling.creating() {
+            if self.credential.trim().is_empty() {
+                problem(Part::Credential, "It needs a token for the repository.");
+            }
+            if self.channel.credential.trim().is_empty()
+                || self.channel.listen_credential.trim().is_empty()
+            {
+                problem(Part::Channel, "It needs both Slack tokens.");
+            }
+        }
+        for (position, row) in self.variables.iter().enumerate() {
+            if row.name.trim().is_empty() {
+                problem(Part::Variable(position), "A variable needs a name.");
+            } else if row.value.trim().is_empty() && !held.iter().any(|had| had == row.name.trim())
+            {
+                problem(Part::Variable(position), "A new variable needs a value.");
+            }
+        }
+        found
+    }
+
+    /// Whether this says everything a project needs: nothing is wrong with
+    /// it anywhere.
     #[must_use]
     pub fn is_complete(&self, filling: &Filling, held: &[String]) -> bool {
-        let described = !self.name.trim().is_empty()
-            && !self.repository.trim().is_empty()
-            && self.foreman.is_complete()
-            && !self.kits.is_empty()
-            && self.kits.iter().all(KitDraft::is_complete)
-            && distinct(&self.kits);
-        let named = self.variables.iter().all(|row| !row.name.trim().is_empty());
-        let valued = self.variables.iter().all(|row| {
-            !row.value.trim().is_empty() || held.iter().any(|had| had == row.name.trim())
-        });
-
-        match filling {
-            Filling::Creating => {
-                described
-                    && named
-                    && valued
-                    && !self.credential.trim().is_empty()
-                    && !self.channel.credential.trim().is_empty()
-                    && !self.channel.listen_credential.trim().is_empty()
-            }
-            Filling::Amending(_) => described && named && valued,
-        }
+        self.problems(filling, held).is_empty()
     }
 }
 
@@ -368,6 +512,21 @@ pub fn distinct(kits: &[KitDraft]) -> bool {
 }
 
 // ------------------------------------------------------------------ jobs
+
+/// A title for a job started by hand, when a person gave none: the first
+/// few words of the work, which is what a person would read in a sidebar.
+///
+/// Here rather than on the server alone because the form that starts a job
+/// shows it as the placeholder of the title it asks for, so both halves
+/// have to agree on what leaving it blank means — see
+/// `docs/decisions/0074-a-jobs-identifier-is-its-name.md`.
+#[must_use]
+pub fn titled(work: &str) -> String {
+    work.split_whitespace()
+        .take(6)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
 /// Where a job has got to, as a page sees it.
 ///
@@ -425,16 +584,56 @@ impl Standing {
     pub const fn is_over(&self) -> bool {
         matches!(self, Self::Done | Self::Discarded | Self::Lost)
     }
+
+    /// What a person does about a job here, as one word, where there is
+    /// something to do — and nothing for a job that is working or over.
+    ///
+    /// The verb the first page puts beside a job, per
+    /// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`;
+    /// the readings it answers are 0052's, and *look* is the honest word for
+    /// a job that stopped without saying why.
+    #[must_use]
+    pub const fn asks(&self) -> Option<&'static str> {
+        match self {
+            Self::Asked => Some("Answer"),
+            Self::Proposed => Some("Review"),
+            Self::Failed { .. } => Some("Fix"),
+            Self::Paused => Some("Resume"),
+            Self::Idle => Some("Look"),
+            Self::Working | Self::Done | Self::Discarded | Self::Lost => None,
+        }
+    }
+}
+
+/// What a job runs on, as a chip is drawn from it: the agent by the
+/// identifier the wire uses and by name, the model by name, and the effort
+/// by its spelling and its name where the model takes one.
+///
+/// Resolved on the server, unlike a project's kits, which a browser edits
+/// and so carries as identifiers with the shapes to read them by: a job's
+/// kit is fixed when the job is made and only ever read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Kit {
+    /// The agent, by the identifier the wire uses.
+    pub agent: String,
+    /// The agent, as a person reads it.
+    pub agent_name: String,
+    /// The model, as a person reads it.
+    pub model: String,
+    /// The effort, as the wire spells it and as a person reads it, where the
+    /// model takes one.
+    pub effort: Option<(String, String)>,
 }
 
 /// One job, as much of it as a page is allowed to know.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Job {
-    /// What names it, and what its container is named after.
+    /// Its name, which is what its container, the tail of its room's name
+    /// and its tunnel's host are named after — see
+    /// `docs/decisions/0074-a-jobs-identifier-is-its-name.md`.
     pub id: String,
-    /// What it ran on, in the words a person reads: the agent, and whatever
-    /// of its settings differs from that agent's own defaults.
-    pub kit: String,
+    /// What it runs on, as a chip is drawn from it.
+    pub kit: Kit,
     /// What its session reported it was set to, in the adapter's own words.
     /// Beside the kit rather than folded into it, because the two were
     /// measured to differ.
@@ -448,10 +647,68 @@ pub struct Job {
     pub created_at: String,
     /// Where it has got to.
     pub standing: Standing,
+    /// When its standing last changed, where the instance kept the moment;
+    /// none for a job written before it did, which says only that it waits
+    /// — see `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+    pub since: Option<String>,
     /// Where to look at whatever it is showing. Always present, and it
     /// promises nothing: the port is published when the container is
     /// created, whether or not the agent ever uses it.
     pub tunnel: String,
+    /// The room its conversation happens in, by the platform's identifier,
+    /// once one has been made.
+    pub room: Option<String>,
+    /// The same, as an address a person can open, while the channel is
+    /// connected and has said where its workspace is.
+    pub room_link: Option<String>,
+    /// The pull requests it said it opened, in order, each with its address
+    /// where the repository is one — see
+    /// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+    pub pull_requests: Vec<PullRequest>,
+}
+
+/// One pull request a job said it opened: the number, and where it is.
+///
+/// The address is composed on the server from the repository and the
+/// platform when the repository is an address. Whether it is still open is
+/// the platform's to know, and nothing here says.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequest {
+    /// The number, as the platform counts them.
+    pub number: u64,
+    /// Where it is, when that can be said.
+    pub link: Option<String>,
+}
+
+/// One job's page: the job, the project it is on, and what the page links to.
+///
+/// See `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+/// A link is present only where it is true: a repository that is an address,
+/// a room while the channel has said where its workspace is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobPage {
+    /// The project, by identifier.
+    pub project: String,
+    /// The project, by name.
+    pub project_name: String,
+    /// Where its jobs work.
+    pub repository: String,
+    /// The same, as an address a browser can open, when what it holds is one.
+    pub repository_link: Option<String>,
+    /// The job, as a list shows it: its kit, its room and its tunnel are
+    /// on it, since a row shows them too.
+    pub job: Job,
+}
+
+/// One of a project's variables, as a list shows it: its name and what it
+/// is for, and never its value — see
+/// `docs/decisions/0075-a-variable-says-what-it-is-for.md`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Variable {
+    /// What it is called in the container.
+    pub name: String,
+    /// What it is for, in the operator's words; empty when nobody said.
+    pub note: String,
 }
 
 /// One kit a project offers, as much of it as a page needs to offer it back.
@@ -470,6 +727,8 @@ pub struct Working {
     pub name: String,
     /// Where its jobs work.
     pub repository: String,
+    /// The same, as an address a browser can open, when what it holds is one.
+    pub repository_link: Option<String>,
     /// The kits its jobs may run on. Never empty in a valid instance.
     pub kits: Vec<Offered>,
     /// Its jobs, newest first.
@@ -533,12 +792,54 @@ pub enum Refusal {
         /// The field, named as the screen names it.
         field: String,
     },
+    /// The repository is not an address on the platform.
+    #[error("the repository has to be an address on GitHub: {rule}")]
+    RepositoryRefused {
+        /// Which rule it broke, in words.
+        rule: String,
+    },
     /// A project would have no kit its jobs could run on.
     #[error("a project needs at least one kit its jobs can run on")]
     KitsMissing,
     /// A project was drafted without a whole channel binding.
     #[error("a project needs a Slack bot token and an app-level token")]
     ChannelIncomplete,
+    /// The platform would not have the token, or could not see the
+    /// repository with it — see
+    /// `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`.
+    #[error("the token was not kept: {why}")]
+    TokenRefused {
+        /// What the platform said, as a clause for the box.
+        why: String,
+    },
+    /// The platform could not be asked about the token, so it was not
+    /// kept: not wrong, and not known to be right.
+    #[error("the token was not kept, because it could not be checked: {why}")]
+    TokenUnchecked {
+        /// What went wrong on the way there.
+        why: String,
+    },
+    /// The channel would not have one of the binding's credentials.
+    #[error("the {} token was not kept: {why}", which(*.listening))]
+    ChannelRefused {
+        /// Whether it was the credential that listens, rather than the one
+        /// that speaks.
+        listening: bool,
+        /// What the channel said, as a clause for the box.
+        why: String,
+    },
+    /// The channel could not be asked about one of the binding's
+    /// credentials, so it was not kept.
+    #[error(
+        "the {} token was not kept, because it could not be checked: {why}",
+        which(*.listening)
+    )]
+    ChannelUnchecked {
+        /// Whether it was the credential that listens.
+        listening: bool,
+        /// What went wrong on the way there.
+        why: String,
+    },
     /// A job was asked for on a project that has no channel bound, which only
     /// a project the last release wrote can lack.
     #[error("{project} has no Slack binding, so a job on it would have nowhere to speak")]
@@ -627,6 +928,11 @@ pub enum Refusal {
     Failed,
 }
 
+/// Which of a binding's two credentials, as the form labels them.
+const fn which(listening: bool) -> &'static str {
+    if listening { "app-level" } else { "bot" }
+}
+
 impl Refusal {
     /// The HTTP status this answers with.
     ///
@@ -645,6 +951,7 @@ impl Refusal {
             // the operator can fix by typing something different.
             Self::CredentialMissing
             | Self::Incomplete { .. }
+            | Self::RepositoryRefused { .. }
             | Self::KitsMissing
             | Self::AgentNotConfigured { .. }
             | Self::KitNotOnProject { .. }
@@ -655,7 +962,13 @@ impl Refusal {
             | Self::VariableReserved { .. }
             | Self::VariableRepeated { .. }
             | Self::VariableValueMissing
-            | Self::ChannelIncomplete => 400,
+            | Self::ChannelIncomplete
+            | Self::TokenRefused { .. }
+            | Self::ChannelRefused { .. } => 400,
+            // The platform behind the credential could not be reached, which
+            // is what a bad gateway means: not the request's fault, and not
+            // this instance's.
+            Self::TokenUnchecked { .. } | Self::ChannelUnchecked { .. } => 502,
             // The request is well formed and the instance is in a state that
             // forbids it, which is what a conflict means.
             Self::AgentInUse { .. }
@@ -664,13 +977,68 @@ impl Refusal {
             | Self::ChannelMissing { .. } => 409,
         }
     }
+
+    /// Which part of the project form this points at, where it points at
+    /// one, so a page can say it beside the box rather than at the top.
+    #[must_use]
+    pub fn part(&self) -> Option<Part> {
+        match self {
+            Self::Incomplete { field } => match field.as_str() {
+                "name" => Some(Part::Name),
+                "repository" => Some(Part::Repository),
+                "credential" => Some(Part::Credential),
+                _ => None,
+            },
+            Self::RepositoryRefused { .. } => Some(Part::Repository),
+            Self::KitsMissing | Self::KitNameTaken { .. } => Some(Part::Kits),
+            Self::ChannelIncomplete => Some(Part::Channel),
+            Self::TokenRefused { .. } | Self::TokenUnchecked { .. } => Some(Part::Credential),
+            Self::ChannelRefused { listening, .. } | Self::ChannelUnchecked { listening, .. } => {
+                Some(if *listening {
+                    Part::Listening
+                } else {
+                    Part::Channel
+                })
+            }
+            Self::VariableNameRefused { position, .. } | Self::VariableRepeated { position } => {
+                position.checked_sub(1).map(Part::Variable)
+            }
+            Self::VariableValueMissing | Self::VariableReserved { .. } => Some(Part::Variables),
+            Self::UnknownAgent { .. }
+            | Self::CredentialMissing
+            | Self::AgentInUse { .. }
+            | Self::UnknownProject { .. }
+            | Self::ChannelMissing { .. }
+            | Self::AgentNotConfigured { .. }
+            | Self::KitNotOnProject { .. }
+            | Self::UnknownSetting { .. }
+            | Self::EffortNotOnModel { .. }
+            | Self::ProjectBusy { .. }
+            | Self::UnknownJob { .. }
+            | Self::JobWorking
+            | Self::Failed => None,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         ChannelDraft, Draft, Filling, Fitted, KitDraft, Refusal, Standing, VariableDraft, distinct,
+        titled,
     };
+
+    /// A job started by hand with no title is titled by the first words of
+    /// its work, and the form shows the same words as the default.
+    #[test]
+    fn a_job_started_by_hand_is_titled_by_its_first_words() {
+        assert_eq!(
+            titled("Fix the flaky parser test before the release ships"),
+            "Fix the flaky parser test before"
+        );
+        assert_eq!(titled("  one   thing  "), "one thing");
+        assert_eq!(titled(""), "");
+    }
 
     fn as_it_comes() -> Fitted {
         Fitted {
@@ -705,6 +1073,7 @@ mod tests {
             variables: vec![VariableDraft {
                 name: "STRIPE_API_KEY".to_owned(),
                 value: "sk-test-not-a-real-key".to_owned(),
+                note: String::new(),
             }],
         }
     }
@@ -776,6 +1145,7 @@ mod tests {
             draft.variables = vec![VariableDraft {
                 name: "DATABASE_URL".to_owned(),
                 value: String::new(),
+                note: String::new(),
             }];
         });
         assert!(!added.is_complete(&amending(), NOTHING_HELD));
@@ -785,6 +1155,7 @@ mod tests {
             draft.variables = vec![VariableDraft {
                 name: "STRIPE_API_KEY".to_owned(),
                 value: String::new(),
+                note: String::new(),
             }];
         });
         assert!(kept.is_complete(&amending(), &["STRIPE_API_KEY".to_owned()]));
@@ -793,6 +1164,7 @@ mod tests {
             draft.variables = vec![VariableDraft {
                 name: "STRIPE_API_KEY_V2".to_owned(),
                 value: String::new(),
+                note: String::new(),
             }];
         });
         assert!(!renamed.is_complete(&amending(), &["STRIPE_API_KEY".to_owned()]));
@@ -828,6 +1200,107 @@ mod tests {
         assert!(
             !without(|draft| draft.channel.listen_credential.clear())
                 .is_complete(&Filling::Creating, NOTHING_HELD)
+        );
+    }
+
+    /// Each thing wrong points at its own box, in the order the form shows
+    /// them, and a refusal from the instance points at a box too where it
+    /// can.
+    #[test]
+    fn every_problem_points_at_where_it_is() {
+        use super::{Part, Refusal};
+
+        let mut draft = filled();
+        draft.name.clear();
+        draft.kits.push(KitDraft {
+            name: " Claude ".to_owned(),
+            description: String::new(),
+            fitted: as_it_comes(),
+        });
+        draft.variables.push(VariableDraft::default());
+        draft.channel.listen_credential.clear();
+
+        let problems = draft.problems(&Filling::Creating, NOTHING_HELD);
+        let parts: Vec<Part> = problems.iter().map(|problem| problem.part).collect();
+        assert_eq!(
+            parts,
+            [
+                Part::Name,
+                Part::Kit(1),
+                Part::Kits,
+                Part::Channel,
+                Part::Variable(1),
+            ],
+            "{problems:?}"
+        );
+        assert!(problems.iter().all(|problem| !problem.why.is_empty()));
+        assert!(!draft.is_complete(&Filling::Creating, NOTHING_HELD));
+        assert!(
+            filled()
+                .problems(&Filling::Creating, NOTHING_HELD)
+                .is_empty()
+        );
+
+        assert_eq!(
+            Refusal::Incomplete {
+                field: "repository".to_owned()
+            }
+            .part(),
+            Some(Part::Repository)
+        );
+
+        assert_eq!(
+            Refusal::RepositoryRefused {
+                rule: "it has to be on github.com".to_owned()
+            }
+            .part(),
+            Some(Part::Repository)
+        );
+        assert_eq!(
+            Refusal::VariableRepeated { position: 2 }.part(),
+            Some(Part::Variable(1)),
+            "the instance counts from one and the form from nought"
+        );
+        assert_eq!(Refusal::VariableRepeated { position: 0 }.part(), None);
+        assert_eq!(Refusal::JobWorking.part(), None);
+        // A checked credential's refusal points at the box it was typed
+        // in, the two Slack boxes apart.
+        assert_eq!(
+            Refusal::TokenRefused {
+                why: "GitHub does not accept it".to_owned()
+            }
+            .part(),
+            Some(Part::Credential)
+        );
+        assert_eq!(
+            Refusal::TokenUnchecked {
+                why: "GitHub could not be reached: dns".to_owned()
+            }
+            .part(),
+            Some(Part::Credential)
+        );
+        assert_eq!(
+            Refusal::ChannelRefused {
+                listening: false,
+                why: "Slack refused it (invalid_auth)".to_owned()
+            }
+            .part(),
+            Some(Part::Channel)
+        );
+        assert_eq!(
+            Refusal::ChannelUnchecked {
+                listening: true,
+                why: "Slack could not be reached: dns".to_owned()
+            }
+            .part(),
+            Some(Part::Listening)
+        );
+        assert_eq!(
+            Refusal::RepositoryRefused {
+                rule: "it has to be on github.com".to_owned()
+            }
+            .status(),
+            400
         );
     }
 
@@ -927,6 +1400,35 @@ mod tests {
         assert_eq!(over, ["done", "discarded", "lost"]);
     }
 
+    /// Exactly the idle standings ask something of a person, and no two ask
+    /// the same thing: a verb shared by two readings would be a reading
+    /// nobody could act on differently.
+    #[test]
+    fn only_an_idle_job_asks_something_and_each_asks_its_own() {
+        let every = [
+            Standing::Working,
+            Standing::Asked,
+            Standing::Proposed,
+            Standing::Paused,
+            Standing::Idle,
+            Standing::Failed {
+                why: "it did not work".to_owned(),
+            },
+            Standing::Done,
+            Standing::Discarded,
+            Standing::Lost,
+        ];
+        let asking: Vec<&str> = every.iter().filter_map(Standing::asks).collect();
+        assert_eq!(asking, ["Answer", "Review", "Resume", "Look", "Fix"]);
+        for standing in &every {
+            assert_eq!(
+                standing.asks().is_some(),
+                !standing.is_over() && *standing != Standing::Working,
+                "{standing:?}"
+            );
+        }
+    }
+
     /// A refusal an operator can fix must not read as a server fault.
     #[test]
     fn a_refusal_is_not_reported_as_a_fault() {
@@ -963,6 +1465,77 @@ mod tests {
             404
         );
         assert_eq!(Refusal::Failed.status(), 500);
+        assert_eq!(
+            Refusal::TokenRefused {
+                why: "GitHub does not accept it".to_owned()
+            }
+            .status(),
+            400
+        );
+        assert_eq!(
+            Refusal::ChannelUnchecked {
+                listening: true,
+                why: "Slack could not be reached: dns".to_owned()
+            }
+            .status(),
+            502
+        );
+    }
+
+    /// An incomplete field points at its own box where the form has one,
+    /// and at nothing where it does not, which is said at the top instead.
+    #[test]
+    fn an_incomplete_field_points_at_its_box() {
+        use super::Part;
+
+        let incomplete = |field: &str| {
+            Refusal::Incomplete {
+                field: field.to_owned(),
+            }
+            .part()
+        };
+        assert_eq!(incomplete("name"), Some(Part::Name));
+        assert_eq!(incomplete("repository"), Some(Part::Repository));
+        assert_eq!(incomplete("credential"), Some(Part::Credential));
+        assert_eq!(incomplete("kit name"), None);
+    }
+
+    /// What a box says when a credential was not kept, asserted whole per
+    /// `docs/conventions.md` §4: the box, and then the platform's clause.
+    #[test]
+    fn a_credential_not_kept_says_which_and_why() {
+        assert_eq!(
+            Refusal::TokenRefused {
+                why: "GitHub does not accept it".to_owned()
+            }
+            .to_string(),
+            "the token was not kept: GitHub does not accept it"
+        );
+        assert_eq!(
+            Refusal::TokenUnchecked {
+                why: "GitHub could not be reached: dns error".to_owned()
+            }
+            .to_string(),
+            "the token was not kept, because it could not be checked: GitHub could not be \
+             reached: dns error"
+        );
+        assert_eq!(
+            Refusal::ChannelRefused {
+                listening: false,
+                why: "Slack refused it (invalid_auth)".to_owned()
+            }
+            .to_string(),
+            "the bot token was not kept: Slack refused it (invalid_auth)"
+        );
+        assert_eq!(
+            Refusal::ChannelUnchecked {
+                listening: true,
+                why: "Slack could not be reached: dns error".to_owned()
+            }
+            .to_string(),
+            "the app-level token was not kept, because it could not be checked: Slack could \
+             not be reached: dns error"
+        );
     }
 
     #[test]
@@ -971,6 +1544,7 @@ mod tests {
             id: "an-identifier".to_owned(),
             name: "aviary".to_owned(),
             repository: "https://example.invalid/aviary".to_owned(),
+            repository_link: None,
             foreman: as_it_comes(),
             kits: vec![default_kit()],
             platforms: Vec::new(),
@@ -979,8 +1553,11 @@ mod tests {
             brief: String::new(),
             watched: Vec::new(),
             foreman_room: None,
+            foreman_room_link: None,
+            attending: false,
             working: 0,
             jobs: 3,
+            token_form: String::new(),
         };
         assert!(project.idle());
         assert!(

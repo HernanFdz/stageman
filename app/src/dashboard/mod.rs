@@ -35,18 +35,29 @@
 )]
 
 pub(crate) mod agents_view;
+mod env_file;
 mod error;
-mod instance_view;
+mod home_view;
+mod job_view;
 mod jobs_view;
+mod live;
+mod project_settings_view;
 mod projects_view;
+mod status_view;
 
 use dioxus::prelude::*;
 
+use crate::ui::{THEME_SCRIPT, ThemeToggle};
+
 pub use agents_view::{Agent, AgentsView};
 pub use error::{DashboardError, DashboardResult};
-pub use instance_view::{Instance, InstanceView};
+pub use home_view::{Home, HomeView, ProjectJob};
+pub use job_view::{JobPage, ProjectJobView};
 pub use jobs_view::{Job, ProjectJobsView, Standing, Working};
+pub use live::{Live, LiveMark};
+pub use project_settings_view::{ProjectNewView, ProjectSettingsView};
 pub use projects_view::{Choice, Fitted, KitDraft, ModelChoice, Project, ProjectsView, Shape};
+pub use status_view::{Instance, Status};
 
 /// The dashboard's stylesheet.
 ///
@@ -94,7 +105,7 @@ const FAVICON: Asset = asset!("/assets/favicon.svg");
 pub enum Route {
     #[layout(Shell)]
         #[route("/")]
-        InstanceView {},
+        HomeView {},
 
         #[route("/agents")]
         AgentsView {},
@@ -102,8 +113,22 @@ pub enum Route {
         #[route("/projects")]
         ProjectsView {},
 
+        // A static segment, which the router prefers to the dynamic one
+        // below, so a project can never be called `new` by mistake — see
+        // `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+        #[route("/projects/new")]
+        ProjectNewView {},
+
         #[route("/projects/:project")]
         ProjectJobsView { project: String },
+
+        #[route("/projects/:project/settings")]
+        ProjectSettingsView { project: String },
+
+        // A job's page keeps the identifier, since names are not unique —
+        // `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+        #[route("/projects/:project/jobs/:job")]
+        ProjectJobView { project: String, job: String },
 }
 
 /// The whole dashboard.
@@ -124,24 +149,54 @@ pub fn Dashboard() -> Element {
 ///
 /// Holds the stylesheet as well as the navigation, so that a screen is only
 /// ever its own contents and no view has to remember to bring the page with
-/// it.
+/// it. It is also what keeps a page live: the stream of ticks is opened here,
+/// once, and every screen's read follows it — see
+/// `docs/decisions/0071-a-page-learns-of-change-from-a-tick.md`.
 #[component]
 pub fn Shell() -> Element {
+    let live = use_context_provider(Live::new);
+    live::use_live(live);
+
     rsx! {
         document::Link { rel: "icon", r#type: "image/svg+xml", href: FAVICON }
+        // Told to the browser as well as decided by the script below, so that
+        // its own controls and scrollbars follow the look.
+        document::Meta { name: "color-scheme", content: "light dark" }
+        // Before the stylesheet, so the class the dark tokens hang off is on
+        // the root before the first rule applies, and a dark page is dark from
+        // its first frame — see
+        // `docs/decisions/0072-the-dashboard-has-a-dark-theme.md`.
+        document::Script { "{THEME_SCRIPT}" }
         document::Stylesheet { href: STYLESHEET }
-        div { class: "min-h-screen bg-background font-sans text-foreground",
-            header { class: "border-b border-border bg-surface",
+        // A column as tall as the window, so the status line sits at its
+        // foot whatever a page's height, rather than wherever the contents
+        // happened to end.
+        div { class: "flex min-h-screen flex-col bg-background font-sans text-foreground",
+            // In view from wherever a person has scrolled to, with the
+            // status line at the foot the same way — `docs/conventions.md`
+            // §3 — and above what scrolls under it, below the modal.
+            header { class: "sticky top-0 z-40 border-b border-border bg-surface",
                 div { class: "mx-auto flex max-w-5xl items-baseline gap-6 px-6 py-4",
                     span { class: "text-base font-semibold tracking-tight", "stageman" }
+                    // In the order
+                    // `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`
+                    // gives: agents last, and still here, because they are
+                    // the first step on a new instance.
                     nav { class: "flex items-baseline gap-4 text-sm",
-                        NavLink { to: Route::InstanceView {}, "Instance" }
-                        NavLink { to: Route::AgentsView {}, "Agents" }
+                        NavLink { to: Route::HomeView {}, "Home" }
                         NavLink { to: Route::ProjectsView {}, "Projects" }
+                        NavLink { to: Route::AgentsView {}, "Agents" }
+                    }
+                    div { class: "ml-auto flex items-center gap-4 self-center",
+                        LiveMark { live }
+                        ThemeToggle {}
                     }
                 }
             }
-            main { class: "mx-auto max-w-5xl px-6 py-6", Outlet::<Route> {} }
+            main { class: "mx-auto w-full max-w-5xl flex-1 px-6 py-6", Outlet::<Route> {} }
+            // The machine and the build, under every page rather than on one
+            // of their own — see the same record.
+            Status {}
         }
     }
 }

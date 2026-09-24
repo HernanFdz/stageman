@@ -64,6 +64,15 @@ pub fn Badge(props: BadgeProps) -> Element {
                 props.class
             ),
             ..props.attributes,
+            // A dot that breathes, because *working* is the one word here
+            // that means something is happening now — and still, under the
+            // reduced-motion preference.
+            if props.tone == BadgeTone::Working {
+                span {
+                    aria_hidden: "true",
+                    class: "size-1.5 rounded-full bg-working motion-safe:animate-pulse",
+                }
+            }
             {props.children}
         }
     }

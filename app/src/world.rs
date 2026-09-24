@@ -70,6 +70,13 @@ impl Asking {
         self.world.send(event);
     }
 
+    /// Whoever wants to know when a write of the instance's file has landed
+    /// — see `docs/decisions/0071-a-page-learns-of-change-from-a-tick.md`.
+    #[must_use]
+    pub fn written(&self) -> tokio::sync::watch::Receiver<()> {
+        self.world.written()
+    }
+
     /// A request identifier nothing else in this process has.
     fn minted(&self) -> RequestId {
         RequestId(self.next.fetch_add(1, Ordering::Relaxed))
@@ -246,7 +253,7 @@ mod tests {
     #[ignore = "needs a container runtime and the network; run `just image-handshake`"]
     async fn a_published_port_with_nothing_inside_answers_for_nobody() {
         let runtime = located_runtime();
-        let name = stageman_job::container(JobId::from_uuid(Uuid::from_u128(43)));
+        let name = stageman_job::container(&JobId::from_uuid(Uuid::from_u128(43)));
         stageman_agent::discard(&runtime, &name)
             .await
             .expect("a clean slate");

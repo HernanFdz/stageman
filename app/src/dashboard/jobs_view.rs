@@ -14,12 +14,15 @@
 //! finished instruction would route around all of it.
 
 use dioxus::prelude::*;
-use lucide_dioxus::{Check, CircleOff, ExternalLink, Eye, EyeOff, Square, X};
 #[cfg(feature = "server")]
 use stageman_instance::{Request, Response};
 
 use super::error::{DashboardError, DashboardResult};
-use crate::ui::{Badge, BadgeTone, Button, Card, EmptyState, Modal};
+use super::live::Live;
+use crate::ui::{
+    Badge, BadgeTone, Button, ButtonVariant, Card, EmptyState, FIELD, Field, Icon, KitChip, Modal,
+    Reference, Skeleton, TextArea, Tooltip, When,
+};
 
 pub use stageman_wire::{Ending, Job, Offered, Standing, Working};
 
@@ -76,14 +79,20 @@ pub async fn jobs(project: String) -> DashboardResult<Working> {
 /// # Errors
 ///
 /// Fails if the project is unknown, if the work is empty, or if the project
-/// offers no kit under that name.
+/// offers no kit under that name. A blank title is the first words of the
+/// work, per `docs/decisions/0074-a-jobs-identifier-is-its-name.md`.
 #[post("/api/projects/{project}/jobs/start")]
-pub async fn start(project: String, kit: String, work: String) -> DashboardResult<Working> {
+pub async fn start(
+    project: String,
+    kit: String,
+    work: String,
+    title: String,
+) -> DashboardResult<Working> {
     match super::ask(Request::Start {
         project,
         kit,
         work,
-        at: stageman_core::Timestamp::now(),
+        title,
     })
     .await?
     {
@@ -135,7 +144,11 @@ pub fn ProjectJobsView(project: String) -> Element {
     // without it this resource keeps its first identifier when the route
     // changes, and the screen shows another project's jobs while claiming to
     // be this one.
-    let mut reading = use_server_future(use_reactive!(|project| jobs(project)))?;
+    let live = use_context::<Live>();
+    let mut reading = use_server_future(use_reactive!(|project| {
+        let _ = live.follow();
+        jobs(project)
+    }))?;
     let mut failure = use_signal(|| None::<DashboardError>);
     let mut starting = use_signal(|| false);
     let mut draft = use_signal(Wanted::default);
@@ -147,15 +160,30 @@ pub fn ProjectJobsView(project: String) -> Element {
                 Some(Ok(working)) => rsx! {
                     Card {
                         title: working.name.clone(),
-                        note: working.repository.clone(),
                         badge: rsx! {
                             Badge { "{working.jobs.len()}" }
+                            Reference {
+                                mark: "github",
+                                says: working.repository.clone(),
+                                link: working.repository_link.clone(),
+                            }
                         },
                         aside: rsx! {
+                            div { class: "flex items-center gap-2",
+                            Tooltip { text: "Settings",
+                                Link {
+                                    to: super::Route::ProjectSettingsView {
+                                        project: identifier.clone(),
+                                    },
+                                    class: ButtonVariant::Secondary.styled("px-2"),
+                                    aria_label: "Settings",
+                                    {Icon::Edit.draw(16)}
+                                }
+                            }
+                            Tooltip { text: "Start a job",
                             Button {
-                                class: "px-2.5 text-base leading-none",
+                                class: "px-2",
                                 aria_label: "Start a job",
-                                title: "Start a job",
                                 onclick: {
                                     // The first kit the project offers, which
                                     // is the one a select with a single option
@@ -165,12 +193,15 @@ pub fn ProjectJobsView(project: String) -> Element {
                                         draft.set(Wanted {
                                             kit: first.clone().unwrap_or_default(),
                                             work: String::new(),
+                                            title: String::new(),
                                         });
                                         failure.set(None);
                                         starting.set(true);
                                     }
                                 },
-                                "+"
+                                {Icon::Add.draw(16)}
+                            }
+                            }
                             }
                         },
                         if working.jobs.is_empty() {
@@ -180,9 +211,12 @@ pub fn ProjectJobsView(project: String) -> Element {
                                        container of its own, stopping at a proposal.",
                             }
                         } else {
-                            ul { class: "divide-y divide-border",
+                            // The list owns the columns and every row shares
+                            // them, so a badge is as wide as its word and the
+                            // titles still start together — see [`JobRow`].
+                            ul { class: ROWS,
                                 for job in working.jobs {
-                                    li { key: "{job.id}",
+                                    li { key: "{job.id}", class: ROW,
                                         RanJob {
                                             job,
                                             project: identifier.clone(),
@@ -209,16 +243,16 @@ pub fn ProjectJobsView(project: String) -> Element {
                             title: "Start a job",
                             onclose: move |()| starting.set(false),
                             actions: rsx! {
+                                Tooltip { text: "Start",
                                 Button {
-                                    class: "px-2.5 text-base leading-none",
+                                    class: "px-2",
                                     aria_label: "Start",
-                                    title: "Start",
                                     disabled: !draft().is_complete(),
                                     onclick: move |_| {
                                         let identifier = identifier.clone();
                                         let asked = draft();
                                         async move {
-                                            match start(identifier, asked.kit, asked.work).await {
+                                            match start(identifier, asked.kit, asked.work, asked.title).await {
                                                 Ok(fresh) => {
                                                     failure.set(None);
                                                     reading.set(Some(Ok(fresh)));
@@ -228,7 +262,8 @@ pub fn ProjectJobsView(project: String) -> Element {
                                             }
                                         }
                                     },
-                                    "✓"
+                                    {Icon::Save.draw(16)}
+                                }
                                 }
                             },
                             if let Some(reason) = failure() {
@@ -243,22 +278,201 @@ pub fn ProjectJobsView(project: String) -> Element {
                         p { class: "text-sm text-failed", "{reason}" }
                     }
                 },
-                None => rsx! {
-                    p { class: "text-sm text-muted-foreground", "Reading the project…" }
-                },
+                None => rsx! { Skeleton {} },
             }
         }
     }
 }
 
-/// How every icon-only control on a job row is drawn.
+/// How every icon-only control on a job's row or page is padded: to a
+/// target of twenty-four a side, per `docs/conventions.md` §3.
 ///
-/// Written once because there are now five of them: padded and pulled back, so
-/// the target is bigger than the shape without moving anything around it.
-const CONTROL: &str = "-m-1 rounded p-1 text-muted-foreground hover:text-foreground \
-                       focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary";
+/// Written once because there are several of them. The group that holds a
+/// few pulls the outer padding back, so the outer glyphs sit flush with
+/// what is around them while the targets keep their distance from each
+/// other; a control on its own is not pulled back, because nothing is
+/// beside it. The colour and the hover are the ghost button's, unless a
+/// verdict says otherwise.
+const CONTROL: &str = "p-1";
 
-/// One job, as the list shows it.
+/// What parts the controls in a group: eight pixels between targets, and
+/// the group pulled back by the padding of its outer controls.
+const CONTROLS: &str = "-m-1 flex items-center gap-2";
+
+/// One job, as the project's list shows it: the row every list draws,
+/// with the controls its standing offers at the end of its first line.
+#[component]
+fn RanJob(
+    job: Job,
+    project: String,
+    onchanged: EventHandler<Result<Working, DashboardError>>,
+) -> Element {
+    rsx! {
+        JobRow {
+            job: job.clone(),
+            project: project.clone(),
+            aside: rsx! {
+                JobControls { project, job, onchanged }
+            },
+        }
+    }
+}
+
+/// What a list of jobs wears: the three columns every row shares.
+///
+/// The columns are the list's rather than the row's, so that the first
+/// column is one width down the whole list and every title starts at the
+/// same place; a row that owned its own grid would size that column to its
+/// own badge and chip, and titles would wander from row to row.
+pub(super) const ROWS: &str = "grid grid-cols-[auto_minmax(0,1fr)_auto] divide-y divide-border";
+
+/// What one item of that list wears: the list's columns, taken over as a
+/// subgrid, and the row's padding. The padding is the item's, because a
+/// first- or last-child variant on the row itself would match its only
+/// child, every time.
+pub(super) const ROW: &str = "col-span-3 grid grid-cols-subgrid items-center gap-x-3 gap-y-1.5 py-3 \
+                              first:pt-0 last:pb-0";
+
+/// Properties for [`JobRow`].
+#[derive(Props, PartialEq, Clone)]
+pub(super) struct JobRowProps {
+    /// The job.
+    pub job: Job,
+    /// Its project, by identifier, which is where its page is.
+    pub project: String,
+    /// Its project, by name, where the list spans projects.
+    #[props(default)]
+    pub project_name: Option<String>,
+    /// What sits at the right end of the first line: the controls its
+    /// standing offers, or the verb it wants.
+    pub aside: Element,
+}
+
+/// One job, as every list shows it: two lines, per `docs/conventions.md`
+/// §3.
+///
+/// The standing and the kit share the first column, so that every title
+/// starts at the same place. The name — the way to the job's page, with
+/// the reason a hover away — with its room and its tunnel beside it, and
+/// then the pull requests it opened, share the second. What a person does
+/// about it ends the first line and how long it has been so ends the
+/// second. A failed job says why on a third line, under the title, because
+/// that is what a person acts on.
+///
+/// Its cells are the item's, placed in the columns the list owns ([`ROWS`]
+/// and [`ROW`]): the root here takes no box of its own, so that a wrapper
+/// between the item and its cells does not start a grid of its own.
+#[component]
+pub(super) fn JobRow(props: JobRowProps) -> Element {
+    let JobRowProps {
+        job,
+        project,
+        project_name,
+        aside,
+    } = props;
+    let to_project = super::Route::ProjectJobsView {
+        project: project.clone(),
+    };
+    let to_job = super::Route::ProjectJobView {
+        project,
+        job: job.id.clone(),
+    };
+
+    rsx! {
+        div { class: "contents",
+            // As wide as its word: a grid stretches a cell's item unless
+            // told where to put it.
+            Badge { tone: job.standing.tone(), class: "justify-self-start", "{job.standing.label()}" }
+            div { class: "flex min-w-0 items-center gap-2",
+                if let Some(name) = project_name {
+                    Link {
+                        to: to_project,
+                        class: "shrink-0 text-sm text-muted-foreground hover:text-foreground hover:underline",
+                        "{name}"
+                    }
+                }
+                // A name, in the face identifiers wear here, and the reason
+                // a hover away: prose about why, which reads badly as a
+                // title — see
+                // `docs/decisions/0074-a-jobs-identifier-is-its-name.md`.
+                Tooltip { text: job.reason.clone(), wrap: true, class: "min-w-0",
+                    Link {
+                        to: to_job,
+                        class: "truncate font-mono text-sm font-medium hover:underline",
+                        "{job.id}"
+                    }
+                }
+                // Where it talks and where it shows, as on its page: the
+                // room is a link while the channel has said where its
+                // workspace is, and its identifier otherwise.
+                if let Some(room) = job.room.clone() {
+                    Reference {
+                        mark: "slack",
+                        says: "Its room, {room}",
+                        link: job.room_link.clone(),
+                    }
+                }
+                // Nothing can answer on the tunnel of a job that is over,
+                // so none is offered.
+                if !job.standing.is_over() {
+                    Showing { tunnel: job.tunnel.clone() }
+                }
+            }
+            div { class: "flex items-center justify-self-end", {aside} }
+            div { class: "justify-self-start",
+                KitChip {
+                    agent: job.kit.agent.clone(),
+                    agent_name: job.kit.agent_name.clone(),
+                    model: job.kit.model.clone(),
+                    effort: job.kit.effort.clone(),
+                }
+            }
+            div { class: "flex min-w-0 flex-wrap items-center gap-1.5",
+                for opened in job.pull_requests.iter() {
+                    super::job_view::PullRequestChip { key: "{opened.number}", number: opened.number, link: opened.link.clone() }
+                }
+            }
+            div { class: "justify-self-end",
+                // How long it has been this way; a job the last release
+                // wrote says only that it waits.
+                if let Some(since) = job.since.clone() {
+                    When { at: since }
+                }
+            }
+            if let Standing::Failed { why } = &job.standing {
+                p { class: "col-span-2 col-start-2 text-xs text-failed", "{why}" }
+            }
+        }
+    }
+}
+
+/// The way to what a job is showing, as an arrow leaving a frame.
+///
+/// In a tab of its own, and told to carry nothing there. What is on the
+/// other side is an application this instance's agent wrote, so it gets
+/// neither a handle on the page that opened it nor the address that page
+/// was at. An arrow leaving a frame rather than an eye, and the distinction
+/// is worth keeping: an eye means *reveal this*, and this one navigates
+/// away.
+#[component]
+pub(super) fn Showing(tunnel: String) -> Element {
+    rsx! {
+        Tooltip { text: "Look at what it is showing — {tunnel}",
+            a {
+                class: "{CONTROL} inline-flex items-center rounded-md text-muted-foreground \
+                        hover:bg-surface-muted hover:text-foreground focus-visible:outline-none \
+                        focus-visible:ring-2 focus-visible:ring-primary",
+                href: "{tunnel}",
+                target: "_blank",
+                rel: "noopener noreferrer",
+                aria_label: "Look at what it is showing",
+                {Icon::Look.draw(16)}
+            }
+        }
+    }
+}
+
+/// The controls a job offers, on its row and on its page.
 ///
 /// **Which controls it offers is decided by the standing**, and the two are
 /// deliberately never offered together: a working job can be stopped and not
@@ -270,92 +484,31 @@ const CONTROL: &str = "-m-1 rounded p-1 text-muted-foreground hover:text-foregro
 /// A job that is already over offers neither: there is nothing left to stop
 /// and nothing left to reclaim.
 #[component]
-fn RanJob(
-    job: Job,
+pub(super) fn JobControls(
     project: String,
+    job: Job,
     onchanged: EventHandler<Result<Working, DashboardError>>,
 ) -> Element {
-    let mut showing = use_signal(|| false);
-    let over = matches!(
-        job.standing,
-        Standing::Done | Standing::Discarded | Standing::Lost
-    );
+    // Which ending is being confirmed, if one is. Retiring removes the
+    // container and the session in it, so it is asked twice — see
+    // `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+    let mut confirming = use_signal(|| None::<Ending>);
+    let over = job.standing.is_over();
 
     rsx! {
-        div { class: "flex flex-col gap-1.5 py-4 first:pt-0 last:pb-0",
-            div { class: "flex items-baseline gap-3",
-                Badge { tone: job.standing.tone(), "{job.standing.label()}" }
-                span { class: "text-sm", "{job.reason}" }
-                span { class: "ml-auto shrink-0 font-mono text-xs text-faint-foreground",
-                    "{job.kit} · {job.created_at}"
-                }
-            }
-            if let Standing::Failed { why } = &job.standing {
-                p { class: "text-xs text-failed", "{why}" }
-            }
-            // What the session said it was set to, in the adapter's spelling,
-            // beside what was asked for above. Shown whenever there is
-            // anything, because the one case worth seeing is the two
-            // disagreeing — and a reader cannot spot a disagreement that is
-            // only shown when it occurs.
-            if !job.reported.is_empty() {
-                p { class: "font-mono text-xs text-faint-foreground",
-                    "reported "
-                    {job.reported.iter().map(|(option, value)| format!("{option} {value}")).collect::<Vec<_>>().join(" · ")}
-                }
-            }
-            // Icons rather than words, because a row of jobs is a list and a
-            // list reads better as shapes. Both carry an accessible name and a
-            // tooltip: an icon-only control with neither is a puzzle, and the
-            // tooltip is the only thing that says which address the second one
-            // goes to.
-            //
-            // The glyphs are deliberately not hidden from assistive technology
-            // and do not need to be. A label on the control replaces whatever
-            // its contents would have computed, so an unnamed drawing inside
-            // one contributes nothing to say twice.
-            div { class: "flex items-center gap-1",
-                button {
-                    r#type: "button",
-                    // Padded and pulled back, so the target is bigger than the
-                    // shape without moving anything around it.
-                    class: "-m-1 rounded p-1 text-muted-foreground hover:text-foreground \
-                            focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
-                    onclick: move |_| showing.toggle(),
-                    aria_label: if showing() { "Hide what it was told" } else { "What it was told" },
-                    title: if showing() { "Hide what it was told" } else { "What it was told" },
-                    if showing() {
-                        EyeOff { size: 16, class: "shrink-0" }
-                    } else {
-                        Eye { size: 16, class: "shrink-0" }
-                    }
-                }
-                // In a tab of its own, and told to carry nothing there. What
-                // is on the other side is an application this instance's agent
-                // wrote, so it gets neither a handle on the page that opened
-                // it nor the address that page was at.
-                //
-                // An arrow leaving a frame rather than an eye, and the
-                // distinction is worth keeping: an eye means *reveal this*, as
-                // the control beside it does, and this one navigates away.
-                a {
-                    class: "-m-1 rounded p-1 text-muted-foreground hover:text-foreground \
-                            focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
-                    href: "{job.tunnel}",
-                    target: "_blank",
-                    rel: "noopener noreferrer",
-                    aria_label: "Look at what it is showing",
-                    title: "Look at what it is showing — {job.tunnel}",
-                    ExternalLink { size: 16, class: "shrink-0" }
-                }
-                // A working job can be stopped, and that is all it can be:
-                // its container is in use and its session is mid-turn.
-                if job.standing == Standing::Working {
-                    button {
-                        r#type: "button",
+        // Icons rather than words, because a row of jobs is a list and a
+        // list reads better as shapes. Every control carries an accessible
+        // name, and its tooltip repeats the name for eyes: an icon-only
+        // control with neither is a puzzle.
+        div { class: CONTROLS,
+            // A working job can be stopped, and that is all it can be:
+            // its container is in use and its session is mid-turn.
+            if job.standing == Standing::Working {
+                Tooltip { text: "Stop it — the job keeps everything and can be given more",
+                    Button {
+                        variant: ButtonVariant::Ghost,
                         class: CONTROL,
                         aria_label: "Stop it",
-                        title: "Stop it — the job keeps everything and can be given more",
                         onclick: {
                             let project = project.clone();
                             let id = job.id.clone();
@@ -365,63 +518,95 @@ fn RanJob(
                                 async move { onchanged.call(stop(project, id).await) }
                             }
                         },
-                        Square { size: 16, class: "shrink-0" }
+                        {Icon::Stop.draw(16)}
                     }
                 }
-                // And a job that has stopped can be ended, either way. Two
-                // controls rather than one with a choice behind it, because
-                // the verdict is the whole of what is being recorded.
-                if !over && job.standing != Standing::Working {
-                    button {
-                        r#type: "button",
-                        class: CONTROL,
+            }
+            // And a job that has stopped can be ended, either way. Two
+            // controls rather than one with a choice behind it, because
+            // the verdict is the whole of what is being recorded. Each
+            // takes its colour on hover and on keyboard focus, and not at
+            // rest — the primary green for the verdict that keeps, the
+            // failed red for the one that discards — so that a list of
+            // them never reads as a list of alarms; see
+            // `docs/conventions.md` §3.
+            if !over && job.standing != Standing::Working {
+                Tooltip { text: "It is done — removes its container and everything in it",
+                    Button {
+                        variant: ButtonVariant::Ghost,
+                        class: "{CONTROL} hover:bg-primary/10 hover:text-primary \
+                                focus-visible:text-primary",
                         aria_label: "It is done",
-                        title: "It is done — removes its container and everything in it",
-                        onclick: {
-                            let project = project.clone();
-                            let id = job.id.clone();
-                            move |_| {
-                                let project = project.clone();
-                                let id = id.clone();
-                                async move {
-                                    onchanged.call(retire(project, id, Ending::Done).await);
-                                }
-                            }
-                        },
-                        Check { size: 16, class: "shrink-0" }
+                        onclick: move |_| confirming.set(Some(Ending::Done)),
+                        {Icon::Done.draw(16)}
                     }
-                    button {
-                        r#type: "button",
-                        class: CONTROL,
+                }
+                Tooltip { text: "Discard it — removes its container and everything in it",
+                    Button {
+                        variant: ButtonVariant::Ghost,
+                        class: "{CONTROL} hover:bg-failed/10 hover:text-failed \
+                                focus-visible:text-failed",
                         aria_label: "Discard it",
-                        title: "Discard it — removes its container and everything in it",
-                        onclick: {
-                            // Moved rather than cloned: the last control on
-                            // the row is the last thing that wants it.
-                            let project = project;
-                            let id = job.id.clone();
-                            move |_| {
-                                let project = project.clone();
-                                let id = id.clone();
-                                async move {
-                                    onchanged.call(retire(project, id, Ending::Discarded).await);
+                        onclick: move |_| confirming.set(Some(Ending::Discarded)),
+                        {Icon::Discard.draw(16)}
+                    }
+                }
+            }
+            if let Some(ending) = confirming() {
+                Modal {
+                    title: match ending {
+                        Ending::Done => "Retire this job as done?",
+                        Ending::Discarded => "Discard this job?",
+                    },
+                    onclose: move |()| confirming.set(None),
+                    actions: rsx! {
+                        Button {
+                            variant: match ending {
+                                Ending::Done => ButtonVariant::Primary,
+                                Ending::Discarded => ButtonVariant::Danger,
+                            },
+                            onclick: {
+                                // Moved rather than cloned: the last
+                                // control on the row is the last thing
+                                // that wants it.
+                                let project = project;
+                                let id = job.id;
+                                move |_| {
+                                    let project = project.clone();
+                                    let id = id.clone();
+                                    confirming.set(None);
+                                    async move {
+                                        onchanged.call(retire(project, id, ending).await);
+                                    }
                                 }
+                            },
+                            match ending {
+                                Ending::Done => "Retire",
+                                Ending::Discarded => "Discard",
                             }
-                        },
-                        X { size: 16, class: "shrink-0" }
+                        }
+                    },
+                    p { class: "text-sm text-muted-foreground",
+                        "Its container and everything in it are removed, and the job stays in \
+                         the list as "
+                        match ending {
+                            Ending::Done => "done",
+                            Ending::Discarded => "discarded",
+                        }
+                        ". Nothing on the platform changes."
                     }
                 }
-                if over {
+            }
+            if over {
+                Tooltip { text: "This job is over — its container and session are gone",
                     span {
-                        class: "-m-1 p-1 text-faint-foreground",
-                        title: "This job is over — its container and session are gone",
-                        CircleOff { size: 16, class: "shrink-0" }
-                    }
-                }
-                if showing() {
-                    pre { class: "mt-1.5 max-h-64 overflow-auto whitespace-pre-wrap rounded-md \
-                                  bg-surface-muted p-3 font-mono text-xs text-muted-foreground",
-                        "{job.kickoff}"
+                        class: "{CONTROL} inline-flex text-faint-foreground",
+                        // Reachable by keyboard, so the tooltip can be
+                        // asked for without a mouse: nothing else on the
+                        // row says what the shape means.
+                        tabindex: "0",
+                        aria_label: "This job is over",
+                        {Icon::Over.draw(16)}
                     }
                 }
             }
@@ -431,15 +616,20 @@ fn RanJob(
 
 /// What starting a job asks for.
 ///
-/// The work and which kit, and nothing else. Not the instruction: that is
-/// composed from this, and composing it here would put an author of
-/// instructions outside the one crate allowed to be one.
+/// The work, which kit, and a title if the person has one — and nothing
+/// else. Not the instruction: that is composed from this, and composing it
+/// here would put an author of instructions outside the one crate allowed
+/// to be one.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Wanted {
     /// Which of the project's kits should do it, by name.
     pub kit: String,
     /// What to do, in the operator's own words.
     pub work: String,
+    /// A few words naming it, which its name is made from; blank for the
+    /// first words of the work — see
+    /// `docs/decisions/0074-a-jobs-identifier-is-its-name.md`.
+    pub title: String,
 }
 
 impl Wanted {
@@ -461,53 +651,92 @@ fn JobForm(draft: Signal<Wanted>, kits: Vec<Offered>) -> Element {
     rsx! {
         div { class: "flex flex-col gap-3",
             // Only when there is a choice. A project with one kit has already
-            // made this decision, and a select with one option asks a question
-            // that has no other answer.
+            // made this decision, and a choice with one option asks a question
+            // that has no other answer. Cards rather than a dropdown, per
+            // `docs/conventions.md` §3: a kit is chosen by what it is for,
+            // and that is a line to read, not an entry to scroll past.
             if kits.len() > 1 {
-                label { class: "flex flex-col gap-1",
+                div { class: "flex flex-col gap-1", role: "radiogroup", aria_label: "Runs on",
                     span { class: "text-xs font-medium text-muted-foreground", "Runs on" }
-                    select {
-                        class: FIELD,
-                        value: "{draft().kit}",
-                        onchange: move |event| draft.with_mut(|draft| draft.kit = event.value()),
-                        for kit in kits.iter() {
-                            option {
-                                key: "{kit.name}",
+                    for kit in kits.iter() {
+                        label {
+                            key: "{kit.name}",
+                            class: if draft().kit == kit.name {
+                                "flex cursor-pointer items-baseline gap-2 rounded-md border border-primary bg-surface-muted px-3 py-2"
+                            } else {
+                                "flex cursor-pointer items-baseline gap-2 rounded-md border border-border px-3 py-2 hover:bg-surface-muted"
+                            },
+                            input {
+                                r#type: "radio",
+                                name: "kit",
+                                class: "sr-only",
                                 value: "{kit.name}",
-                                title: "{kit.description}",
-                                "{kit.name} — {kit.description}"
+                                checked: draft().kit == kit.name,
+                                onchange: {
+                                    let name = kit.name.clone();
+                                    move |_| draft.with_mut(|draft| draft.kit.clone_from(&name))
+                                },
                             }
+                            span { class: "text-sm font-medium", "{kit.name}" }
+                            span { class: "text-xs text-muted-foreground", "{kit.description}" }
                         }
                     }
                 }
             }
-            label { class: "flex flex-col gap-1",
-                span { class: "text-xs font-medium text-muted-foreground", "The work" }
-                textarea {
-                    class: "{FIELD} min-h-40 resize-y",
-                    placeholder: "What needs doing, in your own words. Say what \"done\" looks \
-                                  like, and name anything the agent should read first.",
-                    value: "{draft().work}",
-                    oninput: move |event| draft.with_mut(|draft| draft.work = event.value()),
+            // Label, line, control, per `docs/conventions.md` §3: the
+            // instruction the placeholder used to carry is the line now,
+            // and the placeholder is an example.
+            Field {
+                label: "The work",
+                note: "In your own words. Say what done looks like, and name anything the agent \
+                       should read first.",
+                info: "The agent is told where the repository is, that nothing is checked out, \
+                       that its tools are already signed in, and to stop at a proposal rather \
+                       than merge anything. You are describing the work, not writing the \
+                       instruction.",
+                TextArea {
+                    class: "min-h-40",
+                    placeholder: "Fix the login timeout on the settings page: it logs people out \
+                                  after a minute. Done is a pull request with a test for it.",
+                    value: draft().work,
+                    oninput: move |event: FormEvent| draft.with_mut(|draft| draft.work = event.value()),
                 }
             }
-            p { class: "text-xs text-faint-foreground",
-                "The agent is told where the repository is, that nothing is checked out, that \
-                 its tools are already signed in, and to stop at a proposal rather than merge \
-                 anything. You are describing the work, not writing the instruction."
+            // After the work, because its default is made from the work: the
+            // placeholder shows what the job will be called if this is left
+            // blank, as it is typed above — see
+            // `docs/decisions/0074-a-jobs-identifier-is-its-name.md`.
+            Field {
+                label: "Title",
+                note: "Optional. The job is named after it; the first words of the work otherwise.",
+                info: "A few words, as you would read them in a sidebar. Folded to a slug and \
+                       given a short suffix, they become the job's name: its address here, its \
+                       Slack channel, and the host it shows its work on.",
+                input {
+                    class: FIELD,
+                    placeholder: default_title(&draft().work),
+                    value: "{draft().title}",
+                    oninput: move |event: FormEvent| draft.with_mut(|draft| draft.title = event.value()),
+                }
             }
         }
     }
 }
 
-/// What every input on this screen looks like.
-const FIELD: &str = "w-full rounded-md border border-border bg-surface px-2 py-1.5 \
-                     text-sm placeholder:text-faint-foreground focus-visible:outline-none \
-                     focus-visible:ring-2 focus-visible:ring-primary";
+/// What a job with no title is called: the first words of its work, and an
+/// example while there are none, so the box never reads as empty.
+fn default_title(work: &str) -> String {
+    let titled = stageman_wire::titled(work);
+    if titled.is_empty() {
+        "Fix the login timeout".to_owned()
+    } else {
+        titled
+    }
+}
 
 #[cfg(test)]
 mod tests {
-    use super::{Standing, Toned as _, Wanted};
+    use super::{Standing, Toned as _, Wanted, default_title};
     use crate::ui::BadgeTone;
 
     /// Every standing there is.
@@ -565,6 +794,7 @@ mod tests {
         let complete = Wanted {
             kit: "Claude".to_owned(),
             work: "document the three missing variables".to_owned(),
+            title: String::new(),
         };
         assert!(complete.is_complete());
 
@@ -586,8 +816,21 @@ mod tests {
         let asked = Wanted {
             kit: "Claude".to_owned(),
             work: "  \n\t ".to_owned(),
+            title: String::new(),
         };
 
         assert!(!asked.is_complete());
+    }
+
+    /// The title's placeholder is what the job will be called if it is
+    /// left blank: the first words of the work, and an example before any.
+    #[test]
+    fn the_title_defaults_to_the_first_words_of_the_work() {
+        assert_eq!(
+            default_title("Fix the flaky parser test before the release ships"),
+            "Fix the flaky parser test before"
+        );
+        assert_eq!(default_title(""), "Fix the login timeout");
+        assert_eq!(default_title("   "), "Fix the login timeout");
     }
 }

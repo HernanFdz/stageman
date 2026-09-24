@@ -509,25 +509,46 @@ to check it."
 /// room, whatever thread the exchange was in, because it is about the job
 /// and the root is the job's timeline. See
 /// `docs/decisions/0062-what-this-instance-says-is-markdown.md`.
+///
+/// The pull requests the job has said it opened come along whichever way it
+/// stopped, as Markdown references the caller composed — linked where the
+/// repository is an address — because a draft opened before a question is
+/// still something to look at, per
+/// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
 #[must_use]
-pub fn stopped_notice(waiting: &Waiting, asked_by: Option<&str>, mention: &str) -> String {
+pub fn stopped_notice(
+    waiting: &Waiting,
+    asked_by: Option<&str>,
+    mention: &str,
+    opened: &[String],
+) -> String {
+    let opened = if opened.is_empty() {
+        String::new()
+    } else {
+        format!(" Opened {}.", opened.join(", "))
+    };
     match waiting {
         Waiting::Asked => asked_by.map_or_else(
-            || format!("❓ **Waiting for an answer.** Mention {mention} here to reply."),
-            |who| format!("❓ **Waiting for an answer**, {who}. Mention {mention} here to reply."),
+            || format!("❓ **Waiting for an answer.**{opened} Mention {mention} here to reply."),
+            |who| {
+                format!(
+                    "❓ **Waiting for an answer**, {who}.{opened} Mention {mention} here to reply."
+                )
+            },
         ),
-        Waiting::Proposed => {
-            format!("✅ **Ready for review.** Mention {mention} here to send it back for changes.")
-        }
+        Waiting::Proposed => format!(
+            "✅ **Ready for review.**{opened} Mention {mention} here to send it back for changes."
+        ),
         Waiting::Paused => {
-            format!("⏸️ **Stopped by an operator.** Mention {mention} here to carry on.")
+            format!("⏸️ **Stopped by an operator.**{opened} Mention {mention} here to carry on.")
         }
         Waiting::Failed(why) => format!(
-            "❌ **Failed:** `{why}`. Mention {mention} here to try again once that is fixed."
+            "❌ **Failed:** `{why}`.{opened} Mention {mention} here to try again once that is \
+             fixed."
         ),
-        Waiting::Silent => {
-            format!("⏹️ **Stopped without saying why.** Mention {mention} here to carry on.")
-        }
+        Waiting::Silent => format!(
+            "⏹️ **Stopped without saying why.**{opened} Mention {mention} here to carry on."
+        ),
     }
 }
 
@@ -826,7 +847,12 @@ pub fn thought_line(text: &str) -> String {
 /// reach a running job, and it still does not say that: a job that asks
 /// stops, because nobody answers this session while it runs.
 #[must_use]
-pub fn kickoff(repository: &str, work: &str, tunnel: &str, variables: &[VariableName]) -> String {
+pub fn kickoff(
+    repository: &str,
+    work: &str,
+    tunnel: &str,
+    variables: &[(VariableName, String)],
+) -> String {
     let port = stageman_agent::TUNNEL_PORT;
     // Two things this has to get across, and the second is the one that fails
     // silently. A server bound inside the container to loopback is reachable
@@ -879,16 +905,23 @@ one and do not guess.";
     let supplied = if variables.is_empty() {
         String::new()
     } else {
-        let named = variables
+        // One line per variable, with what it is for where the operator
+        // said — see `docs/decisions/0075-a-variable-says-what-it-is-for.md`.
+        // Names and notes, and never a value: the type of the argument is
+        // what keeps that true.
+        let listed = variables
             .iter()
-            .map(VariableName::as_str)
+            .map(|(name, note)| match note.trim() {
+                "" => format!("- {name}"),
+                said => format!("- {name} — {said}"),
+            })
             .collect::<Vec<_>>()
-            .join(", ");
+            .join("\n");
         format!(
-            "\n\nSome of what this project needs is already in your environment: {named}. \
-Nothing here knows what any of them is for, so follow whatever the repository says about them. \
-Treat each as a credential — do not print one, do not write one into a file, and never include \
-one in a change you propose."
+            "\n\nSome of what this project needs is already in your environment. What each is for \
+is beside it, where the operator said:\n\n{listed}\n\nBeyond that, follow whatever the \
+repository says about them. Treat each as a credential — do not print one, do not write one into \
+a file, and never include one in a change you propose."
         )
     };
 
@@ -914,9 +947,10 @@ lets you work unattended.
 Before you stop, call the `stopping` tool, every time and last of all. Say \
 `ready_for_review` if you have done what was asked and there is something for a \
 person to look at, or `waiting_for_an_answer` if you need something from a \
-person before you can go on. Nothing else tells anybody which of the two this \
-is, so a job that stops without calling it is recorded as having stopped for \
-reasons nobody knows. If a message interrupts you after you have called it, \
+person before you can go on, and give it the numbers of any pull requests you \
+opened, whichever of the two it is. Nothing else tells anybody which of the two \
+this is, so a job that stops without calling it is recorded as having stopped \
+for reasons nobody knows. If a message interrupts you after you have called it, \
 call it again before you stop: the first call no longer counts."
     )
 }
@@ -939,7 +973,7 @@ mod tests {
     /// Named rather than written as an empty slice at each call, because what
     /// these assertions are pinning is that such a project's prompt is
     /// byte-for-byte what it was before variables existed at all.
-    const NONE: &[VariableName] = &[];
+    const NONE: &[(VariableName, String)] = &[];
 
     /// Asserted as literal text, per `docs/conventions.md` §4. Prompt text is
     /// the only kind of code here that changes behaviour without changing
@@ -968,17 +1002,24 @@ Then carry on with the work you were given."
     /// than probed for substrings.
     ///
     /// Note the three things the paragraph does, each load-bearing. Naming the
-    /// variables is what makes an agent reach for one at all. Saying nothing
-    /// here knows what they are for is honest — this project never reads one —
-    /// and points at the repository, which is where
-    /// `docs/decisions/0019-a-projects-tooling-is-the-projects-business.md`
-    /// puts that knowledge. And the last sentence is the only thing standing
-    /// between a credential and a pull request description.
+    /// variables is what makes an agent reach for one at all. Saying what
+    /// each is for where the operator said, and pointing at the repository
+    /// for the rest — this project never reads one, and the repository is
+    /// where `docs/decisions/0019-a-projects-tooling-is-the-projects-business.md`
+    /// puts that knowledge — is honest about what is known. And the last
+    /// sentence is the only thing standing between a credential and a pull
+    /// request description.
     #[test]
     fn a_kickoff_with_variables_reads_exactly_as_written() {
         let variables = [
-            VariableName::new("STRIPE_API_KEY").expect("a deliverable name"),
-            VariableName::new("DATABASE_URL").expect("a deliverable name"),
+            (
+                VariableName::new("STRIPE_API_KEY").expect("a deliverable name"),
+                "the payment provider, in test mode".to_owned(),
+            ),
+            (
+                VariableName::new("DATABASE_URL").expect("a deliverable name"),
+                String::new(),
+            ),
         ];
 
         assert_eq!(
@@ -1004,10 +1045,14 @@ and not to localhost: a server on localhost answers you from inside this contain
 reachable from nowhere else. Say where to look, because nobody finds that address on their \
 own.
 
-Some of what this project needs is already in your environment: STRIPE_API_KEY, DATABASE_URL. \
-Nothing here knows what any of them is for, so follow whatever the repository says about them. \
-Treat each as a credential — do not print one, do not write one into a file, and never include \
-one in a change you propose.
+Some of what this project needs is already in your environment. What each is for is beside it, \
+where the operator said:
+
+- STRIPE_API_KEY — the payment provider, in test mode
+- DATABASE_URL
+
+Beyond that, follow whatever the repository says about them. Treat each as a credential — do not \
+print one, do not write one into a file, and never include one in a change you propose.
 
 When you have a change to propose, open a pull request and stop there. Do not merge it, do not \
 deploy anything, and do not push to the default branch. Somebody reads what you propose before \
@@ -1024,10 +1069,11 @@ session, so do not wait for one and do not guess.
 
 Before you stop, call the `stopping` tool, every time and last of all. Say `ready_for_review` if \
 you have done what was asked and there is something for a person to look at, or \
-`waiting_for_an_answer` if you need something from a person before you can go on. Nothing else \
-tells anybody which of the two this is, so a job that stops without calling it is recorded as \
-having stopped for reasons nobody knows. If a message interrupts you after you have called it, \
-call it again before you stop: the first call no longer counts."
+`waiting_for_an_answer` if you need something from a person before you can go on, and give it \
+the numbers of any pull requests you opened, whichever of the two it is. Nothing else tells \
+anybody which of the two this is, so a job that stops without calling it is recorded as having \
+stopped for reasons nobody knows. If a message interrupts you after you have called it, call it \
+again before you stop: the first call no longer counts."
         );
     }
 
@@ -1055,7 +1101,10 @@ call it again before you stop: the first call no longer counts."
     /// written to the snapshot in the clear.
     #[test]
     fn a_kickoff_names_a_variable_and_says_it_is_a_credential() {
-        let variables = [VariableName::new("STRIPE_API_KEY").expect("a deliverable name")];
+        let variables = [(
+            VariableName::new("STRIPE_API_KEY").expect("a deliverable name"),
+            String::new(),
+        )];
         let prompt = super::kickoff(
             "https://example.invalid/repo",
             "anything",
@@ -1113,10 +1162,11 @@ session, so do not wait for one and do not guess.
 
 Before you stop, call the `stopping` tool, every time and last of all. Say `ready_for_review` if \
 you have done what was asked and there is something for a person to look at, or \
-`waiting_for_an_answer` if you need something from a person before you can go on. Nothing else \
-tells anybody which of the two this is, so a job that stops without calling it is recorded as \
-having stopped for reasons nobody knows. If a message interrupts you after you have called it, \
-call it again before you stop: the first call no longer counts."
+`waiting_for_an_answer` if you need something from a person before you can go on, and give it \
+the numbers of any pull requests you opened, whichever of the two it is. Nothing else tells \
+anybody which of the two this is, so a job that stops without calling it is recorded as having \
+stopped for reasons nobody knows. If a message interrupts you after you have called it, call it \
+again before you stop: the first call no longer counts."
         );
     }
 
@@ -1333,33 +1383,57 @@ it; anything else said here is between people._"
     #[test]
     fn the_notices_read_exactly_as_written() {
         assert_eq!(
-            super::stopped_notice(&Waiting::Asked, Some("<@U0HUMAN>"), "<@U0BOT>"),
+            super::stopped_notice(&Waiting::Asked, Some("<@U0HUMAN>"), "<@U0BOT>", &[]),
             "❓ **Waiting for an answer**, <@U0HUMAN>. Mention <@U0BOT> here to reply."
         );
         assert_eq!(
-            super::stopped_notice(&Waiting::Asked, None, "<@U0BOT>"),
+            super::stopped_notice(&Waiting::Asked, None, "<@U0BOT>", &[]),
             "❓ **Waiting for an answer.** Mention <@U0BOT> here to reply."
         );
         assert_eq!(
-            super::stopped_notice(&Waiting::Proposed, Some("<@U0HUMAN>"), "<@U0BOT>"),
+            super::stopped_notice(&Waiting::Proposed, Some("<@U0HUMAN>"), "<@U0BOT>", &[]),
             "✅ **Ready for review.** Mention <@U0BOT> here to send it back for changes."
         );
         assert_eq!(
-            super::stopped_notice(&Waiting::Paused, None, "<@U0BOT>"),
+            super::stopped_notice(&Waiting::Paused, None, "<@U0BOT>", &[]),
             "⏸️ **Stopped by an operator.** Mention <@U0BOT> here to carry on."
         );
         assert_eq!(
             super::stopped_notice(
                 &Waiting::Failed("the credential had expired".to_owned()),
                 None,
-                "<@U0BOT>"
+                "<@U0BOT>",
+                &[]
             ),
             "❌ **Failed:** `the credential had expired`. Mention <@U0BOT> here to try again once \
 that is fixed."
         );
         assert_eq!(
-            super::stopped_notice(&Waiting::Silent, None, "<@U0BOT>"),
+            super::stopped_notice(&Waiting::Silent, None, "<@U0BOT>", &[]),
             "⏹️ **Stopped without saying why.** Mention <@U0BOT> here to carry on."
+        );
+        assert_eq!(
+            super::stopped_notice(
+                &Waiting::Proposed,
+                None,
+                "<@U0BOT>",
+                &[
+                    "[#12](https://github.com/owner/name/pull/12)".to_owned(),
+                    "#13".to_owned()
+                ]
+            ),
+            "✅ **Ready for review.** Opened [#12](https://github.com/owner/name/pull/12), #13. \
+             Mention <@U0BOT> here to send it back for changes."
+        );
+        assert_eq!(
+            super::stopped_notice(
+                &Waiting::Asked,
+                Some("<@U0HUMAN>"),
+                "<@U0BOT>",
+                &["#7".to_owned()]
+            ),
+            "❓ **Waiting for an answer**, <@U0HUMAN>. Opened #7. Mention <@U0BOT> here to reply.",
+            "a draft opened before a question is still something to look at"
         );
         assert_eq!(
             super::stuck_notice("the agent would not start"),
@@ -1484,7 +1558,7 @@ here."
         ];
         let lines: Vec<String> = readings
             .iter()
-            .map(|waiting| super::stopped_notice(waiting, Some("<@U0HUMAN>"), "<@U0BOT>"))
+            .map(|waiting| super::stopped_notice(waiting, Some("<@U0HUMAN>"), "<@U0BOT>", &[]))
             .collect();
 
         for (i, line) in lines.iter().enumerate() {

@@ -5,6 +5,7 @@ use stageman_agent::Command;
 use stageman_channel::Call;
 use stageman_core::{Agent, JobId, Outcome, Progress, ProjectId, Timestamp, Uuid, Waiting};
 use stageman_instance::{Instance, Request, Response};
+use stageman_platform::Call as PlatformCall;
 use stageman_wire::{ChannelDraft, Draft, Ending, Fitted, KitDraft, Refusal, Standing};
 
 use crate::simulation::{
@@ -12,8 +13,8 @@ use crate::simulation::{
 };
 
 /// Asks, performs, and lets the write land and the answer follow.
-fn ask(sim: &mut Simulation, instance: &mut Instance, id: u64, asked: Request) -> Response {
-    for effect in instance.step(request(id, asked)) {
+pub fn ask(sim: &mut Simulation, instance: &mut Instance, id: u64, asked: Request) -> Response {
+    for effect in instance.step(sim.now(), request(id, asked)) {
         sim.perform(effect);
     }
     let until = sim.now() + 5;
@@ -36,7 +37,9 @@ fn as_it_comes() -> Fitted {
 pub fn a_draft(name: &str) -> Draft {
     Draft {
         name: name.to_owned(),
-        repository: format!("https://example.invalid/{name}"),
+        // An address on the platform, since a draft with anything else is
+        // refused before it becomes a project.
+        repository: format!("https://github.com/example/{name}"),
         foreman: as_it_comes(),
         kits: vec![KitDraft {
             name: "Claude".to_owned(),
@@ -77,7 +80,7 @@ fn removals(sim: &Simulation) -> usize {
         .count()
 }
 
-fn first(sim: &Simulation, what: &str) -> usize {
+pub fn first(sim: &Simulation, what: &str) -> usize {
     let found = sim.trace().iter().position(|line| line.contains(what));
     assert!(
         found.is_some(),
@@ -87,11 +90,30 @@ fn first(sim: &Simulation, what: &str) -> usize {
     found.expect("asserted above")
 }
 
-fn count(sim: &Simulation, what: &str) -> usize {
+pub fn count(sim: &Simulation, what: &str) -> usize {
     sim.trace()
         .iter()
         .filter(|line| line.contains(what))
         .count()
+}
+
+/// Where in the trace the n-th line mentioning something is, counting from
+/// nought: what tells a request's own write from the wake's.
+pub fn nth(sim: &Simulation, what: &str, n: usize) -> usize {
+    let found = sim
+        .trace()
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains(what))
+        .nth(n)
+        .map(|(at, _)| at);
+    assert!(
+        found.is_some(),
+        "fewer than {} lines in the trace say {what}: {:#?}",
+        n + 1,
+        sim.trace()
+    );
+    found.expect("asserted above")
 }
 
 #[test]
@@ -102,12 +124,20 @@ fn the_instance_screen_counts_what_it_may_and_never_a_credential() {
     let written = count(&sim, "-> Write");
 
     let Response::Instance(shown) = ask(&mut sim, &mut instance, 1, Request::Instance) else {
-        panic!("the instance screen");
+        panic!("the status line");
     };
     // The first candidate on the platform every scenario is played on.
     assert_eq!(shown.container_runtime, "/usr/bin/docker");
     assert_eq!(shown.agents, 1);
+    assert!(!shown.domain.is_empty() && !shown.version.is_empty());
+    let served = serde_json::to_string(&shown).expect("it serialises");
+    assert!(!served.contains("agent-token"), "{served}");
+
+    let Response::Home(shown) = ask(&mut sim, &mut instance, 2, Request::Home) else {
+        panic!("the first page");
+    };
     assert_eq!(shown.projects.len(), 1);
+    assert!(shown.needs_you.is_empty() && shown.working.is_empty());
     let served = serde_json::to_string(&shown).expect("it serialises");
     assert!(!served.contains("agent-token"), "{served}");
     assert_eq!(count(&sim, "-> Write"), written, "a read writes nothing");
@@ -225,6 +255,7 @@ fn creating_a_project_listens_on_its_channel_once_the_record_has_landed() {
         credential: "xoxb-not-a-real-token".to_owned(),
         listen_credential: "xapp-not-a-real-token".to_owned(),
     };
+    let writes_before = count(&sim, "-> Write");
     let Response::Projects(shown) = ask(&mut sim, &mut instance, 1, Request::Create { draft })
     else {
         panic!("the projects screen");
@@ -243,13 +274,33 @@ fn creating_a_project_listens_on_its_channel_once_the_record_has_landed() {
         1,
         "listened to from the moment the record landed"
     );
-    // Listening begins by asking the platform who this instance is, and
-    // only once the record has landed.
-    let asked = sim
-        .first_call(|call| matches!(call, Call::WhoAmI { .. }))
-        .expect("the platform was asked");
-    assert!(first(&sim, "-> Write") < asked);
-    assert!(asked < first(&sim, "-> Respond"));
+    // The token and both of the binding's credentials were checked before
+    // anything was written — see
+    // `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`
+    // — and listening then begins by asking the platform who this instance
+    // is again, only once the record has landed.
+    let written = nth(&sim, "-> Write", writes_before);
+    let read = sim
+        .platform_calls()
+        .iter()
+        .find(|(_, call)| matches!(call, PlatformCall::Repository { .. }))
+        .map(|(at, _)| *at)
+        .expect("the token was checked against the repository");
+    let introduced: Vec<usize> = sim
+        .channel_calls()
+        .iter()
+        .filter(|(_, call)| matches!(call, Call::WhoAmI { .. }))
+        .map(|(at, _)| *at)
+        .collect();
+    let [checked, listening] = introduced.as_slice() else {
+        panic!("checked, then introduced: {introduced:?}");
+    };
+    assert!(
+        read < written && *checked < written,
+        "checked before written"
+    );
+    assert!(written < *listening, "introduced once the record landed");
+    assert!(*listening < first(&sim, "-> Respond"));
     assert!(sim.disk().expect("landed").projects.contains_key(&created));
 
     let mut blank = a_draft("blank");
@@ -379,9 +430,9 @@ fn forgetting_a_project_removes_its_containers_and_refuses_while_busy() {
         (job(1), Progress::Working),
         (job(2), Progress::Idle(Waiting::Silent)),
     ]));
-    let (name, held) = Simulation::ours(&stageman_job::container(job(1)));
+    let (name, held) = Simulation::ours(&stageman_job::container(&job(1)));
     sim.container(&name, held);
-    let (name, held) = Simulation::ours(&stageman_job::container(job(2)));
+    let (name, held) = Simulation::ours(&stageman_job::container(&job(2)));
     sim.container(&name, held);
     let (name, held) = Simulation::ours(&stageman_foreman::container(project()));
     sim.container(&name, held);
@@ -411,8 +462,8 @@ fn forgetting_a_project_removes_its_containers_and_refuses_while_busy() {
         panic!("the projects screen");
     };
     assert!(shown.projects.is_empty());
-    assert!(!sim.exists(&stageman_job::container(job(1))));
-    assert!(!sim.exists(&stageman_job::container(job(2))));
+    assert!(!sim.exists(&stageman_job::container(&job(1))));
+    assert!(!sim.exists(&stageman_job::container(&job(2))));
     assert!(!sim.exists(&stageman_foreman::container(project())));
     assert!(first(&sim, "-> Write") < first_removal(&sim));
     assert!(sim.reclaims() >= 1);
@@ -436,7 +487,7 @@ fn starting_a_job_by_hand_runs_its_first_turn_once_the_record_has_landed() {
             project: id.clone(),
             kit: "Claude".to_owned(),
             work: " fix the build ".to_owned(),
-            at: Timestamp::UNIX_EPOCH,
+            title: String::new(),
         },
     ) else {
         panic!("the project's screen");
@@ -452,8 +503,8 @@ fn starting_a_job_by_hand_runs_its_first_turn_once_the_record_has_landed() {
     assert_eq!(started.reason, "started by hand from the dashboard");
     assert!(started.tunnel.contains(&started.id));
     assert!(first(&sim, "-> Write") < sim.first_turn().expect("a turn"));
-    let begun = JobId::from_uuid(Uuid::parse_str(&started.id).expect("an identifier"));
-    assert!(sim.is_running(&stageman_job::container(begun)));
+    let begun = JobId::parse(&started.id).expect("a name");
+    assert!(sim.is_running(&stageman_job::container(&begun)));
 
     assert_eq!(
         ask(
@@ -464,7 +515,7 @@ fn starting_a_job_by_hand_runs_its_first_turn_once_the_record_has_landed() {
                 project: id.clone(),
                 kit: "gpt".to_owned(),
                 work: "anything".to_owned(),
-                at: Timestamp::UNIX_EPOCH,
+                title: String::new(),
             },
         ),
         Response::Refused(Refusal::KitNotOnProject {
@@ -481,7 +532,7 @@ fn starting_a_job_by_hand_runs_its_first_turn_once_the_record_has_landed() {
                 project: id,
                 kit: "Claude".to_owned(),
                 work: "  ".to_owned(),
-                at: Timestamp::UNIX_EPOCH,
+                title: String::new(),
             },
         ),
         Response::Refused(Refusal::Incomplete {
@@ -507,7 +558,7 @@ fn a_job_started_by_hand_on_a_bound_project_has_its_room_made_first() {
             project: project().to_string(),
             kit: "Claude".to_owned(),
             work: "fix the build".to_owned(),
-            at: Timestamp::UNIX_EPOCH,
+            title: String::new(),
         },
     ) else {
         panic!("the project's screen");
@@ -518,13 +569,88 @@ fn a_job_started_by_hand_on_a_bound_project_has_its_room_made_first() {
         .expect("the room was made");
     assert!(made < sim.first_turn().expect("a turn"));
     assert_eq!(sim.rooms().len(), 1);
-    let started = JobId::from_uuid(Uuid::parse_str(&shown.jobs[0].id).expect("an identifier"));
+    let started = JobId::parse(&shown.jobs[0].id).expect("a name");
     assert!(
         instance
             .state()
-            .job(started)
+            .job(&started)
             .and_then(|job| job.room.clone())
             .is_some()
+    );
+}
+
+/// A job's page says what the job is and links only what is true: its room
+/// once the channel has said where its workspace is, and nothing for a job
+/// nobody has — see
+/// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+#[test]
+fn a_jobs_page_says_what_it_is_and_links_only_what_is_true() {
+    let mut sim = Simulation::new();
+    sim.holding(&watching_a_channel(&[]));
+    let mut instance = sim.wake(seed(1));
+
+    let Response::Jobs(shown) = ask(
+        &mut sim,
+        &mut instance,
+        1,
+        Request::Start {
+            project: project().to_string(),
+            kit: "Claude".to_owned(),
+            work: "fix the build".to_owned(),
+            title: String::new(),
+        },
+    ) else {
+        panic!("the project's screen");
+    };
+    let started = shown.jobs[0].id.clone();
+
+    let Response::Job(page) = ask(
+        &mut sim,
+        &mut instance,
+        2,
+        Request::Job {
+            project: project().to_string(),
+            job: started.clone(),
+        },
+    ) else {
+        panic!("the job's page");
+    };
+    assert_eq!(page.job.id, started);
+    assert_eq!(page.project, project().to_string());
+    assert_eq!(page.job.standing, Standing::Working);
+    // What it runs on, with every name a chip needs resolved on this side:
+    // the kit a person drafted, read back as it is shown.
+    assert_eq!(page.job.kit.agent, as_it_comes().agent);
+    assert_eq!(page.job.kit.agent_name, "Claude");
+    assert_eq!(page.job.kit.model, "Default");
+    assert_eq!(
+        page.job.kit.effort,
+        Some(("default".to_owned(), "Default".to_owned()))
+    );
+    assert!(
+        page.job.kickoff.contains("fix the build"),
+        "{}",
+        page.job.kickoff
+    );
+    let room = page.job.room.clone().expect("a room was made for it");
+    assert_eq!(
+        page.job.room_link.as_deref(),
+        Some(format!("https://example.slack.com/archives/{room}").as_str()),
+        "linked from where the channel said its workspace is"
+    );
+
+    let refused = ask(
+        &mut sim,
+        &mut instance,
+        3,
+        Request::Job {
+            project: project().to_string(),
+            job: "00000000-0000-0000-0000-00000000dead".to_owned(),
+        },
+    );
+    assert!(
+        matches!(refused, Response::Refused(Refusal::UnknownJob { .. })),
+        "{refused:?}"
     );
 }
 
@@ -537,9 +663,9 @@ fn stopping_a_job_ends_its_turn_and_leaves_it_paused() {
         (job(1), Progress::Working),
         (job(2), Progress::Idle(Waiting::Silent)),
     ]));
-    let (name, held) = Simulation::ours(&stageman_job::container(job(1)));
+    let (name, held) = Simulation::ours(&stageman_job::container(&job(1)));
     sim.container(&name, held);
-    let (name, held) = Simulation::ours(&stageman_job::container(job(2)));
+    let (name, held) = Simulation::ours(&stageman_job::container(&job(2)));
     sim.container(&name, held);
     let mut instance = sim.wake(seed(1));
     // Far enough for the resumed job's agent to be running, so that the
@@ -547,13 +673,16 @@ fn stopping_a_job_ends_its_turn_and_leaves_it_paused() {
     sim.run_until(&mut instance, 3);
     let id = project().to_string();
 
-    for effect in instance.step(request(
-        1,
-        Request::Stop {
-            project: id.clone(),
-            job: job(1).to_string(),
-        },
-    )) {
+    for effect in instance.step(
+        sim.now(),
+        request(
+            1,
+            Request::Stop {
+                project: id.clone(),
+                job: job(1).to_string(),
+            },
+        ),
+    ) {
         sim.perform(effect);
     }
     let Some(Response::Jobs(shown)) = sim.response(1).cloned() else {
@@ -572,18 +701,35 @@ fn stopping_a_job_ends_its_turn_and_leaves_it_paused() {
 
     sim.run_until(&mut instance, 10);
     assert_eq!(
-        instance.state().job(job(1)).map(|job| job.progress.clone()),
+        instance
+            .state()
+            .job(&job(1))
+            .map(|job| job.progress.clone()),
         Some(Progress::Idle(Waiting::Paused))
+    );
+    // The moment the standing changed is the step's own time, stamped by
+    // the world — see
+    // `docs/decisions/0073-the-world-tells-the-instance-the-time-with-every-step.md`
+    // — which on this clock is after the epoch and no later than now.
+    let changed = instance
+        .state()
+        .job(&job(1))
+        .and_then(|job| job.since)
+        .expect("a standing that changed has a moment");
+    assert!(
+        changed > Timestamp::UNIX_EPOCH
+            && changed <= Timestamp::from_millisecond(10).expect("a moment"),
+        "{changed}"
     );
     assert_eq!(
         sim.disk()
             .expect("landed")
-            .job(job(1))
+            .job(&job(1))
             .map(|job| job.progress.clone()),
         Some(Progress::Idle(Waiting::Paused))
     );
     assert!(
-        sim.exists(&stageman_job::container(job(1))),
+        sim.exists(&stageman_job::container(&job(1))),
         "stopping keeps"
     );
 
@@ -622,9 +768,9 @@ fn retiring_a_job_records_the_verdict_before_its_container_goes() {
         (job(1), Progress::Idle(Waiting::Asked), 1),
         (job(2), Progress::Working, 2),
     ]));
-    let (name, held) = Simulation::ours(&stageman_job::container(job(1)));
+    let (name, held) = Simulation::ours(&stageman_job::container(&job(1)));
     sim.container(&name, held);
-    let (name, held) = Simulation::ours(&stageman_job::container(job(2)));
+    let (name, held) = Simulation::ours(&stageman_job::container(&job(2)));
     sim.container(&name, held);
     let mut instance = sim.wake(seed(1));
     let id = project().to_string();
@@ -649,7 +795,7 @@ fn retiring_a_job_records_the_verdict_before_its_container_goes() {
         .expect("still listed");
     assert_eq!(retired.standing, Standing::Done);
     assert!(first(&sim, "-> Write") < first_removal(&sim));
-    assert!(!sim.exists(&stageman_job::container(job(1))));
+    assert!(!sim.exists(&stageman_job::container(&job(1))));
     assert_eq!(sim.reclaims(), reclaimed + 1);
     // Its room went with it, once the verdict was on the disk: an archived
     // room leaves the sidebar and takes no more posts.
@@ -661,7 +807,7 @@ fn retiring_a_job_records_the_verdict_before_its_container_goes() {
     assert_eq!(
         sim.disk()
             .expect("landed")
-            .job(job(1))
+            .job(&job(1))
             .map(|job| job.progress.clone()),
         Some(Progress::Retired(Outcome::Done))
     );
@@ -691,7 +837,10 @@ fn retiring_a_job_records_the_verdict_before_its_container_goes() {
         },
     );
     assert_eq!(
-        instance.state().job(job(1)).map(|job| job.progress.clone()),
+        instance
+            .state()
+            .job(&job(1))
+            .map(|job| job.progress.clone()),
         Some(Progress::Retired(Outcome::Done)),
         "a verdict is never overwritten"
     );
@@ -721,7 +870,7 @@ fn the_same_requests_leave_the_same_trace() {
                 project: project().to_string(),
                 kit: "Claude".to_owned(),
                 work: "fix the build".to_owned(),
-                at: Timestamp::UNIX_EPOCH,
+                title: String::new(),
             },
         );
         sim.run_until(&mut instance, 5_000);
@@ -749,7 +898,7 @@ fn starting_a_job_on_a_project_with_no_binding_is_refused_by_name() {
                 project: project().to_string(),
                 kit: "Claude".to_owned(),
                 work: "fix the build".to_owned(),
-                at: Timestamp::UNIX_EPOCH,
+                title: String::new(),
             },
         ),
         Response::Refused(Refusal::ChannelMissing {

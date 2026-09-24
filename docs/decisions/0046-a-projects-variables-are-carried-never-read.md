@@ -1,7 +1,10 @@
 # 0046 — A project's variables are carried, never read
 
 ## Status
-Accepted.
+Accepted. Amended by
+`docs/decisions/0075-a-variable-says-what-it-is-for.md`: a variable carries
+a note beside its value, prose for the agent that this project still never
+reads, and a project's variables can be pasted as a `.env` file.
 
 ## Context
 

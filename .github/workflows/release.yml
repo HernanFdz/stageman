@@ -195,7 +195,7 @@ jobs:
       # glue the runtime hydrates against — docs/conventions.md §5. `binstall`
       # fetches a prebuilt where there is one and builds it where there is not.
       - uses: cargo-bins/cargo-binstall@main
-      - run: cargo binstall --no-confirm --locked dioxus-cli@0.7.9
+      - run: cargo binstall --no-confirm --locked dioxus-cli@0.7.10
 
       - run: just release "${{ needs.settle.outputs.version }}" ${{ matrix.target }}
 

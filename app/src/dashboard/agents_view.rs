@@ -16,7 +16,8 @@ use dioxus::prelude::*;
 use stageman_instance::{Request, Response};
 
 use super::error::{DashboardError, DashboardResult};
-use crate::ui::{Badge, BadgeTone, Button, ButtonVariant, Card, EmptyState};
+use super::live::Live;
+use crate::ui::{Badge, BadgeTone, Button, ButtonVariant, Card, EmptyState, Skeleton};
 
 pub use stageman_wire::Agent;
 
@@ -71,7 +72,11 @@ pub async fn forget(agent: String) -> DashboardResult<Vec<Agent>> {
 /// The agents screen.
 #[component]
 pub fn AgentsView() -> Element {
-    let mut listing = use_server_future(agents)?;
+    let live = use_context::<Live>();
+    let mut listing = use_server_future(move || {
+        let _ = live.follow();
+        agents()
+    })?;
     let mut failure = use_signal(|| None::<DashboardError>);
 
     rsx! {
@@ -122,9 +127,7 @@ pub fn AgentsView() -> Element {
                         p { class: "text-sm text-failed", "{reason}" }
                     }
                 },
-                None => rsx! {
-                    p { class: "text-sm text-muted-foreground", "Reading the agents…" }
-                },
+                None => rsx! { Skeleton {} },
             }
         }
     }

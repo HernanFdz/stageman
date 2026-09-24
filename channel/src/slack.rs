@@ -37,9 +37,24 @@
 //! and the identifier it comes back with is what a reply names — see
 //! `docs/decisions/0029-a-reply-is-routed-by-its-thread.md`.
 
-use stageman_core::{Channel, JobId, ProjectId, Secret, Speaking, Uuid};
+use percent_encoding::utf8_percent_encode;
+use stageman_core::{Channel, JobId, ProjectId, Secret, Speaking, Uuid, slug};
 
-use crate::{Call, ChannelError, Identity, Incoming, Message, Reaction, Request, ThreadRead};
+use crate::{
+    Call, ChannelError, Identity, Incoming, Message, QUERY, Reaction, Request, ThreadRead,
+};
+
+/// The manifest the app a project speaks through is created from: the
+/// scopes this module's calls need, and the events the listener reads.
+/// Tracked text, and the one source of it — `README.md` shows a reader the
+/// same block, and a test below pins the two equal — so that the link a
+/// page offers is composed from it and never copied, per
+/// `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`.
+pub const MANIFEST: &str = include_str!("slack/manifest.yaml");
+
+/// Where the platform creates an app from a manifest carried in the
+/// address, URL-encoded, per its documentation.
+const NEW_APP: &str = "https://api.slack.com/apps?new_app=1&manifest_yaml=";
 
 /// Where Slack takes a message.
 const POST_MESSAGE: &str = "https://slack.com/api/chat.postMessage";
@@ -269,17 +284,24 @@ pub fn done(status: u16, body: &[u8]) -> Result<(), ChannelError> {
     accepted(status, body).map(|_| ())
 }
 
-/// The name a job's room is given: `<project>--<title>--<identifier>`, in
-/// what Slack allows — lowercase letters, digits, hyphens and underscores,
-/// eighty characters at most.
+/// The name a job's room is given: `<project>--<job's name>`, in what Slack
+/// allows — lowercase letters, digits, hyphens and underscores, eighty
+/// characters at most.
 ///
-/// Double hyphens separate the parts because titles contain single ones.
-/// A part with nothing left in it is left out rather than left empty, and a
-/// name with neither still says what it is. Measured: consecutive hyphens
-/// survive creation, and an archived room's name is still taken, which is
-/// why the identifier is the one part always present.
-pub fn room_name(project: &str, title: &str, job: JobId) -> String {
-    named(project, title, job.as_uuid())
+/// The job's name carries its title and the suffix that makes it unique,
+/// per `docs/decisions/0074-a-jobs-identifier-is-its-name.md`, and is
+/// never cut: at its longest it fits beside the project's part with room
+/// to spare, which a test below holds to. A project with nothing left in
+/// its part is left out rather than left empty. Measured: consecutive
+/// hyphens survive creation, and an archived room's name is still taken,
+/// which is why the name is the one part always present.
+pub fn room_name(project: &str, job: &JobId) -> String {
+    let project = slug(project, PROJECT_AT_MOST);
+    if project.is_empty() {
+        job.to_string()
+    } else {
+        format!("{project}{SEPARATOR}{job}")
+    }
 }
 
 /// The name a project's foreman's room is given: `<project>--foreman--<identifier>`,
@@ -290,7 +312,9 @@ pub fn foreman_room_name(project: &str, id: ProjectId) -> String {
     named(project, "foreman", id.as_uuid())
 }
 
-/// A room's name from its three parts, folded to what Slack allows.
+/// A room's name from its three parts, folded to what Slack allows: the
+/// foreman's, whose middle part is a word and whose identifier is a
+/// project's. A job's room has its name whole and is named above.
 fn named(project: &str, title: &str, identifier: &Uuid) -> String {
     let identifier: String = identifier
         .simple()
@@ -330,25 +354,6 @@ fn named(project: &str, title: &str, identifier: &Uuid) -> String {
     parts.join(SEPARATOR)
 }
 
-/// Folds text to a piece of a room's name: lowercase, with every run of
-/// anything else as one hyphen, no hyphen at either end, and no longer than
-/// `at_most`.
-fn slug(text: &str, at_most: usize) -> String {
-    let mut folded = String::new();
-    for character in text.chars() {
-        if folded.len() >= at_most {
-            break;
-        }
-        let lowered = character.to_ascii_lowercase();
-        if lowered.is_ascii_alphanumeric() {
-            folded.push(lowered);
-        } else if !folded.is_empty() && !folded.ends_with('-') {
-            folded.push('-');
-        }
-    }
-    folded.trim_end_matches('-').to_owned()
-}
-
 /// A reference to a room, which the platform renders as its name.
 pub fn room_link(room: &str) -> String {
     format!("<#{room}>")
@@ -358,6 +363,11 @@ pub fn room_link(room: &str) -> String {
 /// notifies them of.
 pub fn mention(user: &str) -> String {
     format!("<@{user}>")
+}
+
+/// Where the platform's form for a new app is, with the manifest filled in.
+pub fn app_form() -> String {
+    format!("{NEW_APP}{}", utf8_percent_encode(MANIFEST, QUERY))
 }
 
 /// Renders asking who this instance is, with the credential that speaks.
@@ -502,6 +512,12 @@ pub fn permalink(us: &Identity, room: &str, message: &str, thread: Option<&str>)
         Some(parent) if parent != message => format!("{base}?thread_ts={parent}&cid={room}"),
         _ => base,
     }
+}
+
+/// A link to a room, as Slack spells one: the workspace's address and the
+/// room, which is a message's link without the message.
+pub fn room_address(us: &Identity, room: &str) -> String {
+    format!("{}/archives/{room}", us.url.trim_end_matches('/'))
 }
 
 /// Where to connect, from the answer to [`open_socket`].
@@ -1105,9 +1121,11 @@ struct Answered {
 
 #[cfg(test)]
 mod tests {
-    use super::{accepted, decode, fitting, identity, posted, room_name, slug};
+    use super::{
+        NAME_AT_MOST, accepted, decode, fitting, foreman_room_name, identity, posted, room_name,
+    };
     use crate::{ChannelError, Identity, Incoming};
-    use stageman_core::{JobId, Uuid};
+    use stageman_core::{JobId, ProjectId, Uuid};
 
     fn us() -> Identity {
         Identity {
@@ -1513,24 +1531,53 @@ alerts
         assert!(cut.chars().all(|c| c == 'é'), "cut between characters");
     }
 
-    /// A room's name is folded to the platform's alphabet, part by part,
-    /// and the whole never exceeds its limit.
+    /// A job's room is the project's part and the job's name whole, and
+    /// the whole never exceeds the platform's limit even at its longest —
+    /// which is what lets the name go in uncut.
     #[test]
-    fn a_rooms_name_is_folded_to_what_the_platform_allows() {
-        assert_eq!(slug("Closed Loop!", 80), "closed-loop");
-        assert_eq!(slug("  --x--  ", 80), "x");
+    fn a_jobs_room_is_named_after_the_project_and_the_job() {
+        let minted = Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
+        let job = JobId::named("Fix the login timeout", &minted);
         assert_eq!(
-            slug("ÀB", 80),
-            "b",
-            "what is not the platform's alphabet folds to a hyphen"
+            room_name("Closed Loop!", &job),
+            "closed-loop--fix-the-login-timeout--01234567"
         );
-        assert_eq!(slug("abcdef", 3), "abc");
-        assert_eq!(slug("ab-cdef", 3), "ab", "a cut never ends in a hyphen");
+        assert_eq!(
+            room_name("", &job),
+            "fix-the-login-timeout--01234567",
+            "a project with nothing left in its part is left out"
+        );
+        let older = JobId::from_uuid(minted);
+        assert_eq!(
+            room_name("Closed Loop", &older),
+            "closed-loop--01234567-89ab-cdef-0123-456789abcdef",
+            "a job the last release named is roomed by that name"
+        );
 
-        let job = JobId::from_uuid(Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef));
-        let name = room_name(&"long".repeat(20), &"title ".repeat(30), job);
-        assert!(name.len() <= 80, "{name}");
+        let longest = JobId::named(&"word ".repeat(20), &minted);
+        assert_eq!(
+            longest.as_str().len(),
+            49,
+            "the longest name a title can make"
+        );
+        let name = room_name(&"long".repeat(20), &longest);
+        assert!(name.len() <= NAME_AT_MOST, "{name}");
         assert!(name.ends_with("--01234567"), "{name}");
+    }
+
+    /// The foreman's room is folded part by part, and the whole never
+    /// exceeds the platform's limit.
+    #[test]
+    fn a_foremans_room_is_folded_to_what_the_platform_allows() {
+        let project =
+            ProjectId::from_uuid(Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef));
+        assert_eq!(
+            foreman_room_name("Closed Loop!", project),
+            "closed-loop--foreman--01234567"
+        );
+        let name = foreman_room_name(&"long".repeat(20), project);
+        assert!(name.len() <= NAME_AT_MOST, "{name}");
+        assert!(name.ends_with("--foreman--01234567"), "{name}");
         assert!(!name.contains("---"), "{name}");
     }
 

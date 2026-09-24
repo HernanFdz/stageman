@@ -26,14 +26,16 @@ use stageman_core::{
 use stageman_instance::{
     AppEffect, AppEvent, Effect, Event, Instance, Request, RequestId, Response, Seed, Target,
 };
+use stageman_platform::Call as PlatformCall;
 use stageman_vocabulary::scenario::{Meta, Recorder};
 use stageman_vocabulary::{
     Answer as Answering, Arrival, Bytes, Disconnected, EffectId, Ended, Environment, Finished,
     Named as _, Probed, RequestId as Asked, Responded,
 };
 
-/// Virtual milliseconds.
-pub type Now = u64;
+/// Virtual milliseconds: the vocabulary's own count, which every step is
+/// told.
+pub use stageman_vocabulary::Now;
 
 /// Where every simulated instance keeps its file.
 const INSTANCE_FILE: &str = "/sim/instance.json";
@@ -320,6 +322,10 @@ pub struct Simulation {
     /// Why the platform refuses the next questions a listener asks, front
     /// first.
     listen_failures: VecDeque<String>,
+    /// Why the platform refuses the next requests for where to connect in
+    /// particular, front first, read before the queue above: what tells a
+    /// wrong app-level token from a wrong bot token.
+    locate_failures: VecDeque<String>,
     /// Why the next sockets cannot be opened, front first.
     socket_failures: VecDeque<String>,
     /// Every image this project has built, as the runtime holds them.
@@ -342,6 +348,17 @@ pub struct Simulation {
     /// back and where in the trace it was asked — so a test names a call
     /// rather than a string.
     calls: Vec<(usize, Call)>,
+    /// Every read of a platform asked for, as the platform crate reads it
+    /// back and where in the trace it was asked.
+    platform_calls: Vec<(usize, PlatformCall)>,
+    /// What the platform answers the next reads of a repository, front
+    /// first: a status and a body, as scripted. Unscripted, a read is
+    /// answered as the real platform was measured to answer a token that
+    /// reaches a private repository.
+    platform_answers: VecDeque<(u16, String)>,
+    /// Why the next reads of a repository get no answer at all, front
+    /// first.
+    platform_failures: VecDeque<String>,
     key: Key,
     /// What this flow is recorded as, where it is recorded at all: the file
     /// it is written to, and what that file says it pins.
@@ -386,7 +403,7 @@ pub const fn project() -> ProjectId {
 pub const CHANNEL: &str = "C0123456789";
 
 /// A job of that project, by number.
-pub const fn job(n: u128) -> JobId {
+pub fn job(n: u128) -> JobId {
     JobId::from_uuid(Uuid::from_u128(n))
 }
 
@@ -498,7 +515,7 @@ fn configured(project: Project) -> State {
 pub fn watching(jobs: &[(JobId, Progress)]) -> State {
     configured(a_project(
         jobs.iter()
-            .map(|(id, progress)| (*id, a_job(progress, None)))
+            .map(|(id, progress)| (id.clone(), a_job(progress, None)))
             .collect(),
         false,
     ))
@@ -509,7 +526,7 @@ pub fn watching(jobs: &[(JobId, Progress)]) -> State {
 pub fn watching_a_channel(jobs: &[(JobId, Progress, u32)]) -> State {
     configured(a_project(
         jobs.iter()
-            .map(|(id, progress, n)| (*id, a_job(progress, Some(self::room(*n)))))
+            .map(|(id, progress, n)| (id.clone(), a_job(progress, Some(self::room(*n)))))
             .collect(),
         true,
     ))
@@ -558,8 +575,8 @@ pub fn briefed(state: &mut State, brief: &str) {
 }
 
 /// The name a job's tunnel answers on, under the domain every scenario uses.
-pub fn tunnel_host(job: JobId) -> String {
-    format!("{}.localhost", job.as_uuid())
+pub fn tunnel_host(job: &JobId) -> String {
+    format!("{job}.localhost")
 }
 
 /// A person asking something of the dashboard.
@@ -636,6 +653,7 @@ impl Simulation {
             envelopes: 0,
             acked: Vec::new(),
             listen_failures: VecDeque::new(),
+            locate_failures: VecDeque::new(),
             socket_failures: VecDeque::new(),
             images: vec!["stageman:unneeded".to_owned()],
             listeners: BTreeMap::new(),
@@ -643,6 +661,9 @@ impl Simulation {
             asking_next: 1,
             commands: Vec::new(),
             calls: Vec::new(),
+            platform_calls: Vec::new(),
+            platform_answers: VecDeque::new(),
+            platform_failures: VecDeque::new(),
             key: key(),
             recording: None,
             recorder: None,
@@ -931,7 +952,6 @@ impl Simulation {
                         .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
                         .collect(),
                     peer: peer.to_owned(),
-                    at: 1_757_000_000_000,
                 },
             },
         );
@@ -1186,7 +1206,7 @@ impl Simulation {
         {
             self.seen.extend(named);
         }
-        let effects = instance.step(event.clone());
+        let effects = instance.step(self.now, event.clone());
         if let Some(recorder) = &mut self.recorder {
             recorder.turned(self.now, event, effects.clone(), instance.snapshot());
         }
@@ -1249,7 +1269,7 @@ impl Simulation {
     fn oracle(&self, instance: &Instance) {
         for job in instance.state().working() {
             assert!(
-                self.containers.contains_key(&stageman_job::container(job))
+                self.containers.contains_key(&stageman_job::container(&job))
                     || !self.begun.contains(&job),
                 "job {job} is working with no container"
             );
@@ -1294,7 +1314,7 @@ impl Simulation {
                 // about it in flight, for the one step between a turn's end
                 // and the next turn's registration.
                 (Some(job), _) => {
-                    turning.contains(&stageman_instance::Speaker::Job(job))
+                    turning.contains(&stageman_instance::Speaker::Job(job.clone()))
                         || reading.contains(&stageman_instance::Speaker::Job(job))
                         || held.serving
                         || deciding
@@ -1957,6 +1977,22 @@ impl Simulation {
         {
             self.calls.push((self.trace.len(), call));
         }
+        if let Effect::Request {
+            method,
+            url,
+            headers,
+            body,
+            ..
+        } = &effect
+            && let Some(call) = PlatformCall::parse(&stageman_platform::Request {
+                method: method.clone(),
+                url: url.clone(),
+                headers: headers.clone(),
+                body: body.as_ref().map(|bytes| bytes.as_slice().to_vec()),
+            })
+        {
+            self.platform_calls.push((self.trace.len(), call));
+        }
         self.trace.push(format!(
             "{}: -> {}{}",
             self.now,
@@ -2042,7 +2078,7 @@ impl Simulation {
     /// remembered by the platform.
     pub fn person_says(&mut self, at: Now, room: &str, id: &str, thread: Option<&str>, text: &str) {
         let socket = self.live_socket();
-        let event = self.frame_on(socket, at, room, id, thread, text, Spoken::Plain);
+        let event = self.frame_on(socket, room, id, thread, text, Spoken::Plain);
         self.schedule(at, event);
     }
 
@@ -2050,7 +2086,7 @@ impl Simulation {
     /// platform remembers of it in a thread.
     pub fn we_said(&mut self, at: Now, room: &str, id: &str, thread: Option<&str>, text: &str) {
         let socket = self.live_socket();
-        let event = self.frame_on(socket, at, room, id, thread, text, Spoken::Ours);
+        let event = self.frame_on(socket, room, id, thread, text, Spoken::Ours);
         self.schedule(at, event);
     }
 
@@ -2086,6 +2122,19 @@ impl Simulation {
         headers: BTreeMap<String, String>,
         body: Option<Bytes>,
     ) {
+        // A platform's read before a channel's calls: the two crates read
+        // different requests, and a repository read is nobody's post.
+        if self.read_repository(
+            id,
+            &stageman_platform::Request {
+                method: method.clone(),
+                url: url.clone(),
+                headers: headers.clone(),
+                body: body.as_ref().map(|bytes| bytes.as_slice().to_vec()),
+            },
+        ) {
+            return;
+        }
         let request = stageman_channel::Request {
             method,
             url,
@@ -2168,18 +2217,7 @@ impl Simulation {
                 answered(r#"{"ok":true}"#.to_owned())
             }
             Some(question @ (Call::WhoAmI { .. } | Call::OpenSocket { .. })) => {
-                let body = if let Some(error) = self.listen_failures.pop_front() {
-                    format!(r#"{{"ok":false,"error":"{error}"}}"#)
-                } else if matches!(question, Call::WhoAmI { .. }) {
-                    r#"{"ok":true,"user_id":"U0BOT","bot_id":"B0SELF","url":"https://example.slack.com/"}"#.to_owned()
-                } else {
-                    self.streams_opened += 1;
-                    format!(
-                        r#"{{"ok":true,"url":"wss://sim.slack/link/{}"}}"#,
-                        self.streams_opened
-                    )
-                };
-                answered(body)
+                answered(self.listener_answered(&question))
             }
             None => Responded::Failed("the simulation does not know this request".to_owned()),
         };
@@ -2189,7 +2227,65 @@ impl Simulation {
         // than hang, which a scenario can see. Everything else is answered
         // at once, which is what the scenarios' timings were written to.
         let at = if edited { self.now + 1 } else { self.now };
-        self.schedule(at, Event::Responded { id, responded, at });
+        self.schedule(at, Event::Responded { id, responded });
+    }
+
+    /// Answers one of the two questions a listener asks — and a check of a
+    /// binding's credentials asks the same two — as the platform does,
+    /// unless the next was scripted to be refused. A wrong app-level token
+    /// refuses only the request for where to connect, as measured.
+    fn listener_answered(&mut self, question: &Call) -> String {
+        let refused = match question {
+            Call::OpenSocket { .. } => self
+                .locate_failures
+                .pop_front()
+                .or_else(|| self.listen_failures.pop_front()),
+            _ => self.listen_failures.pop_front(),
+        };
+        if let Some(error) = refused {
+            format!(r#"{{"ok":false,"error":"{error}"}}"#)
+        } else if matches!(question, Call::WhoAmI { .. }) {
+            r#"{"ok":true,"user_id":"U0BOT","bot_id":"B0SELF","url":"https://example.slack.com/"}"#
+                .to_owned()
+        } else {
+            self.streams_opened += 1;
+            format!(
+                r#"{{"ok":true,"url":"wss://sim.slack/link/{}"}}"#,
+                self.streams_opened
+            )
+        }
+    }
+
+    /// Answers a read of a repository, if the request is one: as the real
+    /// platform was measured to answer a token that reaches a private
+    /// repository, unless the next answer was scripted otherwise. False for
+    /// a request that is not a platform's read.
+    fn read_repository(&mut self, id: EffectId, request: &stageman_platform::Request) -> bool {
+        let Some(PlatformCall::Repository { owner, name, .. }) = PlatformCall::parse(request)
+        else {
+            return false;
+        };
+        let responded = if let Some(why) = self.platform_failures.pop_front() {
+            Responded::Failed(why)
+        } else {
+            let (status, body) = self.platform_answers.pop_front().unwrap_or_else(|| {
+                (
+                    200,
+                    format!(r#"{{"full_name":"{owner}/{name}","private":true}}"#),
+                )
+            });
+            Responded::Answered {
+                status,
+                headers: [(
+                    "content-type".to_owned(),
+                    "application/json; charset=utf-8".to_owned(),
+                )]
+                .into(),
+                body: body.into(),
+            }
+        };
+        self.schedule(self.now, Event::Responded { id, responded });
+        true
     }
 
     /// Opens a socket the instance asked for: the platform greets on it at
@@ -2202,7 +2298,6 @@ impl Simulation {
                 Event::Disconnected {
                     id,
                     disconnected: Disconnected::Failed(why),
-                    at: self.now,
                 },
             );
             return;
@@ -2213,7 +2308,6 @@ impl Simulation {
             Event::Frame {
                 id,
                 text: r#"{"type":"hello","num_connections":1}"#.to_owned(),
-                at: self.now,
             },
         );
     }
@@ -2250,7 +2344,6 @@ impl Simulation {
             Event::Disconnected {
                 id,
                 disconnected: Disconnected::Closed,
-                at,
             },
         );
     }
@@ -2267,14 +2360,9 @@ impl Simulation {
 
     /// One message as the platform delivers it: a frame on a socket, in an
     /// envelope of its own.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "a frame is exactly these, and a struct would name the same seven things once more"
-    )]
     fn frame_on(
         &mut self,
         socket: EffectId,
-        at: Now,
         room: &str,
         id: &str,
         in_thread: Option<&str>,
@@ -2320,7 +2408,6 @@ impl Simulation {
             text: format!(
                 r#"{{"envelope_id":"{envelope}","type":"events_api","payload":{{"event":{{"type":"{kind}","channel":"{room}",{speaker},"text":{text},"ts":"{id}"{thread_ts}}}}}}}"#
             ),
-            at,
         }
     }
 
@@ -2331,7 +2418,6 @@ impl Simulation {
     /// profile on its root and not on itself.
     fn app_frame(
         &mut self,
-        at: Now,
         room: &str,
         id: &str,
         under: Option<&str>,
@@ -2392,20 +2478,19 @@ impl Simulation {
                 "payload": {"event": serde_json::Value::Object(event)},
             })
             .to_string(),
-            at,
         }
     }
 
     /// Another app posting at the root of a room, at an instant.
     pub fn app_posts(&mut self, at: Now, room: &str, id: &str, headline: &str, body: &str) {
-        let event = self.app_frame(at, room, id, None, headline, body);
+        let event = self.app_frame(room, id, None, headline, body);
         self.schedule(at, event);
     }
 
     /// Another app following up under an earlier message of its own, at an
     /// instant.
     pub fn app_follows_up(&mut self, at: Now, room: &str, id: &str, under: &str, headline: &str) {
-        let event = self.app_frame(at, room, id, Some(under), headline, "");
+        let event = self.app_frame(room, id, Some(under), headline, "");
         self.schedule(at, event);
     }
 
@@ -2414,7 +2499,6 @@ impl Simulation {
         let socket = self.live_socket();
         let event = self.frame_on(
             socket,
-            at,
             CHANNEL,
             "1788000099.000001",
             Some(&self::thread(thread).id),
@@ -2431,7 +2515,6 @@ impl Simulation {
         let socket = self.live_socket();
         let event = self.frame_on(
             socket,
-            at,
             CHANNEL,
             &self::thread(n).id,
             None,
@@ -2447,7 +2530,6 @@ impl Simulation {
     pub fn says_at_root_on(&mut self, socket: EffectId, at: Now, n: u32, text: &str) {
         let event = self.frame_on(
             socket,
-            at,
             CHANNEL,
             &self::thread(n).id,
             None,
@@ -2463,7 +2545,6 @@ impl Simulation {
         let socket = self.live_socket();
         let event = self.frame_on(
             socket,
-            at,
             &room(n).id,
             "1788000099.000004",
             None,
@@ -2480,7 +2561,6 @@ impl Simulation {
         let socket = self.live_socket();
         let event = self.frame_on(
             socket,
-            at,
             &room(n).id,
             id,
             None,
@@ -2496,7 +2576,6 @@ impl Simulation {
         let socket = self.live_socket();
         let event = self.frame_on(
             socket,
-            at,
             &room(n).id,
             id,
             Some(thread),
@@ -2512,7 +2591,6 @@ impl Simulation {
         let socket = self.live_socket();
         let event = self.frame_on(
             socket,
-            at,
             &room(n).id,
             "1788000099.000005",
             Some(thread),
@@ -2527,16 +2605,7 @@ impl Simulation {
     /// instance's own post.
     pub fn said_in_room(&mut self, n: u32, text: &str, spoken: Spoken) -> Event {
         let socket = self.live_socket();
-        let now = self.now;
-        self.frame_on(
-            socket,
-            now,
-            &room(n).id,
-            "1788000099.000006",
-            None,
-            text,
-            spoken,
-        )
+        self.frame_on(socket, &room(n).id, "1788000099.000006", None, text, spoken)
     }
 
     /// The platform warns, at an instant, that it is about to close the
@@ -2548,7 +2617,6 @@ impl Simulation {
             Event::Frame {
                 id: socket,
                 text: r#"{"type":"disconnect","reason":"warning"}"#.to_owned(),
-                at,
             },
         );
     }
@@ -2568,6 +2636,36 @@ impl Simulation {
     /// Scripts the platform to refuse the next question a listener asks.
     pub fn next_listen_fails(&mut self, why: &str) {
         self.listen_failures.push_back(why.to_owned());
+    }
+
+    /// Scripts the platform to refuse the next request for where to
+    /// connect, and that one alone: a wrong app-level token, as measured.
+    pub fn next_locate_fails(&mut self, why: &str) {
+        self.locate_failures.push_back(why.to_owned());
+    }
+
+    /// Scripts the platform's answer to the next read of a repository: a
+    /// status, and the body it came with, as the real platform was measured
+    /// to answer.
+    pub fn next_platform_answers(&mut self, status: u16, body: &str) {
+        self.platform_answers.push_back((status, body.to_owned()));
+    }
+
+    /// Scripts the next read of a repository to get no answer at all.
+    pub fn next_platform_fails(&mut self, why: &str) {
+        self.platform_failures.push_back(why.to_owned());
+    }
+
+    /// Every request to a channel asked for, with where in the trace each
+    /// was asked.
+    pub fn channel_calls(&self) -> &[(usize, Call)] {
+        &self.calls
+    }
+
+    /// Every read of a platform asked for, with where in the trace each
+    /// was asked.
+    pub fn platform_calls(&self) -> &[(usize, PlatformCall)] {
+        &self.platform_calls
     }
 
     /// Scripts the next socket not to open.

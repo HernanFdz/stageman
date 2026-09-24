@@ -25,6 +25,7 @@
 
 mod boot;
 mod channel;
+mod checks;
 mod file;
 mod foreman;
 mod jobs;
@@ -53,7 +54,7 @@ use stageman_agent::Command;
 use stageman_core::{
     Agent, InstanceId, JobId, Key, Kit, Place, Progress, ProjectId, Room, State, Timestamp, Uuid,
 };
-use stageman_vocabulary::{Effect as Generic, EffectId, Environment, Finished};
+use stageman_vocabulary::{Effect as Generic, EffectId, Environment, Finished, Now};
 
 pub use boot::KeySource;
 pub use file::LoadError;
@@ -127,7 +128,7 @@ fn out_of_order(asked: EffectId, id: EffectId) {
 }
 
 /// What a wake was asked for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum Timer {
     /// The settling sweep: which containers still deserve to be up.
     Settling,
@@ -186,19 +187,21 @@ impl Instance {
         )
     }
 
-    /// Handles one event and answers with what to do about it.
+    /// Handles one event and answers with what to do about it, told the
+    /// time as the world hands the event over — see
+    /// `docs/decisions/0073-the-world-tells-the-instance-the-time-with-every-step.md`.
     ///
     /// While booting, an answer moves booting along and anything of the
     /// application's own waits; the moment the instance is awake, whatever
-    /// waited is handled in the order it arrived.
-    pub fn step(&mut self, event: Event) -> Vec<Effect> {
+    /// waited is handled in the order it arrived, at the time it woke.
+    pub fn step(&mut self, at: Now, event: Event) -> Vec<Effect> {
         match &mut self.stage {
-            Stage::Awake(running) => running.step(event),
-            Stage::Booting(booting) => match booting.step(event) {
+            Stage::Awake(running) => running.step(at, event),
+            Stage::Booting(booting) => match booting.step(at, event) {
                 boot::Booting::Asking(effects) => effects,
                 boot::Booting::Awake(mut running, mut effects, waiting) => {
                     for event in waiting {
-                        effects.extend(running.step(Event::App(event)));
+                        effects.extend(running.step(at, Event::App(event)));
                     }
                     self.stage = Stage::Awake(running);
                     effects
@@ -242,7 +245,7 @@ impl Instance {
     pub fn turning(&self) -> Vec<Speaker> {
         match &self.stage {
             Stage::Booting(_) => Vec::new(),
-            Stage::Awake(running) => running.turns.keys().copied().collect(),
+            Stage::Awake(running) => running.turns.keys().cloned().collect(),
         }
     }
 
@@ -254,7 +257,7 @@ impl Instance {
     pub fn reading_for(&self) -> Vec<Speaker> {
         match &self.stage {
             Stage::Booting(_) => Vec::new(),
-            Stage::Awake(running) => running.pending_threads.keys().copied().collect(),
+            Stage::Awake(running) => running.pending_threads.keys().cloned().collect(),
         }
     }
 
@@ -278,7 +281,7 @@ impl Instance {
                 | Asked::Discarded { container }
                 | Asked::Inspected { container } => Some(container.clone()),
                 Asked::Labelled { name, .. } => Some(name.clone()),
-                Asked::Port { job } | Asked::Probing { job } => Some(stageman_job::container(*job)),
+                Asked::Port { job } | Asked::Probing { job } => Some(stageman_job::container(job)),
                 Asked::Listing
                 | Asked::Images
                 | Asked::Reclaimed { .. }
@@ -289,12 +292,7 @@ impl Instance {
                 | Asked::CheckedOut { .. } => None,
             })
             .chain(running.listing.keys().cloned())
-            .chain(
-                running
-                    .probes
-                    .values()
-                    .map(|job| stageman_job::container(*job)),
-            )
+            .chain(running.probes.values().map(stageman_job::container))
             .collect()
     }
 
@@ -325,8 +323,8 @@ impl stageman_vocabulary::Deciding for Instance {
         Self::boot(seed, environment, target)
     }
 
-    fn step(&mut self, event: Event) -> Vec<Effect> {
-        Self::step(self, event)
+    fn step(&mut self, at: Now, event: Event) -> Vec<Effect> {
+        Self::step(self, at, event)
     }
 
     fn snapshot(&self) -> serde_json::Value {
@@ -453,6 +451,9 @@ pub struct Facts {
     pub runtime_environment: Environment,
     /// The port the tools are served on, which is what a container is told.
     pub tools: u16,
+    /// The time the world told the step that woke it, which the waking
+    /// sweep's records are stamped with.
+    pub now: Now,
     /// The listener they arrive on, where one was taken.
     pub tools_listener: Option<EffectId>,
     /// The listener a person's requests arrive on.
@@ -465,10 +466,21 @@ pub struct Facts {
     pub port: u16,
 }
 
+/// Whether a step's time is earlier than the last step's, which the world
+/// stamps as it hands over and so should never produce; a function so that
+/// the comparison is tested rather than merely logged.
+const fn ran_backwards(at: Now, before: Now) -> bool {
+    at < before
+}
+
 /// An awake instance: everything it knows, and everything it holds.
 pub struct Running {
     /// What is kept.
     state: State,
+    /// The time the world told this step, in its milliseconds: the one clock
+    /// the instance has, per
+    /// `docs/decisions/0073-the-world-tells-the-instance-the-time-with-every-step.md`.
+    now: Now,
     /// Which instance this is.
     id: InstanceId,
     /// What seals the file.
@@ -538,6 +550,14 @@ pub struct Running {
     /// Tunnels being asked whether anything is behind them, by the
     /// identifier the answer carries: whose each probe is.
     probes: BTreeMap<EffectId, JobId>,
+    /// Requests held while the credentials they carry are checked against
+    /// their platforms, by the identifier the world holds each open under
+    /// — see
+    /// `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`.
+    checking: BTreeMap<vocabulary::RequestId, checks::Held>,
+    /// Credentials being checked, by the identifier the answer carries:
+    /// which held request each is for, and what it is a check of.
+    checks: BTreeMap<EffectId, (vocabulary::RequestId, checks::Check)>,
     /// Requests made to a channel, by the identifier the answer carries:
     /// what each was sent for.
     sent: BTreeMap<EffectId, channel::Sent>,
@@ -599,6 +619,7 @@ impl Running {
             runtime,
             runtime_environment,
             tools,
+            now,
             tools_listener,
             dashboard_listener,
             presenting,
@@ -611,6 +632,7 @@ impl Running {
             minted
         });
         Self {
+            now,
             state,
             id,
             key,
@@ -639,6 +661,8 @@ impl Running {
             tunnels: BTreeMap::new(),
             routing: BTreeMap::new(),
             probes: BTreeMap::new(),
+            checking: BTreeMap::new(),
+            checks: BTreeMap::new(),
             sent: BTreeMap::new(),
             deferred: VecDeque::new(),
             immediate: Vec::new(),
@@ -795,14 +819,14 @@ impl Running {
                 // container with no tunnel prints, so an empty answer and a
                 // failed one mean the same thing here: nowhere to send them.
                 let port = stageman_agent::published(said(finished));
-                self.port_found(job, port, effects);
+                self.port_found(&job, port, effects);
             }
             Asked::Probing { job } => {
                 if let Some(why) = complaint(finished) {
                     tracing::debug!(%job, %why, "the runtime could not say where a job's tunnel is");
                 }
                 let port = stageman_agent::published(said(finished));
-                self.probing(job, port, effects);
+                self.probing(&job, port, effects);
             }
         }
     }
@@ -923,8 +947,22 @@ impl Running {
         id
     }
 
-    /// Handles one event and answers with what to do about it.
-    pub fn step(&mut self, event: Event) -> Vec<Effect> {
+    /// Handles one event and answers with what to do about it, at the time
+    /// the world said it was.
+    ///
+    /// A time earlier than the last step's is a fault in the world, which
+    /// stamps as it hands over and so should never produce one; it is said
+    /// and taken as given, because the world is the authority on the clock
+    /// and the instance has no other.
+    pub fn step(&mut self, at: Now, event: Event) -> Vec<Effect> {
+        if ran_backwards(at, self.now) {
+            tracing::warn!(
+                at,
+                before = self.now,
+                "the world's clock ran backwards between two steps"
+            );
+        }
+        self.now = at;
         let mut effects = Vec::new();
         match event {
             Event::Written { id, outcome } => self.written(id, outcome, &mut effects),
@@ -942,15 +980,18 @@ impl Running {
             Event::Line { id, line } => self.line(id, &line, &mut effects),
             Event::Ended { id, ended } => self.process_ended(id, &ended, &mut effects),
             Event::Probed { id, probed } => self.probed(id, probed, &mut effects),
-            Event::Responded { id, responded, at } => {
-                self.responded(id, &responded, at, &mut effects);
+            Event::Responded { id, responded } => {
+                // A credential's check first, since it is answered to a
+                // held request rather than to a channel; everything else
+                // was sent for a channel's sake.
+                if !self.checked(id, &responded, &mut effects) {
+                    self.responded(id, &responded, at, &mut effects);
+                }
             }
-            Event::Frame { id, text, at } => self.frame(id, &text, at, &mut effects),
-            Event::Disconnected {
-                id,
-                disconnected,
-                at,
-            } => self.disconnected(id, &disconnected, at, &mut effects),
+            Event::Frame { id, text } => self.frame(id, &text, at, &mut effects),
+            Event::Disconnected { id, disconnected } => {
+                self.disconnected(id, &disconnected, at, &mut effects);
+            }
             Event::Read { .. } | Event::Bound { .. } => {
                 tracing::warn!(
                     "answered something this instance did not ask for while awake; ignored"
@@ -986,8 +1027,8 @@ impl Running {
                 effects.push(settling);
             }
             Some(Timer::Reconnecting { project }) => self.try_again(project, effects),
-            Some(Timer::Growing { speaker, run }) => self.grow(speaker, run),
-            Some(Timer::Cancelling { speaker }) => self.cancel_overdue(speaker, effects),
+            Some(Timer::Growing { speaker, run }) => self.grow(&speaker, run),
+            Some(Timer::Cancelling { speaker }) => self.cancel_overdue(&speaker, effects),
             None => tracing::warn!("woken for a timer this instance did not set; ignored"),
         }
     }
@@ -1141,15 +1182,23 @@ impl Running {
     }
 
     /// Writes what became of a job.
-    fn record(&mut self, job: JobId, progress: Progress) {
+    fn record(&mut self, job: &JobId, progress: Progress) {
+        let since = self.stamp();
         if let Some(recorded) = self.state.job_mut(job) {
             recorded.progress = progress;
+            recorded.since = Some(since);
             self.dirty = true;
         }
     }
 
+    /// The step's time, as the domain spells one: what every moment the
+    /// instance records is stamped with.
+    fn stamp(&self) -> Timestamp {
+        tools::stamped(self.now)
+    }
+
     /// Writes down what a job's session reported it was set to, this turn.
-    fn noted(&mut self, job: JobId, reported: BTreeMap<String, String>) {
+    fn noted(&mut self, job: &JobId, reported: BTreeMap<String, String>) {
         if let Some(recorded) = self.state.job_mut(job) {
             recorded.reported = reported;
             self.dirty = true;
@@ -1158,7 +1207,7 @@ impl Running {
 
     /// What a job resuming needs from its record: the room it speaks in, and
     /// what it runs on.
-    fn recorded(&self, job: JobId) -> Option<(Option<Room>, Kit)> {
+    fn recorded(&self, job: &JobId) -> Option<(Option<Room>, Kit)> {
         self.state
             .job(job)
             .map(|recorded| (recorded.room.clone(), recorded.kit().clone()))
@@ -1170,17 +1219,17 @@ impl Running {
     /// Unguessable from the instance's own generator, so there is one answer
     /// to where an unguessable value comes from. Bounded by construction: one
     /// entry per turn in flight rather than one per turn ever taken.
-    fn warrant(&mut self, speaker: Speaker, place: Option<Place>, from: Option<String>) -> String {
+    fn warrant(&mut self, speaker: &Speaker, place: Option<Place>, from: Option<String>) -> String {
         let credential = format!(
             "{}{}",
             mint(&mut self.rng).simple(),
             mint(&mut self.rng).simple()
         );
-        self.warrants.retain(|_, known| known.speaker != speaker);
+        self.warrants.retain(|_, known| known.speaker != *speaker);
         self.warrants.insert(
             credential.clone(),
             Warranted {
-                speaker,
+                speaker: speaker.clone(),
                 place,
                 from,
             },
@@ -1223,5 +1272,17 @@ fn complaint(finished: &Finished) -> Option<String> {
         Finished::Exited { stderr, .. } => Some(stderr.as_text().unwrap_or("").trim().to_owned()),
         Finished::NotFound => Some("the runtime could not be run".to_owned()),
         Finished::Failed(why) => Some(why.clone()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Only an earlier time is the clock running backwards: the same time
+    /// twice is a step that took no time, which the simulation does often.
+    #[test]
+    fn only_an_earlier_time_is_the_clock_running_backwards() {
+        assert!(super::ran_backwards(1, 2));
+        assert!(!super::ran_backwards(2, 2));
+        assert!(!super::ran_backwards(3, 2));
     }
 }

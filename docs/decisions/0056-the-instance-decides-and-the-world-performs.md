@@ -73,8 +73,11 @@ effects out.
 
 **Effects are values, never calls.** The instance cannot observe the world
 except through an event, so determinism is a property of the type rather than
-of anybody's discipline. It never reads a clock: the event variants whose
-handlers keep a time carry one, and no others do. It never reads entropy: it
+of anybody's discipline. It never reads a clock: the world tells it the time
+with every step, and no event carries a time of its own — as
+`docs/decisions/0073-the-world-tells-the-instance-the-time-with-every-step.md`
+decides, replacing a time on the variants whose handlers kept one. It never
+reads entropy: it
 owns a generator seeded by the world at construction — from the operating
 system in production, from the scenario in a test — and every identifier,
 nonce and warrant comes from it. It holds no lock, spawns nothing, awaits

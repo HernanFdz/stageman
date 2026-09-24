@@ -294,7 +294,7 @@ impl Running {
         let speaker = Speaker::Foreman(project);
         // Taken whether or not a turn follows, so that nothing read for one
         // message is shown to the next.
-        let read = self.thread_taken(speaker);
+        let read = self.thread_taken(&speaker);
         if self.turns.contains_key(&speaker) {
             tracing::debug!(%project, "the foreman is already working; ignored");
             return;
@@ -338,7 +338,7 @@ impl Running {
         };
         let asked = self.asked_of(project, &errand, starting, context.as_deref());
         let warrant = self.warrant(
-            speaker,
+            &speaker,
             Some(errand.thread.clone().into()),
             errand.from.clone(),
         );

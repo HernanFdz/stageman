@@ -3,6 +3,8 @@
 use dioxus::prelude::*;
 use tw_merge::tw_merge;
 
+use super::Info;
+
 /// Properties for [`Card`].
 #[derive(Props, PartialEq, Clone)]
 pub struct CardProps {
@@ -18,6 +20,14 @@ pub struct CardProps {
     /// An optional line under the title, for what the title cannot say.
     #[props(default)]
     pub note: Option<String>,
+    /// The rest of what there is to say about the region, behind an info
+    /// control beside the title, as a field carries its own.
+    #[props(default)]
+    pub info: Option<String>,
+    /// The same line, where it needs to be more than text — a link, most
+    /// often. Shown under the note where both are given.
+    #[props(default)]
+    pub under: Option<Element>,
     /// Something aligned to the right of the title — a count, a badge, an
     /// action.
     #[props(default)]
@@ -42,12 +52,18 @@ pub fn Card(props: CardProps) -> Element {
                 div {
                     div { class: "flex items-center gap-2",
                         h2 { class: "text-sm font-semibold text-foreground", "{props.title}" }
+                        if let Some(info) = props.info {
+                            Info { text: info }
+                        }
                         if let Some(badge) = props.badge {
                             {badge}
                         }
                     }
                     if let Some(note) = props.note {
                         p { class: "mt-0.5 text-xs text-muted-foreground", "{note}" }
+                    }
+                    if let Some(under) = props.under {
+                        div { class: "mt-0.5 text-xs text-muted-foreground", {under} }
                     }
                 }
                 if let Some(aside) = props.aside {

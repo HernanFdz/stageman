@@ -3415,7 +3415,9 @@ mod tests {
             .variables
             .insert(
                 stageman_core::VariableName::new("STRIPE_API_KEY").expect("a deliverable name"),
-                Secret::new("sk-test-not-a-real-key".to_owned()),
+                stageman_core::Variable::unexplained(Secret::new(
+                    "sk-test-not-a-real-key".to_owned(),
+                )),
             );
         let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project)
             .expect("a watched project");
@@ -3440,7 +3442,9 @@ mod tests {
             .variables
             .insert(
                 stageman_core::VariableName::new("STRIPE_API_KEY").expect("a deliverable name"),
-                Secret::new("sk-test-not-a-real-key".to_owned()),
+                stageman_core::Variable::unexplained(Secret::new(
+                    "sk-test-not-a-real-key".to_owned(),
+                )),
             );
         let foreman = Handout::for_foreman(&state, project).expect("a watched project");
 
@@ -3470,7 +3474,9 @@ mod tests {
                 .variables
                 .insert(
                     stageman_core::VariableName::new(*claimed).expect("a deliverable name"),
-                    Secret::new("somebody-elses-account".to_owned()),
+                    stageman_core::Variable::unexplained(Secret::new(
+                        "somebody-elses-account".to_owned(),
+                    )),
                 );
             let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project)
                 .expect("a watched project");

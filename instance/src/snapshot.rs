@@ -52,8 +52,8 @@ pub fn exposed(state: &State) -> Value {
                         "listen_credential": bound.listen_credential.expose(),
                     }))
                 })),
-                "variables": keyed(project.variables.iter().map(|(name, secret)| {
-                    (name, secret.expose().to_owned())
+                "variables": keyed(project.variables.iter().map(|(name, variable)| {
+                    (name, json!({ "value": variable.value.expose(), "note": variable.note }))
                 })),
                 "jobs": value(&project.jobs),
                 "attending": value(&project.attending),
@@ -88,6 +88,8 @@ pub fn of(running: &Running) -> Value {
             "tunnels": value(&running.tunnels.iter().collect::<Vec<_>>()),
             "routing": value(&running.routing.iter().collect::<Vec<_>>()),
             "probes": value(&running.probes.iter().collect::<Vec<_>>()),
+            "checks": value(&running.checks.iter().collect::<Vec<_>>()),
+            "checking": value(&running.checking.iter().collect::<Vec<_>>()),
             "sent": value(&running.sent.iter().collect::<Vec<_>>()),
             "listeners": keyed(running.listeners.iter().map(|(project, listener)| {
                 (project, json!({

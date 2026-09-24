@@ -1064,9 +1064,9 @@ dependencies = [
 
 [[package]]
 name = "dioxus"
-version = "0.7.9"
+version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c01ecf7ddbae18a419ad3d83c486101a85ffc5740ea09cdd0f09a30dc12170d"
+checksum = "9320593eda4f01858f046698b42441603d2af5fcb62a6c1f9046a0c2eebd6d9b"
 dependencies = [
  "dioxus-asset-resolver",
  "dioxus-cli-config",
@@ -3873,6 +3873,7 @@ dependencies = [
 name = "stageman-channel"
 version = "0.0.0"
 dependencies = [
+ "percent-encoding",
  "serde",
  "serde_json",
  "stageman-core",
@@ -3917,6 +3918,7 @@ dependencies = [
  "stageman-core",
  "stageman-foreman",
  "stageman-job",
+ "stageman-platform",
  "stageman-vocabulary",
  "stageman-wire",
  "thiserror 2.0.20",
@@ -3932,6 +3934,16 @@ dependencies = [
  "stageman-core",
  "thiserror 2.0.20",
  "tokio",
+]
+
+[[package]]
+name = "stageman-platform"
+version = "0.0.0"
+dependencies = [
+ "percent-encoding",
+ "serde_json",
+ "stageman-core",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

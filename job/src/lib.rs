@@ -14,7 +14,7 @@
 //! runs in, the credentials it is handed, and the supervision that ends it.
 
 use stageman_agent::{AgentError, ContainerRuntime};
-use stageman_core::{JobId, Uuid};
+use stageman_core::JobId;
 
 /// What every one of this project's containers is named for.
 ///
@@ -31,8 +31,8 @@ const PREFIX: &str = "stageman-job-";
 /// says which job it belongs to, which is what lets a sweep work from what the
 /// runtime reports rather than from what the instance remembers.
 #[must_use]
-pub fn container(job: JobId) -> String {
-    format!("{PREFIX}{}", job.as_uuid())
+pub fn container(job: &JobId) -> String {
+    format!("{PREFIX}{job}")
 }
 
 /// Which job a container belongs to, if its name says so.
@@ -40,7 +40,11 @@ pub fn container(job: JobId) -> String {
 /// `None` for a container carrying this project's label under a name this
 /// version does not understand — an older naming scheme, or something that
 /// borrowed the label. Worth distinguishing rather than ignoring: it is still
-/// ours to clean up, and it is not ours to resume.
+/// ours to clean up, and it is not ours to resume. What follows the prefix
+/// is read by the one grammar a job's name has, per
+/// `docs/decisions/0074-a-jobs-identifier-is-its-name.md`, so a name in
+/// either shape that grammar accepts is a job's, whether or not this
+/// instance has a record of it.
 ///
 /// Public because placing a container is the instance's decision, and a
 /// listing reaches it as names.
@@ -48,8 +52,7 @@ pub fn container(job: JobId) -> String {
 pub fn job_of(container: &str) -> Option<JobId> {
     container
         .strip_prefix(PREFIX)
-        .and_then(|rest| Uuid::parse_str(rest).ok())
-        .map(JobId::from_uuid)
+        .and_then(|rest| JobId::parse(rest).ok())
 }
 
 /// A container this project started and has not removed.
@@ -96,7 +99,7 @@ pub async fn left_behind(runtime: &ContainerRuntime) -> Result<Vec<Abandoned>, J
 /// # Errors
 ///
 /// Fails if the runtime cannot be run, or refuses.
-pub async fn discard(runtime: &ContainerRuntime, job: JobId) -> Result<(), JobError> {
+pub async fn discard(runtime: &ContainerRuntime, job: &JobId) -> Result<(), JobError> {
     stageman_agent::discard(runtime, &container(job))
         .await
         .map_err(JobError::Agent)
@@ -113,7 +116,7 @@ mod tests {
 
     #[test]
     fn a_jobs_container_name_says_which_job_it_is() {
-        assert_eq!(job_of(&container(a_job())), Some(a_job()));
+        assert_eq!(job_of(&container(&a_job())), Some(a_job()));
     }
 
     /// The property the sweep rests on. Two jobs must never be able to address
@@ -124,14 +127,19 @@ mod tests {
         let one = JobId::from_uuid(Uuid::from_u128(1));
         let other = JobId::from_uuid(Uuid::from_u128(2));
 
-        assert_ne!(container(one), container(other));
+        assert_ne!(container(&one), container(&other));
     }
 
     #[test]
     fn a_container_this_project_did_not_name_belongs_to_no_job() {
         assert_eq!(job_of("something-else"), None);
-        assert_eq!(job_of("stageman-job-not-an-identifier"), None);
+        assert_eq!(job_of("stageman-job-Not_An_Identifier"), None);
+        assert_eq!(job_of("stageman-job-"), None);
         assert_eq!(job_of(""), None);
+        // Either shape the grammar accepts names a job, whether or not any
+        // instance has a record of it.
+        assert!(job_of("stageman-job-fix-login-timeout--3f9a2c1b").is_some());
+        assert!(job_of("stageman-job-9f65d0f3-2fc8-4276-ba90-fab687b0b7b9").is_some());
     }
 
     /// A container whose name says nothing is still ours to remove, so it has
@@ -139,8 +147,8 @@ mod tests {
     #[test]
     fn an_unrecognised_container_is_still_reported() {
         let left = Abandoned {
-            container: "stageman-job-from-an-older-scheme".to_owned(),
-            job: job_of("stageman-job-from-an-older-scheme"),
+            container: "stageman-job-from_an_older_scheme".to_owned(),
+            job: job_of("stageman-job-from_an_older_scheme"),
         };
 
         assert_eq!(left.job, None);
@@ -170,8 +178,8 @@ mod tests {
     async fn a_container_named_for_a_job_is_swept_up_as_that_job() {
         let runtime = located_runtime();
         let job = a_job();
-        let name = container(job);
-        discard(&runtime, job).await.expect("a clean slate");
+        let name = container(&job);
+        discard(&runtime, &job).await.expect("a clean slate");
         let anything = stageman_agent::build(
             &runtime,
             stageman_core::Agent::Claude,
@@ -208,12 +216,12 @@ mod tests {
         let found = left.iter().find(|abandoned| abandoned.container == name);
 
         assert_eq!(
-            found.map(|abandoned| abandoned.job),
-            Some(Some(job)),
+            found.map(|abandoned| abandoned.job.clone()),
+            Some(Some(job.clone())),
             "the sweep should have recognised it: {left:?}"
         );
 
-        discard(&runtime, job).await.expect("it is removable");
+        discard(&runtime, &job).await.expect("it is removable");
         let after = left_behind(&runtime).await.expect("the runtime answers");
         assert!(
             !after.iter().any(|abandoned| abandoned.container == name),

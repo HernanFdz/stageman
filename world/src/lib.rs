@@ -73,6 +73,12 @@ pub struct World<A: App> {
     /// What makes requests. One for the process, so that a connection to a
     /// place asked of twice is kept between the two.
     client: reqwest::Client,
+    /// Told each time a write has landed, and told nothing else: the tick a
+    /// page is made live with — see
+    /// `docs/decisions/0071-a-page-learns-of-change-from-a-tick.md`. A watch
+    /// rather than a queue, so that writes landing while a follower is busy
+    /// collapse into one, which is a property of the channel and not a rule.
+    written: tokio::sync::watch::Sender<()>,
 }
 
 /// A socket, as far as the loop needs to reach it.
@@ -110,9 +116,19 @@ impl<A: App> World<A> {
                 open: parking_lot::Mutex::new(BTreeMap::new()),
                 sockets: parking_lot::Mutex::new(BTreeMap::new()),
                 client: reqwest::Client::new(),
+                written: tokio::sync::watch::channel(()).0,
             }),
             receiving,
         )
+    }
+
+    /// Whoever wants to know when a write has landed.
+    ///
+    /// The receiver has seen everything up to now: what it is told is what
+    /// lands after it was made, and never what landed before.
+    #[must_use]
+    pub fn written(&self) -> tokio::sync::watch::Receiver<()> {
+        self.written.subscribe()
     }
 
     /// Sends a line to a process kept open, if it still is.
@@ -237,7 +253,11 @@ pub fn run<D, P>(
         }
         while let Some(event) = events.recv().await {
             tracing::trace!(kind = event.kind(), "stepping");
-            for effect in deciding.step(event) {
+            // The clock is read here and nowhere else on the way to the
+            // instance, as the event is handed over: every step is told the
+            // time, and the times never run backwards — see
+            // `docs/decisions/0073-the-world-tells-the-instance-the-time-with-every-step.md`.
+            for effect in deciding.step(now(), event) {
                 perform(&world, &performer, effect).await;
             }
         }
@@ -275,6 +295,9 @@ async fn perform<A: App, P: Perform<A>>(
                     .await
                     .unwrap_or_else(|why| Err(why.to_string()));
             world.send(Event::Written { id, outcome });
+            // Landed or refused, the file is what it is now, and whoever
+            // follows the writes reads it either way.
+            world.written.send_replace(());
         }
         Effect::Run {
             id,
@@ -385,11 +408,7 @@ fn requesting<A: App>(
     let world = Arc::clone(world);
     drop(tokio::spawn(async move {
         let responded = request(&world.client, &method, &url, &headers, body, within).await;
-        world.send(Event::Responded {
-            id,
-            responded,
-            at: now(),
-        });
+        world.send(Event::Responded { id, responded });
     }));
 }
 
@@ -449,7 +468,6 @@ fn connect<A: App>(world: &Arc<World<A>>, id: EffectId, url: String) {
                 world.send(Event::Disconnected {
                     id,
                     disconnected: Disconnected::Failed(why.to_string()),
-                    at: now(),
                 });
                 return;
             }
@@ -457,21 +475,13 @@ fn connect<A: App>(world: &Arc<World<A>>, id: EffectId, url: String) {
         let (frames, queued) = tokio::sync::mpsc::unbounded_channel::<String>();
         drop(world.sockets.lock().insert(id, Socketed { frames }));
         let disconnected = spoken(socket, queued, |text| {
-            world.send(Event::Frame {
-                id,
-                text,
-                at: now(),
-            });
+            world.send(Event::Frame { id, text });
         })
         .await;
         // Gone from the map, so a frame sent now is dropped rather than
         // queued for nobody.
         drop(world.sockets.lock().remove(&id));
-        world.send(Event::Disconnected {
-            id,
-            disconnected,
-            at: now(),
-        });
+        world.send(Event::Disconnected { id, disconnected });
     }));
 }
 
@@ -920,7 +930,6 @@ async fn asked<A: App>(
             .map_or_else(|| parts.uri.path().to_owned(), ToString::to_string),
         headers: named(&parts.headers),
         peer: peer.to_string(),
-        at: now(),
     };
 
     let (answering, mut answered) = tokio::sync::oneshot::channel();
@@ -1198,6 +1207,47 @@ mod tests {
         );
     }
 
+    /// A write that landed is told to whoever follows the world's writes,
+    /// which is what a page's tick is made of; nothing is told before it.
+    #[tokio::test]
+    async fn a_write_that_landed_is_told_to_whoever_follows() {
+        let scratch = tempfile::tempdir().expect("a temporary directory");
+        let (world, mut events) = World::<Nothing>::new();
+        let mut following = world.written();
+        assert!(
+            !following.has_changed().expect("the world is here"),
+            "nothing has landed yet"
+        );
+
+        answering(
+            &world,
+            Effect::Write {
+                id: EffectId(1),
+                path: scratch.path().join("file"),
+                bytes: Bytes::new(b"contents".to_vec()),
+                private: false,
+            },
+        )
+        .await;
+
+        match next(&mut events).await {
+            Event::Written { id, outcome } => {
+                assert_eq!(id, EffectId(1));
+                assert!(outcome.is_ok(), "{outcome:?}");
+            }
+            other => panic!("expected the write's answer: {}", other.kind()),
+        }
+        assert!(
+            following.has_changed().expect("the world is here"),
+            "the write that landed was told"
+        );
+        following.changed().await.expect("the world is here");
+        assert!(
+            !following.has_changed().expect("the world is here"),
+            "and told once"
+        );
+    }
+
     /// A write makes the directory it was told to write into, and replaces
     /// what was there.
     ///
@@ -1403,11 +1453,6 @@ mod tests {
             Some("stageman.test")
         );
         assert!(request.peer.starts_with("127.0.0.1:"), "{}", request.peer);
-        assert!(
-            request.at > 1_700_000_000_000,
-            "stamped with the time rather than with a number: {}",
-            request.at
-        );
 
         answering(
             &world,
@@ -1939,17 +1984,9 @@ mod tests {
         )
         .await;
         match next(events).await {
-            Event::Frame {
-                id: whose,
-                text,
-                at,
-            } => {
+            Event::Frame { id: whose, text } => {
                 assert_eq!(whose, id);
                 assert_eq!(text, "hello", "the first frame is the greeting");
-                assert!(
-                    at > 1_700_000_000_000,
-                    "stamped with the time rather than with a number: {at}"
-                );
             }
             other => panic!("expected the greeting: {}", other.kind()),
         }

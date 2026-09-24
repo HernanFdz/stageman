@@ -192,6 +192,19 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   either, since both imply a durable intent that separate attempts belong to,
   and no such thing exists here. A job records which agent ran it, because once
   more than one can, "why did this go badly?" has no answer without it.
+
+  A job is named, and identified, by one string: the title its foreman gave
+  it — or the first words of its work, when a person started it by hand —
+  folded to a slug of at most forty characters, then two hyphens and eight
+  hex minted for it, as in `fix-login-timeout--3f9a2c1b`. That string is its
+  address on the dashboard, its container's name after the prefix, the host
+  it shows its work on and the tail of its room's name, per
+  `docs/decisions/0074-a-jobs-identifier-is-its-name.md`, and nothing parses
+  it: the title in it is for a reader, and the hex is what made it unique.
+  A job the last release wrote is named by its UUID, which is a name under
+  the same grammar. Not an *id* with a *name* beside it, which would be two
+  names for one job; not a *slug*, which names the fold rather than the
+  thing.
 - **working, idle, retired** — where a job has got to, and the only three
   things this system *does* about one: run a turn in it, leave it alone with
   its container, or reclaim what it was holding. Idle carries a reading of why
@@ -262,10 +275,12 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   said there from the last message that was given to this instance, its own
   words among them.
 
-  A job's room is named `<project>--<title>--<8 hex of the job id>`, and
-  only the last part is load-bearing: an archived room keeps its name for
-  ever on the platform, so the name has to be unique for ever too, and the
-  identifier is what makes it so. The rest is for a sidebar.
+  A job's room is named `<project>--<job's name>` since
+  `docs/decisions/0074-a-jobs-identifier-is-its-name.md`, and was
+  `<project>--<title>--<8 hex of the job id>` before it, which the rooms
+  made then keep. Only the name's suffix is load-bearing: an archived room
+  keeps its name for ever on the platform, so the name has to be unique for
+  ever too, and the suffix is what makes it so. The rest is for a sidebar.
 
 - **transcript** — everything an agent says and does in a turn, as the
   protocol streams it: its narration, its working, and the notifications
@@ -378,12 +393,17 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   a person correcting the foreman in a room is still a message.
 
 - **variable** — one name and one value an operator gives a project, set in the
-  environment of every container that project's jobs run in. What makes it a
+  environment of every container that project's jobs run in, and since
+  `docs/decisions/0075-a-variable-says-what-it-is-for.md` a **note** beside
+  them: what it is for, in the operator's words, told to the job's agent
+  next to the name and read by nothing here. What makes it a
   concept of its own rather than a loose platform credential is that **this
   project never reads it**: nothing here parses the value, infers anything from
   the name, or needs code in order to support one — which is precisely what a
   platform and a channel do need, and why both of those are closed sets. See
-  `docs/decisions/0046-a-projects-variables-are-carried-never-read.md`.
+  `docs/decisions/0046-a-projects-variables-are-carried-never-read.md`. A
+  project's variables are typed a row at a time or pasted as a `.env` file,
+  the comment above a line becoming its note.
 
   The word names the mechanism, which this section usually rejects — the
   argument against *checkout*. It survives for the reason **tunnel** does, and
@@ -455,8 +475,11 @@ Record the near-miss too: the term you rejected, and what it would have implied.
 - **event** — one thing the world tells the instance: a message heard, a
   turn ended, a request arrived, a timer gone off, bytes landed on the disk.
   Plain data, and the only way anything reaches the instance at all. An
-  event carries a time only when its handler keeps one, which is why most do
-  not. Not *message*, which is what a person says on a channel, and not
+  event never carries a time: the world tells the instance the time with
+  every **step**, stamped as it hands the event over, and a fact's own time
+  — a platform's timestamp — is data inside the payload; see
+  `docs/decisions/0073-the-world-tells-the-instance-the-time-with-every-step.md`.
+  Not *message*, which is what a person says on a channel, and not
   *command*, which would suggest the world tells the instance what to do
   rather than what happened.
 
@@ -489,6 +512,41 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   does, not what this project does, and it runs by hand and when a pin
   changes rather than in the gate. Not an *example* either, which says how to
   use something rather than what something else is like.
+
+- **chip** — one thing shown inline and compact, and usually a link: a kit
+  on a project's row, a pull request on a job's. A chip says which and
+  where, and carries no verdict. Not a *badge*, which carries one word of
+  state and never links; not a *tag* or a *label*, which are what a platform
+  calls its own; not a *pill*, which names the shape rather than the thing.
+
+- **mark** — somebody's own symbol, drawn inline at icon size: an agent's,
+  one per agent this build can run, keyed by the identifier the wire uses
+  for it, with a generic one for an identifier this build does not know;
+  and since the job page, a platform's and a channel's, for the links a
+  page makes to them, keyed the same way. A mark says *whose*; an icon says
+  *what*. Not a *logo*, which is a brand's full lockup and belongs to nobody
+  here; not an *icon*, which is reserved for the one set §3 names.
+
+- **tick** — what an open page is told when a write of the instance's file
+  has landed: that something may have changed, and nothing else — see
+  `docs/decisions/0071-a-page-learns-of-change-from-a-tick.md`. Not an
+  *event*, which is what the world tells the instance; not a *notification*,
+  which is what a channel posts to a person; not an *update*, which would
+  claim to carry the change.
+
+- **guide** — a link beside a box that takes a credential, opening the
+  platform's own form with what this project knows filled in: the token's
+  name and permissions, the app's manifest. A link and nothing more,
+  composed on the server from tracked text, per
+  `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`.
+  What the box then takes is **checked** against its platform before it is
+  kept — one read with the credential, on the operator's behalf, at the
+  form — and refused beside the box otherwise. Not a *wizard*, which would
+  be a form of this project's own restating the platform's; not a *setup*,
+  which names the whole of what a new operator does and would leave nothing
+  to call the link; and not a *validation* for the check, which reads as
+  something this project does to the text, where the platform is the one
+  that answers.
 
 ## 3. House rules
 
@@ -654,7 +712,11 @@ justify is usually obsolete.
   else's release cadence. The same holds for a channel, for the same reason:
   what is sent to a platform and what its answers mean are the **channel**
   crate's, per
-  `docs/decisions/0058-a-channels-adapter-is-a-crate-beside-the-agents.md`.
+  `docs/decisions/0058-a-channels-adapter-is-a-crate-beside-the-agents.md`;
+  and for a platform the daemon asks something of itself — what a
+  credential is checked with, what the answer means, and where the
+  platform's own form is — which is the **platform** crate's, per
+  `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`.
 - **Packages carry a prefix; directories do not.** The directories are named
   for the concepts in `docs/architecture.md` §1, and the packages inside them
   are `stageman-core`, `stageman-foreman` and `stageman-job`, with the app
@@ -702,7 +764,7 @@ justify is usually obsolete.
 
 - **Nothing inside the instance performs an effect, reads a clock, or draws on
   entropy of its own.** No I/O, no async, no threads, no locks, and every map
-  ordered. Time arrives on the events whose handlers keep it; randomness comes
+  ordered. Time arrives with every step, from the world; randomness comes
   from a generator the world seeded at construction; the outside is reached by
   returning an effect and heard from by being handed an event. The reason is
   that determinism is then a property of the type rather than of anybody's
@@ -767,6 +829,180 @@ justify is usually obsolete.
   that is working is delivered by steering when its conversation is open and
   waits in the job's inbox otherwise — see
   `docs/decisions/0069-a-message-reaches-a-working-job.md`.
+
+- **One icon set, one icon per concept, decided in one module.** Every icon
+  is lucide's. The text glyphs the dashboard once used for add, save, close
+  and edit are refused: a glyph arrives in colour on the platforms that give
+  it an emoji presentation, and two vocabularies on one page read as an
+  accident. Which icon means which concept is decided once, in one module of
+  the app crate, so a foreman is the same shape on every page. The crate
+  compiles icons by category, so an icon that will not resolve usually means
+  a category to add rather than an icon that does not exist, and the cost of a
+  category is compile time rather than bundle size, since a browser build
+  strips what nothing draws. An agent, a platform and a channel are shown by
+  their marks, per §2, vendored as inline drawings rather than fetched from
+  anywhere: a brand's symbol is not the icon set's to draw, and a link that
+  leaves the page says whose it goes to at a glance, where a word would take
+  a glance and a half. A reference that leaves the page is a mark or an
+  icon with the address a hover away, never the address written out — an
+  address is read character by character and a row of them is a wall.
+
+- **A closed set is a control, never a dropdown.** Every set a form here
+  chooses from has a handful of members — an agent, a model, an effort, a
+  kit — and a set that small is a segmented control, or a row of cards with
+  their descriptions, in the page, where every option is seen at once and
+  nothing floats over anything. The browser's own select was what the form
+  used and is refused for two reasons: it draws itself, outside the theme,
+  and it hides the options a choice is made between. A listbox that floats is
+  for a set that is open or long; none exists here, and when one does it is
+  lifted from the components the framework's own registry publishes rather
+  than depended on, because the crate published under that name was a
+  placeholder when this was written.
+
+- **A theme is a token block, and a component never names one.** Since
+  `docs/decisions/0072-the-dashboard-has-a-dark-theme.md` there are two,
+  under one class on the root, applied before paint by the one script the
+  dashboard writes by hand. A component that seems to need a dark variant is
+  one whose colour has no token yet, and the token is the fix. The three
+  state colours are chosen per theme rather than tinted from one.
+
+- **A script the page evaluates sends its answer and never returns it.** The
+  framework wraps what it evaluates in a function that closes the script's
+  channel after it, so a `return` at the top level skips the close: the
+  channel leaks, and Firefox reports code after a return on every page that
+  did it. The answer goes through the channel the wrapper hands the script,
+  and the Rust side receives it, which is the same length and reads the same.
+
+- **Motion is a transition, honours the reduced-motion preference, and needs
+  no library.** What moves: hover and focus, a panel or a popover entering
+  and leaving, the mark that says working, and a row arriving once a page is
+  live. Nothing moves for its own sake, and everything that moves is still
+  under the preference, because a person who asked for stillness asked for
+  it everywhere.
+
+- **A page is live through a tick, never through polling.** The shell opens
+  one stream, and every page restarts its own read on a tick — see
+  `docs/decisions/0071-a-page-learns-of-change-from-a-tick.md`. A page that
+  read on a timer would read while nothing changes and still be stale between
+  reads. The mark in the shell says whether the page is live, and a page
+  without it behind a proxy is a proxy that buffers.
+
+- **A time is shown relative, exact on hover, and drawn after the page
+  wakes.** The server renders the page and the browser hydrates it, and a
+  relative time computed twice from two clocks is two different strings,
+  which the framework reports as a mismatch. So the exact time is what
+  arrives, and the relative one is drawn in the browser.
+
+- **One visible line per field, and the rest behind a control.** A form's
+  copy is the highest-leverage text an operator reads and the easiest to
+  stop reading: a paragraph under every field is six paragraphs, and a
+  person skips all six. A field gets a label that is a noun, a placeholder
+  that is an example rather than an instruction, and one line saying what it
+  is for; anything longer is said by an info control beside the label, to
+  whoever hovers or focuses it.
+
+  **The line goes under the label, whatever the field holds.** Label, line,
+  control, in that order, so that every field reads as a titled thing with
+  its line as the subtitle; a line under the control reads as belonging to
+  whatever is above it, which for a list is its last row. A problem takes
+  the line's place rather than adding to it, so a field that is wrong says
+  one thing, where the eye already looks. What adds to a list sits at the
+  end of the label's line, where an action belongs, rather than under the
+  list, where it moves as the list grows and takes a row for one small
+  control. A control beside a box is the box's height and square, and a
+  list inside a section is rows parted by a hairline rather than boxes
+  within the box: a shorter control reads as a misalignment, and a nested
+  box pads its rows in from the edge every other control on the page sits
+  at.
+
+- **A tooltip, and what the info control beside a label says, show on
+  hover and on a focus that came from the keyboard, never for a click.** A
+  control that is clicked keeps its focus, so a tooltip shown for focus
+  stays until the next click lands somewhere that takes it, and reads as
+  stuck. Shown for `focus-visible` instead, it appears for a person on a
+  keyboard, who cannot hover, and for nobody else. The info control was a
+  disclosure — opened by a click, closed by nothing but a second click, so
+  that several stood open at once and each stood for ever — and is a
+  tooltip now, with two differences a paragraph earns over a repeated
+  name: it is the control's description to assistive technology, because
+  it says what the label does not; and Escape dismisses it while the
+  control has focus, until the pointer leaves or focus moves on, which is
+  the one thing the browser's own states cannot do and the only script in
+  either. One difference it does not earn, and the near-miss worth
+  recording: neither holds still for a pointer that moves onto the text.
+  It was tried, because a paragraph is read rather than glanced at, and it
+  put the text between the pointer and whatever is under the label — the
+  next label's own control was unreachable beneath it. So the text lets
+  the pointer through, and a person who wants it to hold has the keyboard,
+  where focus keeps it until Escape or the next Tab. On a touch screen a
+  tap stands in for hover and a tap elsewhere for leaving, which is the
+  browser's own doing, and nothing said this way is essential on a screen
+  without a pointer, because the line under the label carries what
+  matters. Not a disclosure, which is for content that stays; not a
+  popover, which is for something a person acts in.
+
+- **The shell's header and status line stay in view, and so does a page's
+  own header, through one component.** The settings page is longer than a
+  screen, and what a person reaches for after editing the bottom of it is
+  Save, which
+  `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md` put
+  at the top; a control that has to be scrolled to is a control somebody
+  scrolls past. A job's page is longer than a screen too, and what its
+  header says — which job, and where it is talking and showing — is worth
+  keeping in view over the instruction. The navigation, the live mark and
+  the machine are worth seeing from wherever a person has scrolled to,
+  which was the point of making the machine a line rather than a page. A
+  page that has a header of its own gives it to the one component that
+  stays in view, so that no page sticks while another does not. Whatever
+  stays in view is opaque and above what scrolls under it, so a tooltip or
+  a popover passes beneath, and below the modal, which is the one thing
+  that covers a page.
+
+- **A job's row is two lines, titled by its name.** The standing badge and
+  the kit chip share the first column, and the column is the list's rather
+  than the row's — a subgrid — so that it is one width down the whole list
+  and every title starts at the same place, while a badge stays as wide as
+  its word. The name, with the room's mark and the tunnel beside it while
+  the job is not over, since nothing can answer on the tunnel of one that
+  is, and then the pull requests share the second column; what a person does
+  about the job sits at the right end of the first line and how long it has
+  been so at the right end of the second. The reason is a hover away on the
+  row and a paragraph of the page's kickoff, because it is prose about why
+  and reads badly as a title, which is what the rows carried before
+  `docs/decisions/0074-a-jobs-identifier-is-its-name.md`. What the session
+  reported it was set to is the page's alone: the one case worth seeing is
+  a disagreement with the kit, and a list is not where anybody hunts for
+  one. One component draws the row wherever a job is listed, on Home with
+  the project's name before the job's and the verb its standing wants at the
+  end, and on a project's page with the controls there instead, so that a
+  job looks the same wherever it is met.
+
+- **A job's page keeps its instruction folded, under its reason.** The two
+  are one card, the kickoff: the reason is a paragraph a person reads, and
+  the whole instruction is the only record of what was asked, so it is there
+  and closed until asked for. The trigger sits where the instruction
+  appears, under the reason, says what it opens, and is a disclosure rather
+  than a script: it works before the page wakes and from the keyboard, and
+  the browser keeps it open across the re-reads a tick causes. Not a
+  control in the card's title line, which is the near-miss worth recording:
+  a trigger parted from what it reveals is the one nobody finds.
+
+- **One colour signal per row, and one primary action.** The standing badge
+  is the row's colour. A control is muted until hovered or focused, and
+  takes its colour then: the verdict that keeps in the primary green, the
+  one that discards in the failed red, so that a column of controls never
+  reads as a column of alarms. Not tinted at rest, which is the near-miss
+  worth recording: a discard control in the failed red on every idle row is
+  the red a person scans for, and there is nothing behind it.
+
+- **Targets never overlap, and siblings keep eight pixels between them.** An
+  icon-only control is a target of at least twenty-four pixels a side, and a
+  gap between two of them is a gap between their targets and not between
+  their glyphs: adjacent controls were measured intersecting by four, which
+  is the awkwardness of a control that is hit from its neighbour. More
+  between groups than within them, and no divider inside a pair that is one
+  decision — done or discarded is a verdict — since what needs parting is
+  the pair from everything else.
 
 ## 4. Quality bar beyond the gate
 

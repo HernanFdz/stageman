@@ -280,6 +280,8 @@
             "tunnels": [],
             "routing": [],
             "probes": [],
+            "checks": [],
+            "checking": [],
             "sent": [],
             "listeners": {},
             "sockets": [],

@@ -14,9 +14,21 @@ pub enum ButtonVariant {
     Secondary,
     /// Something destructive, which should look like it.
     Danger,
+    /// An action drawn as its icon alone, in a row of others: no fill and no
+    /// border, so the row stays a row, and hover to say it can be pressed.
+    Ghost,
 }
 
 impl ButtonVariant {
+    /// The classes a control in this variant wears: what every button wears,
+    /// this variant's own, and the caller's, merged. Public so that a link
+    /// which should look like a button can wear them without being one — a
+    /// button inside a link is not a thing a browser accepts.
+    #[must_use]
+    pub fn styled(self, extra: &str) -> String {
+        tw_merge!(BASE, self.class(), extra)
+    }
+
     /// The classes this variant renders with.
     const fn class(self) -> &'static str {
         match self {
@@ -25,9 +37,16 @@ impl ButtonVariant {
                 "bg-surface text-foreground border border-border hover:bg-surface-muted"
             }
             Self::Danger => "bg-failed text-primary-foreground hover:bg-failed/90",
+            Self::Ghost => "text-muted-foreground hover:bg-surface-muted hover:text-foreground",
         }
     }
 }
+
+/// What every button wears, whatever its variant.
+const BASE: &str = "inline-flex items-center justify-center gap-2 rounded-md px-3 py-1.5 text-sm \
+                    font-medium transition-colors disabled:pointer-events-none disabled:opacity-50 \
+                    focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary \
+                    focus-visible:ring-offset-2 focus-visible:ring-offset-background";
 
 /// Properties for [`Button`].
 #[derive(Props, PartialEq, Clone)]
@@ -59,14 +78,7 @@ pub fn Button(props: ButtonProps) -> Element {
             // Explicit, because a button inside a form defaults to submitting
             // it — which is a navigation nobody asked for.
             r#type: "button",
-            class: tw_merge!(
-                "inline-flex items-center justify-center gap-2 rounded-md px-3 py-1.5 text-sm \
-                 font-medium transition-colors disabled:pointer-events-none disabled:opacity-50 \
-                 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary \
-                 focus-visible:ring-offset-2 focus-visible:ring-offset-background",
-                props.variant.class(),
-                props.class
-            ),
+            class: props.variant.styled(&props.class),
             disabled,
             onclick: move |event| {
                 // Checked here as well as by the attribute: `disabled` stops a
@@ -94,7 +106,20 @@ mod tests {
         ButtonVariant::Primary,
         ButtonVariant::Secondary,
         ButtonVariant::Danger,
+        ButtonVariant::Ghost,
     ];
+
+    /// A styled control wears what every button wears, its variant's own,
+    /// and the caller's, merged — which a link dressed as a button relies
+    /// on as much as a button does.
+    #[test]
+    fn a_styled_control_wears_all_three() {
+        let worn = ButtonVariant::Secondary.styled("px-2");
+        assert!(worn.contains("inline-flex"), "{worn}");
+        assert!(worn.contains("border-border"), "{worn}");
+        assert!(worn.contains("px-2") && !worn.contains("px-3"), "{worn}");
+        assert!(ButtonVariant::Primary.styled("").contains("bg-primary"));
+    }
 
     #[test]
     fn every_variant_renders_as_something() {

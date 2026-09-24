@@ -89,11 +89,6 @@ pub struct Arrival {
     pub headers: BTreeMap<String, String>,
     /// Who sent it, as an address.
     pub peer: String,
-    /// When it arrived, in milliseconds since the epoch.
-    ///
-    /// Stamped by the world, because a generic world cannot know which
-    /// handlers keep a time and which ignore it.
-    pub at: u64,
 }
 
 /// What to do about a request the world is holding open.
@@ -330,10 +325,6 @@ pub enum Event<A: App> {
         id: EffectId,
         /// How.
         responded: Responded,
-        /// When, in milliseconds since the epoch, stamped by the world for
-        /// the same reason a served request is: a failure to reach a
-        /// platform is what a gap with no connection can begin with.
-        at: u64,
     },
     /// A socket received one text frame.
     ///
@@ -345,9 +336,6 @@ pub enum Event<A: App> {
         id: EffectId,
         /// The frame's text.
         text: String,
-        /// When it arrived, in milliseconds since the epoch, stamped by the
-        /// world for the same reason a served request is.
-        at: u64,
     },
     /// A socket came to an end, on its own or because it was disconnected.
     /// Answers [`Effect::Connect`], eventually, and [`Effect::Disconnect`].
@@ -356,9 +344,6 @@ pub enum Event<A: App> {
         id: EffectId,
         /// How.
         disconnected: Disconnected,
-        /// When, in milliseconds since the epoch: what a gap with no
-        /// connection is measured from.
-        at: u64,
     },
     /// Something of the application's own.
     App(A::Event),
@@ -411,24 +396,17 @@ impl<A: App> Clone for Event<A> {
                 id: *id,
                 probed: *probed,
             },
-            Self::Responded { id, responded, at } => Self::Responded {
+            Self::Responded { id, responded } => Self::Responded {
                 id: *id,
                 responded: responded.clone(),
-                at: *at,
             },
-            Self::Frame { id, text, at } => Self::Frame {
+            Self::Frame { id, text } => Self::Frame {
                 id: *id,
                 text: text.clone(),
-                at: *at,
             },
-            Self::Disconnected {
-                id,
-                disconnected,
-                at,
-            } => Self::Disconnected {
+            Self::Disconnected { id, disconnected } => Self::Disconnected {
                 id: *id,
                 disconnected: disconnected.clone(),
-                at: *at,
             },
             Self::App(event) => Self::App(event.clone()),
         }
@@ -786,6 +764,15 @@ impl<A: App> Named for Effect<A> {
     }
 }
 
+/// The time the world tells the deciding half with every step.
+///
+/// Milliseconds since the epoch on the world's clock, virtual in a
+/// simulation, read as the event is handed over so that no two steps see it
+/// run backwards. No event carries a time of its own; a fact's own time — a
+/// platform's timestamp — is data inside the payload. See
+/// `docs/decisions/0073-the-world-tells-the-instance-the-time-with-every-step.md`.
+pub type Now = u64;
+
 /// Something the world steps: constructed from a seed and an environment,
 /// then one event in and effects out, for as long as the process runs.
 ///
@@ -817,8 +804,10 @@ pub trait Deciding: Sized {
         target: Self::Target,
     ) -> (Self, Vec<Effect<Self::App>>);
 
-    /// Handles one event and answers with what to do about it.
-    fn step(&mut self, event: Event<Self::App>) -> Vec<Effect<Self::App>>;
+    /// Handles one event and answers with what to do about it, told the
+    /// time as the world hands the event over — see
+    /// `docs/decisions/0073-the-world-tells-the-instance-the-time-with-every-step.md`.
+    fn step(&mut self, at: Now, event: Event<Self::App>) -> Vec<Effect<Self::App>>;
 
     /// Everything it holds, as a value a scenario compares and a reviewer
     /// reads, credentials in the clear.
@@ -1001,7 +990,7 @@ pub(crate) mod doorbell {
             clippy::arithmetic_side_effects,
             reason = "a bell that counted past its type should fail this crate's tests rather than clamp"
         )]
-        fn step(&mut self, event: Event<Doorbell>) -> Vec<Effect<Doorbell>> {
+        fn step(&mut self, _at: crate::Now, event: Event<Doorbell>) -> Vec<Effect<Doorbell>> {
             match event {
                 Event::Read { contents, .. } => {
                     self.heard = contents
@@ -1208,27 +1197,22 @@ mod tests {
                     headers: [("content-type".to_owned(), "application/json".to_owned())].into(),
                     body: Bytes::new(b"{\"ok\":true}".to_vec()),
                 },
-                at: 1_757_000_000_004,
             },
             Event::Responded {
                 id: EffectId(7),
                 responded: Responded::Failed("the name did not resolve".to_owned()),
-                at: 1_757_000_000_004,
             },
             Event::Frame {
                 id: EffectId(8),
                 text: r#"{"type":"hello"}"#.to_owned(),
-                at: 1_757_000_000_001,
             },
             Event::Disconnected {
                 id: EffectId(8),
                 disconnected: Disconnected::Closed,
-                at: 1_757_000_000_002,
             },
             Event::Disconnected {
                 id: EffectId(9),
                 disconnected: Disconnected::Failed("the handshake was refused".to_owned()),
-                at: 1_757_000_000_003,
             },
         ];
         let kinds: Vec<&str> = events.iter().map(Named::kind).collect();
@@ -1301,7 +1285,6 @@ mod tests {
                     path: "/jobs?open=1".to_owned(),
                     headers: [("host".to_owned(), "stageman.test".to_owned())].into(),
                     peer: "127.0.0.1:53124".to_owned(),
-                    at: 1_757_000_000_000,
                 },
             },
             Event::Body {
@@ -1499,7 +1482,6 @@ mod tests {
                 headers: BTreeMap::new(),
                 body: Bytes::new(Vec::new()),
             },
-            at: 5,
         };
         assert!(responded(1, 200) == responded(1, 200));
         assert!(
@@ -1508,17 +1490,12 @@ mod tests {
         );
         assert!(responded(1, 200) != responded(2, 200));
 
-        let frame = |id: u64, text: &str, at: u64| Event::<Doorbell>::Frame {
+        let frame = |id: u64, text: &str| Event::<Doorbell>::Frame {
             id: EffectId(id),
             text: text.to_owned(),
-            at,
         };
-        assert!(frame(1, "a", 5) == frame(1, "a", 5));
-        assert!(frame(1, "a", 5) != frame(1, "b", 5), "another frame");
-        assert!(frame(1, "a", 5) != frame(2, "a", 5), "another socket");
-        assert!(
-            frame(1, "a", 5) != frame(1, "a", 6),
-            "the same frame at another time"
-        );
+        assert!(frame(1, "a") == frame(1, "a"));
+        assert!(frame(1, "a") != frame(1, "b"), "another frame");
+        assert!(frame(1, "a") != frame(2, "a"), "another socket");
     }
 }
