@@ -290,6 +290,7 @@ impl Instance {
                 | Asked::Built { .. }
                 | Asked::Created { .. }
                 | Asked::Started { .. }
+                | Asked::Wrapped { .. }
                 | Asked::CheckedOut { .. } => None,
             })
             .chain(running.listing.keys().cloned())
@@ -421,6 +422,11 @@ enum Asked {
         /// Whose turn.
         speaker: Speaker,
     },
+    /// Whether a turn's wrapper was written into its container.
+    Wrapped {
+        /// Whose turn.
+        speaker: Speaker,
+    },
     /// Whether a turn's repository was checked out.
     CheckedOut {
         /// Whose turn.
@@ -504,6 +510,10 @@ pub struct Running {
     /// Where a container reaches the tools this instance serves, composed
     /// from the port that was actually taken.
     tools: String,
+    /// Where a job's wrapper fetches its credential from, on the same
+    /// listener — see
+    /// `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
+    fetching: String,
     /// Which listener a tool call arrives on, where one was taken.
     tools_listener: Option<EffectId>,
     /// Which listener a person's requests arrive on.
@@ -654,6 +664,7 @@ impl Running {
             runtime,
             runtime_environment,
             tools: paths::tools_endpoint(tools),
+            fetching: paths::credential_endpoint(tools),
             tools_listener,
             dashboard_listener,
             presenting,
@@ -823,6 +834,7 @@ impl Running {
             Asked::Built { image } => self.built(&image, finished, effects),
             Asked::Created { speaker } => self.made(speaker, finished, effects),
             Asked::Started { speaker } => self.held(speaker, finished, effects),
+            Asked::Wrapped { speaker } => self.wrapped(speaker, finished, effects),
             Asked::CheckedOut { speaker } => self.checked_out(speaker, finished, effects),
             Asked::Port { job } => {
                 if let Some(why) = complaint(finished) {
@@ -1235,11 +1247,7 @@ impl Running {
     /// to where an unguessable value comes from. Bounded by construction: one
     /// entry per turn in flight rather than one per turn ever taken.
     fn warrant(&mut self, speaker: &Speaker, place: Option<Place>, from: Option<String>) -> String {
-        let credential = format!(
-            "{}{}",
-            mint(&mut self.rng).simple(),
-            mint(&mut self.rng).simple()
-        );
+        let credential = self.unguessable();
         self.warrants.retain(|_, known| known.speaker != *speaker);
         self.warrants.insert(
             credential.clone(),
@@ -1250,6 +1258,32 @@ impl Running {
             },
         );
         credential
+    }
+}
+
+impl Running {
+    /// An unguessable value from the instance's own generator: what every
+    /// credential this instance mints is made of, so that there is one
+    /// answer to where an unguessable value comes from.
+    fn unguessable(&mut self) -> String {
+        format!(
+            "{}{}",
+            mint(&mut self.rng).simple(),
+            mint(&mut self.rng).simple()
+        )
+    }
+
+    /// Where a job's wrapper fetches its credential from, for a job that
+    /// holds a warrant, and nothing for one the last release wrote — see
+    /// `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
+    /// What a resumed turn is told, so that the wrapper is rewritten for a
+    /// job that can present a warrant and an older job's container is left
+    /// as it was created, with the credential itself in its environment.
+    fn fetching_for(&self, job: &JobId) -> Option<String> {
+        self.state
+            .job(job)?
+            .warrant()
+            .map(|_| self.fetching.clone())
     }
 }
 

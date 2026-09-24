@@ -853,6 +853,7 @@ mod tests {
                 "because".to_owned(),
                 "do the thing".to_owned(),
                 Timestamp::UNIX_EPOCH,
+                stageman_core::Secret::new("warrant-of-a-test-job".to_owned()),
             );
             job.progress = progress;
             watched
@@ -919,6 +920,7 @@ mod tests {
                 "because".to_owned(),
                 "do the thing".to_owned(),
                 Timestamp::from_second(second).expect("a time"),
+                stageman_core::Secret::new("warrant-of-a-test-job".to_owned()),
             );
             job.progress = progress;
             if !kept {
@@ -1057,6 +1059,7 @@ mod tests {
                 "because".to_owned(),
                 "do the thing".to_owned(),
                 Timestamp::UNIX_EPOCH,
+                stageman_core::Secret::new("warrant-of-a-test-job".to_owned()),
             );
             job.progress = Progress::Idle(Waiting::Silent);
             watched

@@ -55,7 +55,25 @@ pub fn exposed(state: &State) -> Value {
                 "variables": keyed(project.variables.iter().map(|(name, variable)| {
                     (name, json!({ "value": variable.value.expose(), "note": variable.note }))
                 })),
-                "jobs": value(&project.jobs),
+                // Walked rather than serialised, since a job holds its
+                // warrant: every field as the record has it, the warrant
+                // exposed like every other credential here.
+                "jobs": keyed(project.jobs.iter().map(|(id, job)| {
+                    (id, json!({
+                        "kit": value(job.kit()),
+                        "reason": job.reason,
+                        "kickoff": job.kickoff,
+                        "created_at": value(&job.created_at),
+                        "progress": value(&job.progress),
+                        "since": value(&job.since),
+                        "room": value(&job.room),
+                        "asked_by": job.asked_by,
+                        "reported": value(&job.reported),
+                        "inbox": value(&job.inbox),
+                        "pull_requests": value(&job.pull_requests),
+                        "warrant": job.warrant().map(stageman_core::Secret::expose),
+                    }))
+                })),
                 "attending": value(&project.attending),
             }))
         })),

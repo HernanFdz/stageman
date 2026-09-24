@@ -751,8 +751,11 @@ pub(crate) const WORKSPACE: &str = "/workspace";
 /// `docs/conventions.md` §3.
 /// Exactly the environment a container running this handout is given, in the
 /// order it is set: the agent's own credential under the variable its
-/// adapter reads, the platform credentials under the variables their tools
-/// read, and the project's variables last, refused on collision.
+/// adapter reads, a job's warrant under the variable its wrapper reads, and
+/// the project's variables last, refused on collision. No platform
+/// credential, since
+/// `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`:
+/// the wrapper fetches one with the warrant when a command needs it.
 ///
 /// Pure, so that whoever decides what a process is handed can decide this
 /// too, and the world only sets it.
@@ -769,16 +772,13 @@ pub fn environment(handout: &Handout) -> Result<Vec<(String, Secret)>, AgentErro
         ),
     }];
 
-    for (platform, credential) in handout.platforms() {
-        set.push((
-            match platform {
-                // What the platform's own command-line tool reads, which is how
-                // a job reaches it at all — see
-                // `docs/decisions/0009-jobs-hold-their-own-platform-credentials.md`.
-                Platform::GitHub => "GH_TOKEN".to_owned(),
-            },
-            credential.clone(),
-        ));
+    // What the wrapper written into a job's container presents to fetch its
+    // project's platform credential with. The credential itself used to
+    // travel here, under the variable the platform's tool reads; the wrapper
+    // now sets that variable for the tool's one process, and nothing rests
+    // in the environment.
+    if let Some(warrant) = handout.warrant() {
+        set.push((WARRANT_VARIABLE.to_owned(), warrant.clone()));
     }
 
     // The project's own, last and refused on collision. Refused rather than
@@ -829,10 +829,28 @@ pub fn environment(handout: &Handout) -> Result<Vec<(String, Secret)>, AgentErro
 /// the shape of the credential, so reserving only the one in force would make
 /// the rule depend on a token an operator has not supplied yet.
 ///
+/// The platform's variable stays here although nothing delivers it into an
+/// environment any more: the wrapper sets it for the tool's own process, so
+/// an operator's variable under that name would be overridden for every
+/// command that reaches the platform and honoured by nothing else, which is
+/// a name better refused than explained.
+///
 /// Adding an agent means adding its names here. Nothing makes that automatic,
 /// and the test below is what notices: it asserts that everything a real
 /// handout delivers is in this list.
-pub const RESERVED: &[&str] = &["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "GH_TOKEN"];
+pub const RESERVED: &[&str] = &[
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "GH_TOKEN",
+    WARRANT_VARIABLE,
+];
+
+/// The variable a job's warrant is delivered in, which the wrapper reads.
+///
+/// Set when the container is created, like everything else in its
+/// environment, and fixed for its life — which is why a job's warrant is
+/// minted once, with the job, rather than per turn.
+pub const WARRANT_VARIABLE: &str = "STAGEMAN_WARRANT";
 
 /// Which variable this agent's credential belongs in.
 ///
@@ -1312,13 +1330,21 @@ fn checkout_arguments(name: &str, repository: &str, platform: Option<Platform>) 
 
 /// The checkout itself, as the shell inside the container runs it.
 ///
-/// Two shapes, decided by whether the job holds a credential for the
-/// repository's platform. With one, the platform's own tool makes the clone
-/// with the credential already in the environment, configures git to push
-/// with it — the tool leaves no helper behind on its own, measured — and sets
-/// the commit identity to the account the credential belongs to, spelled the
-/// way the platform spells a private address. Without one, plain git clones
-/// what is public, and there is no account to be.
+/// Two shapes, decided by whether the job's project holds access to the
+/// repository's platform. With it, the platform's own tool makes the clone —
+/// through the wrapper in its place, which fetches the credential for that
+/// one process — git is told to ask the wrapper for a credential from then
+/// on, and the commit identity is set to the account the credential belongs
+/// to, spelled the way the platform spells a private address. Without it,
+/// plain git clones what is public, and there is no account to be.
+///
+/// **Git's helper is written here rather than by the tool's own
+/// `setup-git`**, and the two lines are exactly the ones it would write.
+/// Measured: the tool names the binary that ran, by its absolute path, and
+/// through the wrapper that is the tool moved aside — so a push would have
+/// gone straight to a binary with no credential in its environment. Named
+/// by absolute path for the same reason: a helper found by the path of
+/// whatever runs git is one fewer thing to hold constant.
 ///
 /// Asserted as literal text, because this is the one place the project types
 /// commands into a container on a job's behalf.
@@ -1327,13 +1353,73 @@ const fn checkout_script(platform: Option<Platform>) -> &'static str {
         Some(Platform::GitHub) => {
             "set -eu\n\
              gh repo clone \"$STAGEMAN_REPOSITORY\" .\n\
-             gh auth setup-git --hostname github.com\n\
+             git config --global credential.https://github.com.helper ''\n\
+             git config --global --add credential.https://github.com.helper \
+             '!/usr/local/bin/gh auth git-credential'\n\
              account=\"$(gh api user --jq '\"\\(.id)+\\(.login)\"')\"\n\
              git config --global user.name \"${account#*+}\"\n\
              git config --global user.email \"${account}@users.noreply.github.com\"\n"
         }
         None => "set -eu\ngit clone \"$STAGEMAN_REPOSITORY\" .\n",
     }
+}
+
+/// Where the wrapper moves the tool itself, out of the way and out of the
+/// path: a directory for programs nothing runs by hand.
+const TOOL_ASIDE: &str = "/usr/local/libexec/stageman/gh";
+
+/// What writes the wrapper into a container that is up: the tool moved
+/// aside the first time, and the wrapper written over its place from
+/// standard input every time. Idempotent, because it is run again on every
+/// resume so that a container never runs a wrapper older than the instance
+/// driving it, nor one naming a port the instance no longer answers on.
+///
+/// **In the tool's place rather than ahead of it on the path**, where the
+/// job's image installs it — so that an absolute path anybody types takes
+/// the same door, and so that git's helper can name one path that is the
+/// wrapper whichever way the tool is found.
+const WRAP_SCRIPT: &str = "set -eu\n\
+    mkdir -p /usr/local/libexec/stageman\n\
+    if [ ! -e /usr/local/libexec/stageman/gh ]; then mv /usr/local/bin/gh \
+    /usr/local/libexec/stageman/gh; fi\n\
+    cat > /usr/local/bin/gh\n\
+    chmod 0755 /usr/local/bin/gh\n";
+
+/// The wrapper that stands in the platform's tool's place — see
+/// `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
+///
+/// It asks the instance for the job's credential, presenting the warrant
+/// its container was created with, and runs the tool with the credential in
+/// that one process's environment. Anything short of a credential fails the
+/// command loudly, with the transport's own reason before this one's: a
+/// tool run without a credential would fail later and further from the
+/// cause, or succeed against a public repository and act as nobody.
+///
+/// The endpoint is written into it rather than read from the environment,
+/// because the environment is fixed when the container is created and the
+/// port the instance answers on is not: the wrapper is rewritten on every
+/// resume, and a container resumed by an instance on another port is told
+/// so. Asserted as literal text, as the checkout is, for the same reason.
+#[must_use]
+pub fn wrapper(endpoint: &str) -> String {
+    format!(
+        "#!/bin/sh\n\
+         # Written into this container by the stageman instance driving it, in\n\
+         # place of the platform's own tool, which is beside it. A command's\n\
+         # credential is fetched from the instance for that one process and\n\
+         # never kept here.\n\
+         set -eu\n\
+         if [ -z \"${{STAGEMAN_WARRANT:-}}\" ]; then\n\
+         \techo 'gh: this container holds no warrant to fetch a credential with' >&2\n\
+         \texit 1\n\
+         fi\n\
+         if ! token=\"$(curl --fail --silent --show-error --max-time 30 \\\n\
+         \t--header \"Authorization: Bearer $STAGEMAN_WARRANT\" '{endpoint}')\"; then\n\
+         \techo 'gh: stageman did not hand over a credential for this job' >&2\n\
+         \texit 1\n\
+         fi\n\
+         GH_TOKEN=\"$token\" exec {TOOL_ASIDE} \"$@\"\n"
+    )
 }
 
 /// Runs the checkout in a container that is up.
@@ -1530,9 +1616,17 @@ pub enum Command {
         /// The container.
         name: String,
     },
+    /// Write the wrapper into a container that is up, in the platform's
+    /// tool's place, from standard input — see [`wrapper`]. Before the
+    /// checkout of a job that begins, and before the agent of one that
+    /// resumes.
+    Wrap {
+        /// The container.
+        name: String,
+    },
     /// Check the repository out into a container's workspace, with the
-    /// platform's own tool where a credential for one is held and plain git
-    /// otherwise — see
+    /// platform's own tool where the project holds access to one and plain
+    /// git otherwise — see
     /// `docs/decisions/0050-the-repository-is-checked-out-before-the-first-turn.md`.
     Checkout {
         /// The container.
@@ -1576,6 +1670,80 @@ impl Label {
             _ => None,
         }
     }
+}
+
+/// The arguments that create a container meant to outlive this process —
+/// see [`Command::Create`]. Apart from the renderer by the line budget,
+/// and because it is the one arm with something to say about every flag.
+fn create_arguments(
+    name: &str,
+    image: &str,
+    agent: Agent,
+    instance: InstanceId,
+    variables: &[String],
+) -> Vec<String> {
+    let mut arguments = vec![
+        "create".to_owned(),
+        "--interactive".to_owned(),
+        // The runtime's own init as process one, which does two
+        // things this needs. It reaps what an agent orphans — and
+        // since
+        // `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`
+        // a container outlives the agent that filled it, so there
+        // is now time to accumulate them. And it passes on the
+        // signal that stops a container, which process one
+        // otherwise ignores, so stopping takes an instant rather
+        // than a timeout.
+        "--init".to_owned(),
+        // So that one hostname reaches this instance whichever
+        // runtime is in use. Measured on both: Docker and Podman
+        // each honour it, and without it a container on Linux can
+        // reach the host by no name at all.
+        "--add-host".to_owned(),
+        "host.docker.internal:host-gateway".to_owned(),
+        // The tunnel, published here because there is nowhere
+        // later: the mapping is fixed when the container is
+        // created and no runtime can add one afterwards.
+        //
+        // Loopback on the host, and an empty host port so the
+        // runtime picks a free one atomically — choosing one here
+        // by binding and releasing it is a race, and this project
+        // has already lost a port that way. What it picked is
+        // asked for rather than recorded, because Docker assigns a
+        // new one on every start and Podman does not.
+        "--publish".to_owned(),
+        format!("127.0.0.1::{TUNNEL_PORT}"),
+        "--name".to_owned(),
+        name.to_owned(),
+        "--label".to_owned(),
+        format!("{OWNER_LABEL}={name}"),
+        // Which agent this container was made for, so that a turn
+        // boundary can ask. A foreman's container is long-lived
+        // and its project's kit can change underneath it; the
+        // same agent on other settings keeps the container,
+        // because settings are settled again every turn, and a
+        // different agent is a different image — see
+        // `docs/decisions/0048-a-job-runs-on-a-kit.md`. The
+        // image's identity cannot answer this, since nothing is
+        // tagged.
+        "--label".to_owned(),
+        format!("{AGENT_LABEL}={}", agent_label(agent)),
+        // Which instance this belongs to, so that a sweep on a
+        // shared daemon can tell its own abandoned work from
+        // somebody else's containers.
+        "--label".to_owned(),
+        format!("{INSTANCE_LABEL}={instance}"),
+    ];
+    for variable in variables {
+        arguments.push("--env".to_owned());
+        arguments.push(variable.clone());
+    }
+    // Deliberately no `--network none` here, unlike the
+    // handshake: reaching a model needs the network, and so does
+    // cloning. Which hosts it *ought* to reach is the egress
+    // allowlist still open in `docs/open-questions.md`.
+    arguments.push(image.to_owned());
+    arguments
 }
 
 impl Command {
@@ -1630,71 +1798,16 @@ impl Command {
                 agent,
                 instance,
                 variables,
-            } => {
-                let mut arguments = vec![
-                    "create".to_owned(),
-                    "--interactive".to_owned(),
-                    // The runtime's own init as process one, which does two
-                    // things this needs. It reaps what an agent orphans — and
-                    // since
-                    // `docs/decisions/0043-a-container-lives-as-long-as-its-tunnel-answers.md`
-                    // a container outlives the agent that filled it, so there
-                    // is now time to accumulate them. And it passes on the
-                    // signal that stops a container, which process one
-                    // otherwise ignores, so stopping takes an instant rather
-                    // than a timeout.
-                    "--init".to_owned(),
-                    // So that one hostname reaches this instance whichever
-                    // runtime is in use. Measured on both: Docker and Podman
-                    // each honour it, and without it a container on Linux can
-                    // reach the host by no name at all.
-                    "--add-host".to_owned(),
-                    "host.docker.internal:host-gateway".to_owned(),
-                    // The tunnel, published here because there is nowhere
-                    // later: the mapping is fixed when the container is
-                    // created and no runtime can add one afterwards.
-                    //
-                    // Loopback on the host, and an empty host port so the
-                    // runtime picks a free one atomically — choosing one here
-                    // by binding and releasing it is a race, and this project
-                    // has already lost a port that way. What it picked is
-                    // asked for rather than recorded, because Docker assigns a
-                    // new one on every start and Podman does not.
-                    "--publish".to_owned(),
-                    format!("127.0.0.1::{TUNNEL_PORT}"),
-                    "--name".to_owned(),
-                    name.clone(),
-                    "--label".to_owned(),
-                    format!("{OWNER_LABEL}={name}"),
-                    // Which agent this container was made for, so that a turn
-                    // boundary can ask. A foreman's container is long-lived
-                    // and its project's kit can change underneath it; the
-                    // same agent on other settings keeps the container,
-                    // because settings are settled again every turn, and a
-                    // different agent is a different image — see
-                    // `docs/decisions/0048-a-job-runs-on-a-kit.md`. The
-                    // image's identity cannot answer this, since nothing is
-                    // tagged.
-                    "--label".to_owned(),
-                    format!("{AGENT_LABEL}={}", agent_label(*agent)),
-                    // Which instance this belongs to, so that a sweep on a
-                    // shared daemon can tell its own abandoned work from
-                    // somebody else's containers.
-                    "--label".to_owned(),
-                    format!("{INSTANCE_LABEL}={instance}"),
-                ];
-                for variable in variables {
-                    arguments.push("--env".to_owned());
-                    arguments.push(variable.clone());
-                }
-                // Deliberately no `--network none` here, unlike the
-                // handshake: reaching a model needs the network, and so does
-                // cloning. Which hosts it *ought* to reach is the egress
-                // allowlist still open in `docs/open-questions.md`.
-                arguments.push(image.clone());
-                arguments
-            }
+            } => create_arguments(name, image, *agent, *instance, variables),
             Self::Start { name } => vec!["start".to_owned(), name.clone()],
+            Self::Wrap { name } => vec![
+                "exec".to_owned(),
+                "--interactive".to_owned(),
+                name.clone(),
+                "sh".to_owned(),
+                "-c".to_owned(),
+                WRAP_SCRIPT.to_owned(),
+            ],
             Self::Checkout {
                 name,
                 repository,
@@ -1836,6 +1949,11 @@ impl Command {
                     name: (*name).to_owned(),
                     repository: repository.to_owned(),
                     platform,
+                })
+            }
+            ["exec", "--interactive", name, "sh", "-c", script] if *script == WRAP_SCRIPT => {
+                Some(Self::Wrap {
+                    name: (*name).to_owned(),
                 })
             }
             ["exec", "--interactive", name, program] if *program == AGENT_PROGRAM => {
@@ -2227,7 +2345,13 @@ mod tests {
                 image: "stageman:0123".to_owned(),
                 agent: Agent::Claude,
                 instance: an_instance(),
-                variables: vec!["ANTHROPIC_API_KEY".to_owned(), "GH_TOKEN".to_owned()],
+                variables: vec![
+                    "ANTHROPIC_API_KEY".to_owned(),
+                    "STAGEMAN_WARRANT".to_owned(),
+                ],
+            },
+            Command::Wrap {
+                name: "stageman-job-1".to_owned(),
             },
             Command::Create {
                 name: "stageman-foreman-2".to_owned(),
@@ -3266,6 +3390,13 @@ mod tests {
     /// Shared because several tests assert names and not values, and because
     /// the delivery helper is fallible now — unwrapping it in six places would
     /// say less than naming the expectation once.
+    /// The fixture's job's warrant.
+    const WARRANT: &str = "warrant-of-the-fixtures-job";
+
+    fn warrant() -> Secret {
+        Secret::new(WARRANT.to_owned())
+    }
+
     fn names_of(handout: &Handout) -> Vec<String> {
         environment(handout)
             .expect("a handout with no reserved name")
@@ -3277,7 +3408,7 @@ mod tests {
     #[test]
     fn a_thread_is_never_delivered_as_a_variable() {
         let (state, project) = instance_with_a_channel("sk-ant-oat01-xyz");
-        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project)
+        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project, warrant())
             .expect("a watched project")
             .speaking_in(stageman_core::Place::from(stageman_core::Thread {
                 channel: Channel::Slack,
@@ -3326,7 +3457,7 @@ mod tests {
 
         for handout in [
             Handout::for_foreman(&state, project).expect("a watched project"),
-            Handout::for_job(&state, Kit::defaults(Agent::Claude), project)
+            Handout::for_job(&state, Kit::defaults(Agent::Claude), project, warrant())
                 .expect("a watched project"),
         ] {
             let named = names_of(&handout);
@@ -3341,10 +3472,15 @@ mod tests {
         }
 
         // And the asymmetry 0027 turns on is unchanged: a foreman watches a
-        // channel and still acts on no platform.
+        // channel and still acts on no platform — so it is given nothing to
+        // fetch a platform credential with, either.
         let foreman = Handout::for_foreman(&state, project).expect("a watched project");
         let named = names_of(&foreman);
         assert!(!named.iter().any(|name| name == "GH_TOKEN"), "{named:?}");
+        assert!(
+            !named.iter().any(|name| name == WARRANT_VARIABLE),
+            "{named:?}"
+        );
     }
 
     /// A project with nothing bound is delivered nothing to speak with, rather
@@ -3353,7 +3489,7 @@ mod tests {
     #[test]
     fn a_job_with_no_channel_is_delivered_no_channel_variables() {
         let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
-        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project)
+        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project, warrant())
             .expect("a watched project");
 
         let named = names_of(&handout);
@@ -3388,19 +3524,36 @@ mod tests {
         assert_eq!(delivered[0].1.expose(), "sk-ant-oat01-xyz");
     }
 
+    /// A job's container is given its warrant, and never the platform
+    /// credential the warrant fetches: the variable the platform's tool reads
+    /// is set by the wrapper for that one process, per
+    /// `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
     #[test]
-    fn a_job_is_delivered_the_variable_its_platform_tool_reads() {
+    fn a_job_is_delivered_its_warrant_and_no_platform_credential() {
         let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
-        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project)
+        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project, warrant())
             .expect("a watched project");
 
+        let delivering = environment(&handout).expect("a handout with no reserved name");
         let named = names_of(&handout);
 
         assert!(
             named.iter().any(|name| name == "CLAUDE_CODE_OAUTH_TOKEN"),
             "{named:?}"
         );
-        assert!(named.iter().any(|name| name == "GH_TOKEN"), "{named:?}");
+        assert!(!named.iter().any(|name| name == "GH_TOKEN"), "{named:?}");
+        let found = delivering
+            .iter()
+            .find(|(name, _)| name == WARRANT_VARIABLE)
+            .expect("the warrant is delivered");
+        assert_eq!(found.1.expose(), WARRANT);
+        for (_, value) in &delivering {
+            assert_ne!(
+                value.expose(),
+                "gh-not-a-real-token",
+                "the token never travels"
+            );
+        }
     }
 
     /// A project's own variables reach its jobs' containers.
@@ -3420,7 +3573,7 @@ mod tests {
                     "sk-test-not-a-real-key".to_owned(),
                 )),
             );
-        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project)
+        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project, warrant())
             .expect("a watched project");
 
         let delivering = environment(&handout).expect("no reserved name here");
@@ -3479,8 +3632,9 @@ mod tests {
                         "somebody-elses-account".to_owned(),
                     )),
                 );
-            let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project)
-                .expect("a watched project");
+            let handout =
+                Handout::for_job(&state, Kit::defaults(Agent::Claude), project, warrant())
+                    .expect("a watched project");
 
             let refused = environment(&handout).expect_err("that name is ours");
 
@@ -3506,8 +3660,9 @@ mod tests {
     fn every_name_this_project_delivers_is_one_it_reserves() {
         for credential in ["sk-ant-oat01-xyz", "sk-ant-api03-xyz"] {
             let (state, project) = instance_with_a_project(credential);
-            let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project)
-                .expect("a watched project");
+            let handout =
+                Handout::for_job(&state, Kit::defaults(Agent::Claude), project, warrant())
+                    .expect("a watched project");
 
             for name in names_of(&handout) {
                 assert!(
@@ -3524,7 +3679,7 @@ mod tests {
     #[test]
     fn no_credential_ever_appears_in_a_containers_arguments() {
         let (state, project) = instance_with_a_channel("sk-ant-oat01-secret-value");
-        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project)
+        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project, warrant())
             .expect("a watched project");
 
         let arguments = retained_arguments(
@@ -3538,12 +3693,14 @@ mod tests {
 
         assert!(!line.contains("sk-ant-oat01-secret-value"), "{line}");
         assert!(!line.contains("gh-not-a-real-token"), "{line}");
+        assert!(!line.contains(WARRANT), "{line}");
         // The newest credential, and the one a reviewer would not think to
         // check: a channel binding arrived through a different map and a
         // different loop, so it is a second chance to make the same mistake.
         assert!(!line.contains("xoxb-not-a-real-token"), "{line}");
         assert!(line.contains("--env CLAUDE_CODE_OAUTH_TOKEN"), "{line}");
-        assert!(line.contains("--env GH_TOKEN"), "{line}");
+        assert!(line.contains("--env STAGEMAN_WARRANT"), "{line}");
+        assert!(!line.contains("GH_TOKEN"), "{line}");
         // No channel credential is named at all since 0034, because none is
         // delivered: the daemon posts, so a container has no use for one.
         assert!(!line.contains("STAGEMAN_SLACK"), "{line}");
@@ -3648,7 +3805,7 @@ mod tests {
     #[test]
     fn a_retained_container_says_which_instance_started_it() {
         let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
-        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project)
+        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project, warrant())
             .expect("a watched project");
 
         let arguments = retained_arguments(
@@ -4083,7 +4240,9 @@ mod tests {
             checkout_script(Some(Platform::GitHub)),
             "set -eu\n\
              gh repo clone \"$STAGEMAN_REPOSITORY\" .\n\
-             gh auth setup-git --hostname github.com\n\
+             git config --global credential.https://github.com.helper ''\n\
+             git config --global --add credential.https://github.com.helper \
+             '!/usr/local/bin/gh auth git-credential'\n\
              account=\"$(gh api user --jq '\"\\(.id)+\\(.login)\"')\"\n\
              git config --global user.name \"${account#*+}\"\n\
              git config --global user.email \"${account}@users.noreply.github.com\"\n"
@@ -4092,6 +4251,73 @@ mod tests {
             checkout_script(None),
             "set -eu\ngit clone \"$STAGEMAN_REPOSITORY\" .\n"
         );
+    }
+
+    /// The wrapper, asserted whole as the checkout is: the other text this
+    /// project puts in a container on a job's behalf, and the one that
+    /// decides what every command reaching the platform runs as. The
+    /// endpoint it is given is the one it asks, and the tool it runs is the
+    /// one moved aside.
+    #[test]
+    #[expect(
+        clippy::literal_string_with_formatting_args,
+        reason = "the wrapper is shell, and `${STAGEMAN_WARRANT:-}` is the shell's own \
+                  spelling, asserted whole exactly as it is written"
+    )]
+    fn the_wrapper_reads_exactly_as_written() {
+        assert_eq!(
+            wrapper("http://host.docker.internal:47113/credential"),
+            "#!/bin/sh\n\
+             # Written into this container by the stageman instance driving it, in\n\
+             # place of the platform's own tool, which is beside it. A command's\n\
+             # credential is fetched from the instance for that one process and\n\
+             # never kept here.\n\
+             set -eu\n\
+             if [ -z \"${STAGEMAN_WARRANT:-}\" ]; then\n\
+             \techo 'gh: this container holds no warrant to fetch a credential with' >&2\n\
+             \texit 1\n\
+             fi\n\
+             if ! token=\"$(curl --fail --silent --show-error --max-time 30 \\\n\
+             \t--header \"Authorization: Bearer $STAGEMAN_WARRANT\" \
+             'http://host.docker.internal:47113/credential')\"; then\n\
+             \techo 'gh: stageman did not hand over a credential for this job' >&2\n\
+             \texit 1\n\
+             fi\n\
+             GH_TOKEN=\"$token\" exec /usr/local/libexec/stageman/gh \"$@\"\n"
+        );
+        assert_eq!(
+            WRAP_SCRIPT,
+            "set -eu\n\
+             mkdir -p /usr/local/libexec/stageman\n\
+             if [ ! -e /usr/local/libexec/stageman/gh ]; then mv /usr/local/bin/gh \
+             /usr/local/libexec/stageman/gh; fi\n\
+             cat > /usr/local/bin/gh\n\
+             chmod 0755 /usr/local/bin/gh\n"
+        );
+        // The helper the checkout writes names the wrapper's place, which
+        // is the tool's own, and the wrapper runs the tool from where the
+        // install script moved it.
+        assert!(checkout_script(Some(Platform::GitHub)).contains("!/usr/local/bin/gh "));
+        assert!(WRAP_SCRIPT.contains("cat > /usr/local/bin/gh\n"));
+        assert!(WRAP_SCRIPT.contains(TOOL_ASIDE));
+        assert!(wrapper("http://x/credential").contains(&format!("exec {TOOL_ASIDE} ")));
+    }
+
+    /// The wrapper is written into the named container from standard
+    /// input, over a shell kept interactive so that the input reaches it.
+    #[test]
+    fn the_wrapper_is_written_into_the_named_container_from_standard_input() {
+        let arguments = Command::Wrap {
+            name: "stageman-job-1".to_owned(),
+        }
+        .arguments();
+
+        assert_eq!(
+            &arguments[..5],
+            ["exec", "--interactive", "stageman-job-1", "sh", "-c"]
+        );
+        assert_eq!(arguments[5], WRAP_SCRIPT);
+        assert_eq!(arguments.len(), 6);
     }
 
     /// The repository travels on the one command that needs it and never in

@@ -361,6 +361,7 @@ impl Running {
                     kit,
                     warrant,
                     tools: self.tools.clone(),
+                    fetching: self.fetching_for(job),
                     text: stageman_foreman::resumption_with(&given),
                 }),
             );
@@ -568,6 +569,7 @@ mod tests {
                         "an issue was opened".to_owned(),
                         "work on it".to_owned(),
                         Timestamp::UNIX_EPOCH,
+                        stageman_core::Secret::new("warrant-of-a-test-job".to_owned()),
                     ),
                 )]),
                 variables: BTreeMap::new(),
@@ -669,6 +671,7 @@ mod tests {
                 "a reason".to_owned(),
                 "some work".to_owned(),
                 Timestamp::UNIX_EPOCH,
+                stageman_core::Secret::new("warrant-of-a-test-job".to_owned()),
             );
             job.progress = progress;
             state

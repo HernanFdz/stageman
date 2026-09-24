@@ -85,14 +85,15 @@ first.
   *watch* a project's channels, and it is the only place a kickoff prompt is
   composed.
 - **job** — the doing. Provisions one isolated workspace, runs one agent inside
-  it, supervises it to completion, and gives it the credentials its project
-  needs. Supervision spans more than one lifetime of this process: a job
+  it, supervises it to completion, and gives it a warrant to fetch the
+  credentials its project needs, one command at a time — see
+  `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`. Supervision spans more than one lifetime of this process: a job
   interrupted by the daemon being killed is resumed at startup rather than
   abandoned, per
   `docs/decisions/0015-a-job-survives-the-daemon-dying.md`. It provisions the
   workspace with the project's repository already checked out in it — before
-  the agent's first turn, inside the same container, with the platform's own
-  tool and the job's own credential, per
+  the agent's first turn, inside the same container, with the platform's
+  own tool through the wrapper the instance writes in its place, per
   `docs/decisions/0050-the-repository-is-checked-out-before-the-first-turn.md`,
   which reversed that half of
   `docs/decisions/0016-the-agent-clones-the-repository.md`. The agent reaches
@@ -222,14 +223,17 @@ reviewer are defending — write down which, because "invariant" enforced by
 nobody is a wish.
 
 - **A job holds credentials for its own project, and for no other.** It gets
-  what its project needs to reach the platforms that project uses, what it
-  needs to speak on that project's channels, whatever its operator gave that
-  project to reach everything else, and the credential material of the one
-  agent running it — and nothing belonging to any other project, and nothing
-  belonging to any other agent. *Defended by* construction, since everything a
-  job is handed is selected from the project it belongs to and built by the
-  pure function in **core**, and by the escape test in
-  `docs/conventions.md` §4.
+  a warrant that fetches what its project needs to reach the platforms that
+  project uses, one command at a time, what it needs to speak on that
+  project's channels, whatever its operator gave that project to reach
+  everything else, and the credential material of the one agent running it
+  — and nothing belonging to any other project, and nothing belonging to any
+  other agent. *Defended by* construction, since everything a job is handed
+  is selected from the project it belongs to and built by the pure function
+  in **core**; by the escape test in `docs/conventions.md` §4; and, for the
+  credential that is fetched rather than handed, by the container test the
+  same section names, since
+  `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
 
   Platforms, channels and variables are three selections rather than one, per
   `docs/decisions/0027-a-channel-is-not-a-platform.md` and

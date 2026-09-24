@@ -559,12 +559,13 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
                     } else {
                         "Leave empty to keep the current one; a new one replaces it."
                     },
-                    info: "Every job on this project holds this token, so a token that reaches \
-                           more than this repository is a token every job could misuse. Grant it \
-                           the one repository, with contents, issues and pull requests write and \
-                           nothing else. It is checked against GitHub before it is kept: a token \
-                           GitHub does not accept, or one that cannot see the repository, is \
-                           refused here.",
+                    info: "Every job on this project fetches this token from the instance when \
+                           a command needs it, and no container carries it — so a token that \
+                           reaches more than this repository is still a token every job could \
+                           misuse. Grant it the one repository, with contents, issues and pull \
+                           requests write and nothing else. It is checked against GitHub before \
+                           it is kept: a token GitHub does not accept, or one that cannot see \
+                           the repository, is refused here.",
                     problem: saying(Part::Credential),
                     // The platform's own form, filled in — see
                     // `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`.

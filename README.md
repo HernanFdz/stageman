@@ -45,8 +45,10 @@ into a state where nothing can run.
 
 A running stageman reads no credential from the machine's environment. Every
 one of them is entered in the dashboard, held encrypted, and handed to a
-container as it starts. Obtaining a credential is a one-time step you do
-wherever you happen to be, and only its result goes into stageman.
+container as it starts — all but a repository's, which no container carries:
+a job's commands fetch it from stageman one at a time, as they run. Obtaining
+a credential is a one-time step you do wherever you happen to be, and only
+its result goes into stageman.
 
 **It asks you nothing to start.** A fresh instance has no agents and no
 projects, and that is a perfectly good instance — it simply has nothing to do

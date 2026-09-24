@@ -351,6 +351,9 @@ impl Running {
                 kit: handout.kit().clone(),
                 warrant,
                 tools: self.tools.clone(),
+                // A foreman's image carries no tool to wrap, and its handout
+                // no warrant to fetch with.
+                fetching: None,
                 text: asked,
             }
         } else {
@@ -390,11 +393,12 @@ impl Running {
                 environment,
                 repository: handout.repository().map(str::to_owned),
                 platform: handout
-                    .platform(stageman_core::Platform::GitHub)
-                    .map(|_| stageman_core::Platform::GitHub),
+                    .reaches(stageman_core::Platform::GitHub)
+                    .then_some(stageman_core::Platform::GitHub),
                 kit: handout.kit().clone(),
                 warrant,
                 tools: self.tools.clone(),
+                fetching: None,
                 kickoff: format!("{}\n\n{asked}", stageman_foreman::opening(&repository)),
             }
         };

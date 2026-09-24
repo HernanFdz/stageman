@@ -20,8 +20,8 @@ use stageman_agent::{Answer, Command, Heard, Label, Said, StopReason};
 use stageman_channel::{Call, Reaction};
 use stageman_core::{
     Agent, AgentConfig, Channel, ChannelConfig, Errand, InstanceId, Job, JobId, Key, Kit,
-    KitConfig, KitName, NONCE_LEN, Nonce, Place, Progress, Project, ProjectId, Room, Secret,
-    Snapshot, State, Thread, Timestamp, Uuid,
+    KitConfig, KitName, NONCE_LEN, Nonce, Place, Platform, Progress, Project, ProjectId, Room,
+    Secret, Snapshot, State, Thread, Timestamp, Uuid,
 };
 use stageman_instance::{
     AppEffect, AppEvent, Effect, Event, Instance, Request, RequestId, Response, Seed, Target,
@@ -73,6 +73,10 @@ pub struct Held {
     /// The variables it was made with, valued: what the runtime was given
     /// and told to forward.
     pub environment: BTreeMap<String, String>,
+    /// The wrapper last written into it, if one was: what the instance
+    /// put in the platform's tool's place, per
+    /// `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
+    pub wrapper: Option<String>,
 }
 
 /// One agent process the simulation keeps open: the adapter's half of a
@@ -255,6 +259,9 @@ pub struct Simulation {
     post_failures: VecDeque<String>,
     /// What each request was answered with, by identifier.
     tool_answers: BTreeMap<Asked, (u16, Option<serde_json::Value>)>,
+    /// The text each request was answered with, by identifier, for an
+    /// answer that is not JSON: a credential handed to a wrapper.
+    texts: BTreeMap<Asked, String>,
     /// What each person's request was answered with, by identifier.
     responses: BTreeMap<RequestId, Response>,
     /// Where each tunnel request was sent, by identifier.
@@ -456,16 +463,44 @@ pub fn in_thread(n: u32) -> Place {
     Place::from(thread(n))
 }
 
-fn a_job(progress: &Progress, room: Option<Room>) -> Job {
+/// The warrant a fixture's job holds, by its name: what its container
+/// presents to fetch its project's credential with.
+pub fn warrant_of(job: &JobId) -> String {
+    format!("warrant-of-{job}")
+}
+
+fn a_job(id: &JobId, progress: &Progress, room: Option<Room>) -> Job {
     let mut job = Job::new(
         Kit::defaults(Agent::Claude),
         "a reason".to_owned(),
         "some work".to_owned(),
         Timestamp::UNIX_EPOCH,
+        Secret::new(warrant_of(id)),
     );
     job.progress = progress.clone();
     job.room = room;
     job
+}
+
+/// The same job as the last release wrote it: with no warrant, its
+/// container having been created with the credential itself in its
+/// environment. Made through the sealed form, which is the only way a job
+/// without one comes to exist.
+pub fn without_a_warrant(job: &Job) -> Job {
+    let mut nonces = || [7; NONCE_LEN];
+    let mut sealed = job.seal(&key(), &mut nonces).expect("a job seals");
+    sealed.warrant = None;
+    sealed.open(&key()).expect("and opens without one")
+}
+
+/// Gives the project a pasted token for its repository's platform.
+pub fn holding_a_token(state: &mut State, token: &str) {
+    state
+        .projects
+        .get_mut(&project())
+        .expect("the project")
+        .credentials
+        .insert(Platform::GitHub, Secret::new(token.to_owned()));
 }
 
 fn a_project(jobs: BTreeMap<JobId, Job>, bound: bool) -> Project {
@@ -516,7 +551,7 @@ fn configured(project: Project) -> State {
 pub fn watching(jobs: &[(JobId, Progress)]) -> State {
     configured(a_project(
         jobs.iter()
-            .map(|(id, progress)| (id.clone(), a_job(progress, None)))
+            .map(|(id, progress)| (id.clone(), a_job(id, progress, None)))
             .collect(),
         false,
     ))
@@ -527,7 +562,7 @@ pub fn watching(jobs: &[(JobId, Progress)]) -> State {
 pub fn watching_a_channel(jobs: &[(JobId, Progress, u32)]) -> State {
     configured(a_project(
         jobs.iter()
-            .map(|(id, progress, n)| (id.clone(), a_job(progress, Some(self::room(*n)))))
+            .map(|(id, progress, n)| (id.clone(), a_job(id, progress, Some(self::room(*n)))))
             .collect(),
         true,
     ))
@@ -626,6 +661,7 @@ impl Simulation {
             sessions_made: 0,
             post_failures: VecDeque::new(),
             tool_answers: BTreeMap::new(),
+            texts: BTreeMap::new(),
             responses: BTreeMap::new(),
             routes: BTreeMap::new(),
             ports: 40_000,
@@ -737,6 +773,7 @@ impl Simulation {
                 port: None,
                 session: Some(format!("sess-{name}")),
                 environment: BTreeMap::new(),
+                wrapper: None,
             },
         )
     }
@@ -752,6 +789,7 @@ impl Simulation {
             port: None,
             session: Some("sess-left".to_owned()),
             environment: BTreeMap::new(),
+            wrapper: None,
         }
     }
 
@@ -766,6 +804,7 @@ impl Simulation {
             port: None,
             session: None,
             environment: BTreeMap::new(),
+            wrapper: None,
         }
     }
 
@@ -837,6 +876,23 @@ impl Simulation {
         self.tool_answers.get(&id)
     }
 
+    /// The text a request was answered with, if it has been.
+    pub fn answer_text(&self, id: Asked) -> Option<&str> {
+        self.texts.get(&id).map(String::as_str)
+    }
+
+    /// The wrapper last written into a container, if one was.
+    pub fn wrapper_of(&self, name: &str) -> Option<&str> {
+        self.containers
+            .get(name)
+            .and_then(|held| held.wrapper.as_deref())
+    }
+
+    /// The bytes on the disk where the instance keeps its file, if any.
+    pub fn disk_bytes(&self) -> Option<&[u8]> {
+        self.files.get(Path::new(INSTANCE_FILE)).map(Vec::as_slice)
+    }
+
     /// What a person's request was answered with, if it has been.
     pub fn response(&self, id: u64) -> Option<&Response> {
         self.responses.get(&RequestId(id))
@@ -876,6 +932,8 @@ impl Simulation {
                 if status == 404 && !body.is_empty() {
                     self.routes.insert(id, Sent::Nowhere);
                 }
+                self.texts
+                    .insert(id, String::from_utf8_lossy(body.as_slice()).into_owned());
                 let body = serde_json::from_slice(body.as_slice()).ok();
                 self.tool_answers.insert(id, (status, body));
             }
@@ -1727,6 +1785,7 @@ impl Simulation {
                     port: None,
                     session: None,
                     environment: given,
+                    wrapper: None,
                 },
             );
             self.seen.insert(name.to_owned());
@@ -1804,6 +1863,22 @@ impl Simulation {
                     None => refused(format!(
                         "Error response from daemon: No such container: {name}\n"
                     )),
+                }
+            }
+            // Written in from standard input, as the runtime would take it,
+            // and kept as what the container now runs in the tool's place.
+            Some(Command::Wrap { name }) => {
+                if !self.is_running(&name) {
+                    refused(format!(
+                        "Error response from daemon: container {name} is not running\n"
+                    ))
+                } else if let Some(text) = stdin.and_then(Bytes::as_text) {
+                    if let Some(held) = self.containers.get_mut(&name) {
+                        held.wrapper = Some(text.to_owned());
+                    }
+                    exited(String::new())
+                } else {
+                    refused("the wrapper was given no text\n".to_owned())
                 }
             }
             Some(Command::Checkout { name, .. }) => {
@@ -1954,6 +2029,7 @@ impl Simulation {
                     | Command::Build { .. }
                     | Command::Create { .. }
                     | Command::Start { .. }
+                    | Command::Wrap { .. }
                     | Command::Checkout { .. }
                     | Command::Exec { .. }),
                 ) => {

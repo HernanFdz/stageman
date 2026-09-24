@@ -947,6 +947,7 @@ mod tests {
             "because a test said so".to_owned(),
             "do the thing".to_owned(),
             Timestamp::UNIX_EPOCH,
+            stageman_core::Secret::new("warrant-of-a-test-job".to_owned()),
         );
         job.progress = progress;
         job

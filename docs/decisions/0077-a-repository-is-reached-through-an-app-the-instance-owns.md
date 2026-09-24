@@ -120,28 +120,43 @@ and never carries it.**
   as one.
 - **A credential is fetched, never carried.** A job's container is created
   with no platform token in its environment. In its place the instance
-  writes, at creation and beside the checkout, a small wrapper ahead of the
-  platform's tool on the path. When any command runs the tool, the wrapper
-  asks the tools endpoint for a credential and runs the real tool with it
-  for that one process; git asks the tool, as the checkout already
-  arranges, so a push takes the same door. The endpoint answers with the
-  project's pasted token, or with an installation token minted for the
-  project's one repository and the App's permissions and kept until
-  shortly before its hour is up, so a project mints about once an hour
-  however many commands its jobs run. Both routes are served the same way,
-  so no job holds a platform credential in its environment whichever its
-  project uses, and the checkout of 0050 is the first command to take the
-  door.
+  writes, once the container is up and before the checkout, a small
+  wrapper in the platform's tool's own place, with the tool moved aside
+  beside it. When any command runs the tool, the wrapper asks the tools
+  endpoint for a credential and runs the real tool with it for that one
+  process; git asks the wrapper too, through a helper the checkout writes
+  itself, so a push takes the same door. Written by the checkout rather
+  than by the tool's own `setup-git`, and in the tool's place rather than
+  ahead of it on the path, because of one measurement on 2026-09-24: the
+  tool names the binary that ran, by its absolute path, in the helper it
+  writes — so a wrapper found first on the path would have been bypassed
+  by every push, and a helper written here has to name the wrapper. The
+  endpoint answers with the project's pasted token, or with an
+  installation token minted for the project's one repository and the
+  App's permissions and kept until shortly before its hour is up, so a
+  project mints about once an hour however many commands its jobs run.
+  Both routes are served the same way, so no job holds a platform
+  credential in its environment whichever its project uses, and the
+  checkout of 0050 is the first command to take the door.
 - **The wrapper is the instance's, not the image's.** It is written into
-  the container by the instance driving it, at creation, which keeps 0034's
-  rule that an image carries nothing this project writes and its reason:
-  what a container runs is never older than the instance that made it.
+  the container by the instance driving it, at creation and again on every
+  resume, which keeps 0034's rule that an image carries nothing this
+  project writes and its reason: what a container runs is never older than
+  the instance driving it — and a container resumed by an instance
+  answering on another port is told where, since the port is written into
+  the wrapper and an environment fixed at creation could not carry it.
 - **A job is given a warrant for one thing.** The credential route is
   answered only to a bearer presenting a job's own warrant, minted when
   the job is, kept sealed on the job so that a restart knows it, and
   delivered into the container's environment at creation. It buys the
   job's own project's credential and nothing else: not the tools of a turn,
-  which keep their own per-turn warrant, and never another project's.
+  which keep their own per-turn warrant, and never another project's. Each
+  kind is honoured on its own route and refused on the other's, which is
+  what keeps them apart; a retired job's buys nothing, its container being
+  gone with everything in it. A job the last release wrote holds none: its
+  container was created with the credential itself in its environment and
+  keeps what it has, since resuming is not retrying, and every job created
+  from now on gets the warrant and no token.
 - **The Instance page is the fourth navigation entry.** Home, Projects,
   Agents, Instance: what the instance configures about itself, which today
   is this App and its installations, and later the Slack app the next
@@ -169,6 +184,12 @@ nothing at rest.
 Rejected: **the wrapper in the image.** It is the program 0034 removed from
 the image, back in the image; the instance writing it per container is
 what keeps it at the instance's version.
+
+Rejected: **the wrapper ahead of the tool on the path**, which is what this
+record first said. The tool's own git setup names the binary that ran,
+measured above, so every push would have gone to a tool with no credential
+in its environment; and a wrapper in the tool's place is also what an
+absolute path anybody types reaches.
 
 Rejected: **asking the agent to refresh a token**, through a tool it calls
 on an authorisation error. A model managing secrets is fragile, and any
@@ -208,19 +229,22 @@ before the proxy, as 0057's request path allows, each held while the
 platform is asked and then answered with a redirect to the page that sent
 the operator away.
 
-**The file grows and bridges.** The App, sealed; the installations the
-instance has learned; and a project's access as one of two shapes, with a
-bare sealed token opening as the first. The older-file test of
-`docs/conventions.md` §4 carries each.
+**The file grows and bridges.** The App, sealed; a job's warrant, sealed
+on its record and absent for a job the last release wrote; the
+installations the instance has learned; and a project's access as one of
+two shapes, with a bare sealed token opening as the first. The older-file
+test of `docs/conventions.md` §4 carries each.
 
 **The handout changes shape.** It carries no platform credential and
-carries the job's warrant instead; the adapter delivers the warrant and the
-wrapper. The isolation bar of `docs/conventions.md` §4 gains a container
-test: a job's wrapper fetches its own project's credential and is refused
-another's.
+carries the job's warrant instead, and says which platforms the job
+reaches, which is what shapes the checkout; the adapter delivers the
+warrant and the wrapper. The isolation bar of `docs/conventions.md` §4
+gains a container test: a job's wrapper fetches its own project's
+credential and is refused another's.
 
 **The tools endpoint gains one route**, answered by the project's kind of
-access, and held while a token is minted.
+access: at once for a pasted token, and held while a token is minted for
+an installation.
 
 **Scenarios pin the flows**: a registration exchanged and kept, a
 registration the platform refuses, a setup redirect with a foreign

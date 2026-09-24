@@ -35,17 +35,6 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   whether it can be done but which hosts belong on the list, and that is
   answered by watching what a job actually reaches for.
 
-- **Should a job's platform credentials be scoped and short-lived?** The other
-  mitigation from 0009, and independent of the first. A credential limited to
-  the one repository a job is working on, minted per job and expiring, turns a
-  leak from an estate-wide problem into a bounded one. Deferred for the same
-  reason. Settled by finding out what the platforms actually support: a token
-  narrow enough to be worth minting per job, and an issuing path that does not
-  need a human. Note the interaction with
-  `docs/decisions/0002-never-merge-never-deploy.md` — whether a scope exists
-  that permits opening a pull request but not merging one is the same question
-  wearing a different hat, and answering it once answers both.
-
 - **Where does a log line go?**
   `docs/decisions/0018-diagnostics-are-emitted-through-tracing.md` settled how
   one is *emitted* and deliberately settled nothing about where it ends up.
@@ -395,17 +384,15 @@ Intended next steps, in order, each with its reason. Written as intentions, not
 progress: "next X, because Y" — never "X is 60% done", which is both derivable
 and wrong within a day.
 
-- Next, the rest of
+- Next, the last chunk of
   `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`,
-  in two chunks, because the App's registration landed first: fetched
-  credentials for the projects that exist — the job's own warrant, the
-  wrapper the instance writes into the container, the credential route on
-  the tools endpoint, the handout without a token, and the container test
-  that a job fetches its own project's credential and is refused another's
-  — so that every existing project stops carrying its token; then
+  because the App's registration and the fetched credentials landed first:
   installations — the settings card's install route, the setup redirect,
-  the repository derived from the installation, minting and caching, and
-  the older-file bridges. Then the small things the dashboard pass of
+  the repository derived from the installation, minting and caching behind
+  the credential route, the checkout's commit identity for an App's token,
+  which names no user and so cannot be asked who it is the way a pasted
+  token's can, and the older-file bridges. Then the small things the
+  dashboard pass of
   `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md` left:
   the projects list's rows padding themselves on a rule that always
   matches, which the job rows had and fixed on the list item; and whether

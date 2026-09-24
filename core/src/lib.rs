@@ -984,9 +984,11 @@ pub struct Thread {
 /// value naming it has not been written down — a field would have that gap, and
 /// a container nothing can name is the one leak 0015 has to prevent.
 ///
-/// It holds no credential, which is why it crosses the snapshot boundary
-/// unchanged while the types around it need a sealed counterpart.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// It held no credential until
+/// `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`
+/// gave it a warrant, and so crossed the snapshot boundary unchanged; it now
+/// crosses it as [`SealedJob`], like every other type that carries one.
+#[derive(Debug, Clone)]
 pub struct Job {
     /// What it runs on: which agent, set how.
     ///
@@ -1025,10 +1027,9 @@ pub struct Job {
     pub created_at: Timestamp,
     /// Where it has got to.
     ///
-    /// Read through a bridge, because the shape on disk changed: a private
-    /// deserialiser beside this type reads what the last release wrote as well
-    /// as what this one does.
-    #[serde(deserialize_with = "progress_or_older")]
+    /// Read through a bridge on the sealed form, because the shape on disk
+    /// changed: a private deserialiser beside it reads what the last release
+    /// wrote as well as what this one does.
     pub progress: Progress,
     /// When its progress last changed — what a job that needs a person has
     /// been waiting since, per
@@ -1041,7 +1042,6 @@ pub struct Job {
     /// defaulted: such a job says only that it waits, and it has waited
     /// longer than any job that carries a moment, since its last change was
     /// before this build's first stamp.
-    #[serde(default)]
     pub since: Option<Timestamp>,
     /// The room its conversation happens in, once there is one.
     ///
@@ -1056,7 +1056,6 @@ pub struct Job {
     /// `thread`, which is read past and dropped: a thread is not somewhere
     /// this rule can answer, so the job keeps its record and loses its place
     /// to be answered in, which is the loss §4 permits.
-    #[serde(default)]
     pub room: Option<Room>,
     /// Who asked for it, as the platform names them, when a person's message
     /// is what started it.
@@ -1065,7 +1064,6 @@ pub struct Job {
     /// named when it needs them. None for a job started from the dashboard,
     /// and for every job the last release wrote, which is why it is
     /// defaulted.
-    #[serde(default)]
     pub asked_by: Option<String>,
     /// What the agent's session reported it was set to, after being set.
     ///
@@ -1082,14 +1080,12 @@ pub struct Job {
     /// turn, since every turn sets and reads back. Empty for a job that has not
     /// had a turn, and for every job recorded before this existed, which is why
     /// it is defaulted.
-    #[serde(default)]
     pub reported: BTreeMap<String, String>,
     /// The messages it has been sent and has not finished with — see
     /// `docs/decisions/0069-a-message-reaches-a-working-job.md`. Kept with
     /// the record, so that a message in hand when this process dies is
     /// still in hand when it starts again. Empty for every job the last
     /// release wrote, which is why it is defaulted.
-    #[serde(default)]
     pub inbox: Inbox,
     /// The pull requests it said it opened, by number on the project's
     /// repository — see
@@ -1101,8 +1097,19 @@ pub struct Job {
     /// project's repository and nowhere else, which is why it is a number
     /// and not an address. Empty for a job that claimed none, and for every
     /// job the last release wrote, which is why it is defaulted.
-    #[serde(default)]
     pub pull_requests: BTreeSet<u64>,
+    /// What its container presents to this instance to fetch its project's
+    /// platform credential with, and nothing else — see
+    /// `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
+    ///
+    /// Minted when the job is and fixed for its life, like the kit, and
+    /// private for the same reason: it is delivered into the container's
+    /// environment at creation, so a value that changed would be one the
+    /// container could no longer present. None only for a job the last
+    /// release wrote, whose container was created with the credential itself
+    /// in its environment and keeps what it has, since resuming is not
+    /// retrying. Read through [`Job::warrant`] and set only by [`Job::new`].
+    warrant: Option<Secret>,
 }
 
 /// The messages a job has been sent and has not finished with.
@@ -1203,8 +1210,18 @@ impl Job {
     /// job is created" a property of the type rather than a rule — see
     /// `docs/decisions/0048-a-job-runs-on-a-kit.md`. Takes the timestamp
     /// rather than reading a clock, like everything else here.
+    ///
+    /// Takes the warrant as well, so that every job created from now on holds
+    /// one: the only job without one is a job read from a file the last
+    /// release wrote.
     #[must_use]
-    pub const fn new(kit: Kit, reason: String, kickoff: String, created_at: Timestamp) -> Self {
+    pub const fn new(
+        kit: Kit,
+        reason: String,
+        kickoff: String,
+        created_at: Timestamp,
+        warrant: Secret,
+    ) -> Self {
         Self {
             kit,
             reason,
@@ -1217,6 +1234,7 @@ impl Job {
             reported: BTreeMap::new(),
             inbox: Inbox::new(),
             pull_requests: BTreeSet::new(),
+            warrant: Some(warrant),
         }
     }
 
@@ -1224,6 +1242,13 @@ impl Job {
     #[must_use]
     pub const fn kit(&self) -> &Kit {
         &self.kit
+    }
+
+    /// What its container presents to fetch its project's credential with,
+    /// or nothing for a job the last release wrote.
+    #[must_use]
+    pub const fn warrant(&self) -> Option<&Secret> {
+        self.warrant.as_ref()
     }
 }
 
@@ -1858,6 +1883,30 @@ impl State {
             .map(|(id, _)| *id)
     }
 
+    /// Which job holds a warrant, if one that is not over does.
+    ///
+    /// What the credential route asks of a bearer — see
+    /// `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
+    /// A retired job's is refused here rather than removed from its record:
+    /// its container is gone with everything in it, so nothing can present
+    /// the warrant, and the record stays as it was written.
+    #[must_use]
+    pub fn job_with_warrant(&self, presented: &str) -> Option<(ProjectId, JobId)> {
+        self.projects.iter().find_map(|(id, project)| {
+            project
+                .jobs
+                .iter()
+                .find(|(_, recorded)| {
+                    !recorded.progress.is_retired()
+                        && recorded
+                            .warrant
+                            .as_ref()
+                            .is_some_and(|warrant| warrant.expose() == presented)
+                })
+                .map(|(job, _)| (*id, job.clone()))
+        })
+    }
+
     /// A job, for recording what became of it.
     pub fn job_mut(&mut self, job: &JobId) -> Option<&mut Job> {
         self.projects
@@ -2032,6 +2081,11 @@ impl State {
                         ))
                     })
                     .collect::<Result<BTreeMap<_, _>, SealError>>()?;
+                let jobs = project
+                    .jobs
+                    .iter()
+                    .map(|(job, recorded)| Ok((job.clone(), recorded.seal(key, nonces)?)))
+                    .collect::<Result<BTreeMap<_, _>, SealError>>()?;
                 Ok((
                     *id,
                     SealedProject {
@@ -2052,7 +2106,7 @@ impl State {
                         brief: project.brief.clone(),
                         watched: project.watched.clone(),
                         foreman_room: project.foreman_room.clone(),
-                        jobs: project.jobs.clone(),
+                        jobs,
                         attending: project.attending.clone(),
                     },
                 ))
@@ -2388,6 +2442,120 @@ pub struct SealedChannelConfig {
     pub listen_credential: Option<SealedSecret>,
 }
 
+/// A job as it appears on disk: everything in the clear but the warrant.
+///
+/// The bridges from what the last release wrote live here rather than on
+/// [`Job`], because this is the shape a file is read into: a job's
+/// progress under its older spellings, and every field a job written before
+/// it existed lacks, defaulted per `docs/conventions.md` §4.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SealedJob {
+    /// What it runs on. Written as `kit`, and read as the bare agent name
+    /// too, for the reason [`Job`] gives.
+    pub kit: Kit,
+    /// Why the foreman started it.
+    pub reason: String,
+    /// The instruction the agent begins from.
+    pub kickoff: String,
+    /// When the record was created.
+    pub created_at: Timestamp,
+    /// Where it has got to, read through the bridge from the last release's
+    /// spellings.
+    #[serde(deserialize_with = "progress_or_older")]
+    pub progress: Progress,
+    /// When its progress last changed. None for every job the last release
+    /// wrote, which is why it is defaulted.
+    #[serde(default)]
+    pub since: Option<Timestamp>,
+    /// The room its conversation happens in. Absent for a job whose room
+    /// could not be created, and for every job the last release wrote, which
+    /// is why it is defaulted; the `thread` that release wrote instead is
+    /// read past and dropped.
+    #[serde(default)]
+    pub room: Option<Room>,
+    /// Who asked for it. None for a job started from the dashboard, and for
+    /// every job the last release wrote, which is why it is defaulted.
+    #[serde(default)]
+    pub asked_by: Option<String>,
+    /// What the agent's session reported it was set to. Empty for a job
+    /// that has not had a turn, and for every job recorded before this
+    /// existed, which is why it is defaulted.
+    #[serde(default)]
+    pub reported: BTreeMap<String, String>,
+    /// The messages it has been sent and has not finished with. Empty for
+    /// every job the last release wrote, which is why it is defaulted.
+    #[serde(default)]
+    pub inbox: Inbox,
+    /// The pull requests it said it opened. Empty for a job that claimed
+    /// none, and for every job the last release wrote, which is why it is
+    /// defaulted.
+    #[serde(default)]
+    pub pull_requests: BTreeSet<u64>,
+    /// Its warrant, sealed. None for every job the last release wrote,
+    /// which is the true answer rather than a substitute for one: such a
+    /// job's container was created with the credential in its environment,
+    /// and there is no warrant to invent for it.
+    #[serde(default)]
+    pub warrant: Option<SealedSecret>,
+}
+
+impl Job {
+    /// Converts to the form that goes on disk, sealing the warrant.
+    ///
+    /// # Errors
+    ///
+    /// Fails only if the cipher rejects the input.
+    pub fn seal(
+        &self,
+        key: &Key,
+        nonces: &mut impl FnMut() -> Nonce,
+    ) -> Result<SealedJob, SealError> {
+        Ok(SealedJob {
+            kit: self.kit.clone(),
+            reason: self.reason.clone(),
+            kickoff: self.kickoff.clone(),
+            created_at: self.created_at,
+            progress: self.progress.clone(),
+            since: self.since,
+            room: self.room.clone(),
+            asked_by: self.asked_by.clone(),
+            reported: self.reported.clone(),
+            inbox: self.inbox.clone(),
+            pull_requests: self.pull_requests.clone(),
+            warrant: self
+                .warrant
+                .as_ref()
+                .map(|warrant| warrant.seal(key, nonces()))
+                .transpose()?,
+        })
+    }
+}
+
+impl SealedJob {
+    /// Recovers the record, its warrant opened.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the warrant cannot be recovered, which means the key is
+    /// wrong or the file was altered.
+    pub fn open(self, key: &Key) -> Result<Job, OpenError> {
+        Ok(Job {
+            kit: self.kit,
+            reason: self.reason,
+            kickoff: self.kickoff,
+            created_at: self.created_at,
+            progress: self.progress,
+            since: self.since,
+            room: self.room,
+            asked_by: self.asked_by,
+            reported: self.reported,
+            inbox: self.inbox,
+            pull_requests: self.pull_requests,
+            warrant: self.warrant.map(|sealed| sealed.open(key)).transpose()?,
+        })
+    }
+}
+
 /// A project as it appears on disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SealedProject {
@@ -2471,8 +2639,8 @@ pub struct SealedProject {
     /// value with its note, or the bare sealed value the last release wrote.
     #[serde(default, deserialize_with = "variables_or_older")]
     pub variables: BTreeMap<String, SealedVariable>,
-    /// Its jobs, which hold nothing needing sealing.
-    pub jobs: BTreeMap<JobId, Job>,
+    /// Its jobs, each with its warrant sealed.
+    pub jobs: BTreeMap<JobId, SealedJob>,
     /// What its foreman was doing, which holds nothing needing sealing either:
     /// a message from a person is not a credential.
     ///
@@ -2627,6 +2795,11 @@ impl Snapshot {
                         Ok((name, offered))
                     })
                     .collect::<Result<BTreeMap<_, _>, OpenError>>()?;
+                let jobs = project
+                    .jobs
+                    .into_iter()
+                    .map(|(job, sealed)| Ok((job, sealed.open(key)?)))
+                    .collect::<Result<BTreeMap<_, _>, OpenError>>()?;
                 Ok((
                     id,
                     Project {
@@ -2640,7 +2813,7 @@ impl Snapshot {
                         brief: project.brief,
                         watched: project.watched,
                         foreman_room: project.foreman_room,
-                        jobs: project.jobs,
+                        jobs,
                         attending: project.attending,
                     },
                 ))
@@ -2814,7 +2987,16 @@ pub struct Handout {
     // `docs/decisions/0050-the-repository-is-checked-out-before-the-first-turn.md`.
     repository: Option<String>,
     agent_credential: Secret,
-    platforms: BTreeMap<Platform, Secret>,
+    // Which platforms the job reaches, and never a credential for one: since
+    // `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`
+    // a job fetches its project's credential with the warrant below when a
+    // command needs one, and carries none. What is decided here is only
+    // which platforms its project holds access to, which is what shapes the
+    // checkout.
+    platforms: BTreeSet<Platform>,
+    // A job's, for that one thing; a foreman has none, having nothing to
+    // fetch.
+    warrant: Option<Secret>,
     variables: BTreeMap<VariableName, Variable>,
     channels: BTreeMap<Channel, Speaking>,
     place: Option<Place>,
@@ -2872,7 +3054,10 @@ impl Handout {
             // `docs/decisions/0036-a-foremans-image-is-not-a-jobs.md`.
             repository: None,
             agent_credential: config.auth_token.clone(),
-            platforms: BTreeMap::new(),
+            platforms: BTreeSet::new(),
+            // A foreman fetches nothing, so it is given nothing to fetch
+            // with.
+            warrant: None,
             // None, for the reason there is no platform credential here: a
             // foreman judges signals rather than acting on them, so a
             // project's credentials for third parties are the clearest
@@ -2885,8 +3070,17 @@ impl Handout {
         })
     }
 
-    /// What a job's agent is handed: its own credential, plus the platform
-    /// credentials and channel bindings of the one project the job belongs to.
+    /// What a job's agent is handed: its own credential, the job's own
+    /// warrant, and the variables and channel bindings of the one project
+    /// the job belongs to.
+    ///
+    /// No platform credential, since
+    /// `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`:
+    /// the warrant is what the job's container presents to this instance to
+    /// fetch its project's credential when a command needs one, and it buys
+    /// that and nothing else. It is taken rather than read from the record
+    /// because a handout is decided before the record exists, to refuse a
+    /// job that could not be handed anything before anything is written.
     ///
     /// The channels are how a job speaks without a terminal, which
     /// `docs/architecture.md` §2 makes an invariant: a job that needs a human
@@ -2899,7 +3093,12 @@ impl Handout {
     /// process started with nothing to authenticate with fails later, further
     /// from the cause, and `docs/conventions.md` §3 would rather that be a
     /// visible job failure than a mystery.
-    pub fn for_job(state: &State, kit: Kit, project: ProjectId) -> Result<Self, HandoutError> {
+    pub fn for_job(
+        state: &State,
+        kit: Kit,
+        project: ProjectId,
+        warrant: Secret,
+    ) -> Result<Self, HandoutError> {
         let agent = kit.agent();
         let config = state
             .agents
@@ -2914,7 +3113,8 @@ impl Handout {
             role: Role::Job,
             repository: Some(project.repository.clone()),
             agent_credential: config.auth_token.clone(),
-            platforms: project.credentials.clone(),
+            platforms: project.credentials.keys().copied().collect(),
+            warrant: Some(warrant),
             variables: project.variables.clone(),
             channels: speaking(project),
             // Narrowed by [`Handout::speaking_in`] once the job has a room.
@@ -2969,15 +3169,23 @@ impl Handout {
         self.repository.as_deref()
     }
 
-    /// What this job reaches one platform with, if it has anything for it.
+    /// Whether this job reaches a platform: whether its project holds access
+    /// to it, which is what its wrapper fetches a credential for.
     #[must_use]
-    pub fn platform(&self, platform: Platform) -> Option<&Secret> {
-        self.platforms.get(&platform)
+    pub fn reaches(&self, platform: Platform) -> bool {
+        self.platforms.contains(&platform)
     }
 
-    /// Every platform credential in this handout.
-    pub fn platforms(&self) -> impl Iterator<Item = (Platform, &Secret)> {
-        self.platforms.iter().map(|(p, s)| (*p, s))
+    /// Every platform this job reaches.
+    pub fn platforms(&self) -> impl Iterator<Item = Platform> + '_ {
+        self.platforms.iter().copied()
+    }
+
+    /// What this job's container presents to fetch its project's credential
+    /// with, or nothing for a foreman.
+    #[must_use]
+    pub const fn warrant(&self) -> Option<&Secret> {
+        self.warrant.as_ref()
     }
 
     /// Every variable this project gives its jobs, in the order a snapshot
@@ -3063,7 +3271,8 @@ impl fmt::Debug for Handout {
             // A URL rather than a secret, and every kickoff embeds it already.
             .field("repository", &self.repository)
             .field("agent_credential", &"<redacted>")
-            .field("platforms", &self.platforms.keys().collect::<Vec<_>>())
+            .field("platforms", &self.platforms)
+            .field("warrant", &self.warrant.as_ref().map(|_| "<redacted>"))
             // Names, never values. A name is not a credential — the operator
             // typed it in order to read it back — and naming what is present
             // is the whole use of a `Debug` on this type.
@@ -3103,8 +3312,9 @@ mod tests {
         Agent, AgentConfig, Arriving, Attending, BASE64, Channel, ChannelConfig, ClaudeEffort,
         ClaudeModel, Errand, Handout, HandoutError, Inbox, Inconsistent, Job, JobId, Key, Kit,
         KitConfig, KitName, KitNameError, NONCE_LEN, Nonce, OpenError, Outcome, Place, Platform,
-        Progress, Project, ProjectId, Recipient, RepositoryAddress, RepositoryError, Room, Secret,
-        Snapshot, State, Taken, Thread, Variable, VariableName, VariableNameError, Waiting,
+        Progress, Project, ProjectId, Recipient, RepositoryAddress, RepositoryError, Room,
+        SealedJob, Secret, Snapshot, State, Taken, Thread, Variable, VariableName,
+        VariableNameError, Waiting,
     };
     use base64::Engine as _;
     use jiff::Timestamp;
@@ -3112,6 +3322,16 @@ mod tests {
     use uuid::Uuid;
 
     const TOKEN: &str = "ghp-not-a-real-token";
+    /// The fixture's job's warrant: what its container presents to fetch
+    /// `TOKEN` with, and never `TOKEN` itself.
+    const WARRANT: &str = "warrant-of-the-fixtures-job";
+    /// Another job's, on another project, so that a handout carrying the
+    /// wrong one can say whose it was.
+    const ALIEN_WARRANT: &str = "warrant-that-is-not-yours";
+
+    fn warrant() -> Secret {
+        Secret::new(WARRANT.to_owned())
+    }
     /// Distinct from `TOKEN`, so a test that finds a credential where it should
     /// not can say which map it escaped from.
     const CHANNEL_TOKEN: &str = "xoxb-not-a-real-token";
@@ -3173,6 +3393,7 @@ mod tests {
                 "an issue was opened".to_owned(),
                 "work on it".to_owned(),
                 Timestamp::UNIX_EPOCH,
+                Secret::new(WARRANT.to_owned()),
             ),
         );
         Project {
@@ -3816,9 +4037,15 @@ mod tests {
                 }}"#
             );
 
-            let job: Job = serde_json::from_str(&older)
-                .unwrap_or_else(|why| panic!("{written} must still parse: {why}"));
+            let job = serde_json::from_str::<SealedJob>(&older)
+                .unwrap_or_else(|why| panic!("{written} must still parse: {why}"))
+                .open(&key())
+                .expect("and opens, holding no warrant to unseal");
             assert_eq!(job.progress, expected);
+            assert!(
+                job.warrant().is_none(),
+                "a job written before warrants existed has none"
+            );
             assert!(
                 job.pull_requests.is_empty(),
                 "a job written before it could claim one claimed none"
@@ -3867,10 +4094,18 @@ mod tests {
                     "a reason".to_owned(),
                     "some work".to_owned(),
                     Timestamp::UNIX_EPOCH,
+                    warrant(),
                 )
             };
-            let written = serde_json::to_string(&job).expect("a job serialises");
-            let read: Job = serde_json::from_str(&written).expect("and parses back");
+            let written = serde_json::to_string(
+                &job.seal(&key(), &mut counting_nonces())
+                    .expect("sealing cannot fail"),
+            )
+            .expect("a job serialises");
+            let read = serde_json::from_str::<SealedJob>(&written)
+                .expect("and parses back")
+                .open(&key())
+                .expect("and opens");
             assert_eq!(read.progress, progress);
         }
     }
@@ -3908,6 +4143,7 @@ mod tests {
             "a refactor touching many files".to_owned(),
             "do it carefully".to_owned(),
             Timestamp::UNIX_EPOCH,
+            warrant(),
         );
         recorded
             .reported
@@ -4134,6 +4370,7 @@ mod tests {
         );
         assert_eq!(job.asked_by, None);
         assert!(job.inbox.is_empty(), "no job had an inbox to write");
+        assert!(job.warrant().is_none(), "no job had a warrant to write");
         assert_eq!(project.brief, "", "nobody had written one");
         assert!(project.watched.is_empty(), "nothing was watched");
     }
@@ -4465,7 +4702,11 @@ mod tests {
         assert_eq!(handout.agent(), Agent::Claude);
         assert_eq!(handout.agent_credential().expose(), "agent-token");
         assert_eq!(handout.platforms().count(), 0);
-        assert!(handout.platform(Platform::GitHub).is_none());
+        assert!(!handout.reaches(Platform::GitHub));
+        assert!(
+            handout.warrant().is_none(),
+            "nothing to fetch, so nothing to fetch with"
+        );
     }
 
     /// The asymmetry `docs/decisions/0027-a-channel-is-not-a-platform.md` is
@@ -4486,15 +4727,29 @@ mod tests {
         assert_eq!(handout.channels().count(), 1);
     }
 
+    /// A job is handed its own warrant and told which platforms it reaches,
+    /// and no platform credential at all: since
+    /// `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`
+    /// the credential is fetched with the warrant when a command needs it,
+    /// and the handout has nowhere to put one.
     #[test]
-    fn a_job_is_handed_its_own_projects_credentials() {
+    fn a_job_is_handed_a_warrant_and_no_platform_credential() {
         let (state, mine, _) = two_projects();
-        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine)
+        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine, warrant())
             .expect("a watched project");
 
         assert_eq!(handout.agent_credential().expose(), "agent-token");
+        assert!(handout.reaches(Platform::GitHub));
+        assert_eq!(handout.platforms().collect::<Vec<_>>(), [Platform::GitHub]);
+        assert_eq!(handout.warrant().map(Secret::expose), Some(WARRANT));
+        // And the state it was built from does hold the token, so this is
+        // about the handout rather than an empty fixture.
         assert_eq!(
-            handout.platform(Platform::GitHub).map(Secret::expose),
+            state
+                .projects
+                .get(&mine)
+                .and_then(|project| project.credentials.get(&Platform::GitHub))
+                .map(Secret::expose),
             Some(TOKEN)
         );
     }
@@ -4512,7 +4767,7 @@ mod tests {
             .map(|project| project.repository.clone())
             .expect("a watched project");
 
-        let job = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine)
+        let job = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine, warrant())
             .expect("a watched project");
         assert_eq!(job.repository(), Some(expected.as_str()));
 
@@ -4527,7 +4782,7 @@ mod tests {
     #[test]
     fn a_job_is_handed_the_channel_it_speaks_on() {
         let (state, mine, _) = two_projects();
-        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine)
+        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine, warrant())
             .expect("a watched project");
 
         let speaking = handout
@@ -4544,18 +4799,22 @@ mod tests {
     fn a_jobs_handout_carries_nothing_belonging_to_another_project() {
         let (state, mine, theirs) = two_projects();
 
-        let ours = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine)
+        let ours = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine, warrant())
             .expect("a watched project");
-        let alien = Handout::for_job(&state, Kit::defaults(Agent::Claude), theirs)
-            .expect("a watched project");
+        let alien = Handout::for_job(
+            &state,
+            Kit::defaults(Agent::Claude),
+            theirs,
+            Secret::new(ALIEN_WARRANT.to_owned()),
+        )
+        .expect("a watched project");
 
-        let leaked = alien.platform(Platform::GitHub).map(Secret::expose);
-        assert_eq!(leaked, Some("not-yours-and-never-was"));
-        assert_ne!(ours.platform(Platform::GitHub).map(Secret::expose), leaked);
-
-        for (_, secret) in ours.platforms() {
-            assert_ne!(secret.expose(), "not-yours-and-never-was");
-        }
+        // Neither carries a platform credential since 0077: each reaches its
+        // project's platform through a warrant of its own, and the warrants
+        // are what must not be confused.
+        assert!(ours.reaches(Platform::GitHub) && alien.reaches(Platform::GitHub));
+        assert_eq!(alien.warrant().map(Secret::expose), Some(ALIEN_WARRANT));
+        assert_ne!(ours.warrant().map(Secret::expose), Some(ALIEN_WARRANT));
 
         // The same claim for the second map. Selection happens once per map,
         // so a map added without being selected from is exactly the mistake
@@ -4588,7 +4847,7 @@ mod tests {
     fn a_job_is_handed_its_projects_variables() {
         let (state, mine, _) = two_projects();
 
-        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine)
+        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine, warrant())
             .expect("a watched project");
         let delivered: Vec<(&str, &str)> = handout
             .variables()
@@ -4621,7 +4880,7 @@ mod tests {
     fn a_handouts_variable_names_can_be_read_without_their_values() {
         let (state, mine, _) = two_projects();
 
-        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine)
+        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine, warrant())
             .expect("a watched project");
         let named: Vec<&str> = handout.variable_names().map(VariableName::as_str).collect();
 
@@ -4701,7 +4960,7 @@ mod tests {
     fn a_handout_does_not_leak_a_variables_value_when_formatted() {
         let (state, mine, _) = two_projects();
 
-        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine)
+        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine, warrant())
             .expect("a watched project");
         let shown = format!("{handout:?}");
 
@@ -4717,7 +4976,7 @@ mod tests {
     fn a_handout_has_nowhere_to_speak_until_it_is_given_a_place() {
         let (state, mine, _) = two_projects();
 
-        let job = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine)
+        let job = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine, warrant())
             .expect("a watched project");
         assert!(job.place().is_none());
         assert!(
@@ -4759,7 +5018,7 @@ mod tests {
         let (state, mine, _) = two_projects();
 
         for handout in [
-            Handout::for_job(&state, Kit::defaults(Agent::Claude), mine)
+            Handout::for_job(&state, Kit::defaults(Agent::Claude), mine, warrant())
                 .expect("a watched project"),
             Handout::for_foreman(&state, mine).expect("a watched project"),
         ] {
@@ -4796,7 +5055,7 @@ mod tests {
         let (state, _, _) = two_projects();
         let stranger = ProjectId::from_uuid(Uuid::from_u128(99));
 
-        let refused = Handout::for_job(&state, Kit::defaults(Agent::Claude), stranger);
+        let refused = Handout::for_job(&state, Kit::defaults(Agent::Claude), stranger, warrant());
 
         assert!(matches!(refused, Err(HandoutError::UnknownProject(id)) if id == stranger));
     }
@@ -4806,7 +5065,7 @@ mod tests {
         let (mut state, mine, _) = two_projects();
         state.agents.clear();
 
-        let refused = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine);
+        let refused = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine, warrant());
 
         assert!(matches!(
             refused,
@@ -4818,7 +5077,7 @@ mod tests {
     #[test]
     fn a_handout_does_not_leak_a_credential_when_formatted() {
         let (state, mine, _) = two_projects();
-        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine)
+        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine, warrant())
             .expect("a watched project");
 
         let shown = format!("{handout:?}");
@@ -4826,6 +5085,11 @@ mod tests {
         assert!(!shown.contains("agent-token"), "{shown}");
         assert!(!shown.contains(TOKEN), "{shown}");
         assert!(!shown.contains(CHANNEL_TOKEN), "{shown}");
+        assert!(!shown.contains(WARRANT), "{shown}");
+        assert!(
+            shown.contains("warrant"),
+            "it should still say it holds one"
+        );
         assert!(
             shown.contains("GitHub"),
             "it should still say what it holds"
@@ -4915,6 +5179,7 @@ mod tests {
                 "a reason".to_owned(),
                 "some work".to_owned(),
                 Timestamp::UNIX_EPOCH,
+                warrant(),
             );
             job.progress = progress;
             jobs.insert(id, job);
@@ -5107,6 +5372,55 @@ mod tests {
             .attending;
         assert_eq!(attending.on().map(|e| e.said.as_str()), Some("in hand"));
         assert_eq!(attending.waiting(), 1);
+    }
+
+    /// A job's warrant is sealed in the file like every other credential,
+    /// never written in the clear, and comes back as itself.
+    #[test]
+    fn a_jobs_warrant_is_sealed_in_the_file_and_survives_it() {
+        let json = serde_json::to_string(&sealed()).expect("a snapshot serialises");
+        assert!(!json.contains(WARRANT), "{json}");
+
+        let reopened: Snapshot = serde_json::from_str(&json).expect("and parses back");
+        let reopened = reopened.open(&key()).expect("and opens");
+        let job = reopened
+            .projects
+            .values()
+            .next()
+            .and_then(|project| project.jobs.values().next())
+            .expect("the job survived");
+
+        assert_eq!(job.warrant().map(Secret::expose), Some(WARRANT));
+    }
+
+    /// A warrant names the job that holds it, and only while that job is
+    /// not over: a retired job's container is gone with everything in it,
+    /// so nothing can present its warrant, and the route that asks this
+    /// refuses it.
+    #[test]
+    fn a_warrant_names_its_job_until_that_job_is_over() {
+        let mut state = populated();
+        let project = *state.projects.keys().next().expect("a project");
+        let job = state
+            .projects
+            .get(&project)
+            .and_then(|watched| watched.jobs.keys().next())
+            .cloned()
+            .expect("a job");
+
+        assert_eq!(
+            state.job_with_warrant(WARRANT),
+            Some((project, job.clone()))
+        );
+        assert_eq!(state.job_with_warrant("not-a-warrant"), None);
+        assert_eq!(state.job_with_warrant(""), None);
+
+        state.job_mut(&job).expect("the job").progress = Progress::Retired(Outcome::Done);
+        assert_eq!(
+            state.job_with_warrant(WARRANT),
+            None,
+            "a retired job's warrant buys nothing"
+        );
     }
 
     /// A job's project is findable from the job alone.

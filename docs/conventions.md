@@ -445,6 +445,21 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   rather than a decision about one process, and loses the part that matters:
   a handout is scoped to somebody, and the scoping is the point.
 
+- **warrant** — what one bearer presents to ask one thing of this instance:
+  minted here, checked here, and never leaving the machine. Two kinds since
+  `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
+  A turn's is minted when the turn starts and forgotten when it ends, and
+  buys the tools the instance serves. A job's is minted with the job, kept
+  sealed on its record, and delivered into its container's environment at
+  creation; it buys the job's own project's platform credential, fetched
+  by the wrapper the instance writes in the platform's tool's place, and
+  nothing else. Each kind is honoured on its own route and refused on the
+  other's, which is what keeps them apart. Not a *token*, the near-miss
+  `docs/decisions/0032-a-foreman-asks-the-instance-by-warrant.md` records:
+  that word already names what an agent authenticates with, what a job
+  reaches a platform with and what a channel is posted on, and none of
+  those is minted here or scoped to one bearer.
+
 - **instance** — everything one running stageman knows and every decision it
   makes, as one synchronous value: the projects and their jobs, the foremen's
   inboxes, what is in flight, and the rule for what to do about each thing
@@ -599,6 +614,14 @@ justify is usually obsolete.
   where is a pure function in the core crate so it can be tested without
   spawning anything; delivering it belongs to the adapter. Reasoning in
   `docs/decisions/0008-one-credential-per-agent.md`.
+
+  **A job's process is handed no platform credential at all**, since
+  `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`:
+  its container carries a warrant, and a wrapper the instance writes in the
+  platform's tool's place fetches the credential for one command at a
+  time. The variable the tool reads stays reserved all the same, because
+  the wrapper sets it for the tool's process and an operator's variable
+  under that name would be overridden there and honoured nowhere.
 
   **A project's variables can reach that same failure from the other side, and
   are refused for it.** An operator naming one `ANTHROPIC_API_KEY` would change
@@ -1052,6 +1075,14 @@ it lands.
   rather than retiring it: the test is now evidence about what that container
   actually permits, and construction is only an argument about what the code
   asks for.
+
+  Since
+  `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`
+  the platform credential is not in the handout to escape from, so the
+  escape test on the handout cannot see it, and a container test does: a
+  job's wrapper, run in a real container against a real daemon, fetches its
+  own project's credential and prints no other's, and a warrant the daemon
+  never minted fails the command rather than running it as nobody.
 - **Killing stageman leaves nothing untracked, and nothing running that is not
   holding a live tunnel.** Hard-killing
   the process is a supported operation with a test, not an accident recovered

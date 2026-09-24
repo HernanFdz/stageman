@@ -15,6 +15,7 @@ mod apps;
 mod booting;
 mod channel;
 mod checks;
+mod credentials;
 mod dashboard;
 mod foreman;
 mod foreman_room;

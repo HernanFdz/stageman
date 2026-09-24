@@ -248,6 +248,17 @@ pub fn tools_endpoint(port: u16) -> String {
     format!("http://host.docker.internal:{port}/mcp")
 }
 
+/// Where a job's wrapper fetches its credential from: the same listener the
+/// tools are served on, as a container reaches it — see
+/// `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
+#[must_use]
+pub fn credential_endpoint(port: u16) -> String {
+    format!(
+        "http://host.docker.internal:{port}{}",
+        crate::tools::CREDENTIAL_PATH
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Domain, NoHome, Target, domain, instance_file, key_file};
@@ -409,7 +420,7 @@ mod tests {
     /// A mistyped port falls back, and zero is honoured.
     #[test]
     fn the_tools_port_is_what_the_environment_says_or_the_one_nothing_uses() {
-        use super::{DEFAULT_TOOLS_PORT, tools_endpoint, tools_port};
+        use super::{DEFAULT_TOOLS_PORT, credential_endpoint, tools_endpoint, tools_port};
 
         assert_eq!(tools_port(&environment(&[])), DEFAULT_TOOLS_PORT);
         assert_eq!(
@@ -428,6 +439,10 @@ mod tests {
         assert_eq!(
             tools_endpoint(47_113),
             "http://host.docker.internal:47113/mcp"
+        );
+        assert_eq!(
+            credential_endpoint(47_113),
+            "http://host.docker.internal:47113/credential"
         );
     }
 

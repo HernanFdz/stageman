@@ -9,7 +9,11 @@ changes what the listener in
 Since `docs/decisions/0067-a-transcript-is-posted-where-its-speaker-owns-the-room.md`
 the tool that speaks is no longer the only way an agent's words reach a
 person: what an agent says and does is posted as it happens, and the tool is
-the way to speak somewhere else.
+the way to speak somewhere else. Amended by
+`docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`:
+one thing this project writes now goes into a *container* — a wrapper in
+the platform's tool's place, written at creation and on every resume by
+the instance driving it — and the image still carries nothing.
 
 ## Context
 

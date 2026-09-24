@@ -257,6 +257,7 @@ impl Running {
                 kit,
                 warrant,
                 tools: self.tools.clone(),
+                fetching: self.fetching_for(job),
                 text: stageman_foreman::reply(&errand.said, &target, context.as_deref(), finding),
             }),
         );
@@ -447,6 +448,7 @@ mod tests {
                         "started by hand".to_owned(),
                         "do the thing".to_owned(),
                         Timestamp::UNIX_EPOCH,
+                        stageman_core::Secret::new("warrant-of-a-test-job".to_owned()),
                     ),
                 )]),
                 variables: BTreeMap::new(),
