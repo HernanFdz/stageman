@@ -280,7 +280,15 @@ fn creating_a_project_listens_on_its_channel_once_the_record_has_landed() {
         .find(|project| project.name == "burrow")
         .expect("the new project");
     assert_eq!(burrow.channels, vec!["Slack".to_owned()]);
-    assert_eq!(burrow.access, Some(AccessView::Token));
+    assert_eq!(
+        burrow.access,
+        Some(AccessView::Token {
+            owner: Some("example".to_owned()),
+            expires: None,
+            expired: false,
+        }),
+        "whose the token is, read when it was checked"
+    );
     let created = ProjectId::from_uuid(Uuid::parse_str(&burrow.id).expect("an identifier"));
     assert_eq!(
         sim.listening(),
@@ -419,7 +427,7 @@ fn amending_keeps_a_credential_when_the_box_is_blank() {
     assert_eq!(watched.name, "renamed");
     assert!(matches!(
         watched.access.get(&stageman_core::Platform::GitHub),
-        Some(stageman_core::Access::Token(token)) if token.expose() == "ghp-the-new-one"
+        Some(stageman_core::Access::Token { secret, .. }) if secret.expose() == "ghp-the-new-one"
     ));
 
     assert_eq!(
@@ -923,4 +931,79 @@ fn starting_a_job_on_a_project_with_no_binding_is_refused_by_name() {
         })
     );
     assert!(sim.first_turn().is_none(), "nothing ran: {:?}", sim.shape());
+}
+
+/// The first page raises a token within a week of expiring, and one
+/// expired, soonest first and before the jobs, each with whose it is;
+/// one further off, or one the platform gave no expiry for, is not
+/// raised; and the project's own page says which — see
+/// `docs/decisions/0080-a-tokens-owner-and-expiry-are-kept-beside-it.md`.
+#[test]
+fn home_raises_a_token_a_week_from_expiring_and_one_expired() {
+    let raised = |days_ahead: i64, owner: Option<&str>, expires: bool| {
+        let mut sim = Simulation::new();
+        let mut state = watching(&[]);
+        let now = i64::try_from(sim.now()).expect("a virtual instant");
+        let at =
+            Timestamp::from_millisecond(now + days_ahead * 24 * 60 * 60 * 1_000).expect("a time");
+        crate::simulation::holding_a_token_of(
+            &mut state,
+            "ghp-not-a-real-token",
+            owner,
+            expires.then_some(at),
+        );
+        sim.holding(&state);
+        let mut instance = sim.wake(seed(1));
+        let Response::Home(home) = ask(&mut sim, &mut instance, 1, Request::Home) else {
+            panic!("the first page");
+        };
+        let Response::Projects(shown) = ask(&mut sim, &mut instance, 2, Request::Projects) else {
+            panic!("the projects screen");
+        };
+        (
+            home.expiring,
+            shown
+                .projects
+                .into_iter()
+                .find(|listed| listed.id == project().to_string())
+                .and_then(|listed| listed.access),
+        )
+    };
+
+    let (raised_soon, view) = raised(3, Some("somebody"), true);
+    assert_eq!(raised_soon.len(), 1);
+    let soon = &raised_soon[0];
+    assert_eq!(soon.project, project().to_string());
+    assert_eq!(soon.project_name, "example");
+    assert_eq!(soon.owner.as_deref(), Some("somebody"));
+    assert!(!soon.expired);
+    assert!(
+        matches!(&view, Some(AccessView::Token { owner: Some(owner), expires: Some(at), expired: false }) if owner == "somebody" && at == &soon.expires),
+        "{view:?}"
+    );
+
+    let (raised_past, view) = raised(-2, None, true);
+    assert_eq!(raised_past.len(), 1);
+    assert!(raised_past[0].expired);
+    assert_eq!(raised_past[0].owner, None, "a token the last release kept");
+    assert!(
+        matches!(view, Some(AccessView::Token { expired: true, .. })),
+        "{view:?}"
+    );
+
+    let (not_yet, _) = raised(30, Some("somebody"), true);
+    assert!(not_yet.is_empty(), "a month off is nobody's business yet");
+    let (never, view) = raised(3, Some("somebody"), false);
+    assert!(never.is_empty(), "a token that does not expire");
+    assert!(
+        matches!(
+            view,
+            Some(AccessView::Token {
+                expires: None,
+                expired: false,
+                ..
+            })
+        ),
+        "{view:?}"
+    );
 }

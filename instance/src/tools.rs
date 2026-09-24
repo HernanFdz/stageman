@@ -857,9 +857,9 @@ impl Running {
             .and_then(|watched| watched.access.get(&Platform::GitHub))
             .cloned();
         match access {
-            Some(stageman_core::Access::Token(credential)) => {
+            Some(stageman_core::Access::Token { secret, .. }) => {
                 tracing::debug!(%job, "handed its project's token to its wrapper");
-                Self::say_now(id, OK, credential.expose(), effects);
+                Self::say_now(id, OK, secret.expose(), effects);
             }
             // Minted for the project's one repository and kept for most of
             // its hour, per

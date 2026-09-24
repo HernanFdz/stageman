@@ -393,7 +393,11 @@ mod tests {
             repository_link: "https://github.com/owner/aviary".to_owned(),
             foreman: stageman_wire::Fitted::default(),
             kits: Vec::new(),
-            access: Some(stageman_wire::AccessView::Token),
+            access: Some(stageman_wire::AccessView::Token {
+                owner: None,
+                expires: None,
+                expired: false,
+            }),
             channels: vec!["Slack".to_owned()],
             variables: Vec::new(),
             brief: String::new(),

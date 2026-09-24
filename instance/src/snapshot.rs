@@ -45,7 +45,11 @@ pub fn exposed(state: &State) -> Value {
                 })),
                 "access": keyed(project.access.iter().map(|(platform, access)| {
                     (format!("{platform:?}"), match access {
-                        stageman_core::Access::Token(secret) => json!({ "token": secret.expose() }),
+                        stageman_core::Access::Token { secret, owner, expires } => json!({
+                            "token": secret.expose(),
+                            "owner": owner,
+                            "expires": value(expires),
+                        }),
                         stageman_core::Access::Installation { id } => json!({ "installation": id }),
                     })
                 })),

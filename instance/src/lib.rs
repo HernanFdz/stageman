@@ -1319,7 +1319,7 @@ impl Running {
         let platform = stageman_core::Platform::GitHub;
         let watched = self.state.projects.get(&project)?;
         match watched.access.get(&platform)? {
-            stageman_core::Access::Token(_) => None,
+            stageman_core::Access::Token { .. } => None,
             stageman_core::Access::Installation { .. } => self
                 .state
                 .apps

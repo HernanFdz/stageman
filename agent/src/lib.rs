@@ -3410,7 +3410,11 @@ mod tests {
         let mut access = BTreeMap::new();
         access.insert(
             Platform::GitHub,
-            stageman_core::Access::Token(Secret::new("gh-not-a-real-token".to_owned())),
+            stageman_core::Access::Token {
+                secret: Secret::new("gh-not-a-real-token".to_owned()),
+                owner: None,
+                expires: None,
+            },
         );
         state.projects.insert(
             id,

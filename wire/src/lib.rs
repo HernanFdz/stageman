@@ -123,6 +123,10 @@ pub struct Instance {
 /// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Home {
+    /// Every token about to stop working, soonest first, and every one
+    /// that has: what a person replaces — see
+    /// `docs/decisions/0080-a-tokens-owner-and-expiry-are-kept-beside-it.md`.
+    pub expiring: Vec<ExpiringToken>,
     /// Every idle job, longest waiting first: the ones a person does
     /// something about, which is what *idle* means.
     pub needs_you: Vec<ProjectJob>,
@@ -130,6 +134,22 @@ pub struct Home {
     pub working: Vec<ProjectJob>,
     /// Every project.
     pub projects: Vec<Project>,
+}
+
+/// A project's token that is about to stop working, or has: raised on the
+/// first page for the person who replaces it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExpiringToken {
+    /// The project, by identifier.
+    pub project: String,
+    /// The project, by name.
+    pub project_name: String,
+    /// Whose the token is, where that was read.
+    pub owner: Option<String>,
+    /// When it expires, as the wire spells a moment.
+    pub expires: String,
+    /// Whether that moment has passed.
+    pub expired: bool,
 }
 
 /// One job beside the project it belongs to, for a list that spans projects.
@@ -247,8 +267,17 @@ impl Project {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "shape", rename_all = "snake_case")]
 pub enum AccessView {
-    /// A token, pasted and checked.
-    Token,
+    /// A token, pasted and checked, with what the platform said of it —
+    /// see `docs/decisions/0080-a-tokens-owner-and-expiry-are-kept-beside-it.md`.
+    Token {
+        /// Whose it is, where that was read: an account's name.
+        owner: Option<String>,
+        /// When the platform stops accepting it, as the wire spells a
+        /// moment, where the platform said.
+        expires: Option<String>,
+        /// Whether that moment has passed, as the instance read the page.
+        expired: bool,
+    },
     /// An installation of the App.
     Installation {
         /// The account it is on.
@@ -423,8 +452,11 @@ pub enum Reached {
     /// The repositories, each with its visibility.
     Listed {
         /// The account the access is on, where the platform says one:
-        /// an installation's, and none for a token.
+        /// an installation's, or the account a token was made under.
         account: Option<String>,
+        /// When a token expires, as the wire spells a moment, where the
+        /// platform said; none for an installation.
+        expires: Option<String>,
         /// The rows, by address.
         repositories: Vec<Reachable>,
         /// Whether the platform had more than were listed.
@@ -447,6 +479,7 @@ impl Default for Reached {
     fn default() -> Self {
         Self::Listed {
             account: None,
+            expires: None,
             repositories: Vec::new(),
             more: false,
         }
@@ -1959,6 +1992,7 @@ mod tests {
             Reached::default(),
             Reached::Listed {
                 account: None,
+                expires: None,
                 repositories: Vec::new(),
                 more: false,
             }

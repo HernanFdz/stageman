@@ -31,7 +31,7 @@ use super::live::Live;
 use super::projects_view::{amend, create, forget, projects, reaches};
 use crate::ui::{
     BESIDE, Button, ButtonVariant, Card, Combobox, ComboboxItem, FIELD, Field, Guide, Icon, Modal,
-    PageHeader, Segmented, Skeleton, TextArea, Tooltip,
+    PageHeader, Segmented, Skeleton, TextArea, Tooltip, When,
 };
 
 pub use stageman_wire::{
@@ -103,13 +103,16 @@ enum Action {
     BackToApp,
 }
 
-/// One piece of the sentence: words, or words that do something.
+/// One piece of the sentence: words, words that do something, or a
+/// moment drawn once the page is awake.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Segment {
     /// Words.
     Text(String),
     /// Words that do something when pressed.
     Act(Action, String),
+    /// A moment, as the wire spells it, read as how far off it is.
+    When(String),
 }
 
 /// What the form holds for the App shape, live or remembered: which
@@ -131,6 +134,15 @@ struct AppSlot {
 struct TokenSlot {
     /// The token set in this form; none for the one the project holds.
     token: Option<String>,
+    /// Whose it is, where the platform has said — see
+    /// `docs/decisions/0080-a-tokens-owner-and-expiry-are-kept-beside-it.md`.
+    owner: Option<String>,
+    /// When the platform stops accepting it, as the wire spells a moment,
+    /// where the platform has said.
+    expires: Option<String>,
+    /// Whether that moment has passed, as the instance last read it. Never
+    /// for a token set here, which the platform just accepted.
+    expired: bool,
     /// What it can read, once the instance has listed it.
     listing: Option<Result<Reached, String>>,
 }
@@ -140,6 +152,9 @@ impl std::fmt::Debug for TokenSlot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TokenSlot")
             .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("owner", &self.owner)
+            .field("expires", &self.expires)
+            .field("expired", &self.expired)
             .field("listing", &self.listing)
             .finish()
     }
@@ -187,10 +202,17 @@ impl Access {
                 repository,
                 ..Self::default()
             },
-            Some(AccessView::Token) => Self {
+            Some(AccessView::Token {
+                owner,
+                expires,
+                expired,
+            }) => Self {
                 shape: AccessShape::Token,
                 token: Some(TokenSlot {
                     token: None,
+                    owner: owner.clone(),
+                    expires: expires.clone(),
+                    expired: *expired,
                     listing: None,
                 }),
                 repository,
@@ -354,7 +376,27 @@ fn sentence(access: &Access, app_registered: bool) -> Vec<Segment> {
             said.push(text(" instead."));
         }
         AccessShape::Token => {
-            said.push(text("With a token. "));
+            // Whose, and until when, where the platform has said: the two
+            // facts kept beside a token, per
+            // `docs/decisions/0080-a-tokens-owner-and-expiry-are-kept-beside-it.md`.
+            let slot = access.token.as_ref();
+            let whose = slot.and_then(|slot| slot.owner.as_deref()).map_or_else(
+                || "With a token".to_owned(),
+                |owner| format!("With {owner}'s token"),
+            );
+            match slot.and_then(|slot| slot.expires.clone()) {
+                Some(at) if slot.is_some_and(|slot| slot.expired) => {
+                    said.push(text(&format!("{whose}, which expired ")));
+                    said.push(Segment::When(at));
+                    said.push(text(". "));
+                }
+                Some(at) => {
+                    said.push(text(&format!("{whose}, expiring ")));
+                    said.push(Segment::When(at));
+                    said.push(text(". "));
+                }
+                None => said.push(text(&format!("{whose}. "))),
+            }
             said.push(act(Action::UseToken, "Replace it"));
             if app_registered {
                 said.push(text(", or "));
@@ -1031,6 +1073,9 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
                             for (position, segment) in sentence(&access.read(), app_registered).into_iter().enumerate() {
                                 match segment {
                                     Segment::Text(words) => rsx! { span { key: "{position}", "{words}" } },
+                                    Segment::When(at) => rsx! {
+                                        When { key: "{position}", at, ahead: true, class: "text-sm text-foreground".to_owned() }
+                                    },
                                     Segment::Act(action, words) => rsx! {
                                         button {
                                             key: "{position}",
@@ -1135,9 +1180,16 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
                             checking_token.set(false);
                             match listed {
                                 Ok(listed @ Reached::Listed { .. }) => {
+                                    let (owner, expires) = match &listed {
+                                        Reached::Listed { account, expires, .. } => (account.clone(), expires.clone()),
+                                        Reached::Unlisted { .. } | Reached::NotYet => (None, None),
+                                    };
                                     apply(access, draft, not_reached, |access| {
                                         access.token = Some(TokenSlot {
                                             token: Some(token),
+                                            owner,
+                                            expires,
+                                            expired: false,
                                             listing: Some(Ok(listed)),
                                         });
                                         access.moved(AccessShape::Token);
@@ -1714,6 +1766,7 @@ mod tests {
         said.iter()
             .map(|segment| match segment {
                 Segment::Text(words) | Segment::Act(_, words) => words.clone(),
+                Segment::When(at) => format!("<{at}>"),
             })
             .collect()
     }
@@ -1722,7 +1775,7 @@ mod tests {
         said.iter()
             .filter_map(|segment| match segment {
                 Segment::Act(action, words) => Some((*action, words.as_str())),
-                Segment::Text(_) => None,
+                Segment::Text(_) | Segment::When(_) => None,
             })
             .collect()
     }
@@ -1745,6 +1798,7 @@ mod tests {
     fn listed(rows: &[Reachable]) -> Reached {
         Reached::Listed {
             account: None,
+            expires: None,
             repositories: rows.to_vec(),
             more: false,
         }
@@ -1761,6 +1815,9 @@ mod tests {
     fn with_a_token(token: Option<&str>) -> TokenSlot {
         TokenSlot {
             token: token.map(str::to_owned),
+            owner: None,
+            expires: None,
+            expired: false,
             listing: None,
         }
     }
@@ -1865,6 +1922,54 @@ mod tests {
         );
     }
 
+    /// The token's sentence says whose it is and when it expires, where the
+    /// platform has said either: the moment drawn once the page is awake,
+    /// and *which expired* once it has passed — see
+    /// `docs/decisions/0080-a-tokens-owner-and-expiry-are-kept-beside-it.md`.
+    #[test]
+    fn the_sentence_says_whose_the_token_is_and_when_it_expires() {
+        let token = Access {
+            shape: AccessShape::Token,
+            token: Some(with_a_token(Some("github_pat_not_a_real_token"))),
+            ..Access::default()
+        };
+        let owned = Access {
+            token: Some(TokenSlot {
+                owner: Some("acme".to_owned()),
+                expires: Some("2026-10-24T12:00:00Z".to_owned()),
+                ..with_a_token(None)
+            }),
+            ..token
+        };
+        assert_eq!(
+            words(&sentence(&owned, false)),
+            "With acme's token, expiring <2026-10-24T12:00:00Z>. Replace it.",
+            "whose, and until when, drawn as a moment"
+        );
+        let expired = Access {
+            token: Some(TokenSlot {
+                expired: true,
+                ..owned.token.clone().expect("the slot")
+            }),
+            ..owned.clone()
+        };
+        assert_eq!(
+            words(&sentence(&expired, false)),
+            "With acme's token, which expired <2026-10-24T12:00:00Z>. Replace it."
+        );
+        let owner_only = Access {
+            token: Some(TokenSlot {
+                expires: None,
+                ..owned.token.clone().expect("the slot")
+            }),
+            ..owned
+        };
+        assert_eq!(
+            words(&sentence(&owner_only, false)),
+            "With acme's token. Replace it."
+        );
+    }
+
     /// The form starts on what the project holds, with its repository, and
     /// on nothing for a project that does not exist yet; and what the wire
     /// is sent names the access the way the instance resolves it — the
@@ -1905,10 +2010,21 @@ mod tests {
                 repository: Some(named("acme/aviary")),
             }
         );
-        project.access = Some(AccessView::Token);
+        project.access = Some(AccessView::Token {
+            owner: Some("acme".to_owned()),
+            expires: Some("2026-10-24T12:00:00Z".to_owned()),
+            expired: false,
+        });
         let starting = Access::starting(Some(&project));
         assert_eq!(starting.shape, AccessShape::Token);
-        assert_eq!(starting.token, Some(with_a_token(None)));
+        assert_eq!(
+            starting.token,
+            Some(TokenSlot {
+                owner: Some("acme".to_owned()),
+                expires: Some("2026-10-24T12:00:00Z".to_owned()),
+                ..with_a_token(None)
+            })
+        );
         assert_eq!(
             starting.draft(),
             AccessDraft::Token {
@@ -2225,7 +2341,11 @@ mod tests {
                     description: "big work".to_owned(),
                     fitted: as_it_comes(),
                 }],
-                access: Some(AccessView::Token),
+                access: Some(AccessView::Token {
+                    owner: None,
+                    expires: None,
+                    expired: false,
+                }),
                 channels: vec!["Slack".to_owned()],
                 variables: vec![stageman_wire::Variable {
                     name: "STRIPE_API_KEY".to_owned(),

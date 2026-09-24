@@ -471,6 +471,12 @@ pub struct Simulation {
     /// What a token can read, by full name and whether private: what the
     /// platform answers a token's listing with.
     token_reads: Vec<(String, bool)>,
+    /// Whose a token is, as the platform answers when asked.
+    token_owner: String,
+    /// When a token expires, as the platform spells it in the header it
+    /// sends beside every answer to one that does; none for one that does
+    /// not.
+    token_expiry: Option<String>,
     key: Key,
     /// What this flow is recorded as, where it is recorded at all: the file
     /// it is written to, and what that file says it pins.
@@ -600,6 +606,18 @@ pub fn without_a_warrant(job: &Job) -> Job {
 
 /// Gives the project a pasted token for its repository's platform.
 pub fn holding_a_token(state: &mut State, token: &str) {
+    holding_a_token_of(state, token, None, None);
+}
+
+/// A project holding a token with what the platform said of it when it
+/// was checked: whose it is, and when it expires — see
+/// `docs/decisions/0080-a-tokens-owner-and-expiry-are-kept-beside-it.md`.
+pub fn holding_a_token_of(
+    state: &mut State,
+    token: &str,
+    owner: Option<&str>,
+    expires: Option<Timestamp>,
+) {
     state
         .projects
         .get_mut(&project())
@@ -607,7 +625,11 @@ pub fn holding_a_token(state: &mut State, token: &str) {
         .access
         .insert(
             Platform::GitHub,
-            Access::Token(Secret::new(token.to_owned())),
+            Access::Token {
+                secret: Secret::new(token.to_owned()),
+                owner: owner.map(str::to_owned),
+                expires,
+            },
         );
 }
 
@@ -814,6 +836,8 @@ impl Simulation {
             coverage: BTreeMap::new(),
             accounts: BTreeMap::new(),
             token_reads: vec![("example/repo".to_owned(), true)],
+            token_owner: "example".to_owned(),
+            token_expiry: None,
             key: key(),
             recording: None,
             recorder: None,
@@ -2597,14 +2621,27 @@ impl Simulation {
                     } => self.mint_answer(id, &repositories),
                     PlatformCall::Repositories { .. } => self.repositories_answer(request),
                     PlatformCall::Readable { .. } => (200, self.readable_answer()),
+                    PlatformCall::Owner { .. } => {
+                        (200, format!(r#"{{"login":"{}"}}"#, self.token_owner))
+                    }
                 });
+            // The expiry rides on every answer to a token that expires, as
+            // measured; an App's own requests carry none, and the sim does
+            // not tell them apart, which nothing here reads wrongly.
+            let mut headers: BTreeMap<String, String> = [(
+                "content-type".to_owned(),
+                "application/json; charset=utf-8".to_owned(),
+            )]
+            .into();
+            if let Some(spelled) = &self.token_expiry {
+                headers.insert(
+                    "github-authentication-token-expiration".to_owned(),
+                    spelled.clone(),
+                );
+            }
             Responded::Answered {
                 status,
-                headers: [(
-                    "content-type".to_owned(),
-                    "application/json; charset=utf-8".to_owned(),
-                )]
-                .into(),
+                headers,
                 body: body.into(),
             }
         };
@@ -2999,6 +3036,17 @@ impl Simulation {
     /// Scripts which account a simulated installation is on, from now on.
     pub fn installed_on(&mut self, installation: u64, account: &str) {
         self.accounts.insert(installation, account.to_owned());
+    }
+
+    /// Scripts whose a token is, from now on.
+    pub fn token_owned_by(&mut self, login: &str) {
+        login.clone_into(&mut self.token_owner);
+    }
+
+    /// Scripts when a token expires, as the platform spells it in its
+    /// header — `2026-09-27 08:42:20 UTC`, measured — or that it does not.
+    pub fn token_expires(&mut self, spelled: Option<&str>) {
+        self.token_expiry = spelled.map(str::to_owned);
     }
 
     /// Scripts what a token can read, by full name and whether private,

@@ -361,6 +361,7 @@ fn what_came_back_under_a_state_is_listed_for_the_form_that_holds_it() {
         answered,
         Response::Reached(Reached::Listed {
             account: Some("acme".to_owned()),
+            expires: None,
             repositories: vec![row("acme/a", true), row("acme/b", false)],
             more: false,
         }),
@@ -608,6 +609,7 @@ fn what_a_project_holds_is_listed_for_its_own_form() {
         reaches(&mut sim, &mut instance, 1, held()),
         Response::Reached(Reached::Listed {
             account: Some("example".to_owned()),
+            expires: None,
             repositories: vec![row("example/a", true)],
             more: false,
         })
@@ -627,10 +629,11 @@ fn what_a_project_holds_is_listed_for_its_own_form() {
     let listed = reaches(&mut sim, &mut instance, 1, held());
     assert!(
         matches!(
-            listed,
-            Response::Reached(Reached::Listed { account: None, .. })
+            &listed,
+            Response::Reached(Reached::Listed { account: Some(login), expires: None, .. })
+                if login == "example"
         ),
-        "{listed:?}"
+        "the account a token was made under, asked with it: {listed:?}"
     );
     let read = sim
         .trace()
@@ -650,17 +653,19 @@ fn what_a_project_holds_is_listed_for_its_own_form() {
 }
 
 /// A form asking what a token can read is answered with what the platform
-/// lists for it, each row saying whether it is private and no account,
-/// since the platform names none for a token; a token the platform does
-/// not accept, or a platform that cannot be asked, is answered with why
-/// rather than refused — the question was asked and that is its answer —
-/// and an empty token is not asked about.
+/// lists for it, each row saying whether it is private, with whose the
+/// token is and when it expires, asked with it in the same breath; a
+/// token the platform does not accept, or a platform that cannot be
+/// asked, is answered with why rather than refused — the question was
+/// asked and that is its answer — and an empty token is not asked about.
 #[test]
 fn what_a_token_can_read_is_listed_and_a_bad_token_answered_with_why() {
     let mut sim = Simulation::new();
     sim.holding(&watching(&[]));
     let mut instance = sim.wake(seed(1));
     sim.token_reads(&[("example/private", true), ("example/public", false)]);
+    sim.token_owned_by("somebody");
+    sim.token_expires(Some("2026-09-27 08:42:20 UTC"));
 
     let asked = |sim: &mut Simulation, instance: &mut Instance, id: u64, token: &str| {
         reaches(
@@ -675,16 +680,22 @@ fn what_a_token_can_read_is_listed_and_a_bad_token_answered_with_why() {
     assert_eq!(
         asked(&mut sim, &mut instance, 1, "ghp-not-a-real-token"),
         Response::Reached(Reached::Listed {
-            account: None,
+            account: Some("somebody".to_owned()),
+            expires: Some("2026-09-27T08:42:20Z".to_owned()),
             repositories: vec![row("example/private", true), row("example/public", false)],
             more: false,
         })
     );
     assert_eq!(
         calls(&sim),
-        [PlatformCall::Readable {
-            platform: Platform::GitHub
-        }]
+        [
+            PlatformCall::Readable {
+                platform: Platform::GitHub
+            },
+            PlatformCall::Owner {
+                platform: Platform::GitHub
+            }
+        ]
     );
     let read = sim
         .trace()
@@ -713,7 +724,11 @@ fn what_a_token_can_read_is_listed_and_a_bad_token_answered_with_why() {
             field: "access".to_owned()
         })
     );
-    assert_eq!(calls(&sim).len(), 3, "an empty token is not asked about");
+    assert_eq!(
+        calls(&sim).len(),
+        6,
+        "two reads per token, and an empty token is not asked about"
+    );
 }
 
 /// A project created on the installation its tab brought back has its
@@ -878,14 +893,21 @@ fn a_kept_installation_is_checked_again_when_the_repository_moves() {
     ) else {
         panic!("amended");
     };
-    assert_eq!(the_project(&shown).access, Some(AccessView::Token));
+    assert_eq!(
+        the_project(&shown).access,
+        Some(AccessView::Token {
+            owner: Some("example".to_owned()),
+            expires: None,
+            expired: false,
+        })
+    );
     assert!(matches!(
         sim.disk()
             .expect("landed")
             .projects
             .get(&project())
             .and_then(|watched| watched.access.get(&Platform::GitHub)),
-        Some(Access::Token(token)) if token.expose() == "ghp-not-a-real-token"
+        Some(Access::Token { secret, .. }) if secret.expose() == "ghp-not-a-real-token"
     ));
 }
 

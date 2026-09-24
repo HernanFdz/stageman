@@ -17,7 +17,7 @@
 //! `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
 
 use percent_encoding::utf8_percent_encode;
-use stageman_core::{Platform, RepositoryAddress, Secret};
+use stageman_core::{Platform, RepositoryAddress, Secret, Timestamp};
 
 use crate::{Call, PlatformError, QUERY, Request};
 
@@ -26,6 +26,14 @@ const REPOSITORIES: &str = "https://api.github.com/repos/";
 
 /// Where the platform lists what a token can read.
 const READABLE: &str = "https://api.github.com/user/repos";
+
+/// Where the platform says whose a token is.
+const USER: &str = "https://api.github.com/user";
+
+/// The header the platform answers every request with when the token it
+/// was made with expires, carrying when — see
+/// `docs/decisions/0080-a-tokens-owner-and-expiry-are-kept-beside-it.md`.
+const EXPIRATION: &str = "github-authentication-token-expiration";
 
 /// How many repositories one listing asks for: the most the platform gives
 /// on a page.
@@ -120,6 +128,116 @@ pub fn readable(credential: &Secret) -> Request {
         .into(),
         body: None,
     }
+}
+
+/// Renders asking whose a token is: the account it was made under, which
+/// is also the request whose answer carries when the token expires.
+pub fn owner(credential: &Secret) -> Request {
+    Request {
+        method: "GET".to_owned(),
+        url: USER.to_owned(),
+        headers: [
+            (
+                "accept".to_owned(),
+                "application/vnd.github+json".to_owned(),
+            ),
+            (
+                "authorization".to_owned(),
+                format!("Bearer {}", credential.expose()),
+            ),
+            ("user-agent".to_owned(), STAGEMAN.to_owned()),
+            ("x-github-api-version".to_owned(), "2022-11-28".to_owned()),
+        ]
+        .into(),
+        body: None,
+    }
+}
+
+/// What the platform said of a token: whose it is, and when it expires
+/// where it does.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Owned {
+    /// The account the token was made under, as the platform spells it.
+    pub login: String,
+    /// When the platform will stop accepting it, where the platform said:
+    /// the header is absent for a token that does not expire.
+    pub expires: Option<Timestamp>,
+}
+
+/// What the platform's answer to [`owner`] means: the account, and the
+/// expiry read off the header the platform sends beside every answer to a
+/// token that expires, spelled `2026-09-27 08:42:20 UTC` as measured.
+///
+/// # Errors
+///
+/// Fails if the platform does not accept the token, refused to say, could
+/// not be reached, answered with something this does not read as an
+/// account, or sent an expiry this does not read as a moment — the last
+/// refused rather than dropped, since a fact this instance acts on has to
+/// be the platform's word or absent.
+pub fn owned(
+    status: u16,
+    headers: &std::collections::BTreeMap<String, String>,
+    body: &[u8],
+) -> Result<Owned, PlatformError> {
+    let platform = Platform::GitHub;
+    match status {
+        200..=299 => {}
+        401 => return Err(PlatformError::Refused { platform }),
+        403 | 429 => {
+            return Err(PlatformError::Forbidden {
+                platform,
+                why: message(body),
+            });
+        }
+        500..=599 => {
+            return Err(PlatformError::Unreachable {
+                platform,
+                why: format!("it answered {status}"),
+            });
+        }
+        other => {
+            return Err(PlatformError::Unexpected {
+                platform,
+                status: other,
+            });
+        }
+    }
+    let told: serde_json::Value =
+        serde_json::from_slice(body).map_err(|failure| PlatformError::Unreadable {
+            platform,
+            why: failure.to_string(),
+        })?;
+    let login = told
+        .get("login")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| PlatformError::Unreadable {
+            platform,
+            why: "the account came without its login".to_owned(),
+        })?;
+    let expires = headers
+        .get(EXPIRATION)
+        .map(|spelled| expiry(spelled))
+        .transpose()?;
+    Ok(Owned { login, expires })
+}
+
+/// The expiry header's moment: `YYYY-MM-DD HH:MM:SS UTC`, as the platform
+/// spells it, read as the moment it names.
+fn expiry(spelled: &str) -> Result<Timestamp, PlatformError> {
+    let unreadable = || PlatformError::Unreadable {
+        platform: Platform::GitHub,
+        why: format!("the token's expiry could not be read: {spelled:?}"),
+    };
+    let (date, clock) = spelled
+        .trim()
+        .strip_suffix(" UTC")
+        .and_then(|rest| rest.split_once(' '))
+        .ok_or_else(unreadable)?;
+    format!("{date}T{clock}Z")
+        .parse::<Timestamp>()
+        .map_err(|_| unreadable())
 }
 
 /// Repositories listed by the platform, as far as one page says, each
@@ -253,6 +371,11 @@ pub fn call(request: &Request) -> Option<Call> {
     }
     if request.url.starts_with(READABLE) {
         return Some(Call::Readable {
+            platform: Platform::GitHub,
+        });
+    }
+    if request.url == USER {
+        return Some(Call::Owner {
             platform: Platform::GitHub,
         });
     }

@@ -15,7 +15,10 @@ at the three boxes on the project form that take a credential. Narrowed
 by `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`: a repository token is checked when it is set, in a panel of
 its own, by a listing of what it can read, and again at save by the read
 decided below, against a repository chosen from that listing rather than
-typed.
+typed. Extended by
+`docs/decisions/0080-a-tokens-owner-and-expiry-are-kept-beside-it.md`: the
+check reads whose the token is as well, and keeps that and the token's
+expiry beside it.
 
 ## Context
 

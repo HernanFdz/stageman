@@ -1013,7 +1013,11 @@ fn a_project_has_a_settings_page_and_a_new_one_is_that_page_empty() {
         .access
         .insert(
             stageman_core::Platform::GitHub,
-            stageman_core::Access::Token(Secret::new("github_pat_not_a_real_token".to_owned())),
+            stageman_core::Access::Token {
+                secret: Secret::new("github_pat_not_a_real_token".to_owned()),
+                owner: Some("example".to_owned()),
+                expires: None,
+            },
         );
     written(&snapshot, &watched);
     let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
@@ -1034,8 +1038,9 @@ fn a_project_has_a_settings_page_and_a_new_one_is_that_page_empty() {
     );
     assert!(settings.contains("example/aviary"), "{settings}");
     assert!(
-        settings.contains("With a token."),
-        "the access sentence says the shape on the server too: {settings}"
+        // The apostrophe as the server escapes it in text.
+        settings.contains("With example&#39;s token."),
+        "the access sentence says the shape, and whose the token is, on the server too: {settings}"
     );
     // A text area's value is its text and not an attribute, so a box the
     // server rendered from an attribute alone arrives empty. The kit's
@@ -1295,7 +1300,11 @@ fn two_projects_each_with_a_job() -> (State, Vec<(JobId, &'static str, &'static 
                 )]),
                 access: BTreeMap::from([(
                     Platform::GitHub,
-                    Access::Token(Secret::new((*token).to_owned())),
+                    Access::Token {
+                        secret: Secret::new((*token).to_owned()),
+                        owner: None,
+                        expires: None,
+                    },
                 )]),
                 channels: BTreeMap::new(),
                 variables: BTreeMap::new(),

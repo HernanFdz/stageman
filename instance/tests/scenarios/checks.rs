@@ -245,7 +245,11 @@ fn an_amended_token_is_checked_and_a_kept_one_is_not() {
         .access
         .insert(
             Platform::GitHub,
-            Access::Token(Secret::new("ghp-the-old-one".to_owned())),
+            Access::Token {
+                secret: Secret::new("ghp-the-old-one".to_owned()),
+                owner: None,
+                expires: None,
+            },
         );
     crate::simulation::on_github(&mut state, "example/renamed");
     sim.holding(&state);
@@ -260,7 +264,7 @@ fn an_amended_token_is_checked_and_a_kept_one_is_not() {
             .access
             .get(&Platform::GitHub)
             .and_then(|access| match access {
-                Access::Token(token) => Some(token.expose().to_owned()),
+                Access::Token { secret, .. } => Some(secret.expose().to_owned()),
                 Access::Installation { .. } => None,
             })
     };
@@ -391,4 +395,205 @@ fn a_daemon_dying_mid_check_answers_nobody_and_keeps_nothing() {
     assert!(sim.response(1).is_none(), "answered to nobody");
     assert_eq!(instance.state().projects.len(), 1, "nothing was kept");
     assert_eq!(reads(&sim), 1, "the next start asks nothing of it");
+}
+
+/// A token checked at save is asked whose it is beside the read of the
+/// repository, and what the platform said — the account, and the expiry
+/// off the header — is kept beside the token and shown on the project;
+/// an amendment that leaves the token and the repository alone asks
+/// nothing and keeps what was said; one that moves the repository under
+/// the token asks both again — see
+/// `docs/decisions/0080-a-tokens-owner-and-expiry-are-kept-beside-it.md`.
+#[test]
+fn a_tokens_owner_and_expiry_are_read_at_the_check_and_kept_beside_it() {
+    let mut sim = Simulation::new();
+    sim.holding(&watching(&[]));
+    let mut instance = sim.wake(seed(1));
+    sim.token_owned_by("somebody");
+    sim.token_expires(Some("2026-09-27 08:42:20 UTC"));
+    let owner_reads = |sim: &Simulation| {
+        sim.platform_calls()
+            .iter()
+            .filter(|(_, call)| matches!(call, PlatformCall::Owner { .. }))
+            .count()
+    };
+
+    let Response::Projects(shown) = ask(
+        &mut sim,
+        &mut instance,
+        1,
+        Request::Create {
+            draft: a_draft("aviary"),
+        },
+    ) else {
+        panic!("created");
+    };
+    assert_eq!(reads(&sim), 1, "the repository, read with the token");
+    assert_eq!(
+        owner_reads(&sim),
+        1,
+        "and whose the token is, in the same breath"
+    );
+    let created = shown
+        .projects
+        .iter()
+        .find(|listed| listed.name == "aviary")
+        .expect("the new project");
+    assert_eq!(
+        created.access,
+        Some(stageman_wire::AccessView::Token {
+            owner: Some("somebody".to_owned()),
+            expires: Some("2026-09-27T08:42:20Z".to_owned()),
+            expired: false,
+        })
+    );
+    let id = created.id.clone();
+    let kept = |sim: &Simulation| {
+        sim.disk()
+            .expect("landed")
+            .projects
+            .values()
+            .find(|watched| watched.name == "aviary" || watched.name == "renamed")
+            .and_then(|watched| watched.access.get(&Platform::GitHub).cloned())
+    };
+    assert!(
+        matches!(
+            kept(&sim),
+            Some(Access::Token { owner: Some(ref owner), expires: Some(at), .. })
+                if owner == "somebody" && at.to_string() == "2026-09-27T08:42:20Z"
+        ),
+        "{:?}",
+        kept(&sim)
+    );
+
+    // Nothing moved under the token: nothing asked, and the facts kept.
+    let mut renamed = a_draft("renamed");
+    renamed.access = AccessDraft::Token {
+        token: None,
+        repository: Some(crate::dashboard::repo("example", "aviary")),
+    };
+    sim.token_owned_by("nobody");
+    let Response::Projects(_) = ask(
+        &mut sim,
+        &mut instance,
+        2,
+        Request::Amend {
+            project: id,
+            draft: renamed,
+        },
+    ) else {
+        panic!("amended");
+    };
+    assert_eq!(reads(&sim), 1);
+    assert_eq!(owner_reads(&sim), 1);
+    assert!(matches!(
+        kept(&sim),
+        Some(Access::Token { owner: Some(ref owner), .. }) if owner == "somebody"
+    ));
+}
+
+/// The repository moved under the token held is both reads again, and
+/// what the platform says now is what is kept — an expiry it no longer
+/// sends included.
+#[test]
+fn a_kept_tokens_facts_are_read_again_when_the_repository_moves() {
+    let mut sim = Simulation::new();
+    let mut state = watching(&[]);
+    crate::simulation::holding_a_token_of(
+        &mut state,
+        "ghp-the-held-one",
+        Some("somebody"),
+        Some("2026-09-27T08:42:20Z".parse().expect("a time")),
+    );
+    crate::simulation::on_github(&mut state, "example/repo");
+    sim.holding(&state);
+    let mut instance = sim.wake(seed(1));
+    sim.token_owned_by("nobody");
+    sim.token_expires(None);
+
+    let mut moved = a_draft("example");
+    moved.access = AccessDraft::Token {
+        token: None,
+        repository: Some(crate::dashboard::repo("example", "other")),
+    };
+    let Response::Projects(_) = ask(
+        &mut sim,
+        &mut instance,
+        1,
+        Request::Amend {
+            project: project().to_string(),
+            draft: moved,
+        },
+    ) else {
+        panic!("amended");
+    };
+    assert_eq!(reads(&sim), 1);
+    assert_eq!(
+        sim.platform_calls()
+            .iter()
+            .filter(|(_, call)| matches!(call, PlatformCall::Owner { .. }))
+            .count(),
+        1
+    );
+    let kept = sim
+        .disk()
+        .expect("landed")
+        .projects
+        .get(&project())
+        .and_then(|watched| watched.access.get(&Platform::GitHub).cloned());
+    assert!(
+        matches!(
+            kept,
+            Some(Access::Token { owner: Some(ref owner), expires: None, .. }) if owner == "nobody"
+        ),
+        "{kept:?}"
+    );
+}
+
+/// The platform refusing the read of the account refuses the token on
+/// its box, as the read of the repository would; and an expiry the
+/// platform sends that this instance cannot read refuses the token too,
+/// rather than being dropped — see
+/// `docs/decisions/0080-a-tokens-owner-and-expiry-are-kept-beside-it.md`.
+#[test]
+fn a_token_whose_account_or_expiry_cannot_be_read_is_refused() {
+    let mut sim = Simulation::new();
+    sim.holding(&watching(&[]));
+    let mut instance = sim.wake(seed(1));
+
+    // The repository's read answers as measured; the account's is refused.
+    sim.next_platform_answers(200, r#"{"full_name":"example/aviary","private":true}"#);
+    sim.next_platform_answers(401, r#"{"message":"Bad credentials"}"#);
+    assert_eq!(
+        ask(
+            &mut sim,
+            &mut instance,
+            1,
+            Request::Create {
+                draft: a_draft("aviary")
+            }
+        ),
+        Response::Refused(Refusal::TokenRefused {
+            why: "GitHub does not accept it".to_owned()
+        })
+    );
+    assert_eq!(instance.state().projects.len(), 1, "nothing kept");
+
+    sim.token_expires(Some("tomorrow"));
+    let refused = ask(
+        &mut sim,
+        &mut instance,
+        2,
+        Request::Create {
+            draft: a_draft("aviary"),
+        },
+    );
+    assert!(
+        matches!(
+            &refused,
+            Response::Refused(Refusal::TokenRefused { why }) if why.contains("expiry could not be read")
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(instance.state().projects.len(), 1, "nothing kept");
 }

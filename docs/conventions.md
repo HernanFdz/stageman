@@ -596,7 +596,12 @@ Record the near-miss too: the term you rejected, and what it would have implied.
 - **access** — how a project reaches its repository's platform: a token
   pasted and checked, or an installation of the App. One per platform,
   and a job never carries either: the credential route serves a token as
-  it is and mints one from an installation. The word this project uses
+  it is and mints one from an installation. A token is kept with what
+  the platform said of it when it was checked — whose it is, and when it
+  expires — since
+  `docs/decisions/0080-a-tokens-owner-and-expiry-are-kept-beside-it.md`:
+  two facts about the secret, which cannot change under it, said on the
+  project's page and raised on the first page a week before the expiry. The word this project uses
   for the map that held *credentials* until
   `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`,
   renamed because an installation is not a credential and a map called

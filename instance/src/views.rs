@@ -10,8 +10,9 @@ use std::collections::BTreeMap;
 
 use stageman_channel::Identity;
 use stageman_core::{
-    Agent, Attending, Channel, ClaudeEffort, ClaudeModel, Inconsistent, Installation, Job, JobId,
-    Kit, Outcome, Platform, Progress, Project, ProjectId, RepositoryAddress, Room, State, Waiting,
+    Access, Agent, Attending, Channel, ClaudeEffort, ClaudeModel, Inconsistent, Installation, Job,
+    JobId, Kit, Outcome, Platform, Progress, Project, ProjectId, RepositoryAddress, Room, State,
+    Timestamp, Waiting,
 };
 use stageman_wire::{AccessView, Choice, Fitted, KitDraft, ModelChoice, Refusal, Shape, Standing};
 
@@ -290,6 +291,7 @@ pub fn projected(
     project: &Project,
     us: Option<&Identity>,
     installations: Option<&BTreeMap<u64, Installation>>,
+    now: Timestamp,
 ) -> stageman_wire::Project {
     stageman_wire::Project {
         id: id.to_string(),
@@ -307,7 +309,11 @@ pub fn projected(
             })
             .collect(),
         access: match project.access.get(&Platform::GitHub) {
-            Some(stageman_core::Access::Token(_)) => Some(AccessView::Token),
+            Some(Access::Token { owner, expires, .. }) => Some(AccessView::Token {
+                owner: owner.clone(),
+                expires: expires.map(|at| at.to_string()),
+                expired: expires.is_some_and(|at| at <= now),
+            }),
             Some(stageman_core::Access::Installation { id }) => Some(AccessView::Installation {
                 account: installations
                     .and_then(|known| known.get(id))
@@ -354,7 +360,11 @@ pub fn projected(
 }
 
 /// Every project this instance watches.
-pub fn watching(state: &State, identities: &Identities) -> Vec<stageman_wire::Project> {
+pub fn watching(
+    state: &State,
+    identities: &Identities,
+    now: Timestamp,
+) -> Vec<stageman_wire::Project> {
     let installations = state
         .apps
         .get(&Platform::GitHub)
@@ -362,8 +372,48 @@ pub fn watching(state: &State, identities: &Identities) -> Vec<stageman_wire::Pr
     state
         .projects
         .iter()
-        .map(|(id, project)| projected(*id, project, identities.get(id), installations))
+        .map(|(id, project)| projected(*id, project, identities.get(id), installations, now))
         .collect()
+}
+
+/// How long before a token expires it is raised on the first page: a week,
+/// which is long enough to mint another and short enough not to nag.
+const RAISED_BEFORE_SECONDS: i64 = 7 * 24 * 60 * 60;
+
+/// Every token about to expire or expired, soonest first — see
+/// `docs/decisions/0080-a-tokens-owner-and-expiry-are-kept-beside-it.md`.
+fn expiring(state: &State, now: Timestamp) -> Vec<stageman_wire::ExpiringToken> {
+    let mut raised: Vec<(Timestamp, stageman_wire::ExpiringToken)> = state
+        .projects
+        .iter()
+        .filter_map(
+            |(id, project)| match project.access.get(&Platform::GitHub) {
+                Some(Access::Token {
+                    owner,
+                    expires: Some(at),
+                    ..
+                }) if at
+                    .as_second()
+                    .checked_sub(now.as_second())
+                    .is_some_and(|left| left <= RAISED_BEFORE_SECONDS) =>
+                {
+                    Some((
+                        *at,
+                        stageman_wire::ExpiringToken {
+                            project: id.to_string(),
+                            project_name: project.name.clone(),
+                            owner: owner.clone(),
+                            expires: at.to_string(),
+                            expired: *at <= now,
+                        },
+                    ))
+                }
+                _ => None,
+            },
+        )
+        .collect();
+    raised.sort_by_key(|(at, _)| *at);
+    raised.into_iter().map(|(_, token)| token).collect()
 }
 
 /// Every agent this build can run, as the browser sees them — the whole set,
@@ -549,6 +599,7 @@ pub fn home(
     identities: &Identities,
     domain: &Domain,
     serving: u16,
+    now: Timestamp,
 ) -> stageman_wire::Home {
     let mut idle: Vec<(ProjectId, &Project, &JobId, &Job)> = Vec::new();
     let mut running: Vec<(ProjectId, &Project, &JobId, &Job)> = Vec::new();
@@ -581,9 +632,10 @@ pub fn home(
         }
     };
     stageman_wire::Home {
+        expiring: expiring(state, now),
         needs_you: idle.into_iter().map(placed).collect(),
         working: running.into_iter().map(placed).collect(),
-        projects: watching(state, identities),
+        projects: watching(state, identities, now),
     }
 }
 
@@ -603,9 +655,10 @@ pub fn watching_now(
     state: &State,
     identities: &Identities,
     app_registered: bool,
+    now: Timestamp,
 ) -> stageman_wire::Watching {
     stageman_wire::Watching {
-        projects: watching(state, identities),
+        projects: watching(state, identities, now),
         available: listed(state)
             .into_iter()
             .filter(|agent| agent.configured)
@@ -884,7 +937,13 @@ mod tests {
                 .insert(JobId::from_uuid(Uuid::from_u128(which)), job);
         }
 
-        let shown = super::projected(ProjectId::from_uuid(Uuid::nil()), watched, None, None);
+        let shown = super::projected(
+            ProjectId::from_uuid(Uuid::nil()),
+            watched,
+            None,
+            None,
+            Timestamp::UNIX_EPOCH,
+        );
         assert_eq!(shown.working, 1);
         assert_eq!(shown.jobs, 3);
         assert_eq!(shown.name, "aviary");
@@ -911,7 +970,13 @@ mod tests {
             app: None,
         });
         watched.repository = RepositoryAddress::new("owner", "aviary").expect("an address");
-        let shown = super::projected(ProjectId::from_uuid(Uuid::nil()), watched, None, None);
+        let shown = super::projected(
+            ProjectId::from_uuid(Uuid::nil()),
+            watched,
+            None,
+            None,
+            Timestamp::UNIX_EPOCH,
+        );
         assert!(shown.attending);
         assert_eq!(shown.repository_link, "https://github.com/owner/aviary");
     }
@@ -956,7 +1021,13 @@ mod tests {
         }
         let domain = Domain::parse("example.com").expect("a domain");
 
-        let shown = super::home(&state, &super::Identities::new(), &domain, 8080);
+        let shown = super::home(
+            &state,
+            &super::Identities::new(),
+            &domain,
+            8080,
+            Timestamp::UNIX_EPOCH,
+        );
 
         let named = |placed: &[stageman_wire::ProjectJob]| {
             placed
@@ -1007,7 +1078,13 @@ mod tests {
             id: "C0BT53FM079".to_owned(),
         });
 
-        let shown = super::projected(ProjectId::from_uuid(Uuid::nil()), watched, None, None);
+        let shown = super::projected(
+            ProjectId::from_uuid(Uuid::nil()),
+            watched,
+            None,
+            None,
+            Timestamp::UNIX_EPOCH,
+        );
         assert_eq!(shown.brief, "Ignore alerts below error.");
         assert_eq!(shown.watched, vec!["C0BT53FM079".to_owned()]);
     }

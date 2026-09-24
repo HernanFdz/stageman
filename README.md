@@ -61,8 +61,10 @@ chosen from what that reaches.** With a token: press *Use a token* on the
 project's page, mint one from GitHub's form — the page links to it with
 the name and the permissions filled in; grant it the one repository
 there, with contents, issues and pull requests write — paste it, and it
-is checked against GitHub before the panel closes. Then pick the
-repository from what the token can read, each marked private or public.
+is checked against GitHub before the panel closes, which also says whose
+it is and when it expires. Then pick the repository from what the token
+can read, each marked private or public. The first page raises a token a
+week before it expires, and after, until it is replaced.
 A public repository you did not grant the token is listed too, since
 anybody can read it, and fails at the first push; a private one is
 listed only because you granted it.

@@ -699,8 +699,20 @@ pub struct Installation {
 pub enum Access {
     /// A token pasted and checked, per
     /// `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`,
-    /// held for as long as the project is.
-    Token(Secret),
+    /// held for as long as the project is, with what the platform said of
+    /// it when it was checked — see
+    /// `docs/decisions/0080-a-tokens-owner-and-expiry-are-kept-beside-it.md`.
+    Token {
+        /// The token itself.
+        secret: Secret,
+        /// Whose it is, as the platform spells the account: read when the
+        /// token was checked, and none for a token the last release kept.
+        owner: Option<String>,
+        /// When the platform will stop accepting it: read from the answer
+        /// when the token was checked, and none where the platform says
+        /// none, or for a token the last release kept.
+        expires: Option<Timestamp>,
+    },
     /// An installation of the App this instance owns, by its identifier on
     /// the platform, learned from the platform's setup redirect and
     /// confirmed with the App's key. Not a credential: what reaches the
@@ -2523,15 +2535,29 @@ impl SealedSecret {
 /// How a project reaches a platform, as it appears on disk: a token
 /// sealed, or an installation by identifier.
 ///
-/// Untagged, so that a token is written exactly as the last release wrote
-/// one — the bare sealed secret — and a file from before installations
-/// existed opens without a bridge of its own. An installation is the one
-/// other object shape, told apart by its one field.
+/// Untagged, and told apart by shape: a token with what was read of it
+/// has its secret under a name, a token as the last release wrote it is
+/// the bare sealed secret, and an installation is the one other object,
+/// with its one field. The bare form is read and never written, so a
+/// file upgrades itself on its first change, per `docs/conventions.md`
+/// §4; the two facts beside a token are defaulted, since a token kept
+/// before they were read genuinely has none.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum SealedAccess {
-    /// A token, sealed.
-    Token(SealedSecret),
+    /// A token, sealed, with what the platform said of it.
+    Token {
+        /// The token, sealed.
+        secret: SealedSecret,
+        /// Whose it is, in the clear: an account's name is not a secret.
+        #[serde(default)]
+        owner: Option<String>,
+        /// When the platform will stop accepting it, in the clear.
+        #[serde(default)]
+        expires: Option<Timestamp>,
+    },
+    /// A token as the last release wrote one: the bare sealed secret.
+    Bare(SealedSecret),
     /// An installation of the App, by identifier, which needs no sealing.
     Installation {
         /// The installation's identifier on the platform.
@@ -2552,7 +2578,15 @@ impl Access {
         nonces: &mut impl FnMut() -> Nonce,
     ) -> Result<SealedAccess, SealError> {
         Ok(match self {
-            Self::Token(secret) => SealedAccess::Token(secret.seal(key, nonces())?),
+            Self::Token {
+                secret,
+                owner,
+                expires,
+            } => SealedAccess::Token {
+                secret: secret.seal(key, nonces())?,
+                owner: owner.clone(),
+                expires: *expires,
+            },
             Self::Installation { id } => SealedAccess::Installation { installation: *id },
         })
     }
@@ -2567,7 +2601,20 @@ impl SealedAccess {
     /// the file was altered.
     pub fn open(self, key: &Key) -> Result<Access, OpenError> {
         Ok(match self {
-            Self::Token(sealed) => Access::Token(sealed.open(key)?),
+            Self::Token {
+                secret,
+                owner,
+                expires,
+            } => Access::Token {
+                secret: secret.open(key)?,
+                owner,
+                expires,
+            },
+            Self::Bare(sealed) => Access::Token {
+                secret: sealed.open(key)?,
+                owner: None,
+                expires: None,
+            },
             Self::Installation { installation } => Access::Installation { id: installation },
         })
     }
@@ -3588,7 +3635,11 @@ mod tests {
         let mut access = BTreeMap::new();
         access.insert(
             Platform::GitHub,
-            Access::Token(Secret::new(TOKEN.to_owned())),
+            Access::Token {
+                secret: Secret::new(TOKEN.to_owned()),
+                owner: Some("example".to_owned()),
+                expires: Some(Timestamp::from_second(4_102_444_800).expect("a time")),
+            },
         );
         let channels = BTreeMap::from([(Channel::Slack, a_slack_binding())]);
         let mut jobs = BTreeMap::new();
@@ -4122,7 +4173,7 @@ mod tests {
             .expect("the project survived");
         assert!(matches!(
             project.access.get(&Platform::GitHub),
-            Some(Access::Token(token)) if token.expose() == TOKEN
+            Some(Access::Token { secret, .. }) if secret.expose() == TOKEN
         ));
         let bound = project
             .channels
@@ -4154,7 +4205,10 @@ mod tests {
             .values()
             .next()
             .expect("the project is there");
-        let Some(SealedAccess::Token(sealed_token)) = project.credentials.get(&Platform::GitHub)
+        let Some(SealedAccess::Token {
+            secret: sealed_token,
+            ..
+        }) = project.credentials.get(&Platform::GitHub)
         else {
             panic!("the credential is there, as a token");
         };
@@ -4602,7 +4656,11 @@ mod tests {
         // written in.
         assert!(matches!(
             project.access.get(&Platform::GitHub),
-            Some(Access::Token(token)) if token.expose() == "agent-token"
+            Some(Access::Token {
+                secret,
+                owner: None,
+                expires: None
+            }) if secret.expose() == "agent-token"
         ));
     }
 
@@ -5066,7 +5124,11 @@ mod tests {
         other.name = "somebody else".to_owned();
         other.access.insert(
             Platform::GitHub,
-            Access::Token(Secret::new("not-yours-and-never-was".to_owned())),
+            Access::Token {
+                secret: Secret::new("not-yours-and-never-was".to_owned()),
+                owner: None,
+                expires: None,
+            },
         );
         other.channels.insert(
             Channel::Slack,
@@ -5142,7 +5204,7 @@ mod tests {
                 .projects
                 .get(&mine)
                 .and_then(|project| project.access.get(&Platform::GitHub)),
-            Some(Access::Token(token)) if token.expose() == TOKEN
+            Some(Access::Token { secret, .. }) if secret.expose() == TOKEN
         ));
     }
 

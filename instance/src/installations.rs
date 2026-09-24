@@ -171,8 +171,11 @@ pub struct Install {
 /// listed so far, and which answers are still awaited.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Reaching {
-    /// The account the access is on, where the platform says one.
+    /// The account the access is on, where the platform says one: an
+    /// installation's, or the one a token was made under.
     pub account: Option<String>,
+    /// When a token expires, where the platform said.
+    pub expires: Option<Timestamp>,
     /// What has been listed so far.
     pub repositories: Vec<Reachable>,
     /// Whether any listing had more than it gave.
@@ -199,6 +202,8 @@ pub enum ReachStage {
     },
     /// What a token can read.
     Readable,
+    /// Whose a token is, and when it expires.
+    Owner,
 }
 
 /// Setup redirects being answered, by the identifier the platform's answer
@@ -251,6 +256,35 @@ fn platform_request(id: EffectId, rendered: stageman_platform::Request) -> Effec
         body: rendered.body.map(Bytes::new),
         within: CHECKED_WITHIN,
     }
+}
+
+/// What the platform said of a token, from its answer to the read of the
+/// account — or why the answer is no use.
+fn owned_of(responded: &Responded) -> Result<stageman_platform::Owned, PlatformError> {
+    let platform = Platform::GitHub;
+    match responded {
+        Responded::Answered {
+            status,
+            headers,
+            body,
+        } => stageman_platform::owned(platform, *status, headers, body.as_slice()),
+        Responded::Failed(why) => Err(PlatformError::Unreachable {
+            platform,
+            why: why.clone(),
+        }),
+    }
+}
+
+/// A listing's repositories as the rows a form is given.
+fn rows_of(listing: stageman_platform::Listing) -> Vec<Reachable> {
+    listing
+        .repositories
+        .into_iter()
+        .map(|repository| Reachable {
+            repository: views::wire_repository(&repository.address),
+            private: repository.private,
+        })
+        .collect()
 }
 
 impl Running {
@@ -366,6 +400,7 @@ impl Running {
             &self.state,
             &self.identities(),
             self.state.apps.contains_key(&Platform::GitHub),
+            self.stamp(),
         )
     }
 
@@ -595,6 +630,7 @@ impl Running {
     pub(crate) fn reaches(&mut self, id: Asking, through: Through, effects: &mut Vec<Effect>) {
         let mut reaching = Reaching {
             account: None,
+            expires: None,
             repositories: Vec::new(),
             more: false,
             outstanding: BTreeSet::new(),
@@ -602,8 +638,8 @@ impl Running {
         };
         let asked = match through {
             Through::Held { project } => match self.held_access(&project) {
-                Ok(Some(Access::Token(token))) => {
-                    self.reach_token(id, token.expose(), &mut reaching, effects)
+                Ok(Some(Access::Token { secret, .. })) => {
+                    self.reach_token(id, secret.expose(), &mut reaching, effects)
                 }
                 Ok(Some(Access::Installation { id: installation })) => {
                     self.reach_installation(id, installation, &mut reaching, effects)
@@ -657,8 +693,9 @@ impl Running {
         Ok(watched.access.get(&Platform::GitHub).cloned())
     }
 
-    /// Asks what a token can read, into a listing being assembled: one
-    /// read, or the refusal an empty token earns without one.
+    /// Asks what a token can read, and whose it is, into a listing being
+    /// assembled: two reads at once, or the refusal an empty token earns
+    /// without one.
     fn reach_token(
         &mut self,
         id: Asking,
@@ -672,14 +709,22 @@ impl Running {
                 field: "access".to_owned(),
             });
         }
-        let rendered = stageman_platform::readable(
-            Platform::GitHub,
-            &stageman_core::Secret::new(token.to_owned()),
-        );
-        let effect = self.effect_id();
-        self.reaches.insert(effect, (id, ReachStage::Readable));
-        reaching.outstanding.insert(effect);
-        effects.push(platform_request(effect, rendered));
+        let secret = stageman_core::Secret::new(token.to_owned());
+        for (stage, rendered) in [
+            (
+                ReachStage::Readable,
+                stageman_platform::readable(Platform::GitHub, &secret),
+            ),
+            (
+                ReachStage::Owner,
+                stageman_platform::owner(Platform::GitHub, &secret),
+            ),
+        ] {
+            let effect = self.effect_id();
+            self.reaches.insert(effect, (id, stage));
+            reaching.outstanding.insert(effect);
+            effects.push(platform_request(effect, rendered));
+        }
         Ok(())
     }
 
@@ -762,7 +807,17 @@ impl Running {
                 why: why.clone(),
             }),
         };
+        let mut unlisted = |why: PlatformError| {
+            reaching.unlisted.get_or_insert_with(|| why.to_string());
+        };
         match stage {
+            ReachStage::Owner => match owned_of(responded) {
+                Ok(owned) => {
+                    reaching.account = Some(owned.login);
+                    reaching.expires = owned.expires;
+                }
+                Err(why) => unlisted(why),
+            },
             ReachStage::Minting { installation } => {
                 match answered
                     .and_then(|(status, body)| stageman_platform::minted(platform, status, body))
@@ -776,9 +831,7 @@ impl Running {
                         reaching.outstanding.insert(effect);
                         effects.push(platform_request(effect, rendered));
                     }
-                    Err(why) => {
-                        reaching.unlisted.get_or_insert_with(|| why.to_string());
-                    }
+                    Err(why) => unlisted(why),
                 }
             }
             ReachStage::Listing { .. } => {
@@ -787,21 +840,9 @@ impl Running {
                 {
                     Ok(listing) => {
                         reaching.more |= listing.more;
-                        reaching
-                            .repositories
-                            .extend(
-                                listing
-                                    .repositories
-                                    .into_iter()
-                                    .map(|repository| Reachable {
-                                        repository: views::wire_repository(&repository.address),
-                                        private: repository.private,
-                                    }),
-                            );
+                        reaching.repositories.extend(rows_of(listing));
                     }
-                    Err(why) => {
-                        reaching.unlisted.get_or_insert_with(|| why.to_string());
-                    }
+                    Err(why) => unlisted(why),
                 }
             }
             ReachStage::Readable => {
@@ -810,21 +851,9 @@ impl Running {
                 }) {
                     Ok(listing) => {
                         reaching.more |= listing.more;
-                        reaching
-                            .repositories
-                            .extend(
-                                listing
-                                    .repositories
-                                    .into_iter()
-                                    .map(|repository| Reachable {
-                                        repository: views::wire_repository(&repository.address),
-                                        private: repository.private,
-                                    }),
-                            );
+                        reaching.repositories.extend(rows_of(listing));
                     }
-                    Err(why) => {
-                        reaching.unlisted.get_or_insert_with(|| why.to_string());
-                    }
+                    Err(why) => unlisted(why),
                 }
             }
         }
@@ -848,6 +877,7 @@ impl Running {
                 .sort_by(|one, other| one.repository.cmp(&other.repository));
             Reached::Listed {
                 account: reaching.account,
+                expires: reaching.expires.map(|at| at.to_string()),
                 repositories: reaching.repositories,
                 more: reaching.more,
             }

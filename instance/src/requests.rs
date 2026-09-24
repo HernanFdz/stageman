@@ -280,7 +280,7 @@ impl Running {
         }
         match self.hold_for_checks(id, &request, effects) {
             Ok(true) => {}
-            Ok(false) => self.respond(id, request, effects),
+            Ok(false) => self.respond(id, request, None, effects),
             Err(refusal) => self.defer(AppEffect::Respond {
                 id,
                 response: Response::Refused(refusal),
@@ -288,8 +288,15 @@ impl Running {
         }
     }
 
-    /// Answers a request now, once whatever it changed is on the disk.
-    pub(crate) fn respond(&mut self, id: RequestId, request: Request, effects: &mut Vec<Effect>) {
+    /// Answers a request now, once whatever it changed is on the disk —
+    /// with what a check learned of the token, where one did.
+    pub(crate) fn respond(
+        &mut self,
+        id: RequestId,
+        request: Request,
+        learned: Option<stageman_platform::Owned>,
+        effects: &mut Vec<Effect>,
+    ) {
         let answered = match request {
             Request::Instance => Ok(Response::Instance(views::instance(
                 &self.state,
@@ -301,13 +308,14 @@ impl Running {
                 &self.identities(),
                 &self.domain,
                 self.serving,
+                self.stamp(),
             ))),
             Request::Agents => Ok(Response::Agents(views::listed(&self.state))),
             Request::Configure { agent, credential } => self.configure(&agent, &credential),
             Request::ForgetAgent { agent } => self.forget_agent(&agent),
             Request::Projects => Ok(Response::Projects(self.projects_screen())),
-            Request::Create { draft } => self.create(&draft),
-            Request::Amend { project, draft } => self.amend(&project, &draft),
+            Request::Create { draft } => self.create(&draft, learned),
+            Request::Amend { project, draft } => self.amend(&project, &draft, learned),
             Request::Forget { project } => self.forget(&project),
             Request::Jobs { project } => self.jobs(&project),
             Request::Job { project, job } => self.job_page(&project, &job),
@@ -386,7 +394,11 @@ impl Running {
     ///
     /// Asked of a copy before it is asked of the instance, so that a refusal
     /// leaves nothing changed.
-    fn create(&mut self, draft: &Draft) -> Result<Response, Refusal> {
+    fn create(
+        &mut self,
+        draft: &Draft,
+        learned: Option<stageman_platform::Owned>,
+    ) -> Result<Response, Refusal> {
         let Drafted {
             name,
             repository,
@@ -398,6 +410,7 @@ impl Running {
             brief,
             ..
         } = drafted(draft, None, &self.begun)?;
+        let access = told_of(access, learned);
 
         let mut candidate = self.state.clone();
         let created = ProjectId::from_uuid(crate::mint(&mut self.rng));
@@ -451,7 +464,12 @@ impl Running {
     /// A token left unsaid means the one it already has, never none: there
     /// is nowhere on the wire for a token, so the form never shows one.
     /// The channel is not offered at all, for the same reason.
-    fn amend(&mut self, project: &str, draft: &Draft) -> Result<Response, Refusal> {
+    fn amend(
+        &mut self,
+        project: &str,
+        draft: &Draft,
+        learned: Option<stageman_platform::Owned>,
+    ) -> Result<Response, Refusal> {
         let identifier = views::identify(&self.state, project)?;
 
         let mut candidate = self.state.clone();
@@ -471,6 +489,7 @@ impl Running {
             brief,
             ..
         } = drafted(draft, Some(watched), &self.begun)?;
+        let access = told_of(access, learned);
         watched.variables = variables;
         amended(watched, name, repository, foreman_kit, kits, access, brief);
         candidate
@@ -785,20 +804,26 @@ pub fn drafted(draft: &Draft, held: Option<&Project>, begun: &Begun) -> Result<D
                 Some(state) => arrived(begun, state).ok_or(Refusal::ArrivalUnknown)?,
                 None => match holding {
                     Some(Access::Installation { id }) => *id,
-                    Some(Access::Token(_)) | None => return Err(unsaid()),
+                    Some(Access::Token { .. }) | None => return Err(unsaid()),
                 },
             };
             (Access::Installation { id }, addressed(repository.as_ref())?)
         }
         AccessDraft::Token { token, repository } => {
-            let token = match token {
-                Some(typed) => Secret::new(required("access", typed)?),
+            // A token set here is what the platform has not yet said
+            // anything of; the one held comes with what it said.
+            let access = match token {
+                Some(typed) => Access::Token {
+                    secret: Secret::new(required("access", typed)?),
+                    owner: None,
+                    expires: None,
+                },
                 None => match holding {
-                    Some(Access::Token(kept)) => kept.clone(),
+                    Some(kept @ Access::Token { .. }) => kept.clone(),
                     Some(Access::Installation { .. }) | None => return Err(unsaid()),
                 },
             };
-            (Access::Token(token), addressed(repository.as_ref())?)
+            (access, addressed(repository.as_ref())?)
         }
     };
     let reach_changed = held.is_none_or(|watched| {
@@ -974,6 +999,21 @@ pub fn binding(channel: &ChannelDraft) -> Result<BTreeMap<Channel, ChannelConfig
 /// The repository, required, and read as an address: an owner and a name
 /// on the platform, with what was pasted beside them forgiven — see
 /// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+/// An access with what a check learned of its token, where one did: whose
+/// it is and when it expires, kept beside it — see
+/// `docs/decisions/0080-a-tokens-owner-and-expiry-are-kept-beside-it.md`.
+/// An installation learns nothing this way.
+fn told_of(access: Access, learned: Option<stageman_platform::Owned>) -> Access {
+    match (access, learned) {
+        (Access::Token { secret, .. }, Some(learned)) => Access::Token {
+            secret,
+            owner: Some(learned.login),
+            expires: learned.expires,
+        },
+        (access, _) => access,
+    }
+}
+
 /// The repository a form chose, as an address on the platform.
 ///
 /// # Errors
@@ -1018,6 +1058,15 @@ mod tests {
     use stageman_wire::Draft;
     use stageman_wire::{AccessDraft, ChannelDraft, Fitted, KitDraft, Refusal, VariableDraft};
     use std::collections::BTreeMap;
+
+    /// A token as a project holds one, with nothing said of it yet.
+    fn token(secret: &str) -> Access {
+        Access::Token {
+            secret: Secret::new(secret.to_owned()),
+            owner: None,
+            expires: None,
+        }
+    }
 
     /// A repository as a form names it.
     fn repo(owner: &str, name: &str) -> stageman_wire::Repository {
@@ -1183,10 +1232,9 @@ mod tests {
     #[test]
     fn amending_replaces_what_a_project_is_and_leaves_what_it_has_done() {
         let mut project = holding(&[Progress::Idle(Waiting::Silent)]);
-        project.access.insert(
-            Platform::GitHub,
-            Access::Token(Secret::new("ghp-the-old-one".to_owned())),
-        );
+        project
+            .access
+            .insert(Platform::GitHub, token("ghp-the-old-one"));
         project.channels.insert(
             Channel::Slack,
             ChannelConfig {
@@ -1211,7 +1259,7 @@ mod tests {
                 model: ClaudeModel::Haiku,
             },
             BTreeMap::from([(KitName::new("deep").expect("a name"), deep.clone())]),
-            Access::Token(Secret::new("ghp-the-old-one".to_owned())),
+            token("ghp-the-old-one"),
             "Ignore alerts below error.".to_owned(),
         );
         assert_eq!(project.name, "renamed");
@@ -1229,7 +1277,7 @@ mod tests {
         assert!(
             matches!(
                 project.access.get(&Platform::GitHub),
-                Some(Access::Token(token)) if token.expose() == "ghp-the-old-one"
+                Some(Access::Token { secret, .. }) if secret.expose() == "ghp-the-old-one"
             ),
             "the same, resolved from what was held, keeps"
         );
@@ -1242,13 +1290,13 @@ mod tests {
             RepositoryAddress::new("example", "renamed").expect("an address"),
             Kit::defaults(Agent::Claude),
             one_kit(),
-            Access::Token(Secret::new("ghp-the-new-one".to_owned())),
+            token("ghp-the-new-one"),
             String::new(),
         );
         assert!(
             matches!(
                 project.access.get(&Platform::GitHub),
-                Some(Access::Token(token)) if token.expose() == "ghp-the-new-one"
+                Some(Access::Token { secret, .. }) if secret.expose() == "ghp-the-new-one"
             ),
             "typed replaces"
         );
@@ -1322,10 +1370,8 @@ mod tests {
 
         let mut held = holding(&[]);
         held.repository = RepositoryAddress::new("example", "aviary").expect("an address");
-        held.access.insert(
-            Platform::GitHub,
-            Access::Token(Secret::new("ghp-the-held-one".to_owned())),
-        );
+        held.access
+            .insert(Platform::GitHub, token("ghp-the-held-one"));
         held.variables = holding_variables(&[("HELD", "kept")]);
         let amending = super::drafted(&draft, Some(&held), &came_back(77))
             .expect("resolved against the project");
@@ -1335,7 +1381,7 @@ mod tests {
             "https://github.com/example/aviary"
         );
         assert!(
-            matches!(amending.access, Access::Token(ref token) if token.expose() == "ghp-the-held-one"),
+            matches!(amending.access, Access::Token { ref secret, .. } if secret.expose() == "ghp-the-held-one"),
             "left unsaid is the one held"
         );
         assert!(
@@ -1386,10 +1432,8 @@ mod tests {
         };
         let mut held = holding(&[]);
         held.repository = RepositoryAddress::new("example", "aviary").expect("an address");
-        held.access.insert(
-            Platform::GitHub,
-            Access::Token(Secret::new("ghp-the-held-one".to_owned())),
-        );
+        held.access
+            .insert(Platform::GitHub, token("ghp-the-held-one"));
         held.variables = holding_variables(&[("HELD", "kept")]);
         let creating = super::drafted(&draft, None, &came_back(77))
             .expect_err("a new project holds no HELD to keep");
@@ -1399,7 +1443,7 @@ mod tests {
         assert!(
             matches!(
                 creating.access,
-                Access::Token(ref token) if token.expose() == "github_pat_not_a_real_token"
+                Access::Token { ref secret, owner: None, expires: None } if secret.expose() == "github_pat_not_a_real_token"
             ),
             "trimmed, and kept"
         );

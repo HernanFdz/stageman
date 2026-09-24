@@ -90,7 +90,14 @@ async fn propose() -> Result<(), String> {
     );
     let project = ProjectId::from_uuid(Uuid::new_v4());
     let mut access = std::collections::BTreeMap::new();
-    access.insert(Platform::GitHub, Access::Token(platform_token));
+    access.insert(
+        Platform::GitHub,
+        Access::Token {
+            secret: platform_token,
+            owner: None,
+            expires: None,
+        },
+    );
     state.projects.insert(
         project,
         Project {

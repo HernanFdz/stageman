@@ -164,7 +164,7 @@ pub fn app_link(platform: Platform, slug: &str) -> String {
     }
 }
 
-pub use github::{Listing, Repository};
+pub use github::{Listing, Owned, Repository};
 pub use installation::{Installed, Minted};
 pub use registration::Registered;
 
@@ -207,6 +207,33 @@ pub fn readable_listed(
 ) -> Result<Listing, PlatformError> {
     match platform {
         Platform::GitHub => github::readable_listed(status, body),
+    }
+}
+
+/// Renders asking whose a token is — see
+/// `docs/decisions/0080-a-tokens-owner-and-expiry-are-kept-beside-it.md`.
+#[must_use]
+pub fn owner(platform: Platform, credential: &Secret) -> Request {
+    match platform {
+        Platform::GitHub => github::owner(credential),
+    }
+}
+
+/// What the platform's answer to [`owner`] means: the account, and when
+/// the token expires where the platform says.
+///
+/// # Errors
+///
+/// Fails if the platform does not accept the token, refused to say, could
+/// not be reached, or answered with something this does not read.
+pub fn owned(
+    platform: Platform,
+    status: u16,
+    headers: &std::collections::BTreeMap<String, String>,
+    body: &[u8],
+) -> Result<Owned, PlatformError> {
+    match platform {
+        Platform::GitHub => github::owned(status, headers, body),
     }
 }
 
@@ -374,6 +401,11 @@ pub enum Call {
         /// Which platform.
         platform: Platform,
     },
+    /// Whose a token is, asked with it.
+    Owner {
+        /// Which platform.
+        platform: Platform,
+    },
 }
 
 impl Call {
@@ -491,8 +523,8 @@ impl PlatformError {
 mod tests {
     use super::{
         Call, PlatformError, app_link, bot_name, exchange, install_link, installation, installed,
-        installed_path, listed, manifest, mint, minted, reach, reached, readable, readable_listed,
-        register_form, registered, repositories, shown, token_form,
+        installed_path, listed, manifest, mint, minted, owned, owner, reach, reached, readable,
+        readable_listed, register_form, registered, repositories, shown, token_form,
     };
     use stageman_core::{Platform, PlatformApp, RepositoryAddress, Secret, Timestamp};
 
@@ -865,6 +897,69 @@ mod tests {
 
     /// Where a person installs the App and where they come back to, and
     /// what the App's own account is called.
+    /// Whose a token is, and when it expires: the read of the account,
+    /// and its answer with the expiry header spelled as the platform was
+    /// measured to spell it — absent for a token that does not expire,
+    /// and refused where this cannot read it — see
+    /// `docs/decisions/0080-a-tokens-owner-and-expiry-are-kept-beside-it.md`.
+    #[test]
+    fn whose_a_token_is_and_when_it_expires_are_read_off_the_account() {
+        let asking = owner(
+            Platform::GitHub,
+            &Secret::new("github_pat_not_a_real_token".to_owned()),
+        );
+        assert_eq!(asking.method, "GET");
+        assert_eq!(asking.url, "https://api.github.com/user");
+        assert_eq!(
+            asking.headers.get("authorization").map(String::as_str),
+            Some("Bearer github_pat_not_a_real_token")
+        );
+        let body = br#"{"login":"HernanFdz","id":1}"#;
+        let spelled = |expiry: Option<&str>| {
+            expiry
+                .map(|spelled| {
+                    (
+                        "github-authentication-token-expiration".to_owned(),
+                        spelled.to_owned(),
+                    )
+                })
+                .into_iter()
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let read = owned(
+            Platform::GitHub,
+            200,
+            &spelled(Some("2026-09-27 08:42:20 UTC")),
+            body,
+        )
+        .expect("read");
+        assert_eq!(read.login, "HernanFdz");
+        assert_eq!(
+            read.expires.map(|at| at.to_string()),
+            Some("2026-09-27T08:42:20Z".to_owned()),
+            "the header's spelling, read as the moment it names"
+        );
+        assert_eq!(
+            owned(Platform::GitHub, 200, &spelled(None), body)
+                .expect("read")
+                .expires,
+            None,
+            "no header is no expiry"
+        );
+        assert!(matches!(
+            owned(Platform::GitHub, 200, &spelled(Some("tomorrow")), body),
+            Err(PlatformError::Unreadable { .. })
+        ));
+        assert!(matches!(
+            owned(Platform::GitHub, 200, &spelled(None), br#"{"id":1}"#),
+            Err(PlatformError::Unreadable { .. })
+        ));
+        assert!(matches!(
+            owned(Platform::GitHub, 401, &spelled(None), b"{}"),
+            Err(PlatformError::Refused { .. })
+        ));
+    }
+
     #[test]
     fn the_install_link_names_the_app() {
         assert_eq!(
@@ -1002,7 +1097,13 @@ mod tests {
         other.url = "https://api.github.com/repos/owner/name/pulls".to_owned();
         assert_eq!(Call::parse(&other), None);
         other.url = "https://api.github.com/user".to_owned();
-        assert_eq!(Call::parse(&other), None);
+        assert_eq!(
+            Call::parse(&other),
+            Some(Call::Owner {
+                platform: Platform::GitHub
+            }),
+            "whose a token is, asked with it"
+        );
         other.url = "https://api.github.com/repos//name".to_owned();
         assert_eq!(Call::parse(&other), None, "no owner is no repository");
         other.url = "https://api.github.com/repos/owner/".to_owned();

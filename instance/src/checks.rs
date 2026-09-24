@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use stageman_channel::ChannelError;
 use stageman_core::{Access, Channel, Platform, RepositoryAddress};
-use stageman_platform::PlatformError;
+use stageman_platform::{Owned, PlatformError};
 use stageman_vocabulary::{Bytes, Effect as Generic, EffectId, Responded};
 use stageman_wire::Refusal;
 
@@ -51,6 +51,10 @@ pub struct Held {
     /// The first check that failed, if one has: what the request is
     /// answered with, whatever the rest say.
     refused: Option<Refusal>,
+    /// What the platform said of the token, once it has: kept beside the
+    /// token when the request is answered — see
+    /// `docs/decisions/0080-a-tokens-owner-and-expiry-are-kept-beside-it.md`.
+    learned: Option<Owned>,
 }
 
 /// What one check is of.
@@ -63,6 +67,12 @@ pub enum Check {
         platform: Platform,
         /// Which repository the read was of, for the refusal to name.
         repository: RepositoryAddress,
+    },
+    /// A project's token asked whose it is, which is also the answer that
+    /// carries when it expires: what is kept beside the token.
+    Owner {
+        /// Which platform.
+        platform: Platform,
     },
     /// An installation of the App, asked to mint a token restricted to the
     /// repository the form chose: refused by the platform where the
@@ -161,6 +171,7 @@ impl Running {
                 request: request.clone(),
                 outstanding,
                 refused: None,
+                learned: None,
             },
         );
         Ok(true)
@@ -187,13 +198,22 @@ impl Running {
         // what the project holds; what it holds was checked when kept.
         match (&resolved.access, resolved.reach_changed) {
             (_, false) => {}
-            (Access::Token(token), true) => checks.push((
-                Check::Token {
-                    platform,
-                    repository: resolved.repository.clone(),
-                },
-                stageman_platform::reach(platform, token, &resolved.repository).into(),
-            )),
+            (Access::Token { secret, .. }, true) => {
+                checks.push((
+                    Check::Token {
+                        platform,
+                        repository: resolved.repository.clone(),
+                    },
+                    stageman_platform::reach(platform, secret, &resolved.repository).into(),
+                ));
+                // Whose it is and when it expires, read whenever the token
+                // is checked: two facts about the secret, which cannot
+                // change under it.
+                checks.push((
+                    Check::Owner { platform },
+                    stageman_platform::owner(platform, secret).into(),
+                ));
+            }
             (Access::Installation { id }, true) => {
                 let id = *id;
                 let app = self
@@ -243,10 +263,14 @@ impl Running {
             return true;
         };
         held.outstanding.remove(&id);
-        if let Err(refusal) = outcome
-            && held.refused.is_none()
-        {
-            held.refused = Some(refusal);
+        match outcome {
+            Ok(Some(learned)) => held.learned = Some(learned),
+            Ok(None) => {}
+            Err(refusal) => {
+                if held.refused.is_none() {
+                    held.refused = Some(refusal);
+                }
+            }
         }
         if !held.outstanding.is_empty() {
             return true;
@@ -259,7 +283,7 @@ impl Running {
                 id: request,
                 response: Response::Refused(refusal),
             }),
-            None => self.respond(request, held.request, effects),
+            None => self.respond(request, held.request, held.learned, effects),
         }
         true
     }
@@ -283,15 +307,31 @@ fn channel_checks(resolved: &Drafted) -> Vec<(Check, Asking)> {
 }
 
 /// What a platform's answer to one check means for the box the credential
-/// was typed in.
-fn verdict(check: &Check, responded: &Responded) -> Result<(), Refusal> {
+/// was typed in, and what the one check that learns something learned.
+fn verdict(check: &Check, responded: &Responded) -> Result<Option<Owned>, Refusal> {
     match check {
+        Check::Owner { platform } => match responded {
+            Responded::Answered {
+                status,
+                headers,
+                body,
+            } => stageman_platform::owned(*platform, *status, headers, body.as_slice())
+                .map(Some)
+                .map_err(|why| owner_refusal(&why)),
+            Responded::Failed(why) => Err(Refusal::TokenUnchecked {
+                why: format!(
+                    "{} could not be reached: {why}",
+                    stageman_platform::shown(*platform)
+                ),
+            }),
+        },
         Check::Token {
             platform,
             repository,
         } => match responded {
             Responded::Answered { status, body, .. } => {
                 stageman_platform::reached(*platform, repository, *status, body.as_slice())
+                    .map(|()| None)
                     .map_err(|why| token_refusal(&why, repository))
             }
             Responded::Failed(why) => Err(Refusal::TokenUnchecked {
@@ -308,7 +348,7 @@ fn verdict(check: &Check, responded: &Responded) -> Result<(), Refusal> {
         } => match responded {
             Responded::Answered { status, body, .. } => {
                 stageman_platform::minted(*platform, *status, body.as_slice())
-                    .map(|_| ())
+                    .map(|_| None)
                     .map_err(|why| covered_refusal(&why, repository))
             }
             Responded::Failed(why) => Err(Refusal::InstallationUnchecked {
@@ -320,10 +360,25 @@ fn verdict(check: &Check, responded: &Responded) -> Result<(), Refusal> {
         },
         Check::Speaking { channel } => spoken(*channel, false, responded, |status, body| {
             stageman_channel::identity(*channel, status, body).map(|_| ())
-        }),
+        })
+        .map(|()| None),
         Check::Listening { channel } => spoken(*channel, true, responded, |status, body| {
             stageman_channel::socket_url(*channel, status, body).map(|_| ())
-        }),
+        })
+        .map(|()| None),
+    }
+}
+
+/// The owner read's refusal: unchecked where the platform was never asked
+/// or could not be, and on the token where it answered anything else.
+fn owner_refusal(why: &PlatformError) -> Refusal {
+    match why {
+        PlatformError::Unreachable { .. } => Refusal::TokenUnchecked {
+            why: why.to_string(),
+        },
+        _ => Refusal::TokenRefused {
+            why: why.to_string(),
+        },
     }
 }
 
@@ -440,7 +495,7 @@ mod tests {
     fn a_tokens_verdict_is_the_platforms_clause_on_its_box() {
         assert_eq!(
             verdict(&token(), &answered(200, r#"{"full_name":"owner/name"}"#)),
-            Ok(())
+            Ok(None)
         );
         assert_eq!(
             verdict(&token(), &answered(401, r#"{"message":"Bad credentials"}"#)),
@@ -495,7 +550,7 @@ mod tests {
                     r#"{"token":"ghs_not_a_real_token","expires_at":"2026-09-24T08:00:00Z"}"#
                 )
             ),
-            Ok(())
+            Ok(None)
         );
         assert_eq!(
             verdict(
@@ -548,7 +603,7 @@ mod tests {
                     r#"{"ok":true,"user_id":"U1","bot_id":"B1","url":"https://x.slack.com/"}"#
                 )
             ),
-            Ok(())
+            Ok(None)
         );
         assert_eq!(
             verdict(
@@ -578,7 +633,7 @@ mod tests {
                 &listening,
                 &answered(200, r#"{"ok":true,"url":"wss://wss.slack.com/link/1"}"#)
             ),
-            Ok(())
+            Ok(None)
         );
         assert_eq!(
             verdict(
