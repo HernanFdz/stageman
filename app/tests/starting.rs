@@ -1042,6 +1042,10 @@ fn a_project_has_a_settings_page_and_a_new_one_is_that_page_empty() {
         settings.contains("With example&#39;s token."),
         "the access sentence says the shape, and whose the token is, on the server too: {settings}"
     );
+    assert!(
+        settings.contains("asking GitHub…"),
+        "the box waits on the listing, which only the browser asks for: {settings}"
+    );
     // A text area's value is its text and not an attribute, so a box the
     // server rendered from an attribute alone arrives empty. The kit's
     // description is the one text this helper fills.
@@ -1521,4 +1525,57 @@ fn anchor(page: &str, href: &str) -> String {
     let until = rest.find('>').unwrap_or(rest.len());
 
     rest.get(..until).unwrap_or_default().to_owned()
+}
+
+/// The Instance page lists where the App is installed, and an installation
+/// a project reaches its repository through says which project and offers
+/// no forgetting; the projects it lists come from the instance, rendered
+/// on the server before the page is awake.
+#[test]
+fn the_instance_page_says_which_project_uses_an_installation() {
+    let (_kept, snapshot) = scratch();
+    let mut watched = watching("aviary", "https://github.com/example/aviary");
+    watched.apps.insert(
+        stageman_core::Platform::GitHub,
+        stageman_core::PlatformApp {
+            id: 4242,
+            slug: "stageman-test".to_owned(),
+            client_id: "Iv1.test".to_owned(),
+            private_key: Secret::new("not-a-real-key".to_owned()),
+            installations: BTreeMap::from([(
+                77,
+                stageman_core::Installation {
+                    account: "acme".to_owned(),
+                    every_repository: false,
+                },
+            )]),
+        },
+    );
+    watched
+        .projects
+        .get_mut(&ProjectId::from_uuid(uuid::Uuid::nil()))
+        .expect("the project")
+        .access
+        .insert(
+            stageman_core::Platform::GitHub,
+            stageman_core::Access::Installation { id: 77 },
+        );
+    written(&snapshot, &watched);
+    let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
+
+    let page = running.get("/instance");
+    assert!(page.contains("200 OK"), "{page}");
+    assert!(page.contains("acme"), "the account is named: {page}");
+    assert!(
+        page.contains("used by aviary"),
+        "the project on the installation is named: {page}"
+    );
+    assert!(
+        page.contains("Used by aviary, so it cannot be forgotten"),
+        "forgetting is refused, and says why: {page}"
+    );
+    assert!(
+        !page.contains("Forget the installation on acme"),
+        "the way to forget it is not offered: {page}"
+    );
 }

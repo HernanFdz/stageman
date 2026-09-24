@@ -1230,4 +1230,55 @@ mod tests {
             "cut to what the form takes: {long}"
         );
     }
+
+    /// The paths the browser comes back to are the instance's own, under
+    /// the Instance page, and neither is the other's.
+    #[test]
+    fn the_paths_the_browser_comes_back_to_are_the_instances_own() {
+        assert_eq!(
+            super::registered_path(Platform::GitHub),
+            "/instance/apps/github/registered"
+        );
+        assert_ne!(
+            super::registered_path(Platform::GitHub),
+            installed_path(Platform::GitHub)
+        );
+    }
+
+    /// The App's key is read only as the PEM the platform hands out: the
+    /// header line and a body, and neither alone.
+    #[test]
+    fn the_key_is_read_only_as_the_pem_the_platform_hands_out() {
+        assert!(super::installation::der_of(TEST_KEY).is_some());
+        assert_eq!(
+            super::installation::der_of(
+                "-----BEGIN RSA PRIVATE KEY-----\n-----END RSA PRIVATE KEY-----\n"
+            ),
+            None,
+            "a header with nothing under it"
+        );
+        assert_eq!(
+            super::installation::der_of("MIIEpAIBAAKCAQEA\n"),
+            None,
+            "a body with no header"
+        );
+    }
+
+    /// A conversion reads back as the exchange of its code, and only a
+    /// code that is one word: none, or one with a path in it, is no call.
+    #[test]
+    fn a_conversion_reads_back_only_with_a_whole_code() {
+        let mut asking = exchange(Platform::GitHub, "c0de");
+        assert_eq!(
+            Call::parse(&asking),
+            Some(Call::Exchange {
+                platform: Platform::GitHub,
+                code: "c0de".to_owned()
+            })
+        );
+        asking.url = "https://api.github.com/app-manifests//conversions".to_owned();
+        assert_eq!(Call::parse(&asking), None, "no code");
+        asking.url = "https://api.github.com/app-manifests/c0/de/conversions".to_owned();
+        assert_eq!(Call::parse(&asking), None, "a path where a code should be");
+    }
 }

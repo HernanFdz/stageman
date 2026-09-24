@@ -68,30 +68,15 @@ pub fn Combobox(props: ComboboxProps) -> Element {
     let mut active = use_signal(|| 0_usize);
     let onchange = props.onchange;
     let items = props.items.clone();
-    // What the box shows while nothing is typed: the choice's label, or
-    // the value as it stands where no item carries it yet — a page
-    // rendered before the list arrived still says what is held.
-    let chosen = props
-        .items
-        .iter()
-        .find(|item| item.id == props.value)
-        .map_or_else(|| props.value.clone(), |item| item.label.clone());
+    let chosen = chosen(&props.items, &props.value);
     let shown: Vec<ComboboxItem> = if open() {
         filtered(&props.items, &query())
     } else {
         Vec::new()
     };
     let rows = shown.len();
-    // Each row with whether it heads its group: the group's name is shown
-    // once, above its first row, since the rows come grouped.
-    let mut headed: Vec<(usize, ComboboxItem, bool)> = Vec::with_capacity(rows);
-    let mut last_group: Option<String> = None;
-    for (position, item) in shown.iter().enumerate() {
-        let heads = item.group.is_some() && item.group != last_group;
-        last_group.clone_from(&item.group);
-        headed.push((position, item.clone(), heads));
-    }
-    let listing = open() && !props.disabled;
+    let headed = headed(&shown);
+    let listing = lists(open(), props.disabled);
     let list_id = format!("combobox-{}", props.label.to_lowercase().replace(' ', "-"));
     // Copied into every row's press and the box's key handler alike, which
     // a callback is and a closure is not.
@@ -229,6 +214,34 @@ pub fn Combobox(props: ComboboxProps) -> Element {
     }
 }
 
+/// What the box shows while nothing is typed: the choice's label, or the
+/// value as it stands where no item carries it yet — a page rendered
+/// before the list arrived still says what is held.
+fn chosen(items: &[ComboboxItem], value: &str) -> String {
+    items
+        .iter()
+        .find(|item| item.id == value)
+        .map_or_else(|| value.to_owned(), |item| item.label.clone())
+}
+
+/// Each row with its position and whether it heads its group: the group's
+/// name is shown once, above its first row, since the rows come grouped.
+fn headed(shown: &[ComboboxItem]) -> Vec<(usize, ComboboxItem, bool)> {
+    let mut headed = Vec::with_capacity(shown.len());
+    let mut last_group: Option<String> = None;
+    for (position, item) in shown.iter().enumerate() {
+        let heads = item.group.is_some() && item.group != last_group;
+        last_group.clone_from(&item.group);
+        headed.push((position, item.clone(), heads));
+    }
+    headed
+}
+
+/// Whether the list is shown: open, and not refused.
+const fn lists(open: bool, disabled: bool) -> bool {
+    open && !disabled
+}
+
 /// The items whose label or group holds what is typed, case apart; every
 /// item while nothing is.
 fn filtered(items: &[ComboboxItem], query: &str) -> Vec<ComboboxItem> {
@@ -268,7 +281,7 @@ fn previous(active: usize, rows: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{ComboboxItem, filtered, next, previous};
+    use super::{ComboboxItem, chosen, filtered, headed, lists, next, previous};
 
     fn item(id: &str, group: Option<&str>) -> ComboboxItem {
         ComboboxItem {
@@ -310,5 +323,33 @@ mod tests {
         assert_eq!(previous(1, 3), 0);
         assert_eq!(previous(0, 3), 2);
         assert_eq!(previous(0, 0), 0);
+    }
+
+    /// The box shows the chosen item's label, or the value as it stands
+    /// where no item carries it; a row heads its group where it is the
+    /// first of that group, and never where the rows have no groups; and
+    /// the list is shown only while open and not refused.
+    #[test]
+    fn the_box_shows_the_choice_and_heads_each_group_once() {
+        let items = vec![
+            item("acme/a", Some("acme")),
+            item("acme/b", Some("acme")),
+            item("example/c", Some("example")),
+        ];
+        assert_eq!(chosen(&items, "acme/b"), "acme/b");
+        assert_eq!(chosen(&items, "nobody/none"), "nobody/none");
+        assert_eq!(
+            headed(&items)
+                .iter()
+                .map(|(position, _, heads)| (*position, *heads))
+                .collect::<Vec<_>>(),
+            [(0, true), (1, false), (2, true)]
+        );
+        let ungrouped = vec![item("a", None), item("b", None)];
+        assert!(headed(&ungrouped).iter().all(|(_, _, heads)| !heads));
+        assert!(lists(true, false));
+        assert!(!lists(true, true));
+        assert!(!lists(false, false));
+        assert!(!lists(false, true));
     }
 }

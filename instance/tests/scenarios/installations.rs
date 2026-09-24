@@ -326,6 +326,32 @@ fn an_install_link_is_minted_per_press_and_the_tab_comes_back_under_its_state() 
     assert_eq!(app.install_failure, None);
 }
 
+/// Only the last few installs begun are remembered, one press each: the
+/// seventeenth press forgets the first and only the first, so a tab coming
+/// back under the first's state finds no page waiting and stays open,
+/// while one under the second's is announced and closes.
+#[test]
+fn only_the_last_few_installs_begun_are_remembered() {
+    let mut sim = Simulation::new();
+    sim.holding(&app_and_project("example/repo"));
+    let mut instance = sim.wake(seed(1));
+    let remembered = 16;
+    let states: Vec<String> = (1..=remembered + 1)
+        .map(|id| pressed(&mut sim, &mut instance, id).state)
+        .collect();
+
+    let page = arrives_installed(&mut sim, &mut instance, 77, Some(&states[0]));
+    assert!(
+        page.contains("opened before stageman last started") && !page.contains("window.close()"),
+        "the oldest state has been forgotten: {page}"
+    );
+    let page = arrives_installed(&mut sim, &mut instance, 78, Some(&states[1]));
+    assert!(
+        closes_saying_installed_on(&page, "example"),
+        "the next-oldest is still remembered: {page}"
+    );
+}
+
 /// What came back under a state is listed for the form that holds the
 /// state — a token minted for that installation for listing, then its
 /// repositories, with the account — and for no other form: another
@@ -1262,4 +1288,192 @@ fn a_daemon_dying_mid_installation_keeps_nothing_and_forgets_the_states_minted_b
         reaches(&mut sim, &mut instance, 2, arrived(&minted.state)),
         Response::Reached(Reached::Unlisted { .. })
     ));
+}
+
+/// The platform's own trouble on the restricted mint that checks an
+/// installation's coverage refuses the installation as unchecked — not
+/// wrong, and not known to be right — rather than as refused.
+#[test]
+fn a_platform_in_trouble_on_the_coverage_check_refuses_the_installation_as_unchecked() {
+    let mut sim = Simulation::new();
+    sim.holding(&app_and_project("example/repo"));
+    let mut instance = sim.wake(seed(1));
+    let state = installed_from_a_page(&mut sim, &mut instance, 77);
+    sim.next_platform_answers(503, r#"{"message":"down"}"#);
+    assert_eq!(
+        ask(
+            &mut sim,
+            &mut instance,
+            1,
+            Request::Create {
+                draft: on_the_app("aviary", Some(&state), "example/aviary")
+            }
+        ),
+        Response::Refused(Refusal::InstallationUnchecked {
+            why: "GitHub could not be reached: it answered 503".to_owned()
+        })
+    );
+    assert_eq!(instance.state().projects.len(), 1, "nothing kept");
+}
+
+/// Forgetting the App forgets everything held for its installations: the
+/// listing token minted for one is not served to the App registered next,
+/// which mints its own.
+#[test]
+fn forgetting_the_app_forgets_the_tokens_held_for_its_installations() {
+    let mut sim = Simulation::new();
+    sim.holding(&app_and_project("example/repo"));
+    let mut instance = sim.wake(seed(1));
+    let state = installed_from_a_page(&mut sim, &mut instance, 77);
+    assert!(matches!(
+        reaches(&mut sim, &mut instance, 1, arrived(&state)),
+        Response::Reached(Reached::Listed { .. })
+    ));
+    assert_eq!(
+        sim.tokens_minted(),
+        1,
+        "a listing token for the installation"
+    );
+
+    let Response::Apps(page) = ask(
+        &mut sim,
+        &mut instance,
+        2,
+        Request::ForgetApp {
+            platform: "github".to_owned(),
+        },
+    ) else {
+        panic!("forgotten");
+    };
+    assert!(page.github.is_none());
+
+    // Registered again, from the page, and installed again: what the
+    // forgotten App held for the installation is not this App's.
+    let Response::Registration(form) = ask(
+        &mut sim,
+        &mut instance,
+        3,
+        Request::Registration {
+            platform: "github".to_owned(),
+            anywhere: false,
+        },
+    ) else {
+        panic!("a form");
+    };
+    sim.visits_path(
+        sim.now(),
+        &format!(
+            "/instance/apps/github/registered?code=c0de&state={}",
+            form.state
+        ),
+    );
+    sim.run_until(&mut instance, sim.now() + 5_000);
+    assert!(instance.state().apps.contains_key(&Platform::GitHub));
+    let state = installed_from_a_page(&mut sim, &mut instance, 77);
+    assert!(matches!(
+        reaches(&mut sim, &mut instance, 4, arrived(&state)),
+        Response::Reached(Reached::Listed { .. })
+    ));
+    assert_eq!(
+        sim.tokens_minted(),
+        2,
+        "minted anew, nothing having been kept"
+    );
+}
+
+/// A project's access amended, or its repository moved, drops the token
+/// minted for its jobs: the next command mints one for what the project
+/// holds now.
+#[test]
+fn an_amended_access_drops_the_token_minted_for_the_projects_jobs() {
+    let mut sim = Simulation::new();
+    let working = job(1);
+    let mut state = watching(&[(working.clone(), Progress::Working)]);
+    with_an_app(&mut state);
+    installed(&mut state, 77);
+    on_github(&mut state, "example/repo");
+    sim.holding(&state);
+    let (name, held) = Simulation::ours(&stageman_job::container(&working));
+    sim.container(&name, held);
+    let mut instance = sim.wake(seed(1));
+    sim.run_until(&mut instance, 10);
+    sim.installation_covers(77, &[("example/repo", true), ("example/other", true)]);
+    let warrant = warrant_of(&working);
+    let fetching = |sim: &mut Simulation, at: u64| {
+        sim.arrives(
+            at,
+            "GET",
+            "/credential",
+            &[("authorization", &format!("Bearer {warrant}"))],
+            NEARBY,
+            "",
+        )
+    };
+    let before = fetching(&mut sim, 20);
+    sim.run_until(&mut instance, 40);
+    assert_eq!(sim.answer_text(before), Some("ghs_sim_1"));
+
+    let Response::Projects(_) = ask(
+        &mut sim,
+        &mut instance,
+        1,
+        Request::Amend {
+            project: project().to_string(),
+            draft: on_the_app("example", None, "example/other"),
+        },
+    ) else {
+        panic!("amended");
+    };
+    let minted_by_the_check = sim.tokens_minted();
+    let later = sim.now() + 100;
+    let after = fetching(&mut sim, later);
+    sim.run_until(&mut instance, later + 100);
+    assert_eq!(
+        sim.tokens_minted(),
+        minted_by_the_check + 1,
+        "minted anew for the repository the project holds now"
+    );
+    assert_ne!(sim.answer_text(after), Some("ghs_sim_1"));
+}
+
+/// A listing the platform had more of than one page holds says so: a
+/// token's page that is full, and an installation whose count exceeds
+/// the page it listed.
+#[test]
+fn a_listing_says_when_the_platform_had_more_than_a_page() {
+    let mut sim = Simulation::new();
+    sim.holding(&watching(&[]));
+    let mut instance = sim.wake(seed(1));
+    let names: Vec<String> = (1..=101).map(|n| format!("example/r{n}")).collect();
+    let page: Vec<(&str, bool)> = names.iter().map(|name| (name.as_str(), false)).collect();
+    sim.token_reads(&page);
+    let listed = reaches(
+        &mut sim,
+        &mut instance,
+        1,
+        Through::Token {
+            token: "ghp-not-a-real-token".to_owned(),
+        },
+    );
+    assert!(
+        matches!(
+            &listed,
+            Response::Reached(Reached::Listed { more: true, repositories, .. }) if repositories.len() == 100
+        ),
+        "{listed:?}"
+    );
+
+    let mut sim = Simulation::new();
+    sim.holding(&app_and_project("example/repo"));
+    let mut instance = sim.wake(seed(1));
+    let state = installed_from_a_page(&mut sim, &mut instance, 77);
+    sim.installation_covers(77, &page);
+    let listed = reaches(&mut sim, &mut instance, 1, arrived(&state));
+    assert!(
+        matches!(
+            &listed,
+            Response::Reached(Reached::Listed { more: true, repositories, .. }) if repositories.len() == 100
+        ),
+        "{listed:?}"
+    );
 }

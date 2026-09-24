@@ -124,7 +124,7 @@ fn a_job_begun_holds_a_warrant_and_its_container_carries_no_token() {
     let checking_out = first(&sim, |command| {
         matches!(
             command,
-            Command::Checkout { name, platform: Some(stageman_core::Platform::GitHub), .. }
+            Command::Checkout { name, platform: Some(stageman_core::Platform::GitHub), actor: None, .. }
                 if *name == container
         )
     });
@@ -312,4 +312,34 @@ fn a_job_from_before_warrants_is_resumed_as_it_was() {
     let asked = fetching(&mut sim, 5_010, Some(&warrant_of(&older)), NEARBY);
     sim.run_until(&mut instance, 5_020);
     assert_eq!(sim.tool_answer(asked).map(|answer| answer.0), Some(403));
+}
+
+/// A job on a project that reaches the platform through an installation
+/// of the App checks out as the App's bot: the commit identity the
+/// checkout sets is the App's name marked as a bot, and a token's project
+/// sets none, since its token says who it is — see
+/// `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
+#[test]
+fn a_jobs_checkout_commits_as_the_apps_bot_on_an_installation() {
+    let mut sim = Simulation::new();
+    let mut state = watching_a_channel(&[]);
+    crate::simulation::with_an_app(&mut state);
+    crate::simulation::installed(&mut state, 77);
+    crate::simulation::on_github(&mut state, "example/repo");
+    sim.holding(&state);
+    let mut instance = sim.wake(seed(1));
+
+    let job = started(&mut sim, &mut instance, 1, "fetch something");
+    sim.run_until(&mut instance, 5_000);
+    let container = stageman_job::container(&job);
+    let actor = sim.commands().iter().find_map(|command| match command {
+        Command::Checkout { name, actor, .. } if *name == container => Some(actor.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        actor,
+        Some(Some("stageman-sim[bot]".to_owned())),
+        "checked out as the App's bot: {:?}",
+        sim.commands()
+    );
 }

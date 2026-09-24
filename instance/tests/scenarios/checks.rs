@@ -597,3 +597,29 @@ fn a_token_whose_account_or_expiry_cannot_be_read_is_refused() {
     );
     assert_eq!(instance.state().projects.len(), 1, "nothing kept");
 }
+
+/// The platform's own trouble on the read of the account — an answer that
+/// is a verdict on nothing — refuses the token as unchecked, the way the
+/// read of the repository would, rather than as wrong.
+#[test]
+fn a_platform_in_trouble_on_the_account_read_refuses_the_token_as_unchecked() {
+    let mut sim = Simulation::new();
+    sim.holding(&watching(&[]));
+    let mut instance = sim.wake(seed(1));
+    sim.next_platform_answers(200, r#"{"full_name":"example/aviary","private":true}"#);
+    sim.next_platform_answers(503, r#"{"message":"down"}"#);
+    assert_eq!(
+        ask(
+            &mut sim,
+            &mut instance,
+            1,
+            Request::Create {
+                draft: a_draft("aviary")
+            }
+        ),
+        Response::Refused(Refusal::TokenUnchecked {
+            why: "GitHub could not be reached: it answered 503".to_owned()
+        })
+    );
+    assert_eq!(instance.state().projects.len(), 1, "nothing kept");
+}

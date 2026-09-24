@@ -4403,6 +4403,23 @@ mod tests {
 
     /// The wrapper is written into the named container from standard
     /// input, over a shell kept interactive so that the input reaches it.
+    /// Only the wrapper's own script reads back as writing the wrapper in;
+    /// any other script run in a container the same way is no command of
+    /// this crate's.
+    #[test]
+    fn only_the_wrappers_script_reads_back_as_wrapping() {
+        let mut arguments = Command::Wrap {
+            name: "stageman-job-1".to_owned(),
+        }
+        .arguments();
+        assert!(matches!(
+            Command::parse(&arguments),
+            Some(Command::Wrap { ref name }) if name == "stageman-job-1"
+        ));
+        *arguments.last_mut().expect("the script") = "echo hi".to_owned();
+        assert_eq!(Command::parse(&arguments), None);
+    }
+
     #[test]
     fn the_wrapper_is_written_into_the_named_container_from_standard_input() {
         let arguments = Command::Wrap {

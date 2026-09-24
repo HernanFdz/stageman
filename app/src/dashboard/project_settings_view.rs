@@ -458,6 +458,10 @@ fn items_of(rows: &[Reachable]) -> Vec<ComboboxItem> {
 /// access now reaches, hands the draft what the wire is sent, and says
 /// what the settling said. Every change to the card goes through here, so
 /// the three cannot drift apart.
+// Skipped by mutation testing: it writes three signals of the page, which
+// only a running page has, and what it composes — `settle` and `draft` —
+// is tested on its own. The probe drives it in a real browser.
+#[mutants::skip]
 fn apply(
     mut access: Signal<Access>,
     mut draft: Signal<Draft>,
@@ -2146,6 +2150,18 @@ mod tests {
         );
         assert!(unlisted.rows().is_empty());
         assert!(!unlisted.busy());
+        assert!(!unlisted.more());
+        let mut a_page_of = on_acme(Some(&a_and_b), None, false);
+        a_page_of.app = Some(AppSlot {
+            listing: Some(Ok(Reached::Listed {
+                account: None,
+                expires: None,
+                repositories: a_and_b.to_vec(),
+                more: true,
+            })),
+            ..on_the_app("acme", None)
+        });
+        assert!(a_page_of.more(), "the platform had more than it listed");
         assert!(on_acme(None, None, false).busy(), "listing not come");
         assert!(!Access::default().busy(), "nothing to list");
 

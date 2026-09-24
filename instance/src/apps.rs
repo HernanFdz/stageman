@@ -71,7 +71,9 @@ impl Running {
         let state = crate::mint(&mut self.rng).simple().to_string();
         self.registrations
             .push_back((state.clone(), Registering { platform }));
-        while self.registrations.len() > REMEMBERED {
+        // One in, at most one out: each press adds one, so one drop keeps
+        // the bound, and a comparison that went wrong could not loop.
+        if self.registrations.len() > REMEMBERED {
             self.registrations.pop_front();
         }
         Ok(Registration {

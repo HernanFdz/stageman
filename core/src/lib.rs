@@ -5939,6 +5939,13 @@ mod tests {
             Err(RepositoryError::NotHttps)
         );
         assert_eq!(
+            RepositoryAddress::new("HernanFdz", "stageman")
+                .expect("an address")
+                .to_string(),
+            "HernanFdz/stageman",
+            "shown as the platform says it"
+        );
+        assert_eq!(
             RepositoryAddress::parse("https://example.invalid/owner/name"),
             Err(RepositoryError::NotOnGitHub)
         );

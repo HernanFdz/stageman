@@ -212,10 +212,20 @@ mod tests {
     #[test]
     fn a_moment_ahead_reads_as_in_and_one_behind_as_ago() {
         assert_eq!(until(0), "now");
+        assert_eq!(until(44), "now");
+        assert_eq!(until(45), "in a minute");
         assert_eq!(until(90), "in 2 minutes");
-        assert_eq!(until(3 * DAY), "in 3 days");
+        assert_eq!(until(44 * MINUTE), "in 44 minutes");
+        assert_eq!(until(45 * MINUTE), "in an hour");
+        assert_eq!(until(21 * HOUR), "in 21 hours");
         assert_eq!(until(22 * HOUR), "in a day");
+        assert_eq!(until(3 * DAY), "in 3 days");
+        assert_eq!(until(25 * DAY), "in 25 days");
+        assert_eq!(until(26 * DAY), "in a month");
         assert_eq!(until(200 * DAY), "in 7 months");
+        assert_eq!(until(319 * DAY), "in 11 months");
+        assert_eq!(until(320 * DAY), "in a year");
+        assert_eq!(until(800 * DAY), "in 2 years");
         let three_days = i64::try_from(3 * DAY).expect("fits");
         assert_eq!(since(three_days, true), "3 days ago");
         assert_eq!(since(-three_days, true), "in 3 days");

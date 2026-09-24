@@ -275,3 +275,44 @@ fn the_app_is_forgotten_from_the_page() {
         })
     );
 }
+
+/// Only the last few registrations begun are remembered: a page asks for
+/// a form on every read, and a state older than those is one no browser
+/// can still come back with. The ninth form minted forgets the first and
+/// only the first: the first's state is refused as not begun here, and
+/// the second's is still honoured.
+#[test]
+fn only_the_last_few_registrations_begun_are_remembered() {
+    let mut sim = Simulation::new();
+    sim.holding(&watching(&[]));
+    let mut instance = sim.wake(seed(1));
+    // As many as the instance remembers, and one more.
+    let remembered = 8;
+    let forms: Vec<stageman_wire::Registration> = (1..=remembered + 1)
+        .map(|id| begun(&mut sim, &mut instance, id))
+        .collect();
+
+    let first = sim.visits_path(sim.now(), &back("c0de", &forms[0].state));
+    sim.run_until(&mut instance, 5_000);
+    assert_eq!(
+        sim.tool_answer(first).map(|(status, _)| *status),
+        Some(400),
+        "the oldest state has been forgotten"
+    );
+    assert!(
+        sim.platform_calls().is_empty(),
+        "nothing asked of the platform for it"
+    );
+
+    let second = sim.visits_path(sim.now(), &back("c0de", &forms[1].state));
+    sim.run_until(&mut instance, 10_000);
+    assert_eq!(
+        sim.tool_answer(second).map(|(status, _)| *status),
+        Some(303),
+        "the next-oldest is still remembered: exchanged, kept, and the browser sent on"
+    );
+    assert!(
+        instance.state().apps.contains_key(&Platform::GitHub),
+        "the App is kept"
+    );
+}

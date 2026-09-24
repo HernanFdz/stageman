@@ -72,12 +72,17 @@ pub use status_view::{Instance, Status};
 /// `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
 ///
 /// Nothing is returned from the script, per `docs/conventions.md` §3.
+// Skipped by mutation testing, as are the two below: each is one script
+// line evaluated in a browser, which nothing on this side can observe. The
+// probe drives them in a real browser.
+#[mutants::skip]
 pub(crate) fn open_a_tab() {
     let _opened = document::eval("window.stagemanTab = window.open(\"about:blank\", \"_blank\");");
 }
 
 /// Sends the tab [`open_a_tab`] opened to an address composed on the
 /// server, quoted here for the one script line.
+#[mutants::skip]
 pub(crate) fn send_the_tab(link: &str) {
     let quoted = link.replace('\\', "\\\\").replace('"', "\\\"");
     let _sent = document::eval(&format!(
@@ -87,6 +92,7 @@ pub(crate) fn send_the_tab(link: &str) {
 
 /// Closes the tab [`open_a_tab`] opened, when there turned out to be
 /// nowhere to send it.
+#[mutants::skip]
 pub(crate) fn close_the_tab() {
     let _closed = document::eval(
         "if (window.stagemanTab) { window.stagemanTab.close(); window.stagemanTab = null; }",

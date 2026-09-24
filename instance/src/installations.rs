@@ -311,7 +311,8 @@ impl Running {
                 installation: None,
             },
         ));
-        while self.begun.len() > REMEMBERED {
+        // One in, at most one out, for the reason the registrations give.
+        if self.begun.len() > REMEMBERED {
             self.begun.pop_front();
         }
         Ok(Response::InstallLink(InstallLink { link, state }))

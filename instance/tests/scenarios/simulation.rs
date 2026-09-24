@@ -2544,12 +2544,15 @@ impl Simulation {
                 || (401, r#"{"message":"Bad credentials"}"#.to_owned()),
                 |installation| {
                     let covered = self.coverage_of(installation);
+                    // One page of the platform's hundred, and the whole count
+                    // beside it, as the real platform answers.
                     (
                         200,
                         serde_json::json!({
                             "total_count": covered.len(),
                             "repositories": covered
                                 .iter()
+                                .take(100)
                                 .map(|(full_name, private)| serde_json::json!({
                                     "full_name": full_name,
                                     "html_url": format!("https://github.com/{full_name}"),
@@ -2567,9 +2570,11 @@ impl Simulation {
     /// answers, every repository the operator can see and the private
     /// ones the token was granted.
     fn readable_answer(&self) -> String {
+        // One page of the platform's hundred, as the real platform answers.
         serde_json::json!(
             self.token_reads
                 .iter()
+                .take(100)
                 .map(|(full_name, private)| serde_json::json!({
                     "full_name": full_name,
                     "html_url": format!("https://github.com/{full_name}"),
