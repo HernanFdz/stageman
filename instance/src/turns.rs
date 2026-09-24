@@ -384,13 +384,13 @@ pub fn pull_requests_of(state: &State, job: &JobId) -> Vec<String> {
     let repository = state
         .project_of(job)
         .and_then(|project| state.projects.get(&project))
-        .map(|project| project.repository.as_str());
+        .map(|project| &project.repository);
     recorded
         .pull_requests
         .iter()
         .map(|number| {
             repository
-                .and_then(|repository| crate::views::pull_request_link(repository, *number))
+                .map(|repository| crate::views::pull_request_link(repository, *number))
                 .map_or_else(
                     || format!("#{number}"),
                     |link| format!("[#{number}]({link})"),
@@ -1409,7 +1409,8 @@ mod tests {
             project,
             Project {
                 name: "example".to_owned(),
-                repository: "https://example.invalid/repo".to_owned(),
+                repository: stageman_core::RepositoryAddress::new("example", "repo")
+                    .expect("an address"),
                 foreman_kit: Kit::defaults(Agent::Claude),
                 kits: BTreeMap::from([(
                     KitName::new("Claude").expect("a name"),

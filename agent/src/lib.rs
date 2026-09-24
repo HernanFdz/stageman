@@ -3416,7 +3416,8 @@ mod tests {
             id,
             Project {
                 name: "example".to_owned(),
-                repository: "https://example.invalid/repo".to_owned(),
+                repository: stageman_core::RepositoryAddress::new("example", "repo")
+                    .expect("an address"),
                 foreman_kit: Kit::defaults(Agent::Claude),
                 kits: only_claude(),
                 access,
@@ -4632,7 +4633,8 @@ mod tests {
                 project,
                 Project {
                     name: "probe".to_owned(),
-                    repository: "https://example.invalid/repo".to_owned(),
+                    repository: stageman_core::RepositoryAddress::new("example", "repo")
+                        .expect("an address"),
                     foreman_kit: Kit::defaults(Agent::Claude),
                     kits: only_claude(),
                     access: BTreeMap::new(),

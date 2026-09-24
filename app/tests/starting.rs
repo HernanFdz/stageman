@@ -387,7 +387,8 @@ fn watching(name: &str, repository: &str) -> State {
             ProjectId::from_uuid(uuid::Uuid::nil()),
             Project {
                 name: name.to_owned(),
-                repository: repository.to_owned(),
+                repository: stageman_core::RepositoryAddress::parse(repository)
+                    .expect("an address on the platform"),
                 foreman_kit: Kit::defaults(Agent::Claude),
                 kits: BTreeMap::from([(
                     KitName::new("Claude").expect("a name"),
@@ -727,7 +728,7 @@ fn two_instances_started_from_nothing_are_told_apart() {
 #[test]
 fn the_dashboard_arrives_with_the_instance_already_on_it() {
     let (_kept, snapshot) = scratch();
-    let watched = watching("aviary", "https://example.invalid/aviary");
+    let watched = watching("aviary", "https://github.com/example/aviary");
     written(&snapshot, &watched);
 
     let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
@@ -739,7 +740,7 @@ fn the_dashboard_arrives_with_the_instance_already_on_it() {
         "the page should name the project: {page}"
     );
     assert!(
-        page.contains("example.invalid/aviary"),
+        page.contains("example/aviary"),
         "the page should name the repository: {page}"
     );
 }
@@ -752,7 +753,7 @@ fn the_dashboard_arrives_with_the_instance_already_on_it() {
 #[test]
 fn the_route_the_page_reads_through_answers_on_its_own() {
     let (_kept, snapshot) = scratch();
-    let watched = watching("aviary", "https://example.invalid/aviary");
+    let watched = watching("aviary", "https://github.com/example/aviary");
     written(&snapshot, &watched);
 
     let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
@@ -774,7 +775,7 @@ fn the_route_the_page_reads_through_answers_on_its_own() {
 #[test]
 fn nothing_served_carries_a_credential() {
     let (_kept, snapshot) = scratch();
-    let mut watched = watching("aviary", "https://example.invalid/aviary");
+    let mut watched = watching("aviary", "https://github.com/example/aviary");
     // A job too, so that its page below renders one: its warrant is the
     // newest credential a record holds, and the one a page about a job
     // would be the first to show.
@@ -888,7 +889,7 @@ fn saying_where_the_instance_goes_still_wins() {
 #[test]
 fn the_dashboard_counts_working_jobs_rather_than_all_of_them() {
     let (_kept, snapshot) = scratch();
-    let mut state = watching("aviary", "https://example.invalid/aviary");
+    let mut state = watching("aviary", "https://github.com/example/aviary");
     let project = state.projects.values_mut().next().expect("the project");
     project.jobs.insert(
         JobId::from_uuid(uuid::Uuid::from_u128(1)),
@@ -920,7 +921,7 @@ fn the_dashboard_counts_working_jobs_rather_than_all_of_them() {
 #[test]
 fn the_first_page_arrives_with_its_regions_and_the_projects() {
     let (_kept, snapshot) = scratch();
-    let mut state = watching("aviary", "https://example.invalid/aviary");
+    let mut state = watching("aviary", "https://github.com/example/aviary");
     let project = state.projects.values_mut().next().expect("the project");
     project.jobs.insert(
         JobId::from_uuid(uuid::Uuid::from_u128(1)),
@@ -957,7 +958,7 @@ fn the_first_page_arrives_with_its_regions_and_the_projects() {
 #[test]
 fn an_agent_a_project_still_names_cannot_be_forgotten() {
     let (_kept, snapshot) = scratch();
-    let watched = watching("aviary", "https://example.invalid/aviary");
+    let watched = watching("aviary", "https://github.com/example/aviary");
     written(&snapshot, &watched);
 
     let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
@@ -1001,7 +1002,7 @@ fn a_credential_is_taken_once_and_never_returned() {
 #[test]
 fn a_project_has_a_settings_page_and_a_new_one_is_that_page_empty() {
     let (_kept, snapshot) = scratch();
-    let mut watched = watching("aviary", "https://example.invalid/aviary");
+    let mut watched = watching("aviary", "https://github.com/example/aviary");
     // Reached with a token, so that the page has a repository to show: a
     // project reaching nothing has nothing chosen, per
     // `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
@@ -1031,7 +1032,7 @@ fn a_project_has_a_settings_page_and_a_new_one_is_that_page_empty() {
         settings.contains(r#"value="aviary""#),
         "the name should be in its box: {settings}"
     );
-    assert!(settings.contains("example.invalid/aviary"), "{settings}");
+    assert!(settings.contains("example/aviary"), "{settings}");
     assert!(
         settings.contains("With a token."),
         "the access sentence says the shape on the server too: {settings}"
@@ -1285,7 +1286,8 @@ fn two_projects_each_with_a_job() -> (State, Vec<(JobId, &'static str, &'static 
             ProjectId::from_uuid(uuid::Uuid::from_u128(n)),
             Project {
                 name: name.to_owned(),
-                repository: format!("https://github.com/example/{name}"),
+                repository: stageman_core::RepositoryAddress::new("example", name)
+                    .expect("an address"),
                 foreman_kit: Kit::defaults(Agent::Claude),
                 kits: BTreeMap::from([(
                     KitName::new("Claude").expect("a name"),

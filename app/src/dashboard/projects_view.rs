@@ -290,8 +290,8 @@ fn WatchedProject(project: Project, available: Vec<Agent>, shapes: Vec<Shape>) -
                 // `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
                 Reference {
                     mark: "github",
-                    says: project.repository.clone(),
-                    link: project.repository_link.clone(),
+                    says: project.repository.to_string(),
+                    link: Some(project.repository_link.clone()),
                 }
                 if let Some(room) = project.foreman_room.clone() {
                     Reference {
@@ -386,8 +386,11 @@ mod tests {
         super::Project {
             id: "p".to_owned(),
             name: "aviary".to_owned(),
-            repository: "https://github.com/owner/aviary".to_owned(),
-            repository_link: None,
+            repository: stageman_wire::Repository {
+                owner: "owner".to_owned(),
+                name: "aviary".to_owned(),
+            },
+            repository_link: "https://github.com/owner/aviary".to_owned(),
             foreman: stageman_wire::Fitted::default(),
             kits: Vec::new(),
             access: Some(stageman_wire::AccessView::Token),

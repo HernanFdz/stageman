@@ -405,7 +405,7 @@ impl Running {
             created,
             Project {
                 name,
-                repository: repository.https(),
+                repository,
                 foreman_kit,
                 kits,
                 access: BTreeMap::from([(Platform::GitHub, access)]),
@@ -472,15 +472,7 @@ impl Running {
             ..
         } = drafted(draft, Some(watched), &self.begun)?;
         watched.variables = variables;
-        amended(
-            watched,
-            name,
-            repository.https(),
-            foreman_kit,
-            kits,
-            access,
-            brief,
-        );
+        amended(watched, name, repository, foreman_kit, kits, access, brief);
         candidate
             .check()
             .map_err(|reason| views::from_inconsistent(&reason))?;
@@ -796,10 +788,7 @@ pub fn drafted(draft: &Draft, held: Option<&Project>, begun: &Begun) -> Result<D
                     Some(Access::Token(_)) | None => return Err(unsaid()),
                 },
             };
-            (
-                Access::Installation { id },
-                addressed(repository.as_deref().unwrap_or_default())?,
-            )
+            (Access::Installation { id }, addressed(repository.as_ref())?)
         }
         AccessDraft::Token { token, repository } => {
             let token = match token {
@@ -809,14 +798,11 @@ pub fn drafted(draft: &Draft, held: Option<&Project>, begun: &Begun) -> Result<D
                     Some(Access::Installation { .. }) | None => return Err(unsaid()),
                 },
             };
-            (
-                Access::Token(token),
-                addressed(repository.as_deref().unwrap_or_default())?,
-            )
+            (Access::Token(token), addressed(repository.as_ref())?)
         }
     };
     let reach_changed = held.is_none_or(|watched| {
-        watched.access.get(&platform) != Some(&access) || watched.repository != repository.https()
+        watched.access.get(&platform) != Some(&access) || watched.repository != repository
     });
     let foreman_kit = views::kit_of(&draft.foreman)?;
     let kits = kits_of(&draft.kits)?;
@@ -905,7 +891,7 @@ pub fn resolved(
 pub fn amended(
     watched: &mut Project,
     name: String,
-    repository: String,
+    repository: RepositoryAddress,
     foreman_kit: Kit,
     kits: BTreeMap<KitName, KitConfig>,
     access: Access,
@@ -988,16 +974,21 @@ pub fn binding(channel: &ChannelDraft) -> Result<BTreeMap<Channel, ChannelConfig
 /// The repository, required, and read as an address: an owner and a name
 /// on the platform, with what was pasted beside them forgiven — see
 /// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
-/// What is kept is the address as this project writes it.
+/// The repository a form chose, as an address on the platform.
 ///
 /// # Errors
 ///
-/// Fails if nothing was given, or if what was given is not an address on
-/// the platform, saying which rule it broke.
-pub fn addressed(given: &str) -> Result<RepositoryAddress, Refusal> {
-    let text = required("repository", given)?;
-    RepositoryAddress::parse(&text).map_err(|why| Refusal::RepositoryRefused {
-        rule: why.to_string(),
+/// Fails if none was chosen, or if either part is not something the
+/// platform would call an owner or a repository, saying which rule it
+/// broke.
+pub fn addressed(given: Option<&stageman_wire::Repository>) -> Result<RepositoryAddress, Refusal> {
+    let given = given.ok_or_else(|| Refusal::Incomplete {
+        field: "repository".to_owned(),
+    })?;
+    RepositoryAddress::new(given.owner.trim(), given.name.trim()).map_err(|why| {
+        Refusal::RepositoryRefused {
+            rule: why.to_string(),
+        }
     })
 }
 
@@ -1021,12 +1012,20 @@ mod tests {
     use super::{addressed, amended, binding, busy, identify_job, kits_of, offered, resolved};
     use stageman_core::{
         Access, Agent, AgentConfig, Channel, ChannelConfig, ClaudeEffort, ClaudeModel, Job, JobId,
-        Kit, KitConfig, KitName, Platform, Progress, Project, ProjectId, Secret, State, Timestamp,
-        Uuid, Variable, VariableName, Waiting,
+        Kit, KitConfig, KitName, Platform, Progress, Project, ProjectId, RepositoryAddress, Secret,
+        State, Timestamp, Uuid, Variable, VariableName, Waiting,
     };
     use stageman_wire::Draft;
     use stageman_wire::{AccessDraft, ChannelDraft, Fitted, KitDraft, Refusal, VariableDraft};
     use std::collections::BTreeMap;
+
+    /// A repository as a form names it.
+    fn repo(owner: &str, name: &str) -> stageman_wire::Repository {
+        stageman_wire::Repository {
+            owner: owner.to_owned(),
+            name: name.to_owned(),
+        }
+    }
 
     fn drafted(credential: &str, listening: &str) -> ChannelDraft {
         ChannelDraft {
@@ -1058,7 +1057,7 @@ mod tests {
     fn holding(jobs: &[Progress]) -> Project {
         Project {
             name: "aviary".to_owned(),
-            repository: "https://example.invalid/aviary".to_owned(),
+            repository: RepositoryAddress::new("example", "aviary").expect("an address"),
             foreman_kit: Kit::defaults(Agent::Claude),
             kits: one_kit(),
             access: BTreeMap::new(),
@@ -1148,28 +1147,33 @@ mod tests {
         );
     }
 
-    /// A repository is kept as the address this project writes, whatever was
-    /// pasted beside it, and refused when it is not one.
+    /// A repository a form chose becomes the address this project writes,
+    /// and is refused where either part is not what the platform would call
+    /// an owner or a repository, or where none was chosen.
     #[test]
     fn a_repository_is_written_as_an_address_or_refused_by_rule() {
         assert_eq!(
-            addressed("https://github.com/HernanFdz/stageman.git/").map(|address| address.https()),
-            Ok("https://github.com/HernanFdz/stageman".to_owned())
-        );
-        assert_eq!(
-            addressed("  "),
+            addressed(None),
             Err(Refusal::Incomplete {
                 field: "repository".to_owned()
             })
         );
         assert!(matches!(
-            addressed("git@github.com:HernanFdz/stageman.git"),
+            addressed(Some(&repo("git@github.com:HernanFdz", "stageman.git"))),
             Err(Refusal::RepositoryRefused { .. })
         ));
         assert!(matches!(
-            addressed("https://example.invalid/aviary"),
+            addressed(Some(&stageman_wire::Repository {
+                owner: String::new(),
+                name: "aviary".to_owned(),
+            })),
             Err(Refusal::RepositoryRefused { .. })
         ));
+        assert_eq!(
+            addressed(Some(&repo(" HernanFdz ", "stageman"))).map(|address| address.https()),
+            Ok("https://github.com/HernanFdz/stageman".to_owned()),
+            "trimmed, and kept"
+        );
     }
 
     /// Amending replaces both the foreman's kit and the kits whole, sets the
@@ -1202,7 +1206,7 @@ mod tests {
         amended(
             &mut project,
             "renamed".to_owned(),
-            "https://example.invalid/renamed".to_owned(),
+            RepositoryAddress::new("example", "renamed").expect("an address"),
             Kit::Claude {
                 model: ClaudeModel::Haiku,
             },
@@ -1235,7 +1239,7 @@ mod tests {
         amended(
             &mut project,
             "renamed".to_owned(),
-            "https://example.invalid/renamed".to_owned(),
+            RepositoryAddress::new("example", "renamed").expect("an address"),
             Kit::defaults(Agent::Claude),
             one_kit(),
             Access::Token(Secret::new("ghp-the-new-one".to_owned())),
@@ -1252,7 +1256,7 @@ mod tests {
         amended(
             &mut project,
             "renamed".to_owned(),
-            "https://example.invalid/renamed".to_owned(),
+            RepositoryAddress::new("example", "renamed").expect("an address"),
             Kit::defaults(Agent::Claude),
             one_kit(),
             Access::Installation { id: 77 },
@@ -1282,7 +1286,7 @@ mod tests {
             kits: vec![kit_row("Claude", "General-purpose.", "default", "default")],
             access: AccessDraft::Token {
                 token: None,
-                repository: Some("https://github.com/example/aviary.git".to_owned()),
+                repository: Some(repo("example", "aviary")),
             },
             channel: ChannelDraft {
                 credential: "xoxb-not-a-real-token".to_owned(),
@@ -1313,11 +1317,11 @@ mod tests {
         ));
         draft.access = AccessDraft::Token {
             token: None,
-            repository: Some("https://github.com/example/aviary.git".to_owned()),
+            repository: Some(repo("example", "aviary")),
         };
 
         let mut held = holding(&[]);
-        held.repository = "https://github.com/example/aviary".to_owned();
+        held.repository = RepositoryAddress::new("example", "aviary").expect("an address");
         held.access.insert(
             Platform::GitHub,
             Access::Token(Secret::new("ghp-the-held-one".to_owned())),
@@ -1346,7 +1350,7 @@ mod tests {
         assert_eq!(amending.brief, "be brief");
         draft.access = AccessDraft::Token {
             token: None,
-            repository: Some("https://github.com/example/other".to_owned()),
+            repository: Some(repo("example", "other")),
         };
         assert!(
             super::drafted(&draft, Some(&held), &came_back(77))
@@ -1371,7 +1375,7 @@ mod tests {
             kits: vec![kit_row("Claude", "General-purpose.", "default", "default")],
             access: AccessDraft::Token {
                 token: Some(" github_pat_not_a_real_token ".to_owned()),
-                repository: Some("https://github.com/example/aviary.git".to_owned()),
+                repository: Some(repo("example", "aviary")),
             },
             channel: ChannelDraft {
                 credential: "xoxb-not-a-real-token".to_owned(),
@@ -1381,7 +1385,7 @@ mod tests {
             brief: " be brief ".to_owned(),
         };
         let mut held = holding(&[]);
-        held.repository = "https://github.com/example/aviary".to_owned();
+        held.repository = RepositoryAddress::new("example", "aviary").expect("an address");
         held.access.insert(
             Platform::GitHub,
             Access::Token(Secret::new("ghp-the-held-one".to_owned())),
@@ -1408,7 +1412,7 @@ mod tests {
         );
         draft.access = AccessDraft::Token {
             token: Some("  ".to_owned()),
-            repository: Some("https://github.com/example/aviary.git".to_owned()),
+            repository: Some(repo("example", "aviary")),
         };
         assert!(matches!(
             super::drafted(&draft, Some(&held), &came_back(77)),
@@ -1416,7 +1420,7 @@ mod tests {
         ));
         draft.access = AccessDraft::App {
             arrival: Some("f00d".to_owned()),
-            repository: Some("https://github.com/example/aviary".to_owned()),
+            repository: Some(repo("example", "aviary")),
         };
         let on_the_app = super::drafted(&draft, None, &came_back(77)).expect("a whole draft");
         assert_eq!(on_the_app.access, Access::Installation { id: 77 });
@@ -1434,7 +1438,7 @@ mod tests {
         );
         draft.access = AccessDraft::App {
             arrival: None,
-            repository: Some("https://github.com/example/aviary".to_owned()),
+            repository: Some(repo("example", "aviary")),
         };
         assert!(
             !super::drafted(&draft, Some(&held), &nothing_came_back())
@@ -1450,7 +1454,7 @@ mod tests {
         );
         draft.access = AccessDraft::App {
             arrival: Some("f00d".to_owned()),
-            repository: Some("https://github.com/example/aviary".to_owned()),
+            repository: Some(repo("example", "aviary")),
         };
         assert_eq!(
             super::drafted(&draft, None, &nothing_came_back()).expect_err("no such state"),
@@ -1700,7 +1704,7 @@ mod tests {
                     name: "aviary".to_owned(),
                     access: AccessDraft::Token {
                         token: Some("ghp-not-a-real-token".to_owned()),
-                        repository: Some("https://github.com/example/aviary".to_owned()),
+                        repository: Some(repo("example", "aviary")),
                     },
                     ..Draft::default()
                 },

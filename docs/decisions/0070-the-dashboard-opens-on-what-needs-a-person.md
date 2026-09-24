@@ -12,6 +12,11 @@ among the smaller things the room design made cheap.
 `docs/decisions/0072-the-dashboard-has-a-dark-theme.md` are taken beside it;
 the first is what makes any page here worth leaving open.
 
+Finished by
+`docs/decisions/0079-a-repository-is-an-owner-and-a-name.md`: the typed
+address this record introduced for composing links is what a project holds
+since then, rather than the text it was parsed from.
+
 Amended when the job page was built. The workspace's address is what the
 channel already asks on every connection and holds, rather than something
 kept on the binding: a room is a link while the channel is connected and

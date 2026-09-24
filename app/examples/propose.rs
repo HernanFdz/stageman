@@ -95,7 +95,9 @@ async fn propose() -> Result<(), String> {
         project,
         Project {
             name: "stageman".to_owned(),
-            repository: repository.clone(),
+            repository: stageman_core::RepositoryAddress::parse(&repository).map_err(|error| {
+                format!("the repository has to be an address on GitHub: {error}")
+            })?,
             foreman_kit: Kit::defaults(Agent::Claude),
             kits: std::collections::BTreeMap::from([(
                 KitName::new("Claude").map_err(|error| format!("a kit's name: {error}"))?,

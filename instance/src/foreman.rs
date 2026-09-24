@@ -579,7 +579,7 @@ impl Running {
             .state
             .projects
             .get(&project)
-            .map(|watched| watched.repository.clone())
+            .map(|watched| watched.repository.https())
             .ok_or(stageman_core::HandoutError::UnknownProject(project))?;
         let handout =
             Handout::for_foreman(&self.state, project)?.speaking_in(thread.clone().into());
@@ -649,7 +649,8 @@ mod tests {
             project,
             Project {
                 name: "example".to_owned(),
-                repository: "https://example.invalid/repo".to_owned(),
+                repository: stageman_core::RepositoryAddress::new("example", "repo")
+                    .expect("an address"),
                 foreman_kit: Kit::defaults(Agent::Claude),
                 kits: BTreeMap::from([
                     (

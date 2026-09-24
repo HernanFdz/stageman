@@ -230,10 +230,12 @@ fn room_address(us: &Identity, room: &Room) -> String {
 /// The repository as an address a browser can open, when what a project
 /// holds is one; a project written before addresses were checked may hold
 /// text that is not, which is shown and linked to nothing.
-fn linked(repository: &str) -> Option<String> {
-    RepositoryAddress::parse(repository)
-        .ok()
-        .map(|address| address.https())
+/// A repository as a page names it: its two parts, and nothing composed.
+pub fn wire_repository(address: &RepositoryAddress) -> stageman_wire::Repository {
+    stageman_wire::Repository {
+        owner: address.owner.clone(),
+        name: address.name.clone(),
+    }
 }
 
 /// What a screen calls an agent.
@@ -292,8 +294,8 @@ pub fn projected(
     stageman_wire::Project {
         id: id.to_string(),
         name: project.name.clone(),
-        repository: project.repository.clone(),
-        repository_link: linked(&project.repository),
+        repository: wire_repository(&project.repository),
+        repository_link: project.repository.https(),
         foreman: fitted(&project.foreman_kit),
         kits: project
             .kits
@@ -429,8 +431,8 @@ pub fn working(
 
     Ok(stageman_wire::Working {
         name: watched.name.clone(),
-        repository: watched.repository.clone(),
-        repository_link: linked(&watched.repository),
+        repository: wire_repository(&watched.repository),
+        repository_link: watched.repository.https(),
         kits: watched
             .kits
             .iter()
@@ -471,8 +473,8 @@ pub fn job_page(
     Ok(stageman_wire::JobPage {
         project: identifier.to_string(),
         project_name: watched.name.clone(),
-        repository: watched.repository.clone(),
-        repository_link: linked(&watched.repository),
+        repository: wire_repository(&watched.repository),
+        repository_link: watched.repository.https(),
         job: job_view(
             &named,
             recorded,
@@ -488,10 +490,8 @@ pub fn job_page(
 /// here and never in the browser, per
 /// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`,
 /// because the shape of an address is the platform's knowledge.
-pub fn pull_request_link(repository: &str, number: u64) -> Option<String> {
-    RepositoryAddress::parse(repository)
-        .ok()
-        .map(|address| format!("{}/pull/{number}", address.https()))
+pub fn pull_request_link(repository: &RepositoryAddress, number: u64) -> String {
+    format!("{}/pull/{number}", repository.https())
 }
 
 /// One job, as a page sees it: with its room as a link where the channel
@@ -499,7 +499,7 @@ pub fn pull_request_link(repository: &str, number: u64) -> Option<String> {
 fn job_view(
     id: &JobId,
     job: &Job,
-    repository: &str,
+    repository: &RepositoryAddress,
     us: Option<&Identity>,
     domain: &Domain,
     serving: u16,
@@ -644,7 +644,8 @@ mod tests {
     };
     use stageman_core::{
         Agent, AgentConfig, ClaudeEffort, ClaudeModel, Job, JobId, Kit, KitConfig, KitName,
-        Outcome, Progress, Project, ProjectId, Secret, State, Timestamp, Uuid, Waiting,
+        Outcome, Progress, Project, ProjectId, RepositoryAddress, Secret, State, Timestamp, Uuid,
+        Waiting,
     };
     use stageman_wire::{Fitted, Refusal, Standing};
     use std::collections::BTreeMap;
@@ -791,7 +792,8 @@ mod tests {
                 ProjectId::from_uuid(Uuid::nil()),
                 Project {
                     name: name.to_owned(),
-                    repository: "https://example.invalid/repo".to_owned(),
+                    repository: stageman_core::RepositoryAddress::new("example", "repo")
+                        .expect("an address"),
                     foreman_kit: Kit::defaults(Agent::Claude),
                     kits: BTreeMap::from([(
                         KitName::new("Claude").expect("a name"),
@@ -888,11 +890,15 @@ mod tests {
         assert_eq!(shown.name, "aviary");
         assert!(!shown.attending, "nothing in hand");
         assert_eq!(
-            shown.repository_link, None,
-            "text that is not an address on the platform links to nothing"
+            shown.repository,
+            stageman_wire::Repository {
+                owner: "example".to_owned(),
+                name: "repo".to_owned()
+            }
         );
+        assert_eq!(shown.repository_link, "https://github.com/example/repo");
 
-        // On a message, and on a repository that is an address.
+        // On a message, and on another repository.
         watched.attending.take(stageman_core::Errand {
             said: "fix the build".to_owned(),
             thread: stageman_core::Thread {
@@ -904,13 +910,10 @@ mod tests {
             message: None,
             app: None,
         });
-        watched.repository = "https://github.com/owner/aviary.git".to_owned();
+        watched.repository = RepositoryAddress::new("owner", "aviary").expect("an address");
         let shown = super::projected(ProjectId::from_uuid(Uuid::nil()), watched, None, None);
         assert!(shown.attending);
-        assert_eq!(
-            shown.repository_link.as_deref(),
-            Some("https://github.com/owner/aviary")
-        );
+        assert_eq!(shown.repository_link, "https://github.com/owner/aviary");
     }
 
     /// The first page lists what a person does something about, longest
@@ -1110,17 +1113,22 @@ mod tests {
         );
     }
 
-    /// A pull request's address is the repository's with the number, where
-    /// the repository is an address, and nothing otherwise.
+    /// A pull request's address is the repository's with the number, and a
+    /// repository crosses to a page as its two parts with its address
+    /// beside it.
     #[test]
-    fn a_pull_request_is_addressed_on_the_repository_or_not_at_all() {
+    fn a_pull_request_is_addressed_on_the_repository() {
+        let named = RepositoryAddress::new("owner", "name").expect("an address");
         assert_eq!(
-            super::pull_request_link("https://github.com/owner/name.git", 12).as_deref(),
-            Some("https://github.com/owner/name/pull/12")
+            super::pull_request_link(&named, 12),
+            "https://github.com/owner/name/pull/12"
         );
         assert_eq!(
-            super::pull_request_link("https://example.invalid/name", 12),
-            None
+            super::wire_repository(&named),
+            stageman_wire::Repository {
+                owner: "owner".to_owned(),
+                name: "name".to_owned()
+            }
         );
     }
 }

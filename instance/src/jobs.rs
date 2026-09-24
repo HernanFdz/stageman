@@ -97,7 +97,7 @@ impl Running {
             .state
             .projects
             .get(&project)
-            .map(|watched| (watched.name.clone(), watched.repository.clone()))
+            .map(|watched| (watched.name.clone(), watched.repository.https()))
             .ok_or(BeginError::UnknownProject(project))?;
         // The channel the job's room is made on. Refused before anything is
         // recorded when there is none, which only a project the last
@@ -215,7 +215,7 @@ impl Running {
                 Some((
                     *channel,
                     bound.speaking(),
-                    watched.repository.clone(),
+                    watched.repository.https(),
                     recorded.reason.clone(),
                 ))
             })

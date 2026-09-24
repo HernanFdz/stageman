@@ -38,7 +38,7 @@ pub fn exposed(state: &State) -> Value {
         "projects": keyed(state.projects.iter().map(|(id, project)| {
             (id, json!({
                 "name": project.name,
-                "repository": project.repository,
+                "repository": project.repository.https(),
                 "foreman_kit": value(&project.foreman_kit),
                 "kits": keyed(project.kits.iter().map(|(name, offered)| {
                     (name, json!({ "description": offered.description, "kit": value(&offered.kit) }))

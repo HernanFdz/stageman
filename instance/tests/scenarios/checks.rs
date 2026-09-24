@@ -87,7 +87,7 @@ fn a_repository_the_token_cannot_see_is_named_in_the_refusal() {
     assert_eq!(
         answered,
         Response::Refused(Refusal::NotReached {
-            repository: "example/burrow".to_owned(),
+            repository: crate::dashboard::repo("example", "burrow"),
             why: "GitHub cannot see it with the token — a fine-grained token has to be granted \
                   that repository"
                 .to_owned()
@@ -268,7 +268,7 @@ fn an_amended_token_is_checked_and_a_kept_one_is_not() {
     let mut blank = a_draft("renamed");
     blank.access = AccessDraft::Token {
         token: None,
-        repository: Some("https://github.com/example/renamed".to_owned()),
+        repository: Some(crate::dashboard::repo("example", "renamed")),
     };
     // The repository as the project holds it: a moved one would be read
     // against the token kept, per
@@ -294,7 +294,7 @@ fn an_amended_token_is_checked_and_a_kept_one_is_not() {
     let mut typed = a_draft("renamed");
     typed.access = AccessDraft::Token {
         token: Some("ghp-the-new-one".to_owned()),
-        repository: Some("https://github.com/example/renamed".to_owned()),
+        repository: Some(crate::dashboard::repo("example", "renamed")),
     };
     sim.next_platform_answers(401, r#"{"message":"Bad credentials"}"#);
     assert_eq!(
@@ -347,7 +347,10 @@ fn a_draft_refused_on_its_own_asks_no_platform() {
     let mut blank = a_draft("blank");
     blank.access = AccessDraft::Token {
         token: Some("ghp-not-a-real-token".to_owned()),
-        repository: Some("git@github.com:example/blank.git".to_owned()),
+        repository: Some(crate::dashboard::repo(
+            "git@github.com:example",
+            "blank.git",
+        )),
     };
     assert!(matches!(
         ask(&mut sim, &mut instance, 1, Request::Create { draft: blank }),

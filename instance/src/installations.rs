@@ -794,7 +794,7 @@ impl Running {
                                     .repositories
                                     .into_iter()
                                     .map(|repository| Reachable {
-                                        address: repository.address.https(),
+                                        repository: views::wire_repository(&repository.address),
                                         private: repository.private,
                                     }),
                             );
@@ -817,7 +817,7 @@ impl Running {
                                     .repositories
                                     .into_iter()
                                     .map(|repository| Reachable {
-                                        address: repository.address.https(),
+                                        repository: views::wire_repository(&repository.address),
                                         private: repository.private,
                                     }),
                             );
@@ -836,16 +836,16 @@ impl Running {
         true
     }
 
-    /// Answers a form's listing, every answer in: the rows by address, with
-    /// the account the access is on; or why the platform would not list,
-    /// as an answer all the same.
+    /// Answers a form's listing, every answer in: the rows by owner and
+    /// name, with the account the access is on; or why the platform would
+    /// not list, as an answer all the same.
     fn reached(&mut self, request: Asking, mut reaching: Reaching) {
         let reached = if let Some(why) = reaching.unlisted {
             Reached::Unlisted { why }
         } else {
             reaching
                 .repositories
-                .sort_by(|one, other| one.address.cmp(&other.address));
+                .sort_by(|one, other| one.repository.cmp(&other.repository));
             Reached::Listed {
                 account: reaching.account,
                 repositories: reaching.repositories,
@@ -891,19 +891,15 @@ impl Running {
             );
             return;
         };
-        let repository = self
+        let Some(repository) = self
             .state
             .projects
             .get(&project)
-            .map(|watched| stageman_core::RepositoryAddress::parse(&watched.repository));
-        let Some(Ok(repository)) = repository else {
+            .map(|watched| watched.repository.clone())
+        else {
             self.token_waiting_answered(
                 project,
-                &Err(
-                    "the project's repository is not an address on GitHub, so no token can be \
-                      minted for it"
-                        .to_owned(),
-                ),
+                &Err("the project is not watched, so no token can be minted for it".to_owned()),
                 effects,
             );
             return;

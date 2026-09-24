@@ -145,6 +145,28 @@ pub struct ProjectJob {
 
 // -------------------------------------------------------------- projects
 
+/// A repository on the platform, as a page names it: an owner and a name,
+/// shown as `owner/name` — see
+/// `docs/decisions/0079-a-repository-is-an-owner-and-a-name.md`.
+///
+/// Two parts rather than text or an address, so that a page shows what a
+/// person says and composes nothing: the address a browser opens comes
+/// beside it, composed on the server.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+pub struct Repository {
+    /// Who owns it, as the platform spells it.
+    pub owner: String,
+    /// What it is called there.
+    pub name: String,
+}
+
+impl fmt::Display for Repository {
+    /// `owner/name`, as the platform says it.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.owner, self.name)
+    }
+}
+
 /// One project, as much of it as a page is allowed to know.
 ///
 /// Which platforms have a credential and which channels are bound is here;
@@ -158,11 +180,10 @@ pub struct Project {
     /// What to call it.
     pub name: String,
     /// Where its jobs work.
-    pub repository: String,
-    /// The same, as an address a browser can open, when what it holds is
-    /// one. Absent for a project written before addresses were checked,
-    /// whose text is shown and linked to nothing.
-    pub repository_link: Option<String>,
+    pub repository: Repository,
+    /// The same, as an address a browser can open. Composed on the server,
+    /// like every address a page links.
+    pub repository_link: String,
     /// How its foreman's agent is set, as the identifiers a browser sends
     /// back — not the names a person reads.
     pub foreman: Fitted,
@@ -279,25 +300,25 @@ pub enum AccessDraft {
         /// The state the install came back under, or none for the
         /// installation the project holds.
         arrival: Option<String>,
-        /// The repository, once one is chosen, as an address.
-        repository: Option<String>,
+        /// The repository, once one is chosen.
+        repository: Option<Repository>,
     },
     /// With a token: one set in the form, or the one the project holds.
     Token {
         /// The token, or none for the one the project holds.
         token: Option<String>,
-        /// The repository, once one is chosen, as an address.
-        repository: Option<String>,
+        /// The repository, once one is chosen.
+        repository: Option<Repository>,
     },
 }
 
 impl AccessDraft {
-    /// The repository this reaches, once one is chosen, as an address.
+    /// The repository this reaches, once one is chosen.
     #[must_use]
-    pub fn repository(&self) -> Option<&str> {
+    pub const fn repository(&self) -> Option<&Repository> {
         match self {
             Self::None => None,
-            Self::App { repository, .. } | Self::Token { repository, .. } => repository.as_deref(),
+            Self::App { repository, .. } | Self::Token { repository, .. } => repository.as_ref(),
         }
     }
 
@@ -435,8 +456,8 @@ impl Default for Reached {
 /// One repository an access reaches.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Reachable {
-    /// Its address, as a browser can open it and as a draft names it.
-    pub address: String,
+    /// The repository, as a draft names it back.
+    pub repository: Repository,
     /// Whether it is private. Under a token, a private repository is one
     /// the token was certainly granted, and a public one may not have
     /// been — see `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
@@ -750,11 +771,7 @@ impl Draft {
                 },
             );
         }
-        if self
-            .access
-            .repository()
-            .is_none_or(|repository| repository.trim().is_empty())
-        {
+        if self.access.repository().is_none() {
             problem(Part::Repository, "Choose the repository.");
         }
         if !self.foreman.is_complete() {
@@ -983,8 +1000,8 @@ pub struct Job {
 pub struct PullRequest {
     /// The number, as the platform counts them.
     pub number: u64,
-    /// Where it is, when that can be said.
-    pub link: Option<String>,
+    /// Where it is, composed on the server from the project's repository.
+    pub link: String,
 }
 
 /// One job's page: the job, the project it is on, and what the page links to.
@@ -999,9 +1016,9 @@ pub struct JobPage {
     /// The project, by name.
     pub project_name: String,
     /// Where its jobs work.
-    pub repository: String,
-    /// The same, as an address a browser can open, when what it holds is one.
-    pub repository_link: Option<String>,
+    pub repository: Repository,
+    /// The same, as an address a browser can open, composed on the server.
+    pub repository_link: String,
     /// The job, as a list shows it: its kit, its room and its tunnel are
     /// on it, since a row shows them too.
     pub job: Job,
@@ -1033,9 +1050,9 @@ pub struct Working {
     /// What to call the project.
     pub name: String,
     /// Where its jobs work.
-    pub repository: String,
-    /// The same, as an address a browser can open, when what it holds is one.
-    pub repository_link: Option<String>,
+    pub repository: Repository,
+    /// The same, as an address a browser can open, composed on the server.
+    pub repository_link: String,
     /// The kits its jobs may run on. Never empty in a valid instance.
     pub kits: Vec<Offered>,
     /// Its jobs, newest first.
@@ -1266,7 +1283,7 @@ pub enum Refusal {
     #[error("the access does not reach {repository}: {why}")]
     NotReached {
         /// The repository, as the platform names it.
-        repository: String,
+        repository: Repository,
         /// What the platform said, as a clause.
         why: String,
     },
@@ -1410,7 +1427,7 @@ impl Refusal {
 mod tests {
     use super::{
         AccessDraft, ChannelDraft, Draft, Filling, Fitted, InstallLink, KitDraft, Reached, Refusal,
-        Standing, Through, VariableDraft, distinct, titled,
+        Repository, Standing, Through, VariableDraft, distinct, titled,
     };
 
     /// A job started by hand with no title is titled by the first words of
@@ -1450,7 +1467,7 @@ mod tests {
             kits: vec![default_kit()],
             access: AccessDraft::Token {
                 token: Some("ghp-not-a-real-token".to_owned()),
-                repository: Some("https://example.invalid/aviary".to_owned()),
+                repository: Some(aviary()),
             },
             channel: ChannelDraft {
                 credential: "xoxb-not-a-real-token".to_owned(),
@@ -1462,6 +1479,14 @@ mod tests {
                 value: "sk-test-not-a-real-key".to_owned(),
                 note: String::new(),
             }],
+        }
+    }
+
+    /// The repository every fixture is on.
+    fn aviary() -> Repository {
+        Repository {
+            owner: "owner".to_owned(),
+            name: "aviary".to_owned(),
         }
     }
 
@@ -1518,7 +1543,7 @@ mod tests {
         let held = without(|draft| {
             draft.access = AccessDraft::Token {
                 token: None,
-                repository: Some("https://github.com/owner/aviary".to_owned()),
+                repository: Some(aviary()),
             };
         });
         assert!(held.is_complete(&amending(), NOTHING_HELD));
@@ -1526,7 +1551,7 @@ mod tests {
         let held_installation = without(|draft| {
             draft.access = AccessDraft::App {
                 arrival: None,
-                repository: Some("https://github.com/owner/aviary".to_owned()),
+                repository: Some(aviary()),
             };
         });
         assert!(held_installation.is_complete(&amending(), NOTHING_HELD));
@@ -1550,15 +1575,12 @@ mod tests {
         let on_the_app = without(|draft| {
             draft.access = AccessDraft::App {
                 arrival: Some("f00d".to_owned()),
-                repository: Some("https://github.com/owner/aviary".to_owned()),
+                repository: Some(aviary()),
             };
         });
         assert!(on_the_app.is_complete(&amending(), NOTHING_HELD));
         assert!(on_the_app.is_complete(&Filling::Creating, NOTHING_HELD));
-        assert_eq!(
-            on_the_app.access.repository(),
-            Some("https://github.com/owner/aviary")
-        );
+        assert_eq!(on_the_app.access.repository(), Some(&aviary()));
         let unchosen = without(|draft| {
             draft.access = AccessDraft::App {
                 arrival: Some("f00d".to_owned()),
@@ -1576,7 +1598,7 @@ mod tests {
         let blank_state = without(|draft| {
             draft.access = AccessDraft::App {
                 arrival: Some("  ".to_owned()),
-                repository: Some("https://github.com/owner/aviary".to_owned()),
+                repository: Some(aviary()),
             };
         });
         assert!(!blank_state.is_complete(&Filling::Creating, NOTHING_HELD));
@@ -1584,7 +1606,7 @@ mod tests {
         let unset_token = without(|draft| {
             draft.access = AccessDraft::Token {
                 token: Some("  ".to_owned()),
-                repository: Some("https://github.com/owner/aviary".to_owned()),
+                repository: Some(aviary()),
             };
         });
         assert_eq!(
@@ -1805,7 +1827,10 @@ mod tests {
         );
         assert_eq!(
             Refusal::NotReached {
-                repository: "example/a".to_owned(),
+                repository: Repository {
+                    owner: "example".to_owned(),
+                    name: "a".to_owned(),
+                },
                 why: "the installation does not cover it".to_owned()
             }
             .part(),
@@ -1827,7 +1852,10 @@ mod tests {
         );
         assert_eq!(
             Refusal::NotReached {
-                repository: "example/a".to_owned(),
+                repository: Repository {
+                    owner: "example".to_owned(),
+                    name: "a".to_owned(),
+                },
                 why: "the installation does not cover it".to_owned()
             }
             .to_string(),
@@ -1867,7 +1895,7 @@ mod tests {
         let mut draft = filled();
         draft.access = AccessDraft::Token {
             token: Some("\t ".to_owned()),
-            repository: Some("https://github.com/owner/aviary".to_owned()),
+            repository: Some(aviary()),
         };
         assert!(!draft.is_complete(&Filling::Creating, NOTHING_HELD));
 
@@ -2153,8 +2181,8 @@ mod tests {
         let project = super::Project {
             id: "an-identifier".to_owned(),
             name: "aviary".to_owned(),
-            repository: "https://example.invalid/aviary".to_owned(),
-            repository_link: None,
+            repository: aviary(),
+            repository_link: "https://github.com/owner/aviary".to_owned(),
             foreman: as_it_comes(),
             kits: vec![default_kit()],
             access: None,

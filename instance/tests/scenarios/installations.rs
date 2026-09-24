@@ -27,7 +27,7 @@ use stageman_wire::{
     AccessDraft, AccessView, InstallLink, InstallationView, Reachable, Reached, Refusal, Through,
 };
 
-use crate::dashboard::{a_draft, ask, count, first, nth};
+use crate::dashboard::{a_draft, ask, count, first, nth, repo};
 use crate::simulation::{
     NEARBY, Simulation, app_installed, installed, job, on_github, project, seed, warrant_of,
     watching, with_an_app,
@@ -163,12 +163,18 @@ fn arrived(state: &str) -> Through {
     }
 }
 
-/// One row of a listing.
-fn row(address: &str, private: bool) -> Reachable {
+/// One row of a listing, from `owner/name`.
+fn row(full_name: &str, private: bool) -> Reachable {
     Reachable {
-        address: format!("https://github.com/{address}"),
+        repository: named(full_name),
         private,
     }
+}
+
+/// A repository from `owner/name`, as a form names it.
+fn named(full_name: &str) -> stageman_wire::Repository {
+    let (owner, name) = full_name.split_once('/').expect("owner/name");
+    repo(owner, name)
 }
 
 /// A draft on the App — on the installation that came back under a
@@ -178,7 +184,7 @@ fn on_the_app(name: &str, arrival: Option<&str>, repository: &str) -> stageman_w
     let mut draft = a_draft(name);
     draft.access = AccessDraft::App {
         arrival: arrival.map(str::to_owned),
-        repository: Some(format!("https://github.com/{repository}")),
+        repository: Some(named(repository)),
     };
     draft
 }
@@ -189,7 +195,7 @@ fn with_a_token(name: &str, token: Option<&str>, repository: &str) -> stageman_w
     let mut draft = a_draft(name);
     draft.access = AccessDraft::Token {
         token: token.map(str::to_owned),
-        repository: Some(format!("https://github.com/{repository}")),
+        repository: Some(named(repository)),
     };
     draft
 }
@@ -736,7 +742,7 @@ fn a_project_is_created_on_the_installation_its_tab_brought_back_and_checked() {
             }
         ),
         Response::Refused(Refusal::NotReached {
-            repository: "example/other".to_owned(),
+            repository: named("example/other"),
             why: "GitHub refused: There is at least one repository that does not exist or is \
                   not accessible to the parent installation."
                 .to_owned()
@@ -778,7 +784,8 @@ fn a_project_is_created_on_the_installation_its_tab_brought_back_and_checked() {
             account: "example".to_owned()
         })
     );
-    assert_eq!(created.repository, "https://github.com/example/aviary");
+    assert_eq!(created.repository, named("example/aviary"));
+    assert_eq!(created.repository_link, "https://github.com/example/aviary");
     assert_eq!(
         instance_page(&mut sim, &mut instance, 3)
             .github
@@ -858,10 +865,7 @@ fn a_kept_installation_is_checked_again_when_the_repository_moves() {
         "{:?}",
         calls(&sim)
     );
-    assert_eq!(
-        the_project(&shown).repository,
-        "https://github.com/example/other"
-    );
+    assert_eq!(the_project(&shown).repository, named("example/other"));
 
     let Response::Projects(shown) = ask(
         &mut sim,
@@ -964,11 +968,11 @@ fn the_access_and_the_repository_are_required() {
         AccessDraft::None,
         AccessDraft::Token {
             token: None,
-            repository: Some("https://github.com/example/aviary".to_owned()),
+            repository: Some(named("example/aviary")),
         },
         AccessDraft::App {
             arrival: None,
-            repository: Some("https://github.com/example/aviary".to_owned()),
+            repository: Some(named("example/aviary")),
         },
     ] {
         let mut draft = a_draft("aviary");

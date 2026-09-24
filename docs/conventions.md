@@ -563,6 +563,17 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   something this project does to the text, where the platform is the one
   that answers.
 
+- **repository** — the one thing a project is about, named as an owner
+  and a name on the platform: an address, never text, since
+  `docs/decisions/0079-a-repository-is-an-owner-and-a-name.md`. Shown as
+  *owner/name*, which is how the platform and a person both say it, and
+  composed into the platform's own spelling only at the edges that need
+  one: the address a browser opens, a checkout's clone, a prompt. Not a
+  *URL*, which is the platform's spelling of one and is composed from it;
+  not an *address* on the wire, where a page is given the two parts and
+  the address beside them, composed on the server. Written to the file
+  as the address, as the last release wrote it, and parsed back on
+  opening, which is the one place text is believed and refused.
 - **installation** — the App, installed on an account for some or all of
   its repositories, by the identifier the platform's setup redirect
   carries: confirmed with the App's key and kept beside the App, with the

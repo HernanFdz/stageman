@@ -333,7 +333,7 @@ fn verdict(check: &Check, responded: &Responded) -> Result<(), Refusal> {
 fn token_refusal(why: &PlatformError, repository: &RepositoryAddress) -> Refusal {
     match why {
         PlatformError::NotGranted { platform, .. } => Refusal::NotReached {
-            repository: format!("{}/{}", repository.owner, repository.name),
+            repository: views::wire_repository(repository),
             why: format!(
                 "{} cannot see it with the token — a fine-grained token has to be granted that \
                  repository",
@@ -357,7 +357,7 @@ fn token_refusal(why: &PlatformError, repository: &RepositoryAddress) -> Refusal
 fn covered_refusal(why: &PlatformError, repository: &RepositoryAddress) -> Refusal {
     match why {
         PlatformError::Forbidden { .. } => Refusal::NotReached {
-            repository: format!("{}/{}", repository.owner, repository.name),
+            repository: views::wire_repository(repository),
             why: why.to_string(),
         },
         PlatformError::Unreachable { .. } => Refusal::InstallationUnchecked {
@@ -463,7 +463,10 @@ mod tests {
         assert_eq!(
             verdict(&token(), &answered(404, r#"{"message":"Not Found"}"#)),
             Err(Refusal::NotReached {
-                repository: "owner/name".to_owned(),
+                repository: stageman_wire::Repository {
+                    owner: "owner".to_owned(),
+                    name: "name".to_owned()
+                },
                 why: "GitHub cannot see it with the token — a fine-grained token has to be \
                       granted that repository"
                     .to_owned()
@@ -503,7 +506,10 @@ mod tests {
                 )
             ),
             Err(Refusal::NotReached {
-                repository: "owner/name".to_owned(),
+                repository: stageman_wire::Repository {
+                    owner: "owner".to_owned(),
+                    name: "name".to_owned()
+                },
                 why: "GitHub refused: There is at least one repository that does not exist or \
                       is not accessible to the parent installation."
                     .to_owned()

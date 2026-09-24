@@ -36,7 +36,7 @@ use crate::ui::{
 
 pub use stageman_wire::{
     AccessDraft, AccessView, ChannelDraft, Draft, Filling, Fitted, KitDraft, Part, Problem,
-    Reachable, Reached, Shape, Through, VariableDraft, Watching,
+    Reachable, Reached, Repository, Shape, Through, VariableDraft, Watching,
 };
 
 /// The project a page is for, where it is for one that exists.
@@ -161,8 +161,8 @@ struct Access {
     app: Option<AppSlot>,
     /// The token shape's slot, where the form has been on it.
     token: Option<TokenSlot>,
-    /// The repository, as an address, once one is chosen.
-    repository: Option<String>,
+    /// The repository, once one is chosen.
+    repository: Option<Repository>,
     /// Whether the repository came from another access than the one the
     /// form is on now, and waits to be settled against its listing.
     carried: bool,
@@ -287,7 +287,8 @@ impl Access {
         let Some(Ok(Reached::Listed { .. })) = self.listing() else {
             return None;
         };
-        let reached = |rows: &[Reachable], have: &str| rows.iter().any(|row| row.address == have);
+        let reached =
+            |rows: &[Reachable], have: &Repository| rows.iter().any(|row| &row.repository == have);
         let rows = self.rows().to_vec();
         match self.repository.take() {
             Some(have) if reached(&rows, &have) => {
@@ -306,7 +307,7 @@ impl Access {
             }
             None => {
                 if let [row] = rows.as_slice() {
-                    self.repository = Some(row.address.clone());
+                    self.repository = Some(row.repository.clone());
                 }
                 self.carried = false;
                 None
@@ -385,32 +386,23 @@ const fn placeholder(shape: AccessShape, busy: bool, listed: usize) -> &'static 
 
 /// What the Repository field says over its line for a repository the
 /// listing does not hold.
-fn not_reached_words(repository: &str) -> String {
-    format!(
-        "{} is not reached this way.",
-        repository
-            .strip_prefix("https://github.com/")
-            .unwrap_or(repository)
-    )
+fn not_reached_words(repository: &Repository) -> String {
+    format!("{repository} is not reached this way.")
 }
 
-/// The rows a listing gives the box: the address as what is sent back,
-/// the owner and name as what is read, the owner as the group where the
-/// rows span more than one, and the visibility as the mark.
+/// The rows a listing gives the box: `owner/name` as what is sent back and
+/// read, the owner as the group where the rows span more than one, and
+/// the visibility as the mark.
 fn items_of(rows: &[Reachable]) -> Vec<ComboboxItem> {
-    let named = |row: &Reachable| {
-        row.address
-            .strip_prefix("https://github.com/")
-            .unwrap_or(&row.address)
-            .to_owned()
-    };
-    let owner = |row: &Reachable| named(row).split('/').next().unwrap_or_default().to_owned();
-    let owners: std::collections::BTreeSet<String> = rows.iter().map(owner).collect();
+    let owners: std::collections::BTreeSet<&str> = rows
+        .iter()
+        .map(|row| row.repository.owner.as_str())
+        .collect();
     rows.iter()
         .map(|row| ComboboxItem {
-            id: row.address.clone(),
-            label: named(row),
-            group: (owners.len() > 1).then(|| owner(row)),
+            id: row.repository.to_string(),
+            label: row.repository.to_string(),
+            group: (owners.len() > 1).then(|| row.repository.owner.clone()),
             icon: Some(if row.private {
                 (Icon::Private, "private".to_owned())
             } else {
@@ -1097,15 +1089,21 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
                         Combobox {
                             label: "Repository",
                             items: items.clone(),
-                            value: access.read().repository.clone().unwrap_or_default(),
+                            value: access.read().repository.as_ref().map(ToString::to_string).unwrap_or_default(),
                             placeholder: placeholder(shape, busy, items.len()).to_owned(),
                             disabled: items.is_empty(),
                             busy,
-                            onchange: move |address: String| {
-                                apply(access, draft, not_reached, |access| {
-                                    access.repository = Some(address);
-                                    access.carried = false;
-                                });
+                            onchange: {
+                                move |picked: String| {
+                                    let Some(row) = rows.iter().find(|row| row.repository.to_string() == picked) else {
+                                        return;
+                                    };
+                                    let repository = row.repository.clone();
+                                    apply(access, draft, not_reached, |access| {
+                                        access.repository = Some(repository);
+                                        access.carried = false;
+                                    });
+                                }
                             },
                         }
                         if more {
@@ -1654,9 +1652,9 @@ mod tests {
     use super::super::agents_view::Agent;
     use super::{
         Access, AccessDraft, AccessShape, AccessView, Action, AppSlot, Draft, Filling, Fitted,
-        Icon, KitDraft, Part, Problem, Reachable, Reached, Segment, Shape, TokenSlot, Watching,
-        beside, items_of, not_reached_words, placeholder, refused_before_asking, seeded, sentence,
-        shape_for, starting, takes_effort, watched, with_agent, with_model,
+        Icon, KitDraft, Part, Problem, Reachable, Reached, Repository, Segment, Shape, TokenSlot,
+        Watching, beside, items_of, not_reached_words, placeholder, refused_before_asking, seeded,
+        sentence, shape_for, starting, takes_effort, watched, with_agent, with_model,
     };
     use stageman_wire::{Choice, ModelChoice};
 
@@ -1700,7 +1698,7 @@ mod tests {
             }],
             access: AccessDraft::Token {
                 token: Some("github_pat_not_a_real_token".to_owned()),
-                repository: Some("https://github.com/owner/aviary".to_owned()),
+                repository: Some(named("owner/aviary")),
             },
             channel: stageman_wire::ChannelDraft {
                 credential: "xoxb-not-a-real-token".to_owned(),
@@ -1729,10 +1727,18 @@ mod tests {
             .collect()
     }
 
-    fn row(address: &str, private: bool) -> Reachable {
+    fn row(full_name: &str, private: bool) -> Reachable {
         Reachable {
-            address: format!("https://github.com/{address}"),
+            repository: named(full_name),
             private,
+        }
+    }
+
+    fn named(full_name: &str) -> Repository {
+        let (owner, name) = full_name.split_once('/').expect("owner/name");
+        Repository {
+            owner: owner.to_owned(),
+            name: name.to_owned(),
         }
     }
 
@@ -1868,8 +1874,8 @@ mod tests {
         let mut project = stageman_wire::Project {
             id: "p".to_owned(),
             name: "aviary".to_owned(),
-            repository: "https://github.com/acme/aviary".to_owned(),
-            repository_link: None,
+            repository: named("acme/aviary"),
+            repository_link: "https://github.com/acme/aviary".to_owned(),
             foreman: as_it_comes(),
             kits: Vec::new(),
             access: Some(AccessView::Installation {
@@ -1890,16 +1896,13 @@ mod tests {
         assert_eq!(starting.shape, AccessShape::App);
         assert_eq!(starting.app, Some(on_the_app("acme", None)));
         assert_eq!(starting.token, None);
-        assert_eq!(
-            starting.repository.as_deref(),
-            Some("https://github.com/acme/aviary")
-        );
+        assert_eq!(starting.repository, Some(named("acme/aviary")));
         assert!(!starting.carried);
         assert_eq!(
             starting.draft(),
             AccessDraft::App {
                 arrival: None,
-                repository: Some("https://github.com/acme/aviary".to_owned()),
+                repository: Some(named("acme/aviary")),
             }
         );
         project.access = Some(AccessView::Token);
@@ -1910,7 +1913,7 @@ mod tests {
             starting.draft(),
             AccessDraft::Token {
                 token: None,
-                repository: Some("https://github.com/acme/aviary".to_owned()),
+                repository: Some(named("acme/aviary")),
             }
         );
         project.access = None;
@@ -1962,29 +1965,25 @@ mod tests {
                     ..on_the_app("acme", None)
                 }),
                 token: None,
-                repository: repository.map(str::to_owned),
+                repository: repository.map(named),
                 carried,
             };
 
-        let mut still_listing = on_acme(None, Some("https://github.com/acme/c"), true);
+        let mut still_listing = on_acme(None, Some("acme/c"), true);
         assert_eq!(still_listing.settle(), None);
         assert_eq!(
-            still_listing.repository.as_deref(),
-            Some("https://github.com/acme/c"),
+            still_listing.repository,
+            Some(named("acme/c")),
             "nothing settles before the listing"
         );
         assert!(still_listing.carried);
 
-        let mut carried_and_reached =
-            on_acme(Some(&a_and_b), Some("https://github.com/acme/b"), true);
+        let mut carried_and_reached = on_acme(Some(&a_and_b), Some("acme/b"), true);
         assert_eq!(carried_and_reached.settle(), None);
-        assert_eq!(
-            carried_and_reached.repository.as_deref(),
-            Some("https://github.com/acme/b")
-        );
+        assert_eq!(carried_and_reached.repository, Some(named("acme/b")));
         assert!(!carried_and_reached.carried, "settled");
 
-        let mut carried_and_not = on_acme(Some(&only_a), Some("https://github.com/acme/c"), true);
+        let mut carried_and_not = on_acme(Some(&only_a), Some("acme/c"), true);
         assert_eq!(
             carried_and_not.settle(),
             Some("acme/c is not reached this way.".to_owned())
@@ -1995,29 +1994,29 @@ mod tests {
         );
         assert!(!carried_and_not.carried);
 
-        let mut held_and_not = on_acme(Some(&only_a), Some("https://github.com/acme/c"), false);
+        let mut held_and_not = on_acme(Some(&only_a), Some("acme/c"), false);
         assert_eq!(
             held_and_not.settle(),
             Some("acme/c is not reached this way.".to_owned())
         );
         assert_eq!(
-            held_and_not.repository.as_deref(),
-            Some("https://github.com/acme/c"),
+            held_and_not.repository,
+            Some(named("acme/c")),
             "the project's own is kept, and said"
         );
 
         let mut none_and_one = on_acme(Some(&only_a), None, true);
         assert_eq!(none_and_one.settle(), None);
         assert_eq!(
-            none_and_one.repository.as_deref(),
-            Some("https://github.com/acme/a"),
+            none_and_one.repository,
+            Some(named("acme/a")),
             "the one row fills in where nothing was chosen"
         );
         let mut none_and_two = on_acme(Some(&a_and_b), None, true);
         assert_eq!(none_and_two.settle(), None);
         assert_eq!(none_and_two.repository, None, "two rows wait for a choice");
 
-        let mut unlisted = on_acme(None, Some("https://github.com/acme/c"), true);
+        let mut unlisted = on_acme(None, Some("acme/c"), true);
         unlisted.app = Some(AppSlot {
             listing: Some(Ok(Reached::Unlisted {
                 why: "GitHub does not accept it".to_owned(),
@@ -2034,7 +2033,7 @@ mod tests {
         assert!(on_acme(None, None, false).busy(), "listing not come");
         assert!(!Access::default().busy(), "nothing to list");
 
-        let mut moved = on_acme(Some(&a_and_b), Some("https://github.com/acme/a"), false);
+        let mut moved = on_acme(Some(&a_and_b), Some("acme/a"), false);
         moved.moved(AccessShape::Token);
         assert_eq!(moved.shape, AccessShape::Token);
         assert!(
@@ -2042,7 +2041,7 @@ mod tests {
             "carried until the token's listing settles it"
         );
         assert_eq!(
-            not_reached_words("acme/d"),
+            not_reached_words(&named("acme/d")),
             "acme/d is not reached this way."
         );
     }
@@ -2080,12 +2079,8 @@ mod tests {
                 .map(|item| (item.id.as_str(), item.label.as_str(), item.group.as_deref()))
                 .collect::<Vec<_>>(),
             [
-                ("https://github.com/acme/site", "acme/site", Some("acme")),
-                (
-                    "https://github.com/example/pub",
-                    "example/pub",
-                    Some("example")
-                ),
+                ("acme/site", "acme/site", Some("acme")),
+                ("example/pub", "example/pub", Some("example")),
             ]
         );
         assert_eq!(
@@ -2222,8 +2217,8 @@ mod tests {
             projects: vec![stageman_wire::Project {
                 id: "p".to_owned(),
                 name: "aviary".to_owned(),
-                repository: "https://github.com/owner/aviary".to_owned(),
-                repository_link: Some("https://github.com/owner/aviary".to_owned()),
+                repository: named("owner/aviary"),
+                repository_link: "https://github.com/owner/aviary".to_owned(),
                 foreman: as_it_comes(),
                 kits: vec![KitDraft {
                     name: "deep".to_owned(),
@@ -2278,7 +2273,7 @@ mod tests {
             existing.access,
             AccessDraft::Token {
                 token: None,
-                repository: Some("https://github.com/owner/aviary".to_owned()),
+                repository: Some(named("owner/aviary")),
             },
             "the token held, left unsaid, on its repository"
         );

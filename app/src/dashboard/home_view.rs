@@ -201,8 +201,8 @@ fn Watched(project: Project) -> Element {
             }
             Reference {
                 mark: "github",
-                says: project.repository.clone(),
-                link: project.repository_link.clone(),
+                says: project.repository.to_string(),
+                link: Some(project.repository_link.clone()),
             }
             span { class: "ml-auto flex shrink-0 items-center gap-2",
                 if project.attending {

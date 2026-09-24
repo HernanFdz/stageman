@@ -554,7 +554,8 @@ mod tests {
             project,
             Project {
                 name: "example".to_owned(),
-                repository: "https://example.invalid/repo".to_owned(),
+                repository: stageman_core::RepositoryAddress::new("example", "repo")
+                    .expect("an address"),
                 foreman_kit: Kit::defaults(Agent::Claude),
                 kits: BTreeMap::from([(
                     KitName::new("Claude").expect("a name"),

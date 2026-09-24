@@ -7,8 +7,17 @@ use stageman_core::{Agent, JobId, Outcome, Progress, ProjectId, Timestamp, Uuid,
 use stageman_instance::{Instance, Request, Response};
 use stageman_platform::Call as PlatformCall;
 use stageman_wire::{
-    AccessDraft, AccessView, ChannelDraft, Draft, Ending, Fitted, KitDraft, Refusal, Standing,
+    AccessDraft, AccessView, ChannelDraft, Draft, Ending, Fitted, KitDraft, Refusal, Repository,
+    Standing,
 };
+
+/// A repository on the fixture's account, as a form names it.
+pub fn repo(owner: &str, name: &str) -> Repository {
+    Repository {
+        owner: owner.to_owned(),
+        name: name.to_owned(),
+    }
+}
 
 use crate::simulation::{
     Simulation, job, project, request, room, seed, watching, watching_a_channel,
@@ -49,7 +58,7 @@ pub fn a_draft(name: &str) -> Draft {
         // refused before it becomes a project.
         access: AccessDraft::Token {
             token: Some("ghp-not-a-real-token".to_owned()),
-            repository: Some(format!("https://github.com/example/{name}")),
+            repository: Some(repo("example", name)),
         },
         channel: ChannelDraft {
             credential: "xoxb-not-a-real-token".to_owned(),
@@ -363,7 +372,7 @@ fn amending_keeps_a_credential_when_the_box_is_blank() {
     let mut blank = a_draft("example");
     blank.access = AccessDraft::Token {
         token: None,
-        repository: Some("https://github.com/example/renamed".to_owned()),
+        repository: Some(repo("example", "renamed")),
     };
     assert_eq!(
         ask(
@@ -384,7 +393,7 @@ fn amending_keeps_a_credential_when_the_box_is_blank() {
     let mut typed = a_draft("renamed");
     typed.access = AccessDraft::Token {
         token: Some("ghp-the-new-one".to_owned()),
-        repository: Some("https://github.com/example/renamed".to_owned()),
+        repository: Some(repo("example", "renamed")),
     };
     ask(
         &mut sim,

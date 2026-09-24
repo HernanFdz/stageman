@@ -157,7 +157,7 @@ fn a_checkout_that_fails_fails_the_job_before_its_agent_speaks() {
         panic!("a job whose repository could not be checked out has failed");
     };
     assert!(why.contains("repository not found"), "{why}");
-    assert!(why.contains("example.invalid"), "{why}");
+    assert!(why.contains("example/repo"), "{why}");
     assert!(sim.talks().is_empty(), "no agent was spoken to");
     assert!(
         sim.exists(&stageman_job::container(&job)),

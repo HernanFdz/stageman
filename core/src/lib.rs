@@ -712,21 +712,23 @@ pub enum Access {
 }
 
 /// Where a project's repository is, as the platform names it: an owner and
-/// a name on GitHub.
+/// a name on GitHub, and what a project holds — see
+/// `docs/decisions/0079-a-repository-is-an-owner-and-a-name.md`.
 ///
-/// Parsed from what an operator typed and refused when it is not an address
-/// on the platform, per
-/// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`: the
-/// dashboard composes addresses from it — the repository's own, and a pull
-/// request's by number — and an address composed from text that was not one
-/// would be wrong quietly. A project written before this existed may hold
-/// text that does not parse; it is opened and shown, and nothing is composed
-/// from it.
+/// Two parts rather than text, so that everything composed from it — the
+/// address a browser opens, a pull request's by number, the name a token is
+/// minted for — is composed from an address and never from text that was
+/// not one, per
+/// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
+/// Written to the file as the address this project spells and parsed back
+/// on opening; text there that is not an address refuses the file, naming
+/// the project, rather than opening as something nothing can compose from.
 ///
 /// Serialises, because the instance holds one while a credential is
 /// checked against it and a scenario's snapshot walks what is held; it is
-/// an address and never a secret.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// an address and never a secret. Shown as `owner/name`, which is how the
+/// platform and a person both say it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct RepositoryAddress {
     /// Who owns it, as the platform spells it.
     pub owner: String,
@@ -734,7 +736,31 @@ pub struct RepositoryAddress {
     pub name: String,
 }
 
+impl fmt::Display for RepositoryAddress {
+    /// `owner/name`, as the platform says it.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.owner, self.name)
+    }
+}
+
 impl RepositoryAddress {
+    /// An address from its two parts, each checked to be something the
+    /// platform would call an owner or a repository.
+    ///
+    /// # Errors
+    ///
+    /// Fails if either part is empty or holds a character the platform does
+    /// not allow.
+    pub fn new(owner: &str, name: &str) -> Result<Self, RepositoryError> {
+        if !is_slug(owner) || !is_slug(name) {
+            return Err(RepositoryError::NotOwnerAndName);
+        }
+        Ok(Self {
+            owner: owner.to_owned(),
+            name: name.to_owned(),
+        })
+    }
+
     /// Parses an https address on GitHub, forgiving the two things people
     /// paste along with one: a trailing `.git`, and a trailing slash.
     ///
@@ -1652,10 +1678,11 @@ pub enum Taken {
 pub struct Project {
     /// What to call it in the dashboard.
     pub name: String,
-    /// Where the repository lives.
+    /// Where the repository lives, as an address on the platform — see
+    /// `docs/decisions/0079-a-repository-is-an-owner-and-a-name.md`.
     ///
     /// Every kickoff embeds this, because an agent has no other way to find it.
-    pub repository: String,
+    pub repository: RepositoryAddress,
     /// The kit this project's foreman thinks with.
     ///
     /// Per project rather than per instance, because watching a project's
@@ -2160,7 +2187,7 @@ impl State {
                     *id,
                     SealedProject {
                         name: project.name.clone(),
-                        repository: project.repository.clone(),
+                        repository: project.repository.https(),
                         foreman_kit: project.foreman_kit.clone(),
                         // Names in the clear beside their kits, on the terms a
                         // variable's name travels: a name is not a credential,
@@ -2338,6 +2365,19 @@ pub enum OpenError {
     /// older version — so this is where believing it stops.
     #[error("the snapshot describes an instance that is not internally consistent")]
     Inconsistent(#[source] Inconsistent),
+    /// A project holds text where an address on the platform has to be —
+    /// see `docs/decisions/0079-a-repository-is-an-owner-and-a-name.md`.
+    ///
+    /// Names the project and the rule broken, and not the text, on the
+    /// terms every variant here keeps: a file is untrusted input.
+    #[error("the project {project} holds a repository that is not an address on GitHub: {why}")]
+    Repository {
+        /// The project, by name.
+        project: String,
+        /// Which rule the text broke.
+        #[source]
+        why: RepositoryError,
+    },
     /// A project names a variable a container could not be given.
     ///
     /// Names the rule and never the value, for the reason every variant here
@@ -2701,7 +2741,10 @@ impl SealedJob {
 pub struct SealedProject {
     /// What to call it.
     pub name: String,
-    /// Where the repository lives.
+    /// Where the repository lives, as the address this project spells.
+    /// Text on disk, as the last release wrote it, and an address once
+    /// opened: text that is not one refuses the file — see
+    /// `docs/decisions/0079-a-repository-is-an-owner-and-a-name.md`.
     pub repository: String,
     /// The kit its foreman thinks with.
     ///
@@ -2853,6 +2896,97 @@ fn opened_apps(
         .collect()
 }
 
+impl SealedProject {
+    /// Decrypts and validates one project: every credential recovered,
+    /// every name and the repository's address believed only once checked.
+    ///
+    /// # Errors
+    ///
+    /// Fails if a credential cannot be recovered, if a variable's or a
+    /// kit's name could not be delivered, or if the repository is text that
+    /// is not an address on the platform.
+    pub fn open(self, key: &Key) -> Result<Project, OpenError> {
+        let access = self
+            .credentials
+            .into_iter()
+            .map(|(platform, sealed)| Ok((platform, sealed.open(key)?)))
+            .collect::<Result<BTreeMap<_, _>, OpenError>>()?;
+        // A binding the last release wrote without the credential that
+        // listens is no binding, per 0059: the project is kept and told so
+        // at startup, rather than the file refused.
+        let channels = self
+            .channels
+            .into_iter()
+            .filter_map(|(channel, sealed)| {
+                let listening = sealed.listen_credential?;
+                Some((channel, sealed.credential, listening))
+            })
+            .map(|(channel, credential, listening)| {
+                Ok((
+                    channel,
+                    ChannelConfig {
+                        credential: credential.open(key)?,
+                        listen_credential: listening.open(key)?,
+                    },
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, OpenError>>()?;
+        // Where a name stops being believed. A snapshot may be hand-edited,
+        // and a name that cannot be delivered has to be refused here rather
+        // than reaching an argument list.
+        let variables = self
+            .variables
+            .into_iter()
+            .map(|(name, sealed)| {
+                let name = VariableName::new(name).map_err(OpenError::VariableName)?;
+                Ok((
+                    name,
+                    Variable {
+                        value: sealed.value.open(key)?,
+                        note: sealed.note,
+                    },
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, OpenError>>()?;
+        // Where a kit's name stops being believed, on the same terms.
+        let kits = self
+            .kits
+            .into_iter()
+            .map(|(name, offered)| {
+                let name = KitName::new(name).map_err(OpenError::KitName)?;
+                Ok((name, offered))
+            })
+            .collect::<Result<BTreeMap<_, _>, OpenError>>()?;
+        let jobs = self
+            .jobs
+            .into_iter()
+            .map(|(job, sealed)| Ok((job, sealed.open(key)?)))
+            .collect::<Result<BTreeMap<_, _>, OpenError>>()?;
+        // Where the repository's text stops being believed: an address is
+        // what everything downstream composes from — see
+        // `docs/decisions/0079-a-repository-is-an-owner-and-a-name.md`.
+        let repository =
+            RepositoryAddress::parse(&self.repository).map_err(|why| OpenError::Repository {
+                project: self.name.clone(),
+                why,
+            })?;
+        Ok(Project {
+            name: self.name,
+            repository,
+            foreman_kit: self.foreman_kit,
+            kits,
+            access,
+            channels,
+            variables,
+            brief: self.brief,
+            watched: self.watched,
+            foreman_room: self.foreman_room,
+            jobs,
+            attending: self.attending,
+        })
+    }
+}
+
 impl Snapshot {
     /// Decrypts and validates, yielding state that can be relied on.
     ///
@@ -2886,81 +3020,7 @@ impl Snapshot {
 
         let projects = projects
             .into_iter()
-            .map(|(id, project)| {
-                let access = project
-                    .credentials
-                    .into_iter()
-                    .map(|(platform, sealed)| Ok((platform, sealed.open(key)?)))
-                    .collect::<Result<BTreeMap<_, _>, OpenError>>()?;
-                // A binding the last release wrote without the credential
-                // that listens is no binding, per 0059: the project is kept
-                // and told so at startup, rather than the file refused.
-                let channels = project
-                    .channels
-                    .into_iter()
-                    .filter_map(|(channel, sealed)| {
-                        let listening = sealed.listen_credential?;
-                        Some((channel, sealed.credential, listening))
-                    })
-                    .map(|(channel, credential, listening)| {
-                        Ok((
-                            channel,
-                            ChannelConfig {
-                                credential: credential.open(key)?,
-                                listen_credential: listening.open(key)?,
-                            },
-                        ))
-                    })
-                    .collect::<Result<BTreeMap<_, _>, OpenError>>()?;
-                // Where a name stops being believed. A snapshot may be
-                // hand-edited, and a name that cannot be delivered has to be
-                // refused here rather than reaching an argument list.
-                let variables = project
-                    .variables
-                    .into_iter()
-                    .map(|(name, sealed)| {
-                        let name = VariableName::new(name).map_err(OpenError::VariableName)?;
-                        Ok((
-                            name,
-                            Variable {
-                                value: sealed.value.open(key)?,
-                                note: sealed.note,
-                            },
-                        ))
-                    })
-                    .collect::<Result<BTreeMap<_, _>, OpenError>>()?;
-                // Where a kit's name stops being believed, on the same terms.
-                let kits = project
-                    .kits
-                    .into_iter()
-                    .map(|(name, offered)| {
-                        let name = KitName::new(name).map_err(OpenError::KitName)?;
-                        Ok((name, offered))
-                    })
-                    .collect::<Result<BTreeMap<_, _>, OpenError>>()?;
-                let jobs = project
-                    .jobs
-                    .into_iter()
-                    .map(|(job, sealed)| Ok((job, sealed.open(key)?)))
-                    .collect::<Result<BTreeMap<_, _>, OpenError>>()?;
-                Ok((
-                    id,
-                    Project {
-                        name: project.name,
-                        repository: project.repository,
-                        foreman_kit: project.foreman_kit,
-                        kits,
-                        access,
-                        channels,
-                        variables,
-                        brief: project.brief,
-                        watched: project.watched,
-                        foreman_room: project.foreman_room,
-                        jobs,
-                        attending: project.attending,
-                    },
-                ))
-            })
+            .map(|(id, project)| Ok((id, project.open(key)?)))
             .collect::<Result<BTreeMap<_, _>, OpenError>>()?;
 
         let state = State {
@@ -3254,7 +3314,7 @@ impl Handout {
         Ok(Self {
             kit,
             role: Role::Job,
-            repository: Some(project.repository.clone()),
+            repository: Some(project.repository.https()),
             agent_credential: config.auth_token.clone(),
             platforms: project.access.keys().copied().collect(),
             warrant: Some(warrant),
@@ -3544,7 +3604,7 @@ mod tests {
         );
         Project {
             name: "example".to_owned(),
-            repository: "https://example.invalid/repo".to_owned(),
+            repository: RepositoryAddress::new("example", "repo").expect("an address"),
             foreman_kit: Kit::defaults(Agent::Claude),
             kits: default_kits(),
             access,
@@ -4397,7 +4457,7 @@ mod tests {
               "projects": {{
                 "00000000-0000-0000-0000-000000000003": {{
                   "name": "example",
-                  "repository": "https://example.invalid/repo",
+                  "repository": "https://github.com/example/repo",
                   "foreman_kit": {{ "Claude": {{ "model": {{ "Default": {{ "effort": "Default" }} }} }} }},
                   "kits": {{
                     "Claude": {{
@@ -4433,7 +4493,7 @@ mod tests {
                 }},
                 "00000000-0000-0000-0000-000000000004": {{
                   "name": "listening",
-                  "repository": "https://example.invalid/other",
+                  "repository": "https://github.com/example/other",
                   "foreman_kit": {{ "Claude": {{ "model": {{ "Default": {{ "effort": "Default" }} }} }} }},
                   "kits": {{
                     "Claude": {{
@@ -4464,6 +4524,22 @@ mod tests {
     /// whose threads name none. The project and its job are kept.
     #[test]
     fn a_snapshot_written_by_the_last_release_still_opens() {
+        // The last release's form did not check the text, so a file may
+        // hold something that is not an address: refused with the project
+        // named, rather than opened as something nothing can compose from —
+        // see `docs/decisions/0079-a-repository-is-an-owner-and-a-name.md`.
+        let not_an_address = written_by_the_last_release().replace(
+            "https://github.com/example/repo",
+            "https://example.invalid/repo",
+        );
+        let parsed: Snapshot = serde_json::from_str(&not_an_address).expect("still parses");
+        let refused = parsed.open(&key()).expect_err("refused on opening");
+        assert_eq!(
+            refused.to_string(),
+            "the project example holds a repository that is not an address on GitHub: it has to \
+             be on github.com"
+        );
+
         let parsed: Snapshot = serde_json::from_str(&written_by_the_last_release())
             .expect("an older file still parses");
         let state = parsed.open(&key()).expect("and still opens");
@@ -4473,6 +4549,11 @@ mod tests {
             .expect("the project survived");
 
         assert_eq!(project.name, "example");
+        assert_eq!(
+            project.repository,
+            RepositoryAddress::new("example", "repo").expect("an address"),
+            "the text the last release wrote opens as the address it spelled"
+        );
         assert_eq!(
             project
                 .kits
@@ -5075,12 +5156,16 @@ mod tests {
         let expected = state
             .projects
             .get(&mine)
-            .map(|project| project.repository.clone())
+            .map(|project| project.repository.https())
             .expect("a watched project");
 
         let job = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine, warrant())
             .expect("a watched project");
-        assert_eq!(job.repository(), Some(expected.as_str()));
+        assert_eq!(
+            job.repository(),
+            Some(expected.as_str()),
+            "the address, as the checkout clones it"
+        );
 
         let foreman = Handout::for_foreman(&state, mine).expect("a watched project");
         assert_eq!(foreman.repository(), None);

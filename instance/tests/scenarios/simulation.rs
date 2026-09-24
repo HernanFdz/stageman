@@ -20,8 +20,8 @@ use stageman_agent::{Answer, Command, Heard, Label, Said, StopReason};
 use stageman_channel::{Call, Reaction};
 use stageman_core::{
     Access, Agent, AgentConfig, Channel, ChannelConfig, Errand, InstanceId, Job, JobId, Key, Kit,
-    KitConfig, KitName, NONCE_LEN, Nonce, Place, Platform, Progress, Project, ProjectId, Room,
-    Secret, Snapshot, State, Thread, Timestamp, Uuid,
+    KitConfig, KitName, NONCE_LEN, Nonce, Place, Platform, Progress, Project, ProjectId,
+    RepositoryAddress, Room, Secret, Snapshot, State, Thread, Timestamp, Uuid,
 };
 use stageman_instance::{
     AppEffect, AppEvent, Effect, Event, Instance, Request, RequestId, Response, Seed, Target,
@@ -124,7 +124,8 @@ pub fn on_github(state: &mut State, full_name: &str) {
         .projects
         .get_mut(&project())
         .expect("the project")
-        .repository = format!("https://github.com/{full_name}");
+        .repository = RepositoryAddress::parse(&format!("https://github.com/{full_name}"))
+        .expect("an address on the platform");
 }
 
 /// Which platform every scenario is played on.
@@ -623,7 +624,7 @@ fn a_project(jobs: BTreeMap<JobId, Job>, bound: bool) -> Project {
     }
     Project {
         name: "example".to_owned(),
-        repository: "https://example.invalid/repo".to_owned(),
+        repository: RepositoryAddress::new("example", "repo").expect("an address"),
         foreman_kit: Kit::defaults(Agent::Claude),
         kits: BTreeMap::from([(
             KitName::new("Claude").expect("a name"),
