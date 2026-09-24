@@ -109,6 +109,18 @@ mod tests {
         ButtonVariant::Ghost,
     ];
 
+    /// A styled control wears what every button wears, its variant's own,
+    /// and the caller's, merged — which a link dressed as a button relies
+    /// on as much as a button does.
+    #[test]
+    fn a_styled_control_wears_all_three() {
+        let worn = ButtonVariant::Secondary.styled("px-2");
+        assert!(worn.contains("inline-flex"), "{worn}");
+        assert!(worn.contains("border-border"), "{worn}");
+        assert!(worn.contains("px-2") && !worn.contains("px-3"), "{worn}");
+        assert!(ButtonVariant::Primary.styled("").contains("bg-primary"));
+    }
+
     #[test]
     fn every_variant_renders_as_something() {
         for variant in EVERY {

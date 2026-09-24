@@ -100,6 +100,10 @@ impl Live {
 
     /// Subscribes the read this is called from to the ticks: that read
     /// re-runs on each. What it answers means nothing.
+    // Skipped by mutation testing: reading the signal is the whole act,
+    // and the value is discarded by every caller, so a mutant returning
+    // either constant is equivalent by design.
+    #[mutants::skip]
     #[must_use]
     pub fn follow(self) -> bool {
         (self.ticked)()
@@ -110,7 +114,12 @@ impl Live {
 ///
 /// The browser's half only: the server renders a page and is not one, and a
 /// server that followed its own ticks would be reading itself.
+// Skipped by mutation testing, as is everything below compiled for the
+// browser's half only: mutation testing builds the daemon's half, where this
+// is not compiled at all, so a mutant here would pass by never being built.
+// The probe drives it in a real browser.
 #[cfg(not(feature = "server"))]
+#[mutants::skip]
 pub(super) fn use_live(live: Live) {
     use_effect(move || {
         spawn(async move { follow(live).await });
@@ -118,7 +127,9 @@ pub(super) fn use_live(live: Live) {
 }
 
 /// The server's half of the same, which is nothing.
+// Skipped by mutation testing: nothing is what it does, by design.
 #[cfg(feature = "server")]
+#[mutants::skip]
 pub(super) const fn use_live(live: Live) {
     let _ = live;
 }
@@ -133,6 +144,7 @@ pub(super) const fn use_live(live: Live) {
 /// and its paint replaced a moment later, and a mark that flipped in that
 /// moment would flash on every reload.
 #[cfg(not(feature = "server"))]
+#[mutants::skip]
 async fn follow(live: Live) {
     let mut live = live;
     let mut again = false;
@@ -169,6 +181,7 @@ async fn follow(live: Live) {
 /// Waits a while before the stream is opened again, so that a daemon that
 /// is down is asked now and then rather than as fast as it refuses.
 #[cfg(not(feature = "server"))]
+#[mutants::skip]
 async fn pause() {
     let mut asked = document::eval(PAUSING);
     let _ = asked.recv::<bool>().await;

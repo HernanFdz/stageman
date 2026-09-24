@@ -1248,6 +1248,7 @@ mod tests {
             .part(),
             Some(Part::Repository)
         );
+
         assert_eq!(
             Refusal::RepositoryRefused {
                 rule: "it has to be on github.com".to_owned()
@@ -1479,6 +1480,24 @@ mod tests {
             .status(),
             502
         );
+    }
+
+    /// An incomplete field points at its own box where the form has one,
+    /// and at nothing where it does not, which is said at the top instead.
+    #[test]
+    fn an_incomplete_field_points_at_its_box() {
+        use super::Part;
+
+        let incomplete = |field: &str| {
+            Refusal::Incomplete {
+                field: field.to_owned(),
+            }
+            .part()
+        };
+        assert_eq!(incomplete("name"), Some(Part::Name));
+        assert_eq!(incomplete("repository"), Some(Part::Repository));
+        assert_eq!(incomplete("credential"), Some(Part::Credential));
+        assert_eq!(incomplete("kit name"), None);
     }
 
     /// What a box says when a credential was not kept, asserted whole per

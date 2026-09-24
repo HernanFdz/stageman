@@ -29,8 +29,48 @@ use crate::ui::{
 };
 
 pub use stageman_wire::{
-    ChannelDraft, Draft, Filling, Fitted, KitDraft, Part, Shape, VariableDraft, Watching,
+    ChannelDraft, Draft, Filling, Fitted, KitDraft, Part, Problem, Shape, VariableDraft, Watching,
 };
+
+/// The project a page is for, where it is for one that exists.
+///
+/// One lookup for everything the page reads off the project — its draft,
+/// what it holds, its name, its token form — so that the comparison it
+/// turns on is tested once rather than inverted in the component where
+/// nothing could notice.
+fn watched<'a>(watching: &'a Watching, filling: &Filling) -> Option<&'a stageman_wire::Project> {
+    match filling {
+        Filling::Amending(id) => watching.projects.iter().find(|project| &project.id == id),
+        Filling::Creating => None,
+    }
+}
+
+/// What to say beside a part of the form: the first thing wrong with it, or
+/// the instance's refusal where that points at the part, or nothing.
+fn beside(
+    problems: &[Problem],
+    refused: Option<&str>,
+    pointed: Option<Part>,
+    part: Part,
+) -> Option<String> {
+    problems
+        .iter()
+        .find(|problem| problem.part == part)
+        .map(|problem| problem.why.clone())
+        .or_else(|| {
+            if pointed == Some(part) {
+                refused.map(str::to_owned)
+            } else {
+                None
+            }
+        })
+}
+
+/// Whether a save stops before asking the instance: the page refuses to
+/// ask badly, and says so beside each box instead.
+fn refused_before_asking(draft: &Draft, filling: &Filling, held: &[String]) -> bool {
+    !draft.is_complete(filling, held)
+}
 
 /// An agent as it comes: the shape's first model, and its first effort where
 /// that model takes one.
@@ -146,10 +186,7 @@ fn starting(watching: &Watching, filling: &Filling) -> Draft {
                 ..Draft::default()
             }
         }
-        Filling::Amending(id) => watching
-            .projects
-            .iter()
-            .find(|project| &project.id == id)
+        Filling::Amending(_) => watched(watching, filling)
             .map(|project| Draft {
                 name: project.name.clone(),
                 repository: project.repository.clone(),
@@ -260,44 +297,26 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
     // What the project holds now, which decides whether an empty value box
     // means *keep*. Empty while creating, which is the true answer: a
     // project that does not exist yet holds nothing.
-    let held: Vec<String> = match &filling {
-        Filling::Amending(id) => watching
-            .projects
-            .iter()
-            .find(|project| &project.id == id)
-            .map(|project| {
-                project
-                    .variables
-                    .iter()
-                    .map(|variable| variable.name.clone())
-                    .collect()
-            })
-            .unwrap_or_default(),
-        Filling::Creating => Vec::new(),
-    };
-    let name = match &filling {
-        Filling::Amending(id) => watching
-            .projects
-            .iter()
-            .find(|project| &project.id == id)
-            .map(|project| project.name.clone())
-            .unwrap_or_default(),
-        Filling::Creating => String::new(),
-    };
+    let project = watched(&watching, &filling);
+    let held: Vec<String> = project
+        .map(|project| {
+            project
+                .variables
+                .iter()
+                .map(|variable| variable.name.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    let name = project
+        .map(|project| project.name.clone())
+        .unwrap_or_default();
     // Where the platforms' own forms are, filled in: the token's is named
     // for this project where it exists, and for none where it does not
     // yet. Composed on the server, like every address a page links.
-    let token_form = match &filling {
-        Filling::Amending(id) => watching
-            .projects
-            .iter()
-            .find(|project| &project.id == id)
-            .map_or_else(
-                || watching.guides.token_form.clone(),
-                |project| project.token_form.clone(),
-            ),
-        Filling::Creating => watching.guides.token_form.clone(),
-    };
+    let token_form = project.map_or_else(
+        || watching.guides.token_form.clone(),
+        |project| project.token_form.clone(),
+    );
     let app_form = watching.guides.app_form.clone();
 
     let problems = if tried() {
@@ -312,16 +331,9 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
     });
     // What to say beside a part: the first thing wrong with it, or the
     // instance's refusal where that points here.
+    let refusal_said = refusal.as_ref().map(ToString::to_string);
     let saying = move |part: Part| -> Option<String> {
-        problems
-            .iter()
-            .find(|problem| problem.part == part)
-            .map(|problem| problem.why.clone())
-            .or_else(|| {
-                (pointed == Some(part))
-                    .then(|| refusal.as_ref().map(ToString::to_string))
-                    .flatten()
-            })
+        beside(&problems, refusal_said.as_deref(), pointed, part)
     };
     let unplaced = refused().filter(|_| pointed.is_none());
 
@@ -341,7 +353,7 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
         move |_| {
             tried.set(true);
             let asked = draft();
-            if !asked.problems(&filling, &held).is_empty() {
+            if refused_before_asking(&asked, &filling, &held) {
                 return;
             }
             let filling = filling.clone();
@@ -1001,10 +1013,61 @@ fn FittedEditor(
 mod tests {
     use super::super::agents_view::Agent;
     use super::{
-        Draft, Filling, Fitted, KitDraft, Shape, Watching, seeded, shape_for, starting,
-        takes_effort, with_agent, with_model,
+        Draft, Filling, Fitted, KitDraft, Part, Problem, Shape, Watching, beside,
+        refused_before_asking, seeded, shape_for, starting, takes_effort, watched, with_agent,
+        with_model,
     };
     use stageman_wire::{Choice, ModelChoice};
+
+    /// What a box says: the first problem with its part, else the
+    /// instance's refusal when that points at the part, else nothing.
+    #[test]
+    fn a_box_says_its_problem_before_the_instances_refusal() {
+        let problems = vec![Problem {
+            part: Part::Name,
+            why: "It needs a name.".to_owned(),
+        }];
+        assert_eq!(
+            beside(&problems, Some("refused"), Some(Part::Name), Part::Name),
+            Some("It needs a name.".to_owned())
+        );
+        assert_eq!(
+            beside(&[], Some("refused"), Some(Part::Name), Part::Name),
+            Some("refused".to_owned())
+        );
+        assert_eq!(
+            beside(&[], Some("refused"), Some(Part::Name), Part::Repository),
+            None
+        );
+        assert_eq!(beside(&[], Some("refused"), None, Part::Name), None);
+        assert_eq!(beside(&problems, None, None, Part::Repository), None);
+    }
+
+    /// A save stops at the page for a draft with anything wrong, and goes
+    /// to the instance for one with nothing wrong.
+    #[test]
+    fn a_save_stops_at_the_page_for_a_draft_with_a_problem() {
+        let blank = Draft::default();
+        assert!(refused_before_asking(&blank, &Filling::Creating, &[]));
+        let whole = Draft {
+            name: "aviary".to_owned(),
+            repository: "https://github.com/owner/aviary".to_owned(),
+            foreman: as_it_comes(),
+            kits: vec![KitDraft {
+                name: "Claude".to_owned(),
+                description: "does the work".to_owned(),
+                fitted: as_it_comes(),
+            }],
+            credential: "github_pat_not_a_real_token".to_owned(),
+            channel: stageman_wire::ChannelDraft {
+                credential: "xoxb-not-a-real-token".to_owned(),
+                listen_credential: "xapp-not-a-real-token".to_owned(),
+            },
+            variables: Vec::new(),
+            brief: String::new(),
+        };
+        assert!(!refused_before_asking(&whole, &Filling::Creating, &[]));
+    }
 
     /// The agent's defaults, as a browser holds them.
     fn as_it_comes() -> Fitted {
@@ -1185,5 +1248,13 @@ mod tests {
 
         let unknown = starting(&watching, &Filling::Amending("q".to_owned()));
         assert_eq!(unknown, Draft::default());
+
+        assert_eq!(
+            watched(&watching, &Filling::Amending("p".to_owned()))
+                .map(|project| project.name.as_str()),
+            Some("aviary")
+        );
+        assert!(watched(&watching, &Filling::Amending("q".to_owned())).is_none());
+        assert!(watched(&watching, &Filling::Creating).is_none());
     }
 }

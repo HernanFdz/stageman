@@ -237,6 +237,10 @@ mod tests {
         assert_eq!(Call::parse(&other), None);
         other.url = "https://api.github.com/user".to_owned();
         assert_eq!(Call::parse(&other), None);
+        other.url = "https://api.github.com/repos//name".to_owned();
+        assert_eq!(Call::parse(&other), None, "no owner is no repository");
+        other.url = "https://api.github.com/repos/owner/".to_owned();
+        assert_eq!(Call::parse(&other), None, "no name is no repository");
     }
 
     /// Each status the platform was measured to answer means one thing,

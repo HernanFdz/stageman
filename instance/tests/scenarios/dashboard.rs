@@ -3,7 +3,7 @@
 
 use stageman_agent::Command;
 use stageman_channel::Call;
-use stageman_core::{Agent, JobId, Outcome, Progress, ProjectId, Uuid, Waiting};
+use stageman_core::{Agent, JobId, Outcome, Progress, ProjectId, Timestamp, Uuid, Waiting};
 use stageman_instance::{Instance, Request, Response};
 use stageman_platform::Call as PlatformCall;
 use stageman_wire::{ChannelDraft, Draft, Ending, Fitted, KitDraft, Refusal, Standing};
@@ -706,6 +706,20 @@ fn stopping_a_job_ends_its_turn_and_leaves_it_paused() {
             .job(&job(1))
             .map(|job| job.progress.clone()),
         Some(Progress::Idle(Waiting::Paused))
+    );
+    // The moment the standing changed is the step's own time, stamped by
+    // the world — see
+    // `docs/decisions/0073-the-world-tells-the-instance-the-time-with-every-step.md`
+    // — which on this clock is after the epoch and no later than now.
+    let changed = instance
+        .state()
+        .job(&job(1))
+        .and_then(|job| job.since)
+        .expect("a standing that changed has a moment");
+    assert!(
+        changed > Timestamp::UNIX_EPOCH
+            && changed <= Timestamp::from_millisecond(10).expect("a moment"),
+        "{changed}"
     );
     assert_eq!(
         sim.disk()

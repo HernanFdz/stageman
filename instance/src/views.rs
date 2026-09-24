@@ -849,6 +849,31 @@ mod tests {
         assert_eq!(shown.working, 1);
         assert_eq!(shown.jobs, 3);
         assert_eq!(shown.name, "aviary");
+        assert!(!shown.attending, "nothing in hand");
+        assert_eq!(
+            shown.repository_link, None,
+            "text that is not an address on the platform links to nothing"
+        );
+
+        // On a message, and on a repository that is an address.
+        watched.attending.take(stageman_core::Errand {
+            said: "fix the build".to_owned(),
+            thread: stageman_core::Thread {
+                channel: stageman_core::Channel::Slack,
+                room: "C0123456789".to_owned(),
+                id: "1788000000.000001".to_owned(),
+            },
+            from: None,
+            message: None,
+            app: None,
+        });
+        watched.repository = "https://github.com/owner/aviary.git".to_owned();
+        let shown = super::projected(ProjectId::from_uuid(Uuid::nil()), watched, None);
+        assert!(shown.attending);
+        assert_eq!(
+            shown.repository_link.as_deref(),
+            Some("https://github.com/owner/aviary")
+        );
     }
 
     /// The first page lists what a person does something about, longest

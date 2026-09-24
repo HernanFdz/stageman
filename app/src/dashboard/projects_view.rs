@@ -84,6 +84,25 @@ pub async fn forget(project: String) -> DashboardResult<Watching> {
     }
 }
 
+/// What a project's row notes under its name: absence for the two things a
+/// project cannot work without, and what the foreman watches — a watched
+/// room by the platform's identifier, because a name costs a scope the
+/// manifest does not grant. A function rather than a paragraph in the
+/// component, so that each condition is tested once.
+fn noted(project: &Project) -> String {
+    let mut notes = Vec::new();
+    if project.platforms.is_empty() {
+        notes.push("no token for the repository".to_owned());
+    }
+    if project.channels.is_empty() {
+        notes.push("no Slack app".to_owned());
+    }
+    if !project.watched.is_empty() {
+        notes.push(format!("watching {}", project.watched.join(", ")));
+    }
+    notes.join(" · ")
+}
+
 /// The projects screen.
 #[component]
 pub fn ProjectsView() -> Element {
@@ -206,20 +225,7 @@ pub(super) fn read_as(shapes: &[Shape], fitted: &Fitted) -> (String, Option<(Str
 #[component]
 fn WatchedProject(project: Project, available: Vec<Agent>, shapes: Vec<Shape>) -> Element {
     let (foreman_model, foreman_effort) = read_as(&shapes, &project.foreman);
-    // Absence for the two things a project cannot work without, and what
-    // the foreman watches: a watched room is shown by the platform's
-    // identifier, because a name costs a scope the manifest does not grant.
-    let mut notes = Vec::new();
-    if project.platforms.is_empty() {
-        notes.push("no token for the repository".to_owned());
-    }
-    if project.channels.is_empty() {
-        notes.push("no Slack app".to_owned());
-    }
-    if !project.watched.is_empty() {
-        notes.push(format!("watching {}", project.watched.join(", ")));
-    }
-    let notes = notes.join(" · ");
+    let notes = noted(&project);
     // The variables a hover away, by name and by what each is for, and
     // never a value.
     let variables = project
@@ -358,6 +364,45 @@ fn WatchedProject(project: Project, available: Vec<Agent>, shapes: Vec<Shape>) -
 
 #[cfg(test)]
 mod tests {
+    fn a_project_with_everything() -> super::Project {
+        super::Project {
+            id: "p".to_owned(),
+            name: "aviary".to_owned(),
+            repository: "https://github.com/owner/aviary".to_owned(),
+            repository_link: None,
+            foreman: stageman_wire::Fitted::default(),
+            kits: Vec::new(),
+            platforms: vec!["github".to_owned()],
+            channels: vec!["Slack".to_owned()],
+            variables: Vec::new(),
+            brief: String::new(),
+            watched: Vec::new(),
+            foreman_room: None,
+            foreman_room_link: None,
+            attending: false,
+            working: 0,
+            jobs: 0,
+            token_form: String::new(),
+        }
+    }
+
+    /// A row notes what is missing and what is watched, each only when it
+    /// applies, and nothing when nothing does.
+    #[test]
+    fn a_row_notes_absences_and_watched_rooms() {
+        assert_eq!(super::noted(&a_project_with_everything()), "");
+        let mut bare = a_project_with_everything();
+        bare.platforms.clear();
+        bare.channels.clear();
+        bare.watched = vec!["C1".to_owned(), "C2".to_owned()];
+        assert_eq!(
+            super::noted(&bare),
+            "no token for the repository · no Slack app · watching C1, C2"
+        );
+        let mut watching = a_project_with_everything();
+        watching.watched = vec!["C1".to_owned()];
+        assert_eq!(super::noted(&watching), "watching C1");
+    }
     use super::super::agents_view::Agent;
     use super::{Choice, Fitted, ModelChoice, Shape, read_as, shown_as};
 

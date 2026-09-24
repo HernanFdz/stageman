@@ -245,9 +245,10 @@ pub fn slug(text: &str, at_most: usize) -> String {
         }
     }
     // Every character kept is ASCII, so a length is a count and a cut at
-    // `at_most` lands on a character boundary.
-    if folded.len() > at_most {
-        let inside_a_word = folded.chars().nth(at_most).is_some_and(|c| c != '-');
+    // `at_most` lands on a character boundary. Whether there is a character
+    // at the cut is whether the fold is longer than the cap.
+    if let Some(at_the_cut) = folded.chars().nth(at_most) {
+        let inside_a_word = at_the_cut != '-';
         folded.truncate(at_most);
         if inside_a_word
             && folded.ends_with(|c: char| c != '-')
@@ -4532,6 +4533,71 @@ mod tests {
         let named: Vec<&str> = handout.variable_names().map(VariableName::as_str).collect();
 
         assert_eq!(named, vec![VARIABLE]);
+        // What the kickoff is told: the name with its note, and never the
+        // value — see `docs/decisions/0075-a-variable-says-what-it-is-for.md`.
+        let told: Vec<(&str, &str)> = handout
+            .variables_told()
+            .map(|(name, note)| (name.as_str(), note))
+            .collect();
+        assert_eq!(told, vec![(VARIABLE, "the staging database, read-only")]);
+    }
+
+    /// The one grammar a name is read by, at each of its edges: the cap,
+    /// the ends, the alphabet — and a name reads back as the text it was.
+    #[test]
+    fn a_jobs_name_is_read_by_the_one_grammar_at_its_edges() {
+        let longest = "a".repeat(JobId::AT_MOST);
+        let read = JobId::parse(&longest).expect("exactly the cap is a name");
+        assert_eq!(read.as_str(), longest);
+        assert_eq!(read.to_string(), longest);
+        assert_eq!(
+            JobId::parse(&format!("{longest}a")),
+            Err(super::InvalidJobId::TooLong)
+        );
+        assert_eq!(JobId::parse(""), Err(super::InvalidJobId::Empty));
+        assert_eq!(
+            JobId::parse("-fix"),
+            Err(super::InvalidJobId::HyphenAtAnEnd)
+        );
+        assert_eq!(
+            JobId::parse("fix-"),
+            Err(super::InvalidJobId::HyphenAtAnEnd)
+        );
+        assert_eq!(
+            JobId::parse("Fix"),
+            Err(super::InvalidJobId::Character('F'))
+        );
+        assert_eq!(
+            JobId::parse("fix_it"),
+            Err(super::InvalidJobId::Character('_'))
+        );
+        assert_eq!(
+            JobId::parse("fix-login-timeout--3f9a2c1b").map(|name| name.to_string()),
+            Ok("fix-login-timeout--3f9a2c1b".to_owned())
+        );
+    }
+
+    /// The fold: lowercase, every run of anything else one hyphen, none at
+    /// either end, and a cut that lands inside a word steps back to the
+    /// last whole one — unless what is left is one word, which is cut where
+    /// it is.
+    #[test]
+    fn a_title_folds_to_a_slug_and_is_cut_on_a_word() {
+        assert_eq!(super::slug("Fix: the LOGIN!!", 40), "fix-the-login");
+        assert_eq!(super::slug("--fix  it--", 40), "fix-it");
+        assert_eq!(super::slug("", 40), "");
+        // Exactly the cap is left alone; one more is cut on a word.
+        assert_eq!(super::slug("fix the login", 13), "fix-the-login");
+        assert_eq!(super::slug("fix the login", 12), "fix-the");
+        assert_eq!(super::slug("fix the login", 9), "fix-the");
+        // A cut that lands on a hyphen, or just after one, keeps the words
+        // before it whole.
+        assert_eq!(super::slug("fix the login", 7), "fix-the");
+        assert_eq!(super::slug("fix the login", 8), "fix-the");
+        // One word longer than the cap is cut where it is; a word after a
+        // whole one is dropped.
+        assert_eq!(super::slug("abcdefghij", 5), "abcde");
+        assert_eq!(super::slug("abc defghij", 5), "abc");
     }
 
     /// `docs/conventions.md` §4, for the map added last.

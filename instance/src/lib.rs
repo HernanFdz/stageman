@@ -466,6 +466,13 @@ pub struct Facts {
     pub port: u16,
 }
 
+/// Whether a step's time is earlier than the last step's, which the world
+/// stamps as it hands over and so should never produce; a function so that
+/// the comparison is tested rather than merely logged.
+const fn ran_backwards(at: Now, before: Now) -> bool {
+    at < before
+}
+
 /// An awake instance: everything it knows, and everything it holds.
 pub struct Running {
     /// What is kept.
@@ -948,7 +955,7 @@ impl Running {
     /// and taken as given, because the world is the authority on the clock
     /// and the instance has no other.
     pub fn step(&mut self, at: Now, event: Event) -> Vec<Effect> {
-        if at < self.now {
+        if ran_backwards(at, self.now) {
             tracing::warn!(
                 at,
                 before = self.now,
@@ -1265,5 +1272,17 @@ fn complaint(finished: &Finished) -> Option<String> {
         Finished::Exited { stderr, .. } => Some(stderr.as_text().unwrap_or("").trim().to_owned()),
         Finished::NotFound => Some("the runtime could not be run".to_owned()),
         Finished::Failed(why) => Some(why.clone()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Only an earlier time is the clock running backwards: the same time
+    /// twice is a step that took no time, which the simulation does often.
+    #[test]
+    fn only_an_earlier_time_is_the_clock_running_backwards() {
+        assert!(super::ran_backwards(1, 2));
+        assert!(!super::ran_backwards(2, 2));
+        assert!(!super::ran_backwards(3, 2));
     }
 }
