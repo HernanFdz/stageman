@@ -1477,3 +1477,63 @@ fn a_listing_says_when_the_platform_had_more_than_a_page() {
         "{listed:?}"
     );
 }
+
+/// Forgetting the App forgets what was held about its installations: the
+/// last installation's failure is not said of the App registered next.
+#[test]
+fn forgetting_the_app_forgets_the_last_installations_failure() {
+    let mut sim = Simulation::new();
+    sim.holding(&app_and_project("example/repo"));
+    let mut instance = sim.wake(seed(1));
+    sim.next_platform_answers(404, r#"{"message":"Not Found"}"#);
+    let page = arrives_installed(&mut sim, &mut instance, 99, None);
+    assert!(stays_saying(
+        &page,
+        "GitHub knows no installation with that identifier for this App"
+    ));
+    assert!(
+        instance_page(&mut sim, &mut instance, 1)
+            .github
+            .and_then(|app| app.install_failure)
+            .is_some(),
+        "said on the page while the App stands"
+    );
+
+    let Response::Apps(page) = ask(
+        &mut sim,
+        &mut instance,
+        2,
+        Request::ForgetApp {
+            platform: "github".to_owned(),
+        },
+    ) else {
+        panic!("forgotten");
+    };
+    assert!(page.github.is_none());
+    let Response::Registration(form) = ask(
+        &mut sim,
+        &mut instance,
+        3,
+        Request::Registration {
+            platform: "github".to_owned(),
+            anywhere: false,
+        },
+    ) else {
+        panic!("a form");
+    };
+    sim.visits_path(
+        sim.now(),
+        &format!(
+            "/instance/apps/github/registered?code=c0de&state={}",
+            form.state
+        ),
+    );
+    sim.run_until(&mut instance, sim.now() + 5_000);
+    let registered = instance_page(&mut sim, &mut instance, 4)
+        .github
+        .expect("the App registered again");
+    assert_eq!(
+        registered.install_failure, None,
+        "nothing of the forgotten App's is said of this one"
+    );
+}
