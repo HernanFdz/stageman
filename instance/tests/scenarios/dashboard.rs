@@ -6,7 +6,9 @@ use stageman_channel::Call;
 use stageman_core::{Agent, JobId, Outcome, Progress, ProjectId, Timestamp, Uuid, Waiting};
 use stageman_instance::{Instance, Request, Response};
 use stageman_platform::Call as PlatformCall;
-use stageman_wire::{ChannelDraft, Draft, Ending, Fitted, KitDraft, Refusal, Standing};
+use stageman_wire::{
+    AccessDraft, AccessView, ChannelDraft, Draft, Ending, Fitted, KitDraft, Refusal, Standing,
+};
 
 use crate::simulation::{
     Simulation, job, project, request, room, seed, watching, watching_a_channel,
@@ -37,16 +39,18 @@ fn as_it_comes() -> Fitted {
 pub fn a_draft(name: &str) -> Draft {
     Draft {
         name: name.to_owned(),
-        // An address on the platform, since a draft with anything else is
-        // refused before it becomes a project.
-        repository: format!("https://github.com/example/{name}"),
         foreman: as_it_comes(),
         kits: vec![KitDraft {
             name: "Claude".to_owned(),
             description: "General-purpose.".to_owned(),
             fitted: as_it_comes(),
         }],
-        credential: "ghp-not-a-real-token".to_owned(),
+        // An address on the platform, since a draft with anything else is
+        // refused before it becomes a project.
+        access: AccessDraft::Token {
+            token: Some("ghp-not-a-real-token".to_owned()),
+            repository: Some(format!("https://github.com/example/{name}")),
+        },
         channel: ChannelDraft {
             credential: "xoxb-not-a-real-token".to_owned(),
             listen_credential: "xapp-not-a-real-token".to_owned(),
@@ -267,7 +271,7 @@ fn creating_a_project_listens_on_its_channel_once_the_record_has_landed() {
         .find(|project| project.name == "burrow")
         .expect("the new project");
     assert_eq!(burrow.channels, vec!["Slack".to_owned()]);
-    assert_eq!(burrow.platforms, vec!["github".to_owned()]);
+    assert_eq!(burrow.access, Some(AccessView::Token));
     let created = ProjectId::from_uuid(Uuid::parse_str(&burrow.id).expect("an identifier"));
     assert_eq!(
         sim.listening(),
@@ -347,7 +351,8 @@ fn a_created_project_is_named_by_the_seed() {
     assert_ne!(created(3), created(4));
 }
 
-/// Blank keeps, typed replaces, and what lands is what the screen was told.
+/// A token left unsaid is the one held, so a project holding none is
+/// refused it; typed replaces; and what lands is what the screen was told.
 #[test]
 fn amending_keeps_a_credential_when_the_box_is_blank() {
     let mut sim = Simulation::new();
@@ -356,25 +361,31 @@ fn amending_keeps_a_credential_when_the_box_is_blank() {
     let id = project().to_string();
 
     let mut blank = a_draft("example");
-    blank.credential.clear();
-    let Response::Projects(shown) = ask(
-        &mut sim,
-        &mut instance,
-        1,
-        Request::Amend {
-            project: id.clone(),
-            draft: blank.clone(),
-        },
-    ) else {
-        panic!("the projects screen");
+    blank.access = AccessDraft::Token {
+        token: None,
+        repository: Some("https://github.com/example/renamed".to_owned()),
     };
-    assert!(
-        shown.projects[0].platforms.is_empty(),
-        "it had none, it has none"
+    assert_eq!(
+        ask(
+            &mut sim,
+            &mut instance,
+            1,
+            Request::Amend {
+                project: id.clone(),
+                draft: blank.clone(),
+            },
+        ),
+        Response::Refused(Refusal::Incomplete {
+            field: "access".to_owned()
+        }),
+        "it had none, so none can be left unsaid"
     );
 
     let mut typed = a_draft("renamed");
-    typed.credential = "ghp-the-new-one".to_owned();
+    typed.access = AccessDraft::Token {
+        token: Some("ghp-the-new-one".to_owned()),
+        repository: Some("https://github.com/example/renamed".to_owned()),
+    };
     ask(
         &mut sim,
         &mut instance,
@@ -397,13 +408,10 @@ fn amending_keeps_a_credential_when_the_box_is_blank() {
     let landed = sim.disk().expect("landed");
     let watched = landed.projects.get(&project()).expect("still watched");
     assert_eq!(watched.name, "renamed");
-    assert_eq!(
-        watched
-            .credentials
-            .get(&stageman_core::Platform::GitHub)
-            .map(stageman_core::Secret::expose),
-        Some("ghp-the-new-one")
-    );
+    assert!(matches!(
+        watched.access.get(&stageman_core::Platform::GitHub),
+        Some(stageman_core::Access::Token(token)) if token.expose() == "ghp-the-new-one"
+    ));
 
     assert_eq!(
         ask(

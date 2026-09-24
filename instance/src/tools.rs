@@ -810,7 +810,7 @@ impl Running {
     }
 
     /// Answers now with a line of text, because nothing changed.
-    fn say_now(id: RequestId, status: u16, text: &str, effects: &mut Vec<Effect>) {
+    pub(crate) fn say_now(id: RequestId, status: u16, text: &str, effects: &mut Vec<Effect>) {
         effects.push(Effect::Answer {
             id,
             answer: Answer::Respond {
@@ -833,7 +833,7 @@ impl Running {
     /// because nothing changes; a job whose project holds no credential is
     /// told so, since its command is about to fail and the reason should be
     /// the true one.
-    fn credential_asked(&self, id: RequestId, request: &Arrival, effects: &mut Vec<Effect>) {
+    fn credential_asked(&mut self, id: RequestId, request: &Arrival, effects: &mut Vec<Effect>) {
         if !nearby(&request.peer) {
             tracing::warn!("a credential was asked for from beyond this machine");
             Self::refuse(id, FORBIDDEN, effects);
@@ -850,23 +850,34 @@ impl Running {
         };
         // The one platform a repository can be on, until there is a second;
         // the route answers for the job's repository, whichever that is.
-        let Some(credential) = self
+        let access = self
             .state
             .projects
             .get(&project)
-            .and_then(|watched| watched.credentials.get(&Platform::GitHub))
-        else {
-            tracing::warn!(%job, "asked for a credential its project does not hold");
-            Self::say_now(
-                id,
-                NOT_FOUND,
-                "this job's project holds no credential for its repository",
-                effects,
-            );
-            return;
-        };
-        tracing::debug!(%job, "handed its project's credential to its wrapper");
-        Self::say_now(id, OK, credential.expose(), effects);
+            .and_then(|watched| watched.access.get(&Platform::GitHub))
+            .cloned();
+        match access {
+            Some(stageman_core::Access::Token(credential)) => {
+                tracing::debug!(%job, "handed its project's token to its wrapper");
+                Self::say_now(id, OK, credential.expose(), effects);
+            }
+            // Minted for the project's one repository and kept for most of
+            // its hour, per
+            // `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
+            Some(stageman_core::Access::Installation { id: installation }) => {
+                tracing::debug!(%job, "handed a token minted from its project's installation");
+                self.credential_from_installation(id, project, installation, effects);
+            }
+            None => {
+                tracing::warn!(%job, "asked for a credential its project does not hold");
+                Self::say_now(
+                    id,
+                    NOT_FOUND,
+                    "this job's project holds no credential for its repository",
+                    effects,
+                );
+            }
+        }
     }
 
     /// Which project a bearer belongs to.
@@ -1527,7 +1538,7 @@ mod tests {
                     KitName::new("Claude").expect("a name"),
                     KitConfig::defaults(Agent::Claude),
                 )]),
-                credentials: BTreeMap::new(),
+                access: BTreeMap::new(),
                 channels: BTreeMap::new(),
                 jobs: BTreeMap::new(),
                 variables: BTreeMap::new(),

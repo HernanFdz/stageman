@@ -349,6 +349,7 @@ impl Running {
             platform: handout
                 .reaches(stageman_core::Platform::GitHub)
                 .then_some(stageman_core::Platform::GitHub),
+            actor: self.actor_for(project),
             kit: handout.kit().clone(),
             warrant,
             tools: self.tools.clone(),

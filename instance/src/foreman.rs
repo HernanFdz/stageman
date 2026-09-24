@@ -395,6 +395,7 @@ impl Running {
                 platform: handout
                     .reaches(stageman_core::Platform::GitHub)
                     .then_some(stageman_core::Platform::GitHub),
+                actor: None,
                 kit: handout.kit().clone(),
                 warrant,
                 tools: self.tools.clone(),
@@ -663,7 +664,7 @@ mod tests {
                         },
                     ),
                 ]),
-                credentials: BTreeMap::new(),
+                access: BTreeMap::new(),
                 channels: BTreeMap::new(),
                 jobs: BTreeMap::new(),
                 variables: BTreeMap::new(),

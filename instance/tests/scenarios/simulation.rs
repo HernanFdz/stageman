@@ -19,7 +19,7 @@ use stageman_agent::ToolCallStatus;
 use stageman_agent::{Answer, Command, Heard, Label, Said, StopReason};
 use stageman_channel::{Call, Reaction};
 use stageman_core::{
-    Agent, AgentConfig, Channel, ChannelConfig, Errand, InstanceId, Job, JobId, Key, Kit,
+    Access, Agent, AgentConfig, Channel, ChannelConfig, Errand, InstanceId, Job, JobId, Key, Kit,
     KitConfig, KitName, NONCE_LEN, Nonce, Place, Platform, Progress, Project, ProjectId, Room,
     Secret, Snapshot, State, Thread, Timestamp, Uuid,
 };
@@ -39,6 +39,93 @@ pub use stageman_vocabulary::Now;
 
 /// Where every simulated instance keeps its file.
 const INSTANCE_FILE: &str = "/sim/instance.json";
+
+/// The key the simulated App signs with: made for the tests and used for
+/// nothing, in the shape the platform hands out, so that a registration
+/// the simulation answers yields an App whose tokens the instance can
+/// mint.
+pub const TEST_KEY: &str = "-----BEGIN RSA PRIVATE KEY-----\n\
+         MIIEpAIBAAKCAQEAv48aiq9x2RBccn267zi6TArEnVXppTczV2jP6z4mRT06Pk4n\n\
+         s9QqKi+t/cSfX+9cgVFj/UHvB43UwZm8ZbcnyZhg5BdOF8m+POt79O4AbJWtlCQF\n\
+         fdBhmAvn685Mak+9mI+VQbboU86Xf2bhJl48kuaiqP6YPpo8MCA9xnjMn1+8OiOr\n\
+         Er5X/hmMVv7tIIaipeEAl6WEYifX+SD1B5WU8TsYImB/2pviNKhdZ4m5hCZ3z1fU\n\
+         zJkv/0eSiJtq1hZ8c3BoY4d4sAfzETnNmmhVIc2E8Zfvs8tyZuZocyudOiqlz7O3\n\
+         7Z4DwDjHc6WM1f4GFblxWMpq9jR/lb1E6WBtUwIDAQABAoIBAQCsuIeiDNeGdO4m\n\
+         fZ+UG34/GmZ1xwVI5yDv652t6vfu7moZy7aYuvDZ4OvtKODbS6QJJi4WKOEx2ny/\n\
+         o7Lvs9m4OCEFCM5tPIa/v0ShcAgJ4FwGewRIkR+uTO3s/LKCGSxG5xAZlKafCmQn\n\
+         h8fzJH1Rp4t6/TShHcivTCLnVfyKpeRe1LPFCWm0M6smwzaQZZ5zwjes3OemrHBm\n\
+         gVkmh656n14ESmAu5n1htza/J3nlsa4l4UitRbPhHRnaTyr80oQgwy6eeioNtdy6\n\
+         63w29/Q9Thc4koUGsd09nIKlaFUCDMVUU3CtwAtli10Lf5tr3Ivgj3t3gOjlejlr\n\
+         5/nUxPihAoGBAN/9BCjjYiLhjkuYqK0VF8rI74BjseSJZJTDW2bpjL9ugRtNRahW\n\
+         OiXhBSQ0KbgjjZWiKlEVFMDicN1p6MXfuPncJcm+Yp5+vnnIVtl3fi6SGWn0w9VE\n\
+         LB0XIBEJArkE8B6ZRppyzNwhD7iKrfQNWzUiw4k9PMYMjc2rsuZJSYvdAoGBANrv\n\
+         mzDnpeU8TUma+ccBAAwRsI3y4QurRiJtpl1WQ2JQve+Tyl1GAOIV5GDN55UMmxW/\n\
+         zNfAQhOfAl0Ok9hlBWxTkrXtjt5IXpZOp/hEcgNBw+yn6Ml8x6P8ta/wlaMgpsjZ\n\
+         ijku+4lMQ6Wbb09CbHlP3Rdv8Ya7k8+tEkObOaLvAoGAIcHLH7JtNt6RiHkgar10\n\
+         EX7JAauEwvGl8/mhS9hE+xDXalrx9ZXRO6Y3FSa7ZuIM05FWGVQ5BXzbD7OHflLi\n\
+         WN3B4C7ORB7L7CSyWiH1JWWlaN+XqAuXLmcu0QJvo5zH54SoLFzC3SYqbWCRKOfe\n\
+         aBquJ3/QKfT4ZhfLZYOEDw0CgYEAyBMdnLSlK3dPHgvNZWppk5363c3ukU5lGoNf\n\
+         /H4fuFIXMUC7N0AJAJOHEFw63UAW3epYlXYyLGIss8PlomS3bwZ01WMSI9q47d1V\n\
+         rRFHq+hG1xefKbqpaxg/JVjUNq5ZHMWIhreD0TXrwATq1ODb5oTwhEGd1EXJT4lX\n\
+         XocVResCgYBam6iJqyhk3ExJ0eu4MT5sWdeqliLd5NRZ/XLIBQ2fuiZU1nFSbgIz\n\
+         nFaZU3jL1az+IsGuqjcB+GwqFt0P9HolFKfaK4y2xiH9UaEI08AqEZqDRB2VMNOv\n\
+         W3w9IvDekeaSfWp+tELfYbY3v+k+BDpTlHTKyIX9QiKEv+UAjjRo3A==\n\
+         -----END RSA PRIVATE KEY-----\n";
+
+/// The simulated App, as a fixture holds it registered already.
+pub fn with_an_app(state: &mut State) {
+    state.apps.insert(
+        Platform::GitHub,
+        stageman_core::PlatformApp {
+            id: 4242,
+            slug: "stageman-sim".to_owned(),
+            client_id: "Iv1.sim".to_owned(),
+            private_key: Secret::new(TEST_KEY.to_owned()),
+            installations: BTreeMap::new(),
+        },
+    );
+}
+
+/// A project reaching its repository through an installation of the App,
+/// which the App is installed as, on the account every fixture's
+/// repositories are under.
+pub fn installed(state: &mut State, installation: u64) {
+    app_installed(state, installation, "example");
+    state
+        .projects
+        .get_mut(&project())
+        .expect("the project")
+        .access
+        .insert(Platform::GitHub, Access::Installation { id: installation });
+}
+
+/// The App installed on an account, as the instance keeps it once the
+/// platform's setup redirect has been answered — see
+/// `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
+pub fn app_installed(state: &mut State, installation: u64, account: &str) {
+    state
+        .apps
+        .get_mut(&Platform::GitHub)
+        .expect("an App is registered")
+        .installations
+        .insert(
+            installation,
+            stageman_core::Installation {
+                account: account.to_owned(),
+                every_repository: false,
+            },
+        );
+}
+
+/// A project whose repository is an address on the platform, as every
+/// project created from the dashboard has.
+pub fn on_github(state: &mut State, full_name: &str) {
+    state
+        .projects
+        .get_mut(&project())
+        .expect("the project")
+        .repository = format!("https://github.com/{full_name}");
+}
 
 /// Which platform every scenario is played on.
 ///
@@ -366,6 +453,23 @@ pub struct Simulation {
     /// Why the next reads of a repository get no answer at all, front
     /// first.
     platform_failures: VecDeque<String>,
+    /// How many tokens the simulated App has minted, so each is named
+    /// apart.
+    tokens_minted: u32,
+    /// Which installation each minted token was minted from, by the
+    /// token's text: what a listing with it answers from.
+    minted_for: BTreeMap<String, u64>,
+    /// The repositories each simulated installation covers, by full name
+    /// and whether private: what a listing answers, and what a restricted
+    /// mint is checked against. An installation not scripted covers the
+    /// fixture's one repository.
+    coverage: BTreeMap<u64, Vec<(String, bool)>>,
+    /// The account each simulated installation is on, where scripted;
+    /// the fixture's account otherwise.
+    accounts: BTreeMap<u64, String>,
+    /// What a token can read, by full name and whether private: what the
+    /// platform answers a token's listing with.
+    token_reads: Vec<(String, bool)>,
     key: Key,
     /// What this flow is recorded as, where it is recorded at all: the file
     /// it is written to, and what that file says it pins.
@@ -499,8 +603,11 @@ pub fn holding_a_token(state: &mut State, token: &str) {
         .projects
         .get_mut(&project())
         .expect("the project")
-        .credentials
-        .insert(Platform::GitHub, Secret::new(token.to_owned()));
+        .access
+        .insert(
+            Platform::GitHub,
+            Access::Token(Secret::new(token.to_owned())),
+        );
 }
 
 fn a_project(jobs: BTreeMap<JobId, Job>, bound: bool) -> Project {
@@ -522,7 +629,7 @@ fn a_project(jobs: BTreeMap<JobId, Job>, bound: bool) -> Project {
             KitName::new("Claude").expect("a name"),
             KitConfig::defaults(Agent::Claude),
         )]),
-        credentials: BTreeMap::new(),
+        access: BTreeMap::new(),
         channels,
         jobs,
         variables: BTreeMap::new(),
@@ -701,6 +808,11 @@ impl Simulation {
             platform_calls: Vec::new(),
             platform_answers: VecDeque::new(),
             platform_failures: VecDeque::new(),
+            tokens_minted: 0,
+            minted_for: BTreeMap::new(),
+            coverage: BTreeMap::new(),
+            accounts: BTreeMap::new(),
+            token_reads: vec![("example/repo".to_owned(), true)],
             key: key(),
             recording: None,
             recorder: None,
@@ -2347,6 +2459,102 @@ impl Simulation {
         }
     }
 
+    /// An installation of the simulated App, on the account it was
+    /// scripted on — the fixture's otherwise — covering chosen
+    /// repositories: what a setup redirect is checked against.
+    fn installation_answer(&self, id: u64) -> (u16, String) {
+        let account = self
+            .accounts
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| "example".to_owned());
+        (
+            200,
+            format!(
+                r#"{{"id":{id},"app_id":4242,"account":{{"login":"{account}"}},"repository_selection":"selected"}}"#
+            ),
+        )
+    }
+
+    /// A token minted from an installation, numbered so that two mintings
+    /// are told apart, good for the platform's hour from this instant —
+    /// unless it was restricted to a repository the installation does not
+    /// cover, which the real platform refuses as unprocessable.
+    fn mint_answer(&mut self, id: u64, repositories: &[String]) -> (u16, String) {
+        let covered = self.coverage_of(id);
+        if repositories.iter().any(|name| {
+            !covered
+                .iter()
+                .any(|(full_name, _)| full_name.rsplit('/').next() == Some(name))
+        }) {
+            return (
+                422,
+                r#"{"message":"There is at least one repository that does not exist or is not accessible to the parent installation."}"#.to_owned(),
+            );
+        }
+        self.tokens_minted += 1;
+        let token = format!("ghs_sim_{}", self.tokens_minted);
+        self.minted_for.insert(token.clone(), id);
+        let expires = Timestamp::from_millisecond(
+            i64::try_from(self.now + 3_600_000).expect("a virtual instant"),
+        )
+        .expect("a time");
+        (
+            201,
+            format!(
+                r#"{{"token":"{token}","expires_at":"{expires}","permissions":{{"contents":"write"}}}}"#
+            ),
+        )
+    }
+
+    /// The repositories the installation the token was minted from
+    /// covers, as scripted; a token the platform never minted is refused.
+    fn repositories_answer(&self, request: &stageman_platform::Request) -> (u16, String) {
+        request
+            .headers
+            .get("authorization")
+            .and_then(|header| header.strip_prefix("Bearer "))
+            .and_then(|token| self.minted_for.get(token).copied())
+            .map_or_else(
+                || (401, r#"{"message":"Bad credentials"}"#.to_owned()),
+                |installation| {
+                    let covered = self.coverage_of(installation);
+                    (
+                        200,
+                        serde_json::json!({
+                            "total_count": covered.len(),
+                            "repositories": covered
+                                .iter()
+                                .map(|(full_name, private)| serde_json::json!({
+                                    "full_name": full_name,
+                                    "html_url": format!("https://github.com/{full_name}"),
+                                    "private": private,
+                                }))
+                                .collect::<Vec<_>>(),
+                        })
+                        .to_string(),
+                    )
+                },
+            )
+    }
+
+    /// What a token can read, as scripted: the list the real platform
+    /// answers, every repository the operator can see and the private
+    /// ones the token was granted.
+    fn readable_answer(&self) -> String {
+        serde_json::json!(
+            self.token_reads
+                .iter()
+                .map(|(full_name, private)| serde_json::json!({
+                    "full_name": full_name,
+                    "html_url": format!("https://github.com/{full_name}"),
+                    "private": private,
+                }))
+                .collect::<Vec<_>>()
+        )
+        .to_string()
+    }
+
     /// Answers a read of a repository, if the request is one: as the real
     /// platform was measured to answer a token that reaches a private
     /// repository, unless the next answer was scripted otherwise. False for
@@ -2358,20 +2566,37 @@ impl Simulation {
         let responded = if let Some(why) = self.platform_failures.pop_front() {
             Responded::Failed(why)
         } else {
-            let (status, body) = self.platform_answers.pop_front().unwrap_or_else(|| match call {
-                PlatformCall::Repository { owner, name, .. } => (
-                    200,
-                    format!(r#"{{"full_name":"{owner}/{name}","private":true}}"#),
-                ),
-                // An App created from a manifest, as the platform answers:
-                // the App object with the key beside it.
-                PlatformCall::Exchange { code, .. } => (
-                    201,
-                    format!(
-                        r#"{{"id":4242,"slug":"stageman-sim","client_id":"Iv1.sim{code}","pem":"-----BEGIN RSA PRIVATE KEY-----\nsim\n-----END RSA PRIVATE KEY-----\n","client_secret":"not-kept","webhook_secret":"not-kept","html_url":"https://github.com/apps/stageman-sim"}}"#
+            let (status, body) = self
+                .platform_answers
+                .pop_front()
+                .unwrap_or_else(|| match call {
+                    PlatformCall::Repository { owner, name, .. } => (
+                        200,
+                        format!(r#"{{"full_name":"{owner}/{name}","private":true}}"#),
                     ),
-                ),
-            });
+                    // An App created from a manifest, as the platform answers:
+                    // the App object with the key beside it — a key that signs,
+                    // so that what the instance mints with it can be answered.
+                    PlatformCall::Exchange { code, .. } => (
+                        201,
+                        serde_json::json!({
+                            "id": 4242,
+                            "slug": "stageman-sim",
+                            "client_id": format!("Iv1.sim{code}"),
+                            "pem": TEST_KEY,
+                            "client_secret": "not-kept",
+                            "webhook_secret": "not-kept",
+                            "html_url": "https://github.com/apps/stageman-sim",
+                        })
+                        .to_string(),
+                    ),
+                    PlatformCall::Installation { id, .. } => self.installation_answer(id),
+                    PlatformCall::Mint {
+                        id, repositories, ..
+                    } => self.mint_answer(id, &repositories),
+                    PlatformCall::Repositories { .. } => self.repositories_answer(request),
+                    PlatformCall::Readable { .. } => (200, self.readable_answer()),
+                });
             Responded::Answered {
                 status,
                 headers: [(
@@ -2747,6 +2972,46 @@ impl Simulation {
     /// to answer.
     pub fn next_platform_answers(&mut self, status: u16, body: &str) {
         self.platform_answers.push_back((status, body.to_owned()));
+    }
+
+    /// Scripts which repositories a simulated installation covers, by full
+    /// name and whether private, from now on.
+    pub fn installation_covers(&mut self, installation: u64, repositories: &[(&str, bool)]) {
+        self.coverage.insert(
+            installation,
+            repositories
+                .iter()
+                .map(|(name, private)| ((*name).to_owned(), *private))
+                .collect(),
+        );
+    }
+
+    /// What a simulated installation covers: as scripted, or the fixture's
+    /// one private repository.
+    fn coverage_of(&self, installation: u64) -> Vec<(String, bool)> {
+        self.coverage
+            .get(&installation)
+            .cloned()
+            .unwrap_or_else(|| vec![("example/repo".to_owned(), true)])
+    }
+
+    /// Scripts which account a simulated installation is on, from now on.
+    pub fn installed_on(&mut self, installation: u64, account: &str) {
+        self.accounts.insert(installation, account.to_owned());
+    }
+
+    /// Scripts what a token can read, by full name and whether private,
+    /// from now on.
+    pub fn token_reads(&mut self, repositories: &[(&str, bool)]) {
+        self.token_reads = repositories
+            .iter()
+            .map(|(name, private)| ((*name).to_owned(), *private))
+            .collect();
+    }
+
+    /// How many tokens the simulated App has minted so far.
+    pub const fn tokens_minted(&self) -> u32 {
+        self.tokens_minted
     }
 
     /// Scripts the next read of a repository to get no answer at all.

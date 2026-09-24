@@ -563,6 +563,38 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   something this project does to the text, where the platform is the one
   that answers.
 
+- **installation** — the App, installed on an account for some or all of
+  its repositories, by the identifier the platform's setup redirect
+  carries: confirmed with the App's key and kept beside the App, with the
+  account and whether it covers every repository, since `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`. It is one
+  per account on the platform and may cover many repositories, so it is
+  the instance's record of where its App is installed rather than any
+  project's: a project's access names one, and a project's repository is
+  chosen from what that one covers, listed from the platform when a form
+  asks and kept nowhere. Which one a form may name is the one its own
+  tab brought back, under a state minted for the press, or the one its
+  project holds; a form is never shown the instance's installations, and
+  never names one by its identifier. Tokens are minted from it per
+  project for that project's one repository and an hour, and held, never
+  kept. Not a *connection* or a *link*, which describe nothing the
+  platform has a word for; not an *App* — an App is registered once, and
+  installed many times. Not a project's, which was 0077's shape and the
+  near-miss worth recording: the platform installs on an account, and a
+  link minted per project could route neither a project being created
+  nor the second project on one account.
+- **access** — how a project reaches its repository's platform: a token
+  pasted and checked, or an installation of the App. One per platform,
+  and a job never carries either: the credential route serves a token as
+  it is and mints one from an installation. The word this project uses
+  for the map that held *credentials* until
+  `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`,
+  renamed because an installation is not a credential and a map called
+  credentials holding one would read wrong. Set before the repository,
+  since `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`: the form's shape, App or Token, and then the repository
+  chosen from what that shape reaches. Not *authorisation*, which is
+  what the platform grants and this instance can only hold a record of.
+  Not *integration*, refused under **channel** for describing plumbing,
+  and the word the redesign began with.
 - **App** — what this instance owns on a platform: registered once, from
   the Instance page, by the platform's own flow, and kept sealed with its
   key; a project *installs* it on a repository rather than holding a
@@ -899,10 +931,54 @@ justify is usually obsolete.
   nothing floats over anything. The browser's own select was what the form
   used and is refused for two reasons: it draws itself, outside the theme,
   and it hides the options a choice is made between. A listbox that floats is
-  for a set that is open or long; none exists here, and when one does it is
-  lifted from the components the framework's own registry publishes rather
-  than depended on, because the crate published under that name was a
-  placeholder when this was written.
+  for a set that is open or long. The one long set here — the
+  repositories an access reaches, since `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md` — gets a control of this
+  project's own, in the token set, with its list in the page rather than
+  floating: a box that filters and holds the choice, and rows shown while
+  it is typed in. The registry the framework publishes has a combobox,
+  and lifting it was measured, when the moment came, to cost a git
+  dependency on the primitives crate, an icon crate of its own and a
+  theme file of its own in the browser's half, which is the price the
+  earlier version of this rule did not know.
+
+- **What leaves for a platform opens a tab of its own, and the page
+  learns of the return through the tick.** A guide's link opens the
+  platform in a tab of its own, so the form and everything typed into it
+  stay where they were. The App's install opens its tab by script rather
+  than by a link, for one reason: a tab opened by script may be closed by
+  script, and one opened by a link may not once the platform has moved it
+  through its pages — so the page the platform brings that tab back to,
+  which is the instance's own, can close it and return the person to the
+  form they left. The tab is opened blank in the press and sent on once
+  the instance has minted the link, because a browser opens a tab for a
+  press and refuses one for what comes later; the link carries a state
+  minted for that press, and what comes back under it is that page's to
+  ask about and no other's. That landing page is outside the dashboard's
+  stylesheet, one sentence and one line of script, and stays open saying
+  why when the platform refused, or saying to press again when the state
+  is one the instance no longer holds. See
+  `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
+  Two things follow. A form keeps its draft in state a re-read does not
+  reset, which is what a hook is; one that seeded its draft from the read
+  on every render would lose the operator's typing to the tick that was
+  meant to help them. And what a form lists from a platform is asked as a
+  held request of its own — the shape's listing when the shape is
+  entered, and whether its state has come back on each tick while a tab
+  is out — never kept and never part of the screen's read, because a
+  listing on every tick would ask the platform on every write.
+
+- **A field that is one of a few shapes is a sentence with its actions
+  inline.** The GitHub card's access is one: its control says which shape
+  the project is in, or that none is chosen, and offers what can be done
+  about it as links in the sentence — install the App, use a token,
+  replace it — rather than a row of buttons for the shapes and another
+  for the actions. A row of buttons is right where choosing is the whole
+  of it, as it is for a model or an effort; a shape here is never chosen
+  by itself, since each is entered by an action of its own, and a
+  sentence carries the shape and the action together. The line under the
+  label stays what the field is for, whatever the shape: it is the
+  control that says where things stand, and a line that changed with it
+  would say the same thing twice.
 
 - **A theme is a token block, and a component never names one.** Since
   `docs/decisions/0072-the-dashboard-has-a-dark-theme.md` there are two,

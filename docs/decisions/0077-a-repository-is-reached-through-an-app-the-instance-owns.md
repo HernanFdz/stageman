@@ -21,6 +21,11 @@ whose checkout now reaches the platform through the same door every later
 command does. Gives
 `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md` a
 fourth navigation entry, for what the instance configures about itself.
+Amended by `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`: the settings card, the install link minted per project
+with its state, the repository rule applied on its return, the
+repositories offered on the card and creation without a token are that
+record's now — where the App is installed is kept beside the App, and a
+repository is chosen from what the access reaches.
 
 ## Context
 
@@ -112,12 +117,16 @@ and never carries it.**
   leak for nothing.
 - **Access to a repository is one of two things.** A token, pasted and
   checked per 0076; or an installation, by identifier, learned from the
-  setup redirect and confirmed with the App's key. The project's GitHub
-  card offers both: paste a token, or install the App, which leaves the
-  page for the platform and comes back with the repository filled in — or
-  with the installation's repositories to choose from, when it covers more
-  than one. A project written by the last release holds a token and opens
-  as one.
+  setup redirect and confirmed with the App's key. How the card offers
+  the two and how the repository is chosen is `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`'s: since it, where
+  the App is installed is kept beside the App, the install link opens the
+  platform in a new tab and carries no state, and the repository is
+  chosen from what the access reaches, at creation as at any other time.
+  A token pasted later replaces an installation, and an installation
+  replaces a token. A project written by the last release holds a token
+  and opens as one. The platform sends the browser back on an
+  installation's update too, and the installation's record is
+  refreshed.
 - **A credential is fetched, never carried.** A job's container is created
   with no platform token in its environment. In its place the instance
   writes, once the container is up and before the checkout, a small
@@ -167,6 +176,12 @@ and never carries it.**
   changes. A new instance's first steps become agents, the App if the
   one-press route is wanted, projects, and Home's empty-state checklist
   says so.
+- **Commits are the App's.** A token minted from an installation is the
+  App's rather than a user's, so the checkout cannot ask the platform who
+  it is; it asks about the App's bot by name instead, which the platform
+  answers by identifier, and attributes commits to that bot spelled the
+  way the platform documents for an App. A pasted token's checkout is
+  unchanged.
 - **Forgetting.** The App is forgotten from the page and refused while a
   project installs through it, as an agent is refused while a project
   names it. The registration on the platform is left for the operator to
@@ -248,10 +263,10 @@ an installation.
 
 **Scenarios pin the flows**: a registration exchanged and kept, a
 registration the platform refuses, a setup redirect with a foreign
-installation refused, a repository derived from an installation of one and
-offered from an installation of several, a token minted once and served
-twice within its hour, and a daemon dying between the redirect and the
-exchange, which keeps nothing.
+installation refused, a token minted once and served twice within its
+hour, and a daemon dying between the redirect and the exchange, which
+keeps nothing. What becomes of an installation that is confirmed is
+`docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`'s to pin.
 
 **The Instance page and the settings page's GitHub card change**, the
 navigation gains an entry, Home's checklist a line, and `README.md` says
@@ -267,7 +282,9 @@ token by hand, which is the migration this record avoids by keeping both
 shapes.
 
 **Revisit if** the platform starts carrying the repositories in the setup
-redirect, which removes a fetch; if a turn is found running commands
+redirect, which removes a fetch; if an installation covering more than one
+page of repositories is met, since one page is read and the rest is not
+listed; if a turn is found running commands
 across the hour so often that minting shows in a log, which is when the
 cache wants a longer horizon; if an operator's repositories span accounts
 the public switch does not cover, which is when a second App per instance

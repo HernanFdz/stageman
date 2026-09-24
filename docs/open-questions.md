@@ -378,21 +378,22 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   and every kit the last release wrote one to bridge or refuse. Settled with
   a record amending 0048 either way.
 
+- **Should where the App is installed be refreshed from the platform?**
+  It is learned from the platform's redirects and kept, per `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`, so an
+  installation removed on the platform stays listed here until a mint
+  fails and somebody forgets it. The platform lists an App's
+  installations for the App's key in one request, which a control on the
+  Instance page could ask on demand and reconcile against. Worth doing
+  when a ghost is met, and not before: a request on every page read is
+  what the record refused.
+
 ## Next
 
 Intended next steps, in order, each with its reason. Written as intentions, not
 progress: "next X, because Y" — never "X is 60% done", which is both derivable
 and wrong within a day.
 
-- Next, the last chunk of
-  `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`,
-  because the App's registration and the fetched credentials landed first:
-  installations — the settings card's install route, the setup redirect,
-  the repository derived from the installation, minting and caching behind
-  the credential route, the checkout's commit identity for an App's token,
-  which names no user and so cannot be asked who it is the way a pasted
-  token's can, and the older-file bridges. Then the small things the
-  dashboard pass of
+- Next, the small things the dashboard pass of
   `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md` left:
   the projects list's rows padding themselves on a rule that always
   matches, which the job rows had and fixed on the list item; and whether

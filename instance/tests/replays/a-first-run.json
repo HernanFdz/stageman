@@ -319,7 +319,16 @@
               "forgotten": 0,
               "unclaimed": 0,
               "elsewhere": 0
-            }
+            },
+            "begun": [],
+            "installs": [],
+            "install_failure": null,
+            "reaching": [],
+            "reaches": [],
+            "listing_tokens": {},
+            "minted": {},
+            "minting": [],
+            "awaiting_tokens": []
           }
         },
         {

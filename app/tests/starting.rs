@@ -41,9 +41,9 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use stageman_core::{
-    Agent, AgentConfig, Channel, ChannelConfig, InstanceId, Job, JobId, Key, Kit, KitConfig,
-    KitName, NONCE_LEN, Outcome, Platform, Progress, Project, ProjectId, Role, Secret, State,
-    Timestamp, Waiting,
+    Access, Agent, AgentConfig, Channel, ChannelConfig, InstanceId, Job, JobId, Key, Kit,
+    KitConfig, KitName, NONCE_LEN, Outcome, Platform, Progress, Project, ProjectId, Role, Secret,
+    State, Timestamp, Waiting,
 };
 
 /// A key, as an operator would supply it: thirty-two bytes of base64.
@@ -393,7 +393,7 @@ fn watching(name: &str, repository: &str) -> State {
                     KitName::new("Claude").expect("a name"),
                     KitConfig::defaults(Agent::Claude),
                 )]),
-                credentials: BTreeMap::new(),
+                access: BTreeMap::new(),
                 channels: BTreeMap::from([(
                     Channel::Slack,
                     ChannelConfig {
@@ -1001,7 +1001,19 @@ fn a_credential_is_taken_once_and_never_returned() {
 #[test]
 fn a_project_has_a_settings_page_and_a_new_one_is_that_page_empty() {
     let (_kept, snapshot) = scratch();
-    let watched = watching("aviary", "https://example.invalid/aviary");
+    let mut watched = watching("aviary", "https://example.invalid/aviary");
+    // Reached with a token, so that the page has a repository to show: a
+    // project reaching nothing has nothing chosen, per
+    // `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
+    watched
+        .projects
+        .get_mut(&ProjectId::from_uuid(uuid::Uuid::nil()))
+        .expect("the project")
+        .access
+        .insert(
+            stageman_core::Platform::GitHub,
+            stageman_core::Access::Token(Secret::new("github_pat_not_a_real_token".to_owned())),
+        );
     written(&snapshot, &watched);
     let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
 
@@ -1020,6 +1032,10 @@ fn a_project_has_a_settings_page_and_a_new_one_is_that_page_empty() {
         "the name should be in its box: {settings}"
     );
     assert!(settings.contains("example.invalid/aviary"), "{settings}");
+    assert!(
+        settings.contains("With a token."),
+        "the access sentence says the shape on the server too: {settings}"
+    );
     // A text area's value is its text and not an attribute, so a box the
     // server rendered from an attribute alone arrives empty. The kit's
     // description is the one text this helper fills.
@@ -1275,7 +1291,10 @@ fn two_projects_each_with_a_job() -> (State, Vec<(JobId, &'static str, &'static 
                     KitName::new("Claude").expect("a name"),
                     KitConfig::defaults(Agent::Claude),
                 )]),
-                credentials: BTreeMap::from([(Platform::GitHub, Secret::new((*token).to_owned()))]),
+                access: BTreeMap::from([(
+                    Platform::GitHub,
+                    Access::Token(Secret::new((*token).to_owned())),
+                )]),
                 channels: BTreeMap::new(),
                 variables: BTreeMap::new(),
                 jobs: BTreeMap::from([(job.clone(), recorded)]),

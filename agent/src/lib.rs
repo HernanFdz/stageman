@@ -1311,6 +1311,11 @@ fn agent_arguments(name: &str) -> Vec<String> {
 /// line and nothing else is.
 const REPOSITORY_VARIABLE: &str = "STAGEMAN_REPOSITORY";
 
+/// The variable the checkout step reads the App's bot's name from, when
+/// the project's access is an installation: `<slug>[bot]`, as the platform
+/// names it. On the one command that needs it, like the repository.
+const ACTOR_VARIABLE: &str = "STAGEMAN_ACTOR";
+
 /// What checks the repository out into a container's workspace, before its
 /// agent is run for the first time — see
 /// `docs/decisions/0050-the-repository-is-checked-out-before-the-first-turn.md`.
@@ -1319,24 +1324,33 @@ const REPOSITORY_VARIABLE: &str = "STAGEMAN_REPOSITORY";
 /// repository travels in a variable rather than in the script, so it needs no
 /// quoting and the script is the same text for every job.
 #[cfg(test)]
-fn checkout_arguments(name: &str, repository: &str, platform: Option<Platform>) -> Vec<String> {
+fn checkout_arguments(
+    name: &str,
+    repository: &str,
+    platform: Option<Platform>,
+    actor: Option<&str>,
+) -> Vec<String> {
     Command::Checkout {
         name: name.to_owned(),
         repository: repository.to_owned(),
         platform,
+        actor: actor.map(str::to_owned),
     }
     .arguments()
 }
 
 /// The checkout itself, as the shell inside the container runs it.
 ///
-/// Two shapes, decided by whether the job's project holds access to the
-/// repository's platform. With it, the platform's own tool makes the clone —
-/// through the wrapper in its place, which fetches the credential for that
-/// one process — git is told to ask the wrapper for a credential from then
-/// on, and the commit identity is set to the account the credential belongs
-/// to, spelled the way the platform spells a private address. Without it,
-/// plain git clones what is public, and there is no account to be.
+/// Three shapes, decided by whether the job's project holds access to the
+/// repository's platform and of which kind. With access, the platform's
+/// own tool makes the clone — through the wrapper in its place, which
+/// fetches the credential for that one process — git is told to ask the
+/// wrapper for a credential from then on, and the commit identity is set
+/// to the account the credential belongs to, spelled the way the platform
+/// spells a private address: the account the tool is signed in as for a
+/// token, and the App's own bot for an installation, whose identifier the
+/// platform answers by name and whose name travels in a variable. Without
+/// access, plain git clones what is public, and there is no account to be.
 ///
 /// **Git's helper is written here rather than by the tool's own
 /// `setup-git`**, and the two lines are exactly the ones it would write.
@@ -1348,9 +1362,9 @@ fn checkout_arguments(name: &str, repository: &str, platform: Option<Platform>) 
 ///
 /// Asserted as literal text, because this is the one place the project types
 /// commands into a container on a job's behalf.
-const fn checkout_script(platform: Option<Platform>) -> &'static str {
-    match platform {
-        Some(Platform::GitHub) => {
+const fn checkout_script(platform: Option<Platform>, actor: bool) -> &'static str {
+    match (platform, actor) {
+        (Some(Platform::GitHub), false) => {
             "set -eu\n\
              gh repo clone \"$STAGEMAN_REPOSITORY\" .\n\
              git config --global credential.https://github.com.helper ''\n\
@@ -1360,7 +1374,21 @@ const fn checkout_script(platform: Option<Platform>) -> &'static str {
              git config --global user.name \"${account#*+}\"\n\
              git config --global user.email \"${account}@users.noreply.github.com\"\n"
         }
-        None => "set -eu\ngit clone \"$STAGEMAN_REPOSITORY\" .\n",
+        // An installation's token is the App's rather than a user's, so
+        // the platform cannot be asked who it is; it can be asked about
+        // the App's bot by name, which is the account such commits are
+        // attributed to, spelled as the platform documents for an App.
+        (Some(Platform::GitHub), true) => {
+            "set -eu\n\
+             gh repo clone \"$STAGEMAN_REPOSITORY\" .\n\
+             git config --global credential.https://github.com.helper ''\n\
+             git config --global --add credential.https://github.com.helper \
+             '!/usr/local/bin/gh auth git-credential'\n\
+             account=\"$(gh api \"users/$STAGEMAN_ACTOR\" --jq '\"\\(.id)+\\(.login)\"')\"\n\
+             git config --global user.name \"${account#*+}\"\n\
+             git config --global user.email \"${account}@users.noreply.github.com\"\n"
+        }
+        (None, _) => "set -eu\ngit clone \"$STAGEMAN_REPOSITORY\" .\n",
     }
 }
 
@@ -1439,7 +1467,7 @@ async fn check_out(
     platform: Option<Platform>,
 ) -> Result<(), AgentError> {
     let done = tokio::process::Command::new(runtime.path())
-        .args(checkout_arguments(name, repository, platform))
+        .args(checkout_arguments(name, repository, platform, None))
         .kill_on_drop(true)
         .output()
         .await
@@ -1636,6 +1664,10 @@ pub enum Command {
         repository: String,
         /// Whose tool makes the clone, if any's.
         platform: Option<Platform>,
+        /// The account commits are attributed to when the credential is an
+        /// App's rather than a user's: its bot, as the platform names it.
+        /// Nothing for a token, whose account the tool is asked for.
+        actor: Option<String>,
     },
     /// Run the agent inside a container that is up, with its standard
     /// streams piped to this process: the pipes are what a turn holds, and
@@ -1812,15 +1844,25 @@ impl Command {
                 name,
                 repository,
                 platform,
-            } => vec![
-                "exec".to_owned(),
-                "--env".to_owned(),
-                format!("{REPOSITORY_VARIABLE}={repository}"),
-                name.clone(),
-                "sh".to_owned(),
-                "-c".to_owned(),
-                checkout_script(*platform).to_owned(),
-            ],
+                actor,
+            } => {
+                let mut arguments = vec![
+                    "exec".to_owned(),
+                    "--env".to_owned(),
+                    format!("{REPOSITORY_VARIABLE}={repository}"),
+                ];
+                if let Some(actor) = actor {
+                    arguments.push("--env".to_owned());
+                    arguments.push(format!("{ACTOR_VARIABLE}={actor}"));
+                }
+                arguments.extend([
+                    name.clone(),
+                    "sh".to_owned(),
+                    "-c".to_owned(),
+                    checkout_script(*platform, actor.is_some()).to_owned(),
+                ]);
+                arguments
+            }
             Self::Exec { name } => vec![
                 "exec".to_owned(),
                 "--interactive".to_owned(),
@@ -1937,19 +1979,21 @@ impl Command {
                 name: (*name).to_owned(),
             }),
             ["exec", "--env", repository, name, "sh", "-c", script] => {
-                let repository = repository.strip_prefix(&format!("{REPOSITORY_VARIABLE}="))?;
-                let platform = if *script == checkout_script(Some(Platform::GitHub)) {
-                    Some(Platform::GitHub)
-                } else if *script == checkout_script(None) {
-                    None
-                } else {
-                    return None;
-                };
-                Some(Self::Checkout {
-                    name: (*name).to_owned(),
-                    repository: repository.to_owned(),
-                    platform,
-                })
+                checkout_parsed(repository, None, name, script)
+            }
+            [
+                "exec",
+                "--env",
+                repository,
+                "--env",
+                actor,
+                name,
+                "sh",
+                "-c",
+                script,
+            ] => {
+                let actor = actor.strip_prefix(&format!("{ACTOR_VARIABLE}="))?;
+                checkout_parsed(repository, Some(actor), name, script)
             }
             ["exec", "--interactive", name, "sh", "-c", script] if *script == WRAP_SCRIPT => {
                 Some(Self::Wrap {
@@ -1964,6 +2008,30 @@ impl Command {
             _ => None,
         }
     }
+}
+
+/// A checkout read back from its arguments: the repository from its
+/// variable, and whose tool makes the clone from which script it is.
+fn checkout_parsed(
+    repository: &str,
+    actor: Option<&str>,
+    name: &str,
+    script: &str,
+) -> Option<Command> {
+    let repository = repository.strip_prefix(&format!("{REPOSITORY_VARIABLE}="))?;
+    let platform = if script == checkout_script(Some(Platform::GitHub), actor.is_some()) {
+        Some(Platform::GitHub)
+    } else if script == checkout_script(None, actor.is_some()) {
+        None
+    } else {
+        return None;
+    };
+    Some(Command::Checkout {
+        name: name.to_owned(),
+        repository: repository.to_owned(),
+        platform,
+        actor: actor.map(str::to_owned),
+    })
 }
 
 /// Every container this project has ever started that the runtime still
@@ -2367,11 +2435,19 @@ mod tests {
                 name: "stageman-job-1".to_owned(),
                 repository: "https://example.invalid/repo".to_owned(),
                 platform: Some(Platform::GitHub),
+                actor: Some("stageman-sim[bot]".to_owned()),
+            },
+            Command::Checkout {
+                name: "stageman-job-1".to_owned(),
+                repository: "https://example.invalid/repo".to_owned(),
+                platform: Some(Platform::GitHub),
+                actor: None,
             },
             Command::Checkout {
                 name: "stageman-job-1".to_owned(),
                 repository: "https://example.invalid/repo".to_owned(),
                 platform: None,
+                actor: None,
             },
             Command::Exec {
                 name: "stageman-job-1".to_owned(),
@@ -2396,6 +2472,7 @@ mod tests {
             name: "stageman-job-1".to_owned(),
             repository: "https://example.invalid/repo".to_owned(),
             platform: None,
+            actor: None,
         }
         .arguments();
         other_script.pop();
@@ -3330,10 +3407,10 @@ mod tests {
     fn instance_with_a_project(credential: &str) -> (State, ProjectId) {
         let mut state = instance(credential);
         let id = ProjectId::from_uuid(Uuid::from_u128(7));
-        let mut credentials = BTreeMap::new();
-        credentials.insert(
+        let mut access = BTreeMap::new();
+        access.insert(
             Platform::GitHub,
-            Secret::new("gh-not-a-real-token".to_owned()),
+            stageman_core::Access::Token(Secret::new("gh-not-a-real-token".to_owned())),
         );
         state.projects.insert(
             id,
@@ -3342,7 +3419,7 @@ mod tests {
                 repository: "https://example.invalid/repo".to_owned(),
                 foreman_kit: Kit::defaults(Agent::Claude),
                 kits: only_claude(),
-                credentials,
+                access,
                 channels: BTreeMap::new(),
                 variables: BTreeMap::new(),
                 jobs: BTreeMap::<_, Job>::new(),
@@ -4237,7 +4314,23 @@ mod tests {
     #[test]
     fn the_checkout_reads_exactly_as_written() {
         assert_eq!(
-            checkout_script(Some(Platform::GitHub)),
+            checkout_script(Some(Platform::GitHub), true),
+            "set -eu\n\
+             gh repo clone \"$STAGEMAN_REPOSITORY\" .\n\
+             git config --global credential.https://github.com.helper ''\n\
+             git config --global --add credential.https://github.com.helper \
+             '!/usr/local/bin/gh auth git-credential'\n\
+             account=\"$(gh api \"users/$STAGEMAN_ACTOR\" --jq '\"\\(.id)+\\(.login)\"')\"\n\
+             git config --global user.name \"${account#*+}\"\n\
+             git config --global user.email \"${account}@users.noreply.github.com\"\n"
+        );
+        assert_eq!(
+            checkout_script(None, true),
+            checkout_script(None, false),
+            "plain git has no account to be, whoever the App's bot is"
+        );
+        assert_eq!(
+            checkout_script(Some(Platform::GitHub), false),
             "set -eu\n\
              gh repo clone \"$STAGEMAN_REPOSITORY\" .\n\
              git config --global credential.https://github.com.helper ''\n\
@@ -4248,7 +4341,7 @@ mod tests {
              git config --global user.email \"${account}@users.noreply.github.com\"\n"
         );
         assert_eq!(
-            checkout_script(None),
+            checkout_script(None, false),
             "set -eu\ngit clone \"$STAGEMAN_REPOSITORY\" .\n"
         );
     }
@@ -4297,7 +4390,7 @@ mod tests {
         // The helper the checkout writes names the wrapper's place, which
         // is the tool's own, and the wrapper runs the tool from where the
         // install script moved it.
-        assert!(checkout_script(Some(Platform::GitHub)).contains("!/usr/local/bin/gh "));
+        assert!(checkout_script(Some(Platform::GitHub), false).contains("!/usr/local/bin/gh "));
         assert!(WRAP_SCRIPT.contains("cat > /usr/local/bin/gh\n"));
         assert!(WRAP_SCRIPT.contains(TOOL_ASIDE));
         assert!(wrapper("http://x/credential").contains(&format!("exec {TOOL_ASIDE} ")));
@@ -4329,6 +4422,7 @@ mod tests {
             "stageman-job-1",
             "https://example.invalid/repo.git",
             Some(Platform::GitHub),
+            None,
         );
 
         assert_eq!(
@@ -4341,13 +4435,35 @@ mod tests {
             ]
         );
         assert_eq!(&arguments[4..6], ["sh", "-c"]);
-        assert_eq!(arguments[6], checkout_script(Some(Platform::GitHub)));
+        assert_eq!(arguments[6], checkout_script(Some(Platform::GitHub), false));
         assert_eq!(arguments.len(), 7);
         assert!(
             !arguments[6].contains("example.invalid"),
             "the script must not carry the URL: {}",
             arguments[6]
         );
+
+        // The App's bot travels the same way, on the same command, and only
+        // when there is one.
+        let attributed = checkout_arguments(
+            "stageman-job-1",
+            "https://example.invalid/repo.git",
+            Some(Platform::GitHub),
+            Some("stageman-sim[bot]"),
+        );
+        assert_eq!(
+            &attributed[..6],
+            [
+                "exec",
+                "--env",
+                "STAGEMAN_REPOSITORY=https://example.invalid/repo.git",
+                "--env",
+                "STAGEMAN_ACTOR=stageman-sim[bot]",
+                "stageman-job-1",
+            ]
+        );
+        assert_eq!(attributed[8], checkout_script(Some(Platform::GitHub), true));
+        assert_eq!(attributed.len(), 9);
     }
 
     /// A published tunnel is reported by the runtime, and the report is read.
@@ -4519,7 +4635,7 @@ mod tests {
                     repository: "https://example.invalid/repo".to_owned(),
                     foreman_kit: Kit::defaults(Agent::Claude),
                     kits: only_claude(),
-                    credentials: BTreeMap::new(),
+                    access: BTreeMap::new(),
                     channels: BTreeMap::new(),
                     variables: BTreeMap::new(),
                     jobs: BTreeMap::new(),

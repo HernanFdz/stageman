@@ -1,5 +1,5 @@
-//! GitHub: whether a token reaches a repository, and where the form that
-//! mints one is.
+//! GitHub: whether a token reaches a repository, what a token can read,
+//! and where the form that mints one is.
 //!
 //! One read, measured on 2026-09-23 against the real platform: a token it
 //! does not accept is answered `401`, a private repository the token was not
@@ -8,6 +8,13 @@
 //! object in a `200` describes the account rather than the token, so nothing
 //! in a read says what the token may write, and nothing here claims to. See
 //! `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`.
+//!
+//! One listing, measured on 2026-09-24: what a fine-grained token can read
+//! is every public repository the operator owns or belongs to an
+//! organisation for, and the private ones the token was granted — so a
+//! private entry is certainly granted and a public one may not be, which
+//! is what the listing crosses with each entry's visibility for. See
+//! `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
 
 use percent_encoding::utf8_percent_encode;
 use stageman_core::{Platform, RepositoryAddress, Secret};
@@ -16,6 +23,13 @@ use crate::{Call, PlatformError, QUERY, Request};
 
 /// Where the platform answers about a repository.
 const REPOSITORIES: &str = "https://api.github.com/repos/";
+
+/// Where the platform lists what a token can read.
+const READABLE: &str = "https://api.github.com/user/repos";
+
+/// How many repositories one listing asks for: the most the platform gives
+/// on a page.
+const PER_PAGE: u32 = 100;
 
 /// Where a fine-grained token is minted. Its form takes from the address a
 /// name and each permission by name, per the platform's documentation;
@@ -85,6 +99,122 @@ pub fn reached(
     }
 }
 
+/// Renders listing what a token can read: the first page, which is the
+/// most the platform gives.
+pub fn readable(credential: &Secret) -> Request {
+    Request {
+        method: "GET".to_owned(),
+        url: format!("{READABLE}?per_page={PER_PAGE}"),
+        headers: [
+            (
+                "accept".to_owned(),
+                "application/vnd.github+json".to_owned(),
+            ),
+            (
+                "authorization".to_owned(),
+                format!("Bearer {}", credential.expose()),
+            ),
+            ("user-agent".to_owned(), STAGEMAN.to_owned()),
+            ("x-github-api-version".to_owned(), "2022-11-28".to_owned()),
+        ]
+        .into(),
+        body: None,
+    }
+}
+
+/// Repositories listed by the platform, as far as one page says, each
+/// with its visibility.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Listing {
+    /// The repositories listed, as addresses, with whether each is private.
+    pub repositories: Vec<Repository>,
+    /// Whether there were more than were listed.
+    pub more: bool,
+}
+
+/// One repository as a listing names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Repository {
+    /// Its address.
+    pub address: RepositoryAddress,
+    /// Whether it is private: for a token's listing, whether the token was
+    /// certainly granted it.
+    pub private: bool,
+}
+
+/// The repositories in a listing's items, skipping what is not an address
+/// on the platform.
+pub fn repositories_of(items: &[serde_json::Value]) -> Vec<Repository> {
+    items
+        .iter()
+        .filter_map(|item| {
+            let address = item
+                .get("html_url")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|url| RepositoryAddress::parse(url).ok())?;
+            Some(Repository {
+                address,
+                private: item
+                    .get("private")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+            })
+        })
+        .collect()
+}
+
+/// What the platform's answer to [`readable`] means, status by status as
+/// measured.
+///
+/// # Errors
+///
+/// Fails if the platform does not accept the token, refused to say, could
+/// not be reached, or answered with something this does not read as a
+/// listing.
+pub fn readable_listed(status: u16, body: &[u8]) -> Result<Listing, PlatformError> {
+    let platform = Platform::GitHub;
+    match status {
+        200..=299 => {}
+        401 => return Err(PlatformError::Refused { platform }),
+        403 | 429 => {
+            return Err(PlatformError::Forbidden {
+                platform,
+                why: message(body),
+            });
+        }
+        500..=599 => {
+            return Err(PlatformError::Unreachable {
+                platform,
+                why: format!("it answered {status}"),
+            });
+        }
+        other => {
+            return Err(PlatformError::Unexpected {
+                platform,
+                status: other,
+            });
+        }
+    }
+    let told: serde_json::Value =
+        serde_json::from_slice(body).map_err(|failure| PlatformError::Unreadable {
+            platform,
+            why: failure.to_string(),
+        })?;
+    let items = told.as_array().ok_or_else(|| PlatformError::Unreadable {
+        platform,
+        why: "the listing is not a list".to_owned(),
+    })?;
+    // One page is asked for; a full page means the platform had more.
+    let full = u32::try_from(items.len()).map_err(|_| PlatformError::Unreadable {
+        platform,
+        why: "the listing is longer than can be counted".to_owned(),
+    })?;
+    Ok(Listing {
+        repositories: repositories_of(items),
+        more: full >= PER_PAGE,
+    })
+}
+
 /// What the platform said, when it said anything: the message every
 /// refusal of its carries, or that it carried none.
 pub fn message(body: &[u8]) -> String {
@@ -120,6 +250,11 @@ pub fn token_form(project: Option<&str>) -> String {
 pub fn call(request: &Request) -> Option<Call> {
     if request.method != "GET" {
         return None;
+    }
+    if request.url.starts_with(READABLE) {
+        return Some(Call::Readable {
+            platform: Platform::GitHub,
+        });
     }
     let rest = request.url.strip_prefix(REPOSITORIES)?;
     let (owner, name) = rest.split_once('/')?;

@@ -20,6 +20,7 @@ mod dashboard;
 mod foreman;
 mod foreman_room;
 mod inbox;
+mod installations;
 mod listening;
 mod notices;
 mod replies;

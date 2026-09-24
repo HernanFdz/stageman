@@ -81,18 +81,19 @@ impl Running {
         })
     }
 
-    /// The Apps this instance owns, as the page shows them.
+    /// The Apps this instance owns, as the page shows them: each with
+    /// where it is installed, where to install it, and what came of the
+    /// last installation if it was not kept.
     #[must_use]
     pub fn apps(&self) -> Apps {
+        let platform = Platform::GitHub;
         Apps {
-            github: self
-                .state
-                .apps
-                .get(&Platform::GitHub)
-                .map(|app| PlatformAppView {
-                    slug: app.slug.clone(),
-                    link: stageman_platform::app_link(Platform::GitHub, &app.slug),
-                }),
+            github: self.state.apps.get(&platform).map(|app| PlatformAppView {
+                slug: app.slug.clone(),
+                link: stageman_platform::app_link(platform, &app.slug),
+                installations: self.installations_view(platform),
+                install_failure: self.install_failure.clone(),
+            }),
             failed: self.app_failure.clone(),
         }
     }
@@ -100,18 +101,30 @@ impl Running {
     /// Forgets the App on a platform.
     ///
     /// Left on the platform for the operator to delete: this instance acts
-    /// there only to mint what it was installed to mint.
+    /// there only to mint what it was installed to mint. Refused while a
+    /// project reaches its repository through it, as an agent is refused
+    /// while a project names it.
     ///
     /// # Errors
     ///
-    /// Fails if no App is registered on that platform.
+    /// Fails if no App is registered on that platform, or if a project is
+    /// installed on through it.
     pub fn forget_app(&mut self, platform: Platform) -> Result<Response, Refusal> {
-        if self.state.apps.remove(&platform).is_none() {
+        if !self.state.apps.contains_key(&platform) {
             return Err(Refusal::AppMissing {
                 platform: stageman_platform::shown(platform).to_owned(),
             });
         }
+        let installed_on = self.installed_on(platform);
+        if !installed_on.is_empty() {
+            return Err(Refusal::AppInUse {
+                platform: stageman_platform::shown(platform).to_owned(),
+                projects: installed_on,
+            });
+        }
+        self.state.apps.remove(&platform);
         self.app_failure = None;
+        self.forget_installations();
         self.dirty = true;
         Ok(Response::Apps(self.apps()))
     }
@@ -201,6 +214,10 @@ impl Running {
                         slug: registered.slug,
                         client_id: registered.client_id,
                         private_key: registered.private_key,
+                        // Installed nowhere yet: what the setup redirect
+                        // brings, per
+                        // `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
+                        installations: std::collections::BTreeMap::new(),
                     },
                 );
                 self.app_failure = None;
@@ -229,7 +246,7 @@ impl Running {
 /// One parameter of a query string, where it is made of the characters a
 /// code or a state token is made of: letters, digits and the three marks
 /// the platform uses. Anything else is not the parameter.
-fn parameter(query: &str, name: &str) -> Option<String> {
+pub fn parameter(query: &str, name: &str) -> Option<String> {
     query
         .split('&')
         .filter_map(|pair| pair.split_once('='))

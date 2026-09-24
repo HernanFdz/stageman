@@ -86,6 +86,11 @@ pub enum Run {
         /// The platform whose tool makes the checkout, if the project holds
         /// access to one.
         platform: Option<Platform>,
+        /// The account the checkout attributes commits to when the
+        /// project's access is an installation of the App: its bot, as the
+        /// platform names it. Nothing for a token, whose account the tool
+        /// is asked for.
+        actor: Option<String>,
         /// What the agent runs on.
         kit: Kit,
         /// What the agent presents to the tools endpoint.
@@ -790,6 +795,7 @@ impl Running {
             container,
             repository: Some(repository),
             platform,
+            actor,
             ..
         } = &turn.run
         else {
@@ -801,6 +807,7 @@ impl Running {
             name: container.clone(),
             repository: repository.clone(),
             platform: *platform,
+            actor: actor.clone(),
         };
         let checking_out = self.ask(&command, Asked::CheckedOut { speaker });
         effects.push(checking_out);
@@ -1408,7 +1415,7 @@ mod tests {
                     KitName::new("Claude").expect("a name"),
                     KitConfig::defaults(Agent::Claude),
                 )]),
-                credentials: BTreeMap::new(),
+                access: BTreeMap::new(),
                 channels: BTreeMap::new(),
                 jobs: BTreeMap::from([(
                     job.clone(),
@@ -1525,6 +1532,7 @@ mod tests {
             environment: BTreeMap::new(),
             repository: None,
             platform: None,
+            actor: None,
             kit: Kit::defaults(Agent::Claude),
             warrant: "w".to_owned(),
             tools: "http://host.docker.internal:47113/mcp".to_owned(),

@@ -10,10 +10,10 @@ use std::collections::BTreeMap;
 
 use stageman_channel::Identity;
 use stageman_core::{
-    Agent, Attending, Channel, ClaudeEffort, ClaudeModel, Inconsistent, Job, JobId, Kit, Outcome,
-    Platform, Progress, Project, ProjectId, RepositoryAddress, Room, State, Waiting,
+    Agent, Attending, Channel, ClaudeEffort, ClaudeModel, Inconsistent, Installation, Job, JobId,
+    Kit, Outcome, Platform, Progress, Project, ProjectId, RepositoryAddress, Room, State, Waiting,
 };
-use stageman_wire::{Choice, Fitted, KitDraft, ModelChoice, Refusal, Shape, Standing};
+use stageman_wire::{AccessView, Choice, Fitted, KitDraft, ModelChoice, Refusal, Shape, Standing};
 
 use crate::tunnel::{Domain, address};
 
@@ -263,11 +263,12 @@ const fn wire_platform(platform: Platform) -> &'static str {
 ///
 /// Fails if nothing is called that.
 pub fn platform_named(identifier: &str) -> Result<Platform, Refusal> {
-    match identifier {
-        "github" => Ok(Platform::GitHub),
-        _ => Err(Refusal::AppMissing {
+    if identifier == wire_platform(Platform::GitHub) {
+        Ok(Platform::GitHub)
+    } else {
+        Err(Refusal::AppMissing {
             platform: identifier.to_owned(),
-        }),
+        })
     }
 }
 
@@ -279,11 +280,14 @@ pub const fn wire_channel(channel: Channel) -> &'static str {
 }
 
 /// One project, as the browser sees it: identifiers where it sends them back,
-/// names where a person reads them, and never a credential.
+/// names where a person reads them, and never a credential. The App's
+/// installations name the account an installation is on, where the
+/// project reaches its repository through one.
 pub fn projected(
     id: ProjectId,
     project: &Project,
     us: Option<&Identity>,
+    installations: Option<&BTreeMap<u64, Installation>>,
 ) -> stageman_wire::Project {
     stageman_wire::Project {
         id: id.to_string(),
@@ -300,11 +304,16 @@ pub fn projected(
                 fitted: fitted(&offered.kit),
             })
             .collect(),
-        platforms: project
-            .credentials
-            .keys()
-            .map(|platform| wire_platform(*platform).to_owned())
-            .collect(),
+        access: match project.access.get(&Platform::GitHub) {
+            Some(stageman_core::Access::Token(_)) => Some(AccessView::Token),
+            Some(stageman_core::Access::Installation { id }) => Some(AccessView::Installation {
+                account: installations
+                    .and_then(|known| known.get(id))
+                    .map(|installation| installation.account.clone())
+                    .unwrap_or_default(),
+            }),
+            None => None,
+        },
         channels: project
             .channels
             .keys()
@@ -344,10 +353,14 @@ pub fn projected(
 
 /// Every project this instance watches.
 pub fn watching(state: &State, identities: &Identities) -> Vec<stageman_wire::Project> {
+    let installations = state
+        .apps
+        .get(&Platform::GitHub)
+        .map(|app| &app.installations);
     state
         .projects
         .iter()
-        .map(|(id, project)| projected(*id, project, identities.get(id)))
+        .map(|(id, project)| projected(*id, project, identities.get(id), installations))
         .collect()
 }
 
@@ -585,8 +598,12 @@ pub fn instance(state: &State, runtime: &str, domain: &Domain) -> stageman_wire:
 }
 
 /// What the projects screen shows: the projects, the agents that may be
-/// named, and the shape of each of those.
-pub fn watching_now(state: &State, identities: &Identities) -> stageman_wire::Watching {
+/// named, the shape of each of those, and whether an App is registered.
+pub fn watching_now(
+    state: &State,
+    identities: &Identities,
+    app_registered: bool,
+) -> stageman_wire::Watching {
     stageman_wire::Watching {
         projects: watching(state, identities),
         available: listed(state)
@@ -602,6 +619,7 @@ pub fn watching_now(state: &State, identities: &Identities) -> stageman_wire::Wa
             token_form: stageman_platform::token_form(Platform::GitHub, None),
             app_form: stageman_channel::app_form(Channel::Slack),
         },
+        app_registered,
     }
 }
 
@@ -612,6 +630,9 @@ pub fn from_inconsistent(reason: &Inconsistent) -> Refusal {
         Inconsistent::UnconfiguredProjectAgent { agent, .. } => Refusal::AgentNotConfigured {
             name: shown(*agent),
         },
+        Inconsistent::UnknownInstallation { installation, .. } => {
+            Refusal::NoSuchInstallation { id: *installation }
+        }
     }
 }
 
@@ -776,7 +797,7 @@ mod tests {
                         KitName::new("Claude").expect("a name"),
                         KitConfig::defaults(Agent::Claude),
                     )]),
-                    credentials: BTreeMap::new(),
+                    access: BTreeMap::new(),
                     channels: BTreeMap::new(),
                     jobs: BTreeMap::new(),
                     variables: BTreeMap::new(),
@@ -861,7 +882,7 @@ mod tests {
                 .insert(JobId::from_uuid(Uuid::from_u128(which)), job);
         }
 
-        let shown = super::projected(ProjectId::from_uuid(Uuid::nil()), watched, None);
+        let shown = super::projected(ProjectId::from_uuid(Uuid::nil()), watched, None, None);
         assert_eq!(shown.working, 1);
         assert_eq!(shown.jobs, 3);
         assert_eq!(shown.name, "aviary");
@@ -884,7 +905,7 @@ mod tests {
             app: None,
         });
         watched.repository = "https://github.com/owner/aviary.git".to_owned();
-        let shown = super::projected(ProjectId::from_uuid(Uuid::nil()), watched, None);
+        let shown = super::projected(ProjectId::from_uuid(Uuid::nil()), watched, None, None);
         assert!(shown.attending);
         assert_eq!(
             shown.repository_link.as_deref(),
@@ -983,7 +1004,7 @@ mod tests {
             id: "C0BT53FM079".to_owned(),
         });
 
-        let shown = super::projected(ProjectId::from_uuid(Uuid::nil()), watched, None);
+        let shown = super::projected(ProjectId::from_uuid(Uuid::nil()), watched, None, None);
         assert_eq!(shown.brief, "Ignore alerts below error.");
         assert_eq!(shown.watched, vec!["C0BT53FM079".to_owned()]);
     }

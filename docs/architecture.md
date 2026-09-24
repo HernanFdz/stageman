@@ -66,9 +66,13 @@ first.
 - **platform** — the contract every platform is asked on by this daemon,
   and the adapters that implement it: what is asked of a platform, what its
   answer means, and where its own forms are, as pure functions the
-  **instance** renders and reads and the world carries. One question so
-  far — whether a credential reaches a repository, asked once before the
-  credential is kept — and beside **agent** and **channel** for the reason
+  **instance** renders and reads and the world carries. Whether a
+  credential reaches a repository, asked once before the credential is
+  kept; what an access reaches, listed for a form, per `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`; an App's
+  registration, an installation of it and the tokens minted from one,
+  signed with the App's key, per
+  `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`
+  — and beside **agent** and **channel** for the reason
   those are beside each other: `Platform` is the domain's third closed set,
   closed because reaching one needs code. A job still reaches a platform
   through the platform's own tools and never through this, per

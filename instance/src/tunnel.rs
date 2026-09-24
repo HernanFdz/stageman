@@ -322,7 +322,9 @@ impl crate::Running {
             // registration, answered here before the proxy — see
             // `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
             Routed::Dashboard => {
-                if !self.came_back(id, request, effects) {
+                if !self.came_back(id, request, effects)
+                    && !self.came_back_installed(id, request, effects)
+                {
                     effects.push(Effect::Answer {
                         id,
                         answer: Answer::Proxy {

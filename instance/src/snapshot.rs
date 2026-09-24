@@ -43,8 +43,11 @@ pub fn exposed(state: &State) -> Value {
                 "kits": keyed(project.kits.iter().map(|(name, offered)| {
                     (name, json!({ "description": offered.description, "kit": value(&offered.kit) }))
                 })),
-                "credentials": keyed(project.credentials.iter().map(|(platform, secret)| {
-                    (format!("{platform:?}"), secret.expose().to_owned())
+                "access": keyed(project.access.iter().map(|(platform, access)| {
+                    (format!("{platform:?}"), match access {
+                        stageman_core::Access::Token(secret) => json!({ "token": secret.expose() }),
+                        stageman_core::Access::Installation { id } => json!({ "installation": id }),
+                    })
                 })),
                 "channels": keyed(project.channels.iter().map(|(channel, bound)| {
                     (format!("{channel:?}"), json!({
@@ -80,10 +83,45 @@ pub fn exposed(state: &State) -> Value {
     })
 }
 
+/// What an awake instance holds about the App's installations — see
+/// `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
+///
+/// Apart from the rest of what is held only because one document of every
+/// key is more than the macro can expand; merged into it below.
+fn installing(running: &Running) -> Value {
+    json!({
+        "begun": value(&running.begun),
+        "installs": value(&running.installs.iter().collect::<Vec<_>>()),
+        "install_failure": value(&running.install_failure),
+        "reaching": value(&running.reaching.iter().collect::<Vec<_>>()),
+        "reaches": value(&running.reaches.iter().collect::<Vec<_>>()),
+        "listing_tokens": keyed(running.listing_tokens.iter().map(|(installation, minted)| {
+            (installation, json!({ "token": minted.token.expose(), "expires": value(&minted.expires) }))
+        })),
+        "minted": keyed(running.minted.iter().map(|(project, minted)| {
+            (project, json!({ "token": minted.token.expose(), "expires": value(&minted.expires) }))
+        })),
+        "minting": value(&running.minting.iter().collect::<Vec<_>>()),
+        "awaiting_tokens": value(&running.awaiting_tokens.iter().collect::<Vec<_>>()),
+    })
+}
+
 /// Everything an awake instance holds: what goes to the disk, and what only
 /// this process knows.
 #[must_use]
 pub fn of(running: &Running) -> Value {
+    let mut of = whole(running);
+    if let (Some(held), Value::Object(more)) = (
+        of.get_mut("held").and_then(Value::as_object_mut),
+        installing(running),
+    ) {
+        held.extend(more);
+    }
+    of
+}
+
+/// Everything but what [`installing`] adds.
+fn whole(running: &Running) -> Value {
     json!({
         "kept": exposed(&running.state),
         "held": {

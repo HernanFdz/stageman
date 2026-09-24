@@ -5,10 +5,10 @@
 //! `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`.
 
 use stageman_channel::Call;
-use stageman_core::{Platform, Secret};
+use stageman_core::{Access, Platform, Secret};
 use stageman_instance::{Request, Response};
 use stageman_platform::Call as PlatformCall;
-use stageman_wire::Refusal;
+use stageman_wire::{AccessDraft, Refusal};
 
 use crate::dashboard::{a_draft, ask, count, first, nth};
 use crate::simulation::{Simulation, project, request, seed, watching};
@@ -66,8 +66,9 @@ fn a_token_the_platform_refuses_is_not_kept() {
     assert!(read.contains("Bearer ghp-not-a-real-token"), "{read}");
 }
 
-/// A private repository the token was not granted is named in the refusal,
-/// so the operator knows which grant is missing.
+/// A private repository the token was not granted is the repository's
+/// refusal, naming it, so the operator knows which grant is missing — see
+/// `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
 #[test]
 fn a_repository_the_token_cannot_see_is_named_in_the_refusal() {
     let mut sim = Simulation::new();
@@ -85,9 +86,10 @@ fn a_repository_the_token_cannot_see_is_named_in_the_refusal() {
     );
     assert_eq!(
         answered,
-        Response::Refused(Refusal::TokenRefused {
-            why: "GitHub cannot see example/burrow with it — a fine-grained token has to be \
-                  granted that repository"
+        Response::Refused(Refusal::NotReached {
+            repository: "example/burrow".to_owned(),
+            why: "GitHub cannot see it with the token — a fine-grained token has to be granted \
+                  that repository"
                 .to_owned()
         })
     );
@@ -229,18 +231,23 @@ fn the_checks_come_before_the_write_and_the_answer_after() {
     );
 }
 
-/// Amending with a blank token asks nobody; a typed one is checked, kept
-/// when the platform accepts it, and the old one kept when it does not.
+/// Amending with the access left as it is asks nobody while the repository
+/// stays; a token set is checked, kept when the platform accepts it, and
+/// the old one kept when it does not.
 #[test]
-fn an_amended_token_is_checked_and_a_blank_one_is_not() {
+fn an_amended_token_is_checked_and_a_kept_one_is_not() {
     let mut sim = Simulation::new();
     let mut state = watching(&[]);
     state
         .projects
         .get_mut(&project())
         .expect("the project")
-        .credentials
-        .insert(Platform::GitHub, Secret::new("ghp-the-old-one".to_owned()));
+        .access
+        .insert(
+            Platform::GitHub,
+            Access::Token(Secret::new("ghp-the-old-one".to_owned())),
+        );
+    crate::simulation::on_github(&mut state, "example/renamed");
     sim.holding(&state);
     let mut instance = sim.wake(seed(1));
     let id = project().to_string();
@@ -250,13 +257,22 @@ fn an_amended_token_is_checked_and_a_blank_one_is_not() {
             .projects
             .get(&project())
             .expect("watched")
-            .credentials
+            .access
             .get(&Platform::GitHub)
-            .map(|token| token.expose().to_owned())
+            .and_then(|access| match access {
+                Access::Token(token) => Some(token.expose().to_owned()),
+                Access::Installation { .. } => None,
+            })
     };
 
     let mut blank = a_draft("renamed");
-    blank.credential.clear();
+    blank.access = AccessDraft::Token {
+        token: None,
+        repository: Some("https://github.com/example/renamed".to_owned()),
+    };
+    // The repository as the project holds it: a moved one would be read
+    // against the token kept, per
+    // `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
     let Response::Projects(_) = ask(
         &mut sim,
         &mut instance,
@@ -268,11 +284,18 @@ fn an_amended_token_is_checked_and_a_blank_one_is_not() {
     ) else {
         panic!("the projects screen");
     };
-    assert_eq!(reads(&sim), 0, "a blank box is the token already held");
+    assert_eq!(
+        reads(&sim),
+        0,
+        "as it is, on the repository it holds: nothing to ask"
+    );
     assert_eq!(held(&sim).as_deref(), Some("ghp-the-old-one"));
 
     let mut typed = a_draft("renamed");
-    typed.credential = "ghp-the-new-one".to_owned();
+    typed.access = AccessDraft::Token {
+        token: Some("ghp-the-new-one".to_owned()),
+        repository: Some("https://github.com/example/renamed".to_owned()),
+    };
     sim.next_platform_answers(401, r#"{"message":"Bad credentials"}"#);
     assert_eq!(
         ask(
@@ -322,7 +345,10 @@ fn a_draft_refused_on_its_own_asks_no_platform() {
     let mut instance = sim.wake(seed(1));
 
     let mut blank = a_draft("blank");
-    blank.repository = "git@github.com:example/blank.git".to_owned();
+    blank.access = AccessDraft::Token {
+        token: Some("ghp-not-a-real-token".to_owned()),
+        repository: Some("git@github.com:example/blank.git".to_owned()),
+    };
     assert!(matches!(
         ask(&mut sim, &mut instance, 1, Request::Create { draft: blank }),
         Response::Refused(Refusal::RepositoryRefused { .. })

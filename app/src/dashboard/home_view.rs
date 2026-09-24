@@ -130,11 +130,11 @@ fn Overview(home: Home) -> Element {
                                 }
                                 li {
                                     Link { to: super::Route::InstanceView {}, class: "underline", "Register the App on GitHub" }
-                                    ", if you would rather install it on a repository than paste a token."
+                                    " and install it where your repositories are, if you would rather not paste a token."
                                 }
                                 li {
                                     Link { to: super::Route::ProjectsView {}, class: "underline", "Add a project" }
-                                    ": its repository, a token for it or the App installed on it, and the Slack app it talks through."
+                                    ": how it reaches GitHub, the repository chosen from what that reaches, and the Slack app it talks through."
                                 }
                                 li { "Invite the app into a channel, and mention it." }
                             }

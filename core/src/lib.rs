@@ -660,6 +660,55 @@ pub struct PlatformApp {
     pub client_id: String,
     /// Its private key, PEM, which signs that token.
     pub private_key: Secret,
+    /// Where it is installed, by the installation's identifier on the
+    /// platform: learned from the platform's setup redirect, confirmed with
+    /// the key, and kept here rather than on any project — see
+    /// `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
+    /// A project's access names one of these, and a form lists what they
+    /// cover from the platform when it asks.
+    pub installations: BTreeMap<u64, Installation>,
+}
+
+/// One installation of the App: on which account, and whether on every
+/// repository of it or on chosen ones.
+///
+/// What the platform says of an installation when it is fetched with the
+/// App's key, and all this instance keeps of one. Which repositories it
+/// covers is deliberately not here: it goes stale the moment a repository
+/// is added on the platform's own page, so it is listed when a form asks
+/// and kept nowhere. Nothing in it is a credential, so it travels in the
+/// clear.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Installation {
+    /// The account it is installed on, as the platform spells it.
+    pub account: String,
+    /// Whether it covers every repository of that account rather than
+    /// chosen ones.
+    pub every_repository: bool,
+}
+
+/// How a project reaches its repository's platform — see
+/// `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
+///
+/// One of two shapes, and a project holds one per platform. Whichever it
+/// holds, a job never carries it: the credential route serves a pasted
+/// token as it is, and mints one from an installation for the project's
+/// repository and an hour, so the shape decides what the instance does to
+/// answer a job and nothing about what the job sees.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Access {
+    /// A token pasted and checked, per
+    /// `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`,
+    /// held for as long as the project is.
+    Token(Secret),
+    /// An installation of the App this instance owns, by its identifier on
+    /// the platform, learned from the platform's setup redirect and
+    /// confirmed with the App's key. Not a credential: what reaches the
+    /// repository is minted from it, per project, when a job asks.
+    Installation {
+        /// The installation's identifier on the platform.
+        id: u64,
+    },
 }
 
 /// Where a project's repository is, as the platform names it: an owner and
@@ -1644,15 +1693,19 @@ pub struct Project {
     /// Not a secret, deliberately: it is written to be read, like a kit's
     /// description, and travels in the clear on the same terms.
     pub brief: String,
-    /// What its jobs are handed, one credential per platform.
+    /// How it reaches its repository on each platform: a token, or an
+    /// installation of the App this instance owns — see [`Access`].
     ///
-    /// A map rather than a list so that two credentials for one platform is
+    /// A map rather than a list so that two for one platform is
     /// unrepresentable, and ordered rather than hashed so the snapshot does not
-    /// reshuffle itself between writes.
-    pub credentials: BTreeMap<Platform, Secret>,
+    /// reshuffle itself between writes. Empty only for a project the last
+    /// release wrote without a token, or one created to be installed on
+    /// from its settings page: a job on such a project checks out what is
+    /// public and reaches nothing else.
+    pub access: BTreeMap<Platform, Access>,
     /// Where its conversations happen, one binding per channel.
     ///
-    /// Separate from `credentials` above rather than folded into it — see
+    /// Separate from `access` above rather than folded into it — see
     /// `docs/decisions/0027-a-channel-is-not-a-platform.md`, which is mostly an
     /// argument about the two lines this splits into.
     ///
@@ -1782,7 +1835,10 @@ impl State {
     /// The invariant `docs/decisions/0021-an-instance-starts-empty.md` moved
     /// down from the instance to the project: a project names one agent for its
     /// foreman and at least one its jobs may run on, and every one of them
-    /// is configured.
+    /// is configured. And since
+    /// `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`,
+    /// a project reaching its repository through an installation names one
+    /// the App holds, which is the same shape of reference.
     ///
     /// Checked rather than made unrepresentable. A type that could not hold an
     /// empty set would enforce half of this and leave the other half — an agent
@@ -1812,6 +1868,19 @@ impl State {
                     return Err(Inconsistent::UnconfiguredProjectAgent {
                         project: *id,
                         agent: named,
+                    });
+                }
+            }
+            for (platform, access) in &project.access {
+                if let Access::Installation { id: installation } = access
+                    && !self
+                        .apps
+                        .get(platform)
+                        .is_some_and(|app| app.installations.contains_key(installation))
+                {
+                    return Err(Inconsistent::UnknownInstallation {
+                        project: *id,
+                        installation: *installation,
                     });
                 }
             }
@@ -2035,6 +2104,7 @@ impl State {
                         slug: app.slug.clone(),
                         client_id: app.client_id.clone(),
                         private_key: app.private_key.seal(key, nonces())?,
+                        installations: app.installations.clone(),
                     },
                 ))
             })
@@ -2045,9 +2115,9 @@ impl State {
             .iter()
             .map(|(id, project)| {
                 let credentials = project
-                    .credentials
+                    .access
                     .iter()
-                    .map(|(platform, secret)| Ok((*platform, secret.seal(key, nonces())?)))
+                    .map(|(platform, access)| Ok((*platform, access.seal(key, nonces)?)))
                     .collect::<Result<BTreeMap<_, _>, SealError>>()?;
                 let channels = project
                     .channels
@@ -2231,6 +2301,17 @@ pub enum Inconsistent {
         /// The agent it names.
         agent: Agent,
     },
+    /// A project reaches its repository through an installation the App
+    /// does not hold — or holds no App at all.
+    #[error(
+        "project {project} names installation {installation}, which the App is not installed as"
+    )]
+    UnknownInstallation {
+        /// The project holding the dangling reference.
+        project: ProjectId,
+        /// The installation it names.
+        installation: u64,
+    },
 }
 
 /// A snapshot could not be turned back into state.
@@ -2399,6 +2480,59 @@ impl SealedSecret {
     }
 }
 
+/// How a project reaches a platform, as it appears on disk: a token
+/// sealed, or an installation by identifier.
+///
+/// Untagged, so that a token is written exactly as the last release wrote
+/// one — the bare sealed secret — and a file from before installations
+/// existed opens without a bridge of its own. An installation is the one
+/// other object shape, told apart by its one field.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SealedAccess {
+    /// A token, sealed.
+    Token(SealedSecret),
+    /// An installation of the App, by identifier, which needs no sealing.
+    Installation {
+        /// The installation's identifier on the platform.
+        installation: u64,
+    },
+}
+
+impl Access {
+    /// Converts to the form that goes on disk, sealing a token; an
+    /// installation is its identifier and needs no sealing.
+    ///
+    /// # Errors
+    ///
+    /// Fails only if the cipher rejects the input.
+    pub fn seal(
+        &self,
+        key: &Key,
+        nonces: &mut impl FnMut() -> Nonce,
+    ) -> Result<SealedAccess, SealError> {
+        Ok(match self {
+            Self::Token(secret) => SealedAccess::Token(secret.seal(key, nonces())?),
+            Self::Installation { id } => SealedAccess::Installation { installation: *id },
+        })
+    }
+}
+
+impl SealedAccess {
+    /// Recovers the access, opening a token.
+    ///
+    /// # Errors
+    ///
+    /// Fails if a token cannot be recovered, which means the key is wrong or
+    /// the file was altered.
+    pub fn open(self, key: &Key) -> Result<Access, OpenError> {
+        Ok(match self {
+            Self::Token(sealed) => Access::Token(sealed.open(key)?),
+            Self::Installation { installation } => Access::Installation { id: installation },
+        })
+    }
+}
+
 /// An agent's configuration as it appears on disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SealedAgentConfig {
@@ -2418,6 +2552,12 @@ pub struct SealedPlatformApp {
     pub client_id: String,
     /// Its private key, sealed.
     pub private_key: SealedSecret,
+    /// Where it is installed, in the clear. Defaulted, because a file
+    /// written before installations were kept described an App installed
+    /// nowhere this instance knew of, which is the true answer — see
+    /// `docs/conventions.md` §4.
+    #[serde(default)]
+    pub installations: BTreeMap<u64, Installation>,
 }
 
 /// A channel binding as it appears on disk.
@@ -2593,8 +2733,10 @@ pub struct SealedProject {
     /// is the true answer for a file from before: nobody had written one.
     #[serde(default)]
     pub brief: String,
-    /// Its sealed credentials.
-    pub credentials: BTreeMap<Platform, SealedSecret>,
+    /// How it reaches each platform: a token, sealed, or an installation
+    /// by identifier. Under the name the last release wrote, whose bare
+    /// sealed token still opens as one.
+    pub credentials: BTreeMap<Platform, SealedAccess>,
     /// Its channel bindings, each with its credential sealed.
     ///
     /// **Defaulted, because this field was added after snapshots existed.**
@@ -2704,6 +2846,7 @@ fn opened_apps(
                     slug: sealed.slug,
                     client_id: sealed.client_id,
                     private_key: sealed.private_key.open(key)?,
+                    installations: sealed.installations,
                 },
             ))
         })
@@ -2744,7 +2887,7 @@ impl Snapshot {
         let projects = projects
             .into_iter()
             .map(|(id, project)| {
-                let credentials = project
+                let access = project
                     .credentials
                     .into_iter()
                     .map(|(platform, sealed)| Ok((platform, sealed.open(key)?)))
@@ -2807,7 +2950,7 @@ impl Snapshot {
                         repository: project.repository,
                         foreman_kit: project.foreman_kit,
                         kits,
-                        credentials,
+                        access,
                         channels,
                         variables,
                         brief: project.brief,
@@ -3113,7 +3256,7 @@ impl Handout {
             role: Role::Job,
             repository: Some(project.repository.clone()),
             agent_credential: config.auth_token.clone(),
-            platforms: project.credentials.keys().copied().collect(),
+            platforms: project.access.keys().copied().collect(),
             warrant: Some(warrant),
             variables: project.variables.clone(),
             channels: speaking(project),
@@ -3309,12 +3452,12 @@ pub enum HandoutError {
 #[cfg(test)]
 mod tests {
     use super::{
-        Agent, AgentConfig, Arriving, Attending, BASE64, Channel, ChannelConfig, ClaudeEffort,
-        ClaudeModel, Errand, Handout, HandoutError, Inbox, Inconsistent, Job, JobId, Key, Kit,
-        KitConfig, KitName, KitNameError, NONCE_LEN, Nonce, OpenError, Outcome, Place, Platform,
-        Progress, Project, ProjectId, Recipient, RepositoryAddress, RepositoryError, Room,
-        SealedJob, Secret, Snapshot, State, Taken, Thread, Variable, VariableName,
-        VariableNameError, Waiting,
+        Access, Agent, AgentConfig, Arriving, Attending, BASE64, Channel, ChannelConfig,
+        ClaudeEffort, ClaudeModel, Errand, Handout, HandoutError, Inbox, Inconsistent,
+        Installation, Job, JobId, Key, Kit, KitConfig, KitName, KitNameError, NONCE_LEN, Nonce,
+        OpenError, Outcome, Place, Platform, PlatformApp, Progress, Project, ProjectId, Recipient,
+        RepositoryAddress, RepositoryError, Room, SealedAccess, SealedJob, SealedPlatformApp,
+        Secret, Snapshot, State, Taken, Thread, Variable, VariableName, VariableNameError, Waiting,
     };
     use base64::Engine as _;
     use jiff::Timestamp;
@@ -3382,8 +3525,11 @@ mod tests {
     }
 
     fn a_project_with_a_job() -> Project {
-        let mut credentials = BTreeMap::new();
-        credentials.insert(Platform::GitHub, Secret::new(TOKEN.to_owned()));
+        let mut access = BTreeMap::new();
+        access.insert(
+            Platform::GitHub,
+            Access::Token(Secret::new(TOKEN.to_owned())),
+        );
         let channels = BTreeMap::from([(Channel::Slack, a_slack_binding())]);
         let mut jobs = BTreeMap::new();
         jobs.insert(
@@ -3401,7 +3547,7 @@ mod tests {
             repository: "https://example.invalid/repo".to_owned(),
             foreman_kit: Kit::defaults(Agent::Claude),
             kits: default_kits(),
-            credentials,
+            access,
             channels,
             variables: BTreeMap::from([(
                 VariableName::new(VARIABLE).expect("a deliverable name"),
@@ -3914,13 +4060,10 @@ mod tests {
             .values()
             .next()
             .expect("the project survived");
-        assert_eq!(
-            project
-                .credentials
-                .get(&Platform::GitHub)
-                .map(Secret::expose),
-            Some(TOKEN)
-        );
+        assert!(matches!(
+            project.access.get(&Platform::GitHub),
+            Some(Access::Token(token)) if token.expose() == TOKEN
+        ));
         let bound = project
             .channels
             .get(&Channel::Slack)
@@ -3951,11 +4094,11 @@ mod tests {
             .values()
             .next()
             .expect("the project is there");
-        let project_nonce = &project
-            .credentials
-            .get(&Platform::GitHub)
-            .expect("the credential is there")
-            .nonce;
+        let Some(SealedAccess::Token(sealed_token)) = project.credentials.get(&Platform::GitHub)
+        else {
+            panic!("the credential is there, as a token");
+        };
+        let project_nonce = &sealed_token.nonce;
         let channel_nonce = &project
             .channels
             .get(&Channel::Slack)
@@ -4262,7 +4405,7 @@ mod tests {
                       "description": "its defaults"
                     }}
                   }},
-                  "credentials": {{}},
+                  "credentials": {{ "GitHub": {sealed} }},
                   "channels": {{
                     "Slack": {{ "address": "C0123456789", "credential": {sealed} }}
                   }},
@@ -4373,6 +4516,175 @@ mod tests {
         assert!(job.warrant().is_none(), "no job had a warrant to write");
         assert_eq!(project.brief, "", "nobody had written one");
         assert!(project.watched.is_empty(), "nothing was watched");
+        // The last release wrote a token as a bare sealed secret, which is
+        // the one shape of access it knew and still the shape a token is
+        // written in.
+        assert!(matches!(
+            project.access.get(&Platform::GitHub),
+            Some(Access::Token(token)) if token.expose() == "agent-token"
+        ));
+    }
+
+    /// An installation is written by its identifier alone, needing no
+    /// sealing, and comes back as itself; a token is still written as the
+    /// bare sealed secret, so a file holding tokens is unchanged by the
+    /// second shape existing.
+    #[test]
+    fn an_installation_survives_the_file_as_its_identifier() {
+        let mut state = populated();
+        state
+            .apps
+            .insert(Platform::GitHub, an_app(&[(77, "example", false)]));
+        let project = *state.projects.keys().next().expect("a project");
+        state
+            .projects
+            .get_mut(&project)
+            .expect("the project")
+            .access
+            .insert(Platform::GitHub, Access::Installation { id: 77 });
+
+        let json = serde_json::to_string(
+            &state
+                .seal(&key(), &mut counting_nonces())
+                .expect("sealing cannot fail"),
+        )
+        .expect("a snapshot serialises");
+        assert!(json.contains(r#""GitHub":{"installation":77}"#), "{json}");
+
+        let reopened: Snapshot = serde_json::from_str(&json).expect("and parses back");
+        let reopened = reopened.open(&key()).expect("and opens");
+        assert_eq!(
+            reopened
+                .projects
+                .get(&project)
+                .and_then(|watched| watched.access.get(&Platform::GitHub)),
+            Some(&Access::Installation { id: 77 })
+        );
+    }
+
+    /// An App this instance owns, installed as given: identifier, account,
+    /// and whether on every repository. The key is a placeholder, since
+    /// nothing here signs with it.
+    fn an_app(installations: &[(u64, &str, bool)]) -> PlatformApp {
+        PlatformApp {
+            id: 4242,
+            slug: "stageman-test".to_owned(),
+            client_id: "Iv1.test".to_owned(),
+            private_key: Secret::new("not-a-real-key".to_owned()),
+            installations: installations
+                .iter()
+                .map(|(id, account, every_repository)| {
+                    (
+                        *id,
+                        Installation {
+                            account: (*account).to_owned(),
+                            every_repository: *every_repository,
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// Where the App is installed travels through the file in the clear,
+    /// beside its sealed key, and a file written before installations were
+    /// kept opens with none — the literal older shape, per
+    /// `docs/conventions.md` §4.
+    #[test]
+    fn an_apps_installations_survive_the_file_and_default_when_absent() {
+        let mut state = populated();
+        state.apps.insert(
+            Platform::GitHub,
+            an_app(&[(77, "example", false), (78, "acme", true)]),
+        );
+        let json = serde_json::to_string(
+            &state
+                .seal(&key(), &mut counting_nonces())
+                .expect("sealing cannot fail"),
+        )
+        .expect("a snapshot serialises");
+        assert!(
+            json.contains(
+                r#""installations":{"77":{"account":"example","every_repository":false},"78":{"account":"acme","every_repository":true}}"#
+            ),
+            "{json}"
+        );
+        assert!(
+            !json.contains("not-a-real-key"),
+            "the key is sealed: {json}"
+        );
+        let reopened: Snapshot = serde_json::from_str(&json).expect("and parses back");
+        let reopened = reopened.open(&key()).expect("and opens");
+        assert_eq!(
+            reopened
+                .apps
+                .get(&Platform::GitHub)
+                .map(|app| app.installations.clone()),
+            state
+                .apps
+                .get(&Platform::GitHub)
+                .map(|app| app.installations.clone())
+        );
+
+        // As the App was written before installations were kept: the four
+        // fields and nothing else.
+        let sealed_key = serde_json::to_string(
+            &Secret::new("not-a-real-key".to_owned())
+                .seal(&key(), [1; NONCE_LEN])
+                .expect("sealing a well-formed secret"),
+        )
+        .expect("a sealed secret serialises");
+        let older: SealedPlatformApp = serde_json::from_str(&format!(
+            r#"{{"id":4242,"slug":"stageman-test","client_id":"Iv1.test","private_key":{sealed_key}}}"#
+        ))
+        .expect("an App written before installations still parses");
+        assert!(older.installations.is_empty());
+    }
+
+    /// A project reaching its repository through an installation names one
+    /// the App holds, or the state is refused: with no App, and with an App
+    /// installed elsewhere.
+    #[test]
+    fn a_project_naming_an_installation_the_app_does_not_hold_is_refused() {
+        let mut state = populated();
+        let project = *state.projects.keys().next().expect("a project");
+        state
+            .projects
+            .get_mut(&project)
+            .expect("the project")
+            .access
+            .insert(Platform::GitHub, Access::Installation { id: 77 });
+        assert_eq!(
+            state.check(),
+            Err(Inconsistent::UnknownInstallation {
+                project,
+                installation: 77
+            })
+        );
+
+        state
+            .apps
+            .insert(Platform::GitHub, an_app(&[(78, "example", false)]));
+        assert!(matches!(
+            state.check(),
+            Err(Inconsistent::UnknownInstallation {
+                installation: 77,
+                ..
+            })
+        ));
+
+        state
+            .apps
+            .insert(Platform::GitHub, an_app(&[(77, "example", false)]));
+        assert_eq!(state.check(), Ok(()));
+        assert_eq!(
+            Inconsistent::UnknownInstallation {
+                project,
+                installation: 77
+            }
+            .to_string(),
+            format!("project {project} names installation 77, which the App is not installed as")
+        );
     }
 
     /// A brief and the watched rooms travel through the file whole, in the
@@ -4671,9 +4983,9 @@ mod tests {
 
         let mut other = a_project_with_a_job();
         other.name = "somebody else".to_owned();
-        other.credentials.insert(
+        other.access.insert(
             Platform::GitHub,
-            Secret::new("not-yours-and-never-was".to_owned()),
+            Access::Token(Secret::new("not-yours-and-never-was".to_owned())),
         );
         other.channels.insert(
             Channel::Slack,
@@ -4744,14 +5056,13 @@ mod tests {
         assert_eq!(handout.warrant().map(Secret::expose), Some(WARRANT));
         // And the state it was built from does hold the token, so this is
         // about the handout rather than an empty fixture.
-        assert_eq!(
+        assert!(matches!(
             state
                 .projects
                 .get(&mine)
-                .and_then(|project| project.credentials.get(&Platform::GitHub))
-                .map(Secret::expose),
-            Some(TOKEN)
-        );
+                .and_then(|project| project.access.get(&Platform::GitHub)),
+            Some(Access::Token(token)) if token.expose() == TOKEN
+        ));
     }
 
     /// The checkout is made from the handout, so the repository has to travel

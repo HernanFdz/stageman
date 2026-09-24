@@ -14,13 +14,16 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use stageman_core::{
-    AgentConfig, Channel, ChannelConfig, JobId, Kit, KitConfig, KitName, Outcome, Platform,
+    Access, AgentConfig, Channel, ChannelConfig, JobId, Kit, KitConfig, KitName, Outcome, Platform,
     Progress, Project, ProjectId, RepositoryAddress, Secret, State, Variable, VariableName,
 };
-use stageman_wire::{ChannelDraft, Draft, Ending, KitDraft, Refusal, VariableDraft};
+use stageman_wire::{
+    AccessDraft, ChannelDraft, Draft, Ending, KitDraft, Refusal, Through, VariableDraft,
+};
 
 use crate::Effect;
 use crate::Running;
+use crate::installations::{Begun, arrived};
 
 use crate::views;
 use crate::vocabulary::{AppEffect, RequestId, Speaker};
@@ -130,6 +133,26 @@ pub enum Request {
         /// The platform, by wire identifier.
         platform: String,
     },
+    /// An install link for one press, carrying a state minted for it —
+    /// see `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
+    InstallLink {
+        /// The platform, by wire identifier.
+        platform: String,
+    },
+    /// Forget one installation of the App on a platform, if no project
+    /// names it — see `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
+    ForgetInstallation {
+        /// The platform, by wire identifier.
+        platform: String,
+        /// The installation, by its identifier on the platform.
+        id: u64,
+    },
+    /// What an access reaches, for the project form: held while the
+    /// platform lists it, and never kept — see `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
+    Reaches {
+        /// Which access.
+        through: Through,
+    },
 }
 
 impl fmt::Debug for Request {
@@ -199,6 +222,18 @@ impl fmt::Debug for Request {
                 .debug_struct("ForgetApp")
                 .field("platform", platform)
                 .finish(),
+            Self::InstallLink { platform } => f
+                .debug_struct("InstallLink")
+                .field("platform", platform)
+                .finish(),
+            Self::ForgetInstallation { platform, id } => f
+                .debug_struct("ForgetInstallation")
+                .field("platform", platform)
+                .field("id", id)
+                .finish(),
+            Self::Reaches { through } => {
+                f.debug_struct("Reaches").field("through", through).finish()
+            }
         }
     }
 }
@@ -223,6 +258,10 @@ pub enum Response {
     Apps(stageman_wire::Apps),
     /// A form to register an App with.
     Registration(stageman_wire::Registration),
+    /// Where to install the App, minted for one press.
+    InstallLink(stageman_wire::InstallLink),
+    /// What an access reaches, for the project form.
+    Reached(stageman_wire::Reached),
     /// It was not done, and why.
     Refused(Refusal),
 }
@@ -233,6 +272,12 @@ impl Running {
     /// platforms, and answers it once they have, per
     /// `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`.
     pub fn requested(&mut self, id: RequestId, request: Request, effects: &mut Vec<Effect>) {
+        // A listing is held on its own terms: nothing of it is checked or
+        // kept, and it is answered when the platform has listed.
+        if let Request::Reaches { through } = request {
+            self.reaches(id, through, effects);
+            return;
+        }
         match self.hold_for_checks(id, &request, effects) {
             Ok(true) => {}
             Ok(false) => self.respond(id, request, effects),
@@ -260,10 +305,7 @@ impl Running {
             Request::Agents => Ok(Response::Agents(views::listed(&self.state))),
             Request::Configure { agent, credential } => self.configure(&agent, &credential),
             Request::ForgetAgent { agent } => self.forget_agent(&agent),
-            Request::Projects => Ok(Response::Projects(views::watching_now(
-                &self.state,
-                &self.identities(),
-            ))),
+            Request::Projects => Ok(Response::Projects(self.projects_screen())),
             Request::Create { draft } => self.create(&draft),
             Request::Amend { project, draft } => self.amend(&project, &draft),
             Request::Forget { project } => self.forget(&project),
@@ -287,6 +329,17 @@ impl Running {
                 .map(Response::Registration),
             Request::ForgetApp { platform } => {
                 views::platform_named(&platform).and_then(|platform| self.forget_app(platform))
+            }
+            Request::InstallLink { platform } => {
+                views::platform_named(&platform).and_then(|platform| self.install_link(platform))
+            }
+            Request::ForgetInstallation { platform, id } => views::platform_named(&platform)
+                .and_then(|platform| self.forget_installation(platform, id)),
+            // Routed before anything is held, above; a listing that reaches
+            // here was carried by a check it cannot have had.
+            Request::Reaches { .. } => {
+                tracing::error!("a listing was answered as if it had been checked");
+                Err(Refusal::Failed)
             }
         };
         let response = answered.unwrap_or_else(Response::Refused);
@@ -338,12 +391,13 @@ impl Running {
             name,
             repository,
             foreman_kit,
-            credential,
+            access,
             kits,
             channels,
             variables,
             brief,
-        } = drafted(draft, None)?;
+            ..
+        } = drafted(draft, None, &self.begun)?;
 
         let mut candidate = self.state.clone();
         let created = ProjectId::from_uuid(crate::mint(&mut self.rng));
@@ -354,12 +408,7 @@ impl Running {
                 repository: repository.https(),
                 foreman_kit,
                 kits,
-                // Required of a new project, so never empty here; an option
-                // only because an amendment may leave the box blank.
-                credentials: credential
-                    .into_iter()
-                    .map(|token| (Platform::GitHub, token))
-                    .collect(),
+                access: BTreeMap::from([(Platform::GitHub, access)]),
                 channels,
                 variables,
                 jobs: BTreeMap::new(),
@@ -374,6 +423,7 @@ impl Running {
             .map_err(|reason| views::from_inconsistent(&reason))?;
         self.state = candidate;
         self.dirty = true;
+        self.arrival_spent(draft);
 
         // Listened to from now, not from the next restart: binding a channel
         // used to do nothing until the daemon was restarted, and nothing said
@@ -381,17 +431,26 @@ impl Running {
         if let Some(question) = self.listen(created) {
             self.defer(question);
         }
-        Ok(Response::Projects(views::watching_now(
-            &self.state,
-            &self.identities(),
-        )))
+        Ok(Response::Projects(self.projects_screen()))
+    }
+
+    /// A draft kept named an install by its state: spent, since what came
+    /// back under it is a project's now.
+    fn arrival_spent(&mut self, draft: &Draft) {
+        if let AccessDraft::App {
+            arrival: Some(state),
+            ..
+        } = &draft.access
+        {
+            self.spend_arrival(state);
+        }
     }
 
     /// Changes what a project is, leaving what it has done alone.
     ///
-    /// A blank credential means the one it already has, never none: there is
-    /// nowhere on the wire for the current value, so the box always starts
-    /// empty. The channel is not offered at all, for the same reason.
+    /// A token left unsaid means the one it already has, never none: there
+    /// is nowhere on the wire for a token, so the form never shows one.
+    /// The channel is not offered at all, for the same reason.
     fn amend(&mut self, project: &str, draft: &Draft) -> Result<Response, Refusal> {
         let identifier = views::identify(&self.state, project)?;
 
@@ -404,13 +463,14 @@ impl Running {
         let Drafted {
             name,
             repository,
+            reach_changed,
             foreman_kit,
-            credential,
+            access,
             kits,
             variables,
             brief,
             ..
-        } = drafted(draft, Some(watched))?;
+        } = drafted(draft, Some(watched), &self.begun)?;
         watched.variables = variables;
         amended(
             watched,
@@ -418,7 +478,7 @@ impl Running {
             repository.https(),
             foreman_kit,
             kits,
-            credential,
+            access,
             brief,
         );
         candidate
@@ -426,10 +486,13 @@ impl Running {
             .map_err(|reason| views::from_inconsistent(&reason))?;
         self.state = candidate;
         self.dirty = true;
-        Ok(Response::Projects(views::watching_now(
-            &self.state,
-            &self.identities(),
-        )))
+        self.arrival_spent(draft);
+        // A token minted for what the project reached before is not for
+        // what it reaches now, whether the access changed or the repository.
+        if reach_changed {
+            self.access_amended(identifier);
+        }
+        Ok(Response::Projects(self.projects_screen()))
     }
 
     /// Stops watching a repository, and reclaims everything it was holding.
@@ -475,10 +538,7 @@ impl Running {
         }
         self.state.projects.remove(&identifier);
         self.dirty = true;
-        Ok(Response::Projects(views::watching_now(
-            &self.state,
-            &self.identities(),
-        )))
+        Ok(Response::Projects(self.projects_screen()))
     }
 
     /// One project's screen.
@@ -507,7 +567,7 @@ impl Running {
     /// Who this instance is on each project's channel, where the channel
     /// has said: held by the listener and never kept, so a page links a room
     /// while the channel is connected and shows its identifier otherwise.
-    fn identities(&self) -> views::Identities {
+    pub(crate) fn identities(&self) -> views::Identities {
         self.listeners
             .iter()
             .filter_map(|(id, listener)| listener.us.clone().map(|us| (*id, us)))
@@ -681,11 +741,16 @@ pub struct Drafted {
     pub name: String,
     /// Where its jobs work, as an address on the platform.
     pub repository: RepositoryAddress,
+    /// Whether the access or the repository is not what the project
+    /// already holds: what decides whether the platform is asked before
+    /// anything is kept — see
+    /// `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
+    pub reach_changed: bool,
     /// How its foreman's agent is set.
     pub foreman_kit: Kit,
-    /// The token for the repository: required of a new project, and what
-    /// was typed for one that exists — blank means the one already held.
-    pub credential: Option<Secret>,
+    /// How it reaches the repository: a token, set in the form or the one
+    /// the project holds, or an installation of the App.
+    pub access: Access,
     /// The kits its jobs may run on.
     pub kits: BTreeMap<KitName, KitConfig>,
     /// Its channel bindings, whole. Empty for an amendment, which never
@@ -698,25 +763,62 @@ pub struct Drafted {
 }
 
 /// Resolves a draft: for a project that does not exist yet when `held` is
-/// none, and for the one given otherwise.
+/// none, and for the one given otherwise, against the installs begun for an
+/// installation named by its state.
+///
+/// The access before the repository, in the order the form sets them.
 ///
 /// # Errors
 ///
-/// Fails if anything required is missing, if the repository is not an
-/// address on the platform, if a kit describes settings this build does not
-/// know, if a new project's binding is half given, or if a variable's row
-/// is refused.
-pub fn drafted(draft: &Draft, held: Option<&Project>) -> Result<Drafted, Refusal> {
+/// Fails if anything required is missing — the access left unsaid counting
+/// as missing where the project holds none — if the state named is not
+/// one an installation has come back under, if the repository is not an
+/// address on the platform, if a kit describes settings this build does
+/// not know, if a new project's binding is half given, or if a variable's
+/// row is refused.
+pub fn drafted(draft: &Draft, held: Option<&Project>, begun: &Begun) -> Result<Drafted, Refusal> {
+    let platform = Platform::GitHub;
     let name = required("name", &draft.name)?;
-    let repository = addressed(&draft.repository)?;
+    let unsaid = || Refusal::Incomplete {
+        field: "access".to_owned(),
+    };
+    let holding = held.and_then(|watched| watched.access.get(&platform));
+    let (access, repository) = match &draft.access {
+        AccessDraft::None => return Err(unsaid()),
+        AccessDraft::App {
+            arrival,
+            repository,
+        } => {
+            let id = match arrival {
+                Some(state) => arrived(begun, state).ok_or(Refusal::ArrivalUnknown)?,
+                None => match holding {
+                    Some(Access::Installation { id }) => *id,
+                    Some(Access::Token(_)) | None => return Err(unsaid()),
+                },
+            };
+            (
+                Access::Installation { id },
+                addressed(repository.as_deref().unwrap_or_default())?,
+            )
+        }
+        AccessDraft::Token { token, repository } => {
+            let token = match token {
+                Some(typed) => Secret::new(required("access", typed)?),
+                None => match holding {
+                    Some(Access::Token(kept)) => kept.clone(),
+                    Some(Access::Installation { .. }) | None => return Err(unsaid()),
+                },
+            };
+            (
+                Access::Token(token),
+                addressed(repository.as_deref().unwrap_or_default())?,
+            )
+        }
+    };
+    let reach_changed = held.is_none_or(|watched| {
+        watched.access.get(&platform) != Some(&access) || watched.repository != repository.https()
+    });
     let foreman_kit = views::kit_of(&draft.foreman)?;
-    let credential = if held.is_some() {
-        let typed = draft.credential.trim();
-        (!typed.is_empty()).then(|| typed.to_owned())
-    } else {
-        Some(required("credential", &draft.credential)?)
-    }
-    .map(Secret::new);
     let kits = kits_of(&draft.kits)?;
     let channels = match held {
         None => binding(&draft.channel)?,
@@ -730,8 +832,9 @@ pub fn drafted(draft: &Draft, held: Option<&Project>) -> Result<Drafted, Refusal
     Ok(Drafted {
         name,
         repository,
+        reach_changed,
         foreman_kit,
-        credential,
+        access,
         kits,
         channels,
         variables,
@@ -795,9 +898,9 @@ pub fn resolved(
 
 /// Applies what the form came back with to the project it names.
 ///
-/// No credential means the one already held, never none. A project that
-/// had none and is amended with a blank box still has none. The brief is
-/// the one text where blank means blank: it is shown in full and
+/// The access is set whole, as resolved: the token held where the form
+/// left it unsaid, so nothing is ever taken away by an amendment. The
+/// brief is the one text where blank means blank: it is shown in full and
 /// resubmitted, so an empty box is an operator taking it away.
 pub fn amended(
     watched: &mut Project,
@@ -805,7 +908,7 @@ pub fn amended(
     repository: String,
     foreman_kit: Kit,
     kits: BTreeMap<KitName, KitConfig>,
-    credential: Option<Secret>,
+    access: Access,
     brief: String,
 ) {
     watched.name = name;
@@ -815,9 +918,7 @@ pub fn amended(
     watched.foreman_kit = foreman_kit;
     watched.kits = kits;
     watched.brief = brief;
-    if let Some(token) = credential {
-        watched.credentials.insert(Platform::GitHub, token);
-    }
+    watched.access.insert(Platform::GitHub, access);
 }
 
 /// The kits a form described, refusing what the domain would silently mend.
@@ -919,12 +1020,12 @@ pub fn required(field: &str, given: &str) -> Result<String, Refusal> {
 mod tests {
     use super::{addressed, amended, binding, busy, identify_job, kits_of, offered, resolved};
     use stageman_core::{
-        Agent, AgentConfig, Channel, ChannelConfig, ClaudeEffort, ClaudeModel, Job, JobId, Kit,
-        KitConfig, KitName, Platform, Progress, Project, ProjectId, Secret, State, Timestamp, Uuid,
-        Variable, VariableName, Waiting,
+        Access, Agent, AgentConfig, Channel, ChannelConfig, ClaudeEffort, ClaudeModel, Job, JobId,
+        Kit, KitConfig, KitName, Platform, Progress, Project, ProjectId, Secret, State, Timestamp,
+        Uuid, Variable, VariableName, Waiting,
     };
     use stageman_wire::Draft;
-    use stageman_wire::{ChannelDraft, Fitted, KitDraft, Refusal, VariableDraft};
+    use stageman_wire::{AccessDraft, ChannelDraft, Fitted, KitDraft, Refusal, VariableDraft};
     use std::collections::BTreeMap;
 
     fn drafted(credential: &str, listening: &str) -> ChannelDraft {
@@ -960,7 +1061,7 @@ mod tests {
             repository: "https://example.invalid/aviary".to_owned(),
             foreman_kit: Kit::defaults(Agent::Claude),
             kits: one_kit(),
-            credentials: BTreeMap::new(),
+            access: BTreeMap::new(),
             channels: BTreeMap::new(),
             variables: BTreeMap::new(),
             attending: stageman_core::Attending::default(),
@@ -1071,15 +1172,17 @@ mod tests {
         ));
     }
 
-    /// Amending replaces both the foreman's kit and the kits whole, keeps a
-    /// credential when the box is blank, replaces it when typed, and leaves
-    /// what the project has done alone.
+    /// Amending replaces both the foreman's kit and the kits whole, sets the
+    /// access as resolved — the same where it was left as it is, a new one
+    /// in either shape where it was set — and leaves what the project has
+    /// done alone.
     #[test]
     fn amending_replaces_what_a_project_is_and_leaves_what_it_has_done() {
         let mut project = holding(&[Progress::Idle(Waiting::Silent)]);
-        project
-            .credentials
-            .insert(Platform::GitHub, Secret::new("ghp-the-old-one".to_owned()));
+        project.access.insert(
+            Platform::GitHub,
+            Access::Token(Secret::new("ghp-the-old-one".to_owned())),
+        );
         project.channels.insert(
             Channel::Slack,
             ChannelConfig {
@@ -1104,7 +1207,7 @@ mod tests {
                 model: ClaudeModel::Haiku,
             },
             BTreeMap::from([(KitName::new("deep").expect("a name"), deep.clone())]),
-            None,
+            Access::Token(Secret::new("ghp-the-old-one".to_owned())),
             "Ignore alerts below error.".to_owned(),
         );
         assert_eq!(project.name, "renamed");
@@ -1119,13 +1222,12 @@ mod tests {
             project.kits,
             BTreeMap::from([(KitName::new("deep").expect("a name"), deep)])
         );
-        assert_eq!(
-            project
-                .credentials
-                .get(&Platform::GitHub)
-                .map(Secret::expose),
-            Some("ghp-the-old-one"),
-            "blank keeps"
+        assert!(
+            matches!(
+                project.access.get(&Platform::GitHub),
+                Some(Access::Token(token)) if token.expose() == "ghp-the-old-one"
+            ),
+            "the same, resolved from what was held, keeps"
         );
         assert_eq!(project.jobs.len(), 1, "its history is not an amendment");
         assert!(project.channels.contains_key(&Channel::Slack));
@@ -1136,47 +1238,52 @@ mod tests {
             "https://example.invalid/renamed".to_owned(),
             Kit::defaults(Agent::Claude),
             one_kit(),
-            Some(Secret::new("ghp-the-new-one".to_owned())),
+            Access::Token(Secret::new("ghp-the-new-one".to_owned())),
             String::new(),
         );
-        assert_eq!(
-            project
-                .credentials
-                .get(&Platform::GitHub)
-                .map(Secret::expose),
-            Some("ghp-the-new-one"),
+        assert!(
+            matches!(
+                project.access.get(&Platform::GitHub),
+                Some(Access::Token(token)) if token.expose() == "ghp-the-new-one"
+            ),
             "typed replaces"
         );
         assert_eq!(project.brief, "", "a blank brief is taken away, not kept");
-
-        let mut none = holding(&[]);
         amended(
-            &mut none,
-            "aviary".to_owned(),
-            "https://example.invalid/aviary".to_owned(),
+            &mut project,
+            "renamed".to_owned(),
+            "https://example.invalid/renamed".to_owned(),
             Kit::defaults(Agent::Claude),
             one_kit(),
-            None,
+            Access::Installation { id: 77 },
             String::new(),
         );
-        assert!(none.credentials.is_empty(), "blank leaves none as none");
+        assert_eq!(
+            project.access.get(&Platform::GitHub),
+            Some(&Access::Installation { id: 77 }),
+            "an installation replaces a token"
+        );
     }
 
-    /// One resolution for both forms: a new project needs its token and a
-    /// whole binding, and an existing one takes a blank token as the one
-    /// it holds, a typed one as new, and no binding at all.
+    /// One resolution for both forms: a new project needs its access set
+    /// and a whole binding, and an existing one takes the token left
+    /// unsaid as the one it holds, a set access as new — in either shape —
+    /// and no binding at all. Whether the reach changed is resolved beside
+    /// it, since that is what decides whether the platform is asked.
     #[test]
     fn a_draft_is_resolved_once_for_creating_and_for_amending() {
         let mut draft = Draft {
             name: " aviary ".to_owned(),
-            repository: "https://github.com/example/aviary.git".to_owned(),
             foreman: stageman_wire::Fitted {
                 agent: "claude".to_owned(),
                 model: "default".to_owned(),
                 effort: "default".to_owned(),
             },
             kits: vec![kit_row("Claude", "General-purpose.", "default", "default")],
-            credential: String::new(),
+            access: AccessDraft::Token {
+                token: None,
+                repository: Some("https://github.com/example/aviary.git".to_owned()),
+            },
             channel: ChannelDraft {
                 credential: "xoxb-not-a-real-token".to_owned(),
                 listen_credential: "xapp-not-a-real-token".to_owned(),
@@ -1186,48 +1293,203 @@ mod tests {
         };
         assert!(
             matches!(
-                super::drafted(&draft, None),
-                Err(Refusal::Incomplete { ref field }) if field == "credential"
+                super::drafted(&draft, None, &came_back(77)),
+                Err(Refusal::Incomplete { ref field }) if field == "access"
             ),
-            "a new project needs its token"
+            "a new project needs its token said: there is none to hold"
         );
+        draft.access = AccessDraft::None;
+        assert!(matches!(
+            super::drafted(&draft, None, &came_back(77)),
+            Err(Refusal::Incomplete { ref field }) if field == "access"
+        ));
+        draft.access = AccessDraft::App {
+            arrival: Some("f00d".to_owned()),
+            repository: None,
+        };
+        assert!(matches!(
+            super::drafted(&draft, None, &came_back(77)),
+            Err(Refusal::Incomplete { ref field }) if field == "repository"
+        ));
+        draft.access = AccessDraft::Token {
+            token: None,
+            repository: Some("https://github.com/example/aviary.git".to_owned()),
+        };
 
         let mut held = holding(&[]);
+        held.repository = "https://github.com/example/aviary".to_owned();
+        held.access.insert(
+            Platform::GitHub,
+            Access::Token(Secret::new("ghp-the-held-one".to_owned())),
+        );
         held.variables = holding_variables(&[("HELD", "kept")]);
-        let amending = super::drafted(&draft, Some(&held)).expect("resolved against the project");
+        let amending = super::drafted(&draft, Some(&held), &came_back(77))
+            .expect("resolved against the project");
         assert_eq!(amending.name, "aviary");
         assert_eq!(
             amending.repository.https(),
             "https://github.com/example/aviary"
         );
-        assert!(amending.credential.is_none(), "blank keeps");
+        assert!(
+            matches!(amending.access, Access::Token(ref token) if token.expose() == "ghp-the-held-one"),
+            "left unsaid is the one held"
+        );
+        assert!(
+            !amending.reach_changed,
+            "the same token on the same address, however it was pasted"
+        );
         assert!(amending.channels.is_empty(), "never offered when amending");
         assert_eq!(
             settled(&amending.variables),
             vec![("HELD".to_owned(), "kept".to_owned())]
         );
         assert_eq!(amending.brief, "be brief");
+        draft.access = AccessDraft::Token {
+            token: None,
+            repository: Some("https://github.com/example/other".to_owned()),
+        };
+        assert!(
+            super::drafted(&draft, Some(&held), &came_back(77))
+                .expect("resolved")
+                .reach_changed,
+            "the repository moved under the token held"
+        );
+    }
 
-        draft.credential = " github_pat_not_a_real_token ".to_owned();
-        let creating =
-            super::drafted(&draft, None).expect_err("a new project holds no HELD to keep");
+    /// A token set is new for either form, trimmed; a blank one is refused;
+    /// and an installation chosen is the same as the one held only on the
+    /// same address.
+    #[test]
+    fn a_set_access_is_resolved_as_new_and_an_unchanged_one_as_held() {
+        let mut draft = Draft {
+            name: " aviary ".to_owned(),
+            foreman: stageman_wire::Fitted {
+                agent: "claude".to_owned(),
+                model: "default".to_owned(),
+                effort: "default".to_owned(),
+            },
+            kits: vec![kit_row("Claude", "General-purpose.", "default", "default")],
+            access: AccessDraft::Token {
+                token: Some(" github_pat_not_a_real_token ".to_owned()),
+                repository: Some("https://github.com/example/aviary.git".to_owned()),
+            },
+            channel: ChannelDraft {
+                credential: "xoxb-not-a-real-token".to_owned(),
+                listen_credential: "xapp-not-a-real-token".to_owned(),
+            },
+            variables: vec![row("HELD", "")],
+            brief: " be brief ".to_owned(),
+        };
+        let mut held = holding(&[]);
+        held.repository = "https://github.com/example/aviary".to_owned();
+        held.access.insert(
+            Platform::GitHub,
+            Access::Token(Secret::new("ghp-the-held-one".to_owned())),
+        );
+        held.variables = holding_variables(&[("HELD", "kept")]);
+        let creating = super::drafted(&draft, None, &came_back(77))
+            .expect_err("a new project holds no HELD to keep");
         assert_eq!(creating, Refusal::VariableValueMissing);
         draft.variables.clear();
-        let creating = super::drafted(&draft, None).expect("a whole draft");
-        assert_eq!(
-            creating.credential.as_ref().map(Secret::expose),
-            Some("github_pat_not_a_real_token"),
+        let creating = super::drafted(&draft, None, &came_back(77)).expect("a whole draft");
+        assert!(
+            matches!(
+                creating.access,
+                Access::Token(ref token) if token.expose() == "github_pat_not_a_real_token"
+            ),
             "trimmed, and kept"
         );
+        assert!(creating.reach_changed, "everything is new");
         assert!(creating.channels.contains_key(&Channel::Slack));
-        assert_eq!(
-            super::drafted(&draft, Some(&held))
-                .expect("typed replaces")
-                .credential
-                .as_ref()
-                .map(Secret::expose),
-            Some("github_pat_not_a_real_token")
+        assert!(
+            super::drafted(&draft, Some(&held), &came_back(77))
+                .expect("a token set replaces")
+                .reach_changed
         );
+        draft.access = AccessDraft::Token {
+            token: Some("  ".to_owned()),
+            repository: Some("https://github.com/example/aviary.git".to_owned()),
+        };
+        assert!(matches!(
+            super::drafted(&draft, Some(&held), &came_back(77)),
+            Err(Refusal::Incomplete { ref field }) if field == "access"
+        ));
+        draft.access = AccessDraft::App {
+            arrival: Some("f00d".to_owned()),
+            repository: Some("https://github.com/example/aviary".to_owned()),
+        };
+        let on_the_app = super::drafted(&draft, None, &came_back(77)).expect("a whole draft");
+        assert_eq!(on_the_app.access, Access::Installation { id: 77 });
+        assert_eq!(
+            on_the_app.repository.https(),
+            "https://github.com/example/aviary"
+        );
+        held.access
+            .insert(Platform::GitHub, Access::Installation { id: 77 });
+        assert!(
+            !super::drafted(&draft, Some(&held), &came_back(77))
+                .expect("resolved")
+                .reach_changed,
+            "the same installation on the same address, whether named by its state or held"
+        );
+        draft.access = AccessDraft::App {
+            arrival: None,
+            repository: Some("https://github.com/example/aviary".to_owned()),
+        };
+        assert!(
+            !super::drafted(&draft, Some(&held), &nothing_came_back())
+                .expect("the installation held")
+                .reach_changed
+        );
+        assert!(
+            matches!(
+                super::drafted(&draft, None, &nothing_came_back()),
+                Err(Refusal::Incomplete { ref field }) if field == "access"
+            ),
+            "a new project holds no installation to leave unsaid"
+        );
+        draft.access = AccessDraft::App {
+            arrival: Some("f00d".to_owned()),
+            repository: Some("https://github.com/example/aviary".to_owned()),
+        };
+        assert_eq!(
+            super::drafted(&draft, None, &nothing_came_back()).expect_err("no such state"),
+            Refusal::ArrivalUnknown
+        );
+        assert_eq!(
+            super::drafted(&draft, None, &minted_but_not_back()).expect_err("nothing back yet"),
+            Refusal::ArrivalUnknown
+        );
+    }
+
+    /// Installs begun, with an installation come back under the one state
+    /// the tests name.
+    fn came_back(installation: u64) -> crate::installations::Begun {
+        [(
+            "f00d".to_owned(),
+            crate::installations::Install {
+                platform: Platform::GitHub,
+                installation: Some(installation),
+            },
+        )]
+        .into()
+    }
+
+    /// No install begun at all.
+    fn nothing_came_back() -> crate::installations::Begun {
+        crate::installations::Begun::new()
+    }
+
+    /// The one state minted, with nothing come back under it yet.
+    fn minted_but_not_back() -> crate::installations::Begun {
+        [(
+            "f00d".to_owned(),
+            crate::installations::Install {
+                platform: Platform::GitHub,
+                installation: None,
+            },
+        )]
+        .into()
     }
 
     /// What a form describes becomes the project's kits, and what the domain
@@ -1436,13 +1698,26 @@ mod tests {
             Request::Create {
                 draft: Draft {
                     name: "aviary".to_owned(),
-                    credential: "ghp-not-a-real-token".to_owned(),
+                    access: AccessDraft::Token {
+                        token: Some("ghp-not-a-real-token".to_owned()),
+                        repository: Some("https://github.com/example/aviary".to_owned()),
+                    },
                     ..Draft::default()
                 },
             }
         );
         assert!(shown.contains("Create"), "{shown}");
         assert!(shown.contains("aviary"), "{shown}");
+        assert!(!shown.contains("ghp-not-a-real-token"), "{shown}");
+        let shown = format!(
+            "{:?}",
+            Request::Reaches {
+                through: stageman_wire::Through::Token {
+                    token: "ghp-not-a-real-token".to_owned(),
+                },
+            }
+        );
+        assert!(shown.contains("Reaches"), "{shown}");
         assert!(!shown.contains("ghp-not-a-real-token"), "{shown}");
 
         let named = [

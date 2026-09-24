@@ -11,7 +11,11 @@ crate beside **agent** and **channel** for the reason
 `docs/decisions/0058-a-channels-adapter-is-a-crate-beside-the-agents.md`
 added the second. Takes the setup guides out of `docs/open-questions.md`
 §Next, where the dashboard pass listed them last. Taken during that pass,
-at the three boxes on the project form that take a credential.
+at the three boxes on the project form that take a credential. Narrowed
+by `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`: a repository token is checked when it is set, in a panel of
+its own, by a listing of what it can read, and again at save by the read
+decided below, against a repository chosen from that listing rather than
+typed.
 
 ## Context
 

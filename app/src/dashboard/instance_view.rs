@@ -13,6 +13,12 @@
 //! its manifest composed on the server and minted for one attempt. The
 //! browser comes back to a path the instance answers itself, and lands
 //! here again with the App kept or the refusal said.
+//!
+//! **Installing is a link in a new tab**, and the browser lands here again
+//! with the installation kept beside the App, or the refusal said — see
+//! `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
+//! Where the App is installed is listed here, each installation
+//! forgettable while no project reaches its repository through it.
 
 use dioxus::prelude::*;
 #[cfg(feature = "server")]
@@ -21,10 +27,11 @@ use stageman_instance::{Request, Response};
 use super::error::{DashboardError, DashboardResult};
 use super::live::Live;
 use crate::ui::{
-    Button, ButtonVariant, Card, EmptyState, Field, Modal, Reference, Segmented, Skeleton,
+    BESIDE, Button, ButtonVariant, Card, EmptyState, Field, Icon, Mark, Modal, Reference,
+    Segmented, Skeleton, Tooltip,
 };
 
-pub use stageman_wire::{Apps, PlatformAppView, Registration};
+pub use stageman_wire::{Apps, InstallLink, InstallationView, PlatformAppView, Registration};
 
 /// The Apps this instance owns, and what the last registration said.
 ///
@@ -52,6 +59,22 @@ pub async fn registration(platform: String, anywhere: bool) -> DashboardResult<R
     }
 }
 
+/// Where to install the App, minted for one press: the state in the link
+/// is what the page asks by once the tab has come back — see
+/// `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
+///
+/// # Errors
+///
+/// Fails if no App is registered on the platform, or if the platform is
+/// not one this build knows.
+#[post("/api/instance/apps/install-link")]
+pub async fn install_link(platform: String) -> DashboardResult<InstallLink> {
+    match super::ask(Request::InstallLink { platform }).await? {
+        Response::InstallLink(minted) => Ok(minted),
+        other => Err(super::unexpected(&other)),
+    }
+}
+
 /// Forgets the App on a platform.
 ///
 /// # Errors
@@ -60,6 +83,20 @@ pub async fn registration(platform: String, anywhere: bool) -> DashboardResult<R
 #[post("/api/instance/apps/forget")]
 pub async fn forget_app(platform: String) -> DashboardResult<Apps> {
     match super::ask(Request::ForgetApp { platform }).await? {
+        Response::Apps(shown) => Ok(shown),
+        other => Err(super::unexpected(&other)),
+    }
+}
+
+/// Forgets one installation of the App on a platform.
+///
+/// # Errors
+///
+/// Fails if no App is registered there, if it holds no such installation,
+/// or if a project reaches its repository through it.
+#[post("/api/instance/apps/forget-installation")]
+pub async fn forget_installation(platform: String, id: u64) -> DashboardResult<Apps> {
+    match super::ask(Request::ForgetInstallation { platform, id }).await? {
         Response::Apps(shown) => Ok(shown),
         other => Err(super::unexpected(&other)),
     }
@@ -116,6 +153,9 @@ fn GitHubApp(
     onchanged: EventHandler<DashboardResult<Apps>>,
 ) -> Element {
     let mut forgetting = use_signal(|| false);
+    // Why the last press of Install could not open the platform, if the
+    // last one could not: a link the instance would not mint.
+    let mut not_opened = use_signal(|| None::<String>);
 
     rsx! {
         Card {
@@ -134,18 +174,91 @@ fn GitHubApp(
             }
             match app {
                 Some(app) => rsx! {
-                    div { class: "flex items-center gap-3",
-                        Reference {
-                            mark: "github",
-                            says: "The App on GitHub",
-                            link: Some(app.link.clone()),
+                    div { class: "flex flex-col gap-4",
+                        div { class: "flex items-center gap-3",
+                            Reference {
+                                mark: "github",
+                                says: "The App on GitHub",
+                                link: Some(app.link.clone()),
+                            }
+                            span { class: "font-mono text-sm", "{app.slug}" }
+                            span { class: "ml-auto flex items-center gap-2",
+                                Button {
+                                    variant: ButtonVariant::Danger,
+                                    onclick: move |_| forgetting.set(true),
+                                    "Forget…"
+                                }
+                            }
                         }
-                        span { class: "font-mono text-sm", "{app.slug}" }
-                        span { class: "ml-auto flex items-center gap-2",
-                            Button {
-                                variant: ButtonVariant::Danger,
-                                onclick: move |_| forgetting.set(true),
-                                "Forget…"
+                        if let Some(why) = app.install_failure.clone() {
+                            p { role: "alert", class: "text-sm text-failed",
+                                "The App was not installed: {why}"
+                            }
+                        }
+                        if let Some(why) = not_opened() {
+                            p { role: "alert", class: "text-sm text-failed", "{why}" }
+                        }
+                        // Where it is installed, as the platform has told
+                        // this instance; the way onto the platform to
+                        // install it sits at the end of the label's line,
+                        // where what adds to a list belongs.
+                        Field {
+                            label: "Installed on",
+                            note: "Where the App is installed, as GitHub brought you back to say. A project's repository is chosen from what these reach.",
+                            info: "Installing opens GitHub in a new tab: choose the account, and all of \
+                                   its repositories or some, and GitHub brings you back here. A form \
+                                   left open on a project fills its list in when you do. An \
+                                   installation nothing uses can be forgotten here; one a project \
+                                   reaches its repository through cannot, and says which.",
+                            aside: rsx! {
+                                // By script rather than a link, so that the tab
+                                // can close itself when GitHub brings it back —
+                                // see `docs/conventions.md` §3.
+                                Tooltip {
+                                    text: "Opens GitHub in a tab of its own to install this instance's \
+                                           App on an account, for some or all of its repositories. The \
+                                           tab closes itself when GitHub brings it back, and this list \
+                                           fills in.",
+                                    wrap: true,
+                                    at_end: true,
+                                    Button {
+                                        variant: ButtonVariant::Secondary,
+                                        class: "h-8.5 gap-1.5 px-2 text-xs",
+                                        aria_label: "Install the App",
+                                        // The tab in the press, the address after
+                                        // it, for the reason `open_a_tab` gives.
+                                        onclick: move |_| {
+                                            super::open_a_tab();
+                                            spawn(async move {
+                                                match install_link("github".to_owned()).await {
+                                                    Ok(minted) => {
+                                                        super::send_the_tab(&minted.link);
+                                                        not_opened.set(None);
+                                                    }
+                                                    Err(why) => {
+                                                        super::close_the_tab();
+                                                        not_opened.set(Some(why.to_string()));
+                                                    }
+                                                }
+                                            });
+                                        },
+                                        Mark { agent: "github".to_owned(), size: 14 }
+                                        "Install the App"
+                                    }
+                                }
+                            },
+                            if app.installations.is_empty() {
+                                p { class: "py-2 text-sm text-muted-foreground",
+                                    "Nowhere yet."
+                                }
+                            } else {
+                                ul { class: "divide-y divide-border",
+                                    for installation in app.installations.iter().cloned() {
+                                        li { key: "{installation.id}",
+                                            Installed { installation, onchanged }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -168,12 +281,63 @@ fn GitHubApp(
                             },
                             p { class: "text-sm text-muted-foreground",
                                 "Its key is removed from this instance. The App itself stays \
-                                 registered on GitHub until you delete it there."
+                                 registered on GitHub until you delete it there. Refused while a \
+                                 project is installed on through it."
                             }
                         }
                     }
                 },
                 None => rsx! { Registering {} },
+            }
+        }
+    }
+}
+
+/// One installation of the App: the account, what it covers, which
+/// projects reach their repository through it, and the way to forget it
+/// where nothing does.
+#[component]
+fn Installed(
+    installation: InstallationView,
+    onchanged: EventHandler<DashboardResult<Apps>>,
+) -> Element {
+    let id = installation.id;
+    let in_use = !installation.used_by.is_empty();
+    let covers = if installation.every_repository {
+        "all repositories"
+    } else {
+        "chosen repositories"
+    };
+    let used_by = installation.used_by.join(", ");
+    let forgetting_says = if in_use {
+        format!("Used by {used_by}, so it cannot be forgotten")
+    } else {
+        format!("Forget the installation on {}", installation.account)
+    };
+
+    rsx! {
+        div { class: "flex items-center gap-3 py-2 first:pt-0 last:pb-0",
+            Mark { agent: "github".to_owned(), size: 16 }
+            span { class: "text-sm font-medium", "{installation.account}" }
+            span { class: "text-xs text-muted-foreground", "{covers}" }
+            if in_use {
+                span { class: "text-xs text-muted-foreground", "used by {used_by}" }
+            }
+            span { class: "ml-auto flex items-center",
+                Tooltip { text: forgetting_says.clone(), wrap: in_use, at_end: true,
+                    Button {
+                        variant: ButtonVariant::Secondary,
+                        class: BESIDE,
+                        disabled: in_use,
+                        aria_label: "{forgetting_says}",
+                        onclick: move |_| {
+                            spawn(async move {
+                                onchanged.call(forget_installation("github".to_owned(), id).await);
+                            });
+                        },
+                        {Icon::Remove.draw(16)}
+                    }
+                }
             }
         }
     }

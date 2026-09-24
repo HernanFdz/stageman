@@ -61,6 +61,38 @@ pub use project_settings_view::{ProjectNewView, ProjectSettingsView};
 pub use projects_view::{Choice, Fitted, KitDraft, ModelChoice, Project, ProjectsView, Shape};
 pub use status_view::{Instance, Status};
 
+/// Opens a tab of this page's own, blank, in the press that asked for it:
+/// a browser opens a tab for a press and refuses one for what comes
+/// later, and the address is minted by the instance after the press, so
+/// the tab is opened first and sent on by [`send_the_tab`] once the
+/// address is known. By script rather than by a link, because a tab
+/// opened by script may be closed by script, which is what lets the page
+/// the platform brings it back to close it and return the person to where
+/// they were — see
+/// `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
+///
+/// Nothing is returned from the script, per `docs/conventions.md` §3.
+pub(crate) fn open_a_tab() {
+    let _opened = document::eval("window.stagemanTab = window.open(\"about:blank\", \"_blank\");");
+}
+
+/// Sends the tab [`open_a_tab`] opened to an address composed on the
+/// server, quoted here for the one script line.
+pub(crate) fn send_the_tab(link: &str) {
+    let quoted = link.replace('\\', "\\\\").replace('"', "\\\"");
+    let _sent = document::eval(&format!(
+        "if (window.stagemanTab) {{ window.stagemanTab.location = \"{quoted}\"; }}"
+    ));
+}
+
+/// Closes the tab [`open_a_tab`] opened, when there turned out to be
+/// nowhere to send it.
+pub(crate) fn close_the_tab() {
+    let _closed = document::eval(
+        "if (window.stagemanTab) { window.stagemanTab.close(); window.stagemanTab = null; }",
+    );
+}
+
 /// The dashboard's stylesheet.
 ///
 /// Resolved at compile time, which is the only way this framework will serve a

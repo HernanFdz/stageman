@@ -871,7 +871,7 @@ mod tests {
                 stageman_core::KitName::new("Claude").expect("a name"),
                 stageman_core::KitConfig::defaults(Agent::Claude),
             )]),
-            credentials: BTreeMap::new(),
+            access: BTreeMap::new(),
             channels,
             jobs: BTreeMap::new(),
             variables: BTreeMap::new(),

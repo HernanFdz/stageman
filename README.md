@@ -56,21 +56,30 @@ yet. You give it those in the dashboard, in that order, because a project needs
 an agent to think with and at least one **kit** its jobs can run on — an agent,
 set a particular way: which model, and how hard it thinks.
 
-**A project needs a token for its repository**: a fine-grained one, granted
-that repository alone, with contents, issues and pull requests write. The
-project's settings page links to GitHub's form with that filled in — the
-repository is the one thing the form cannot be told, so pick it there — and
-a token pasted back is checked against GitHub before it is kept, as every
-credential you give a project is: a wrong one is refused beside the box,
-rather than found by the first job that needed it.
+**A project reaches its repository one of two ways, and the repository is
+chosen from what that reaches.** With a token: press *Use a token* on the
+project's page, mint one from GitHub's form — the page links to it with
+the name and the permissions filled in; grant it the one repository
+there, with contents, issues and pull requests write — paste it, and it
+is checked against GitHub before the panel closes. Then pick the
+repository from what the token can read, each marked private or public.
+A public repository you did not grant the token is listed too, since
+anybody can read it, and fails at the first push; a private one is
+listed only because you granted it.
 
-**Or install an App instead of pasting a token.** The Instance page
-registers a GitHub App of your own by GitHub's own form, which sends you
-back here with the App's key; the key stays sealed in the instance's file
-and never leaves the machine. A project then installs the App on its
-repository rather than holding a token, and its jobs run on tokens minted
-per turn, good for an hour and for that one repository. Register it under
-your account, or under an organisation whose repositories it should reach.
+**Or install the App.** The Instance page registers a GitHub App of your
+own by GitHub's own form, which sends you back here with the App's key;
+the key stays sealed in the instance's file and never leaves the machine.
+Install it on the account your repository is under, from the project's
+own page: *Install the App* opens GitHub in a tab of its own, which closes
+itself when GitHub brings you back, and the form is on the App with what
+that installation reaches listed; pick the repository there. A second
+project on the same account presses the same control, and GitHub brings it
+back the same way. Its jobs then run on tokens minted from the
+installation, good for an hour and for that one repository, and the
+commits they make are the App's. Register it under your account, or under
+an organisation whose repositories it should reach; the Instance page
+lists every installation.
 
 **It needs nothing named in the environment either.** Its file is encrypted
 under a key, and a key cannot live in the file it protects — so on a first run

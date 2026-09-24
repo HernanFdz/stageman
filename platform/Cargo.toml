@@ -25,6 +25,16 @@ repository.workspace = true
 # For the one address this crate composes with words in it: a platform's
 # own form, filled in through its query string.
 percent-encoding = "2.3.2"
+# The App's key is a PEM, which is base64 around the key's DER, and the
+# token signed with it is base64 in the URL-safe alphabet: two encodings of
+# one crate, both already in the tree.
+base64 = "0.23.1"
+# What signs the token an App's requests are authenticated with: the same
+# cryptography the world already links for TLS, so no second library — see
+# `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
+# Signing draws randomness for blinding and changes no byte of what it
+# produces, which is what lets a scenario's trace stay exact.
+ring = "0.17.14"
 # The manifest is a struct serialised in its own field order, so that the
 # text is the same whatever a map does with its keys.
 serde = { version = "1.0.228", features = ["derive"] }

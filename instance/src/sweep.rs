@@ -560,7 +560,7 @@ mod tests {
                     KitName::new("Claude").expect("a name"),
                     KitConfig::defaults(Agent::Claude),
                 )]),
-                credentials: BTreeMap::new(),
+                access: BTreeMap::new(),
                 channels: BTreeMap::new(),
                 jobs: BTreeMap::from([(
                     job.clone(),

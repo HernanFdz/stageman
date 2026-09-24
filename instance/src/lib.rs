@@ -29,6 +29,7 @@ mod channel;
 mod checks;
 mod file;
 mod foreman;
+mod installations;
 mod jobs;
 mod listening;
 mod paths;
@@ -578,6 +579,30 @@ pub struct Running {
     exchanging: apps::Exchanging,
     /// Why the last registration was not kept, until the next one is.
     app_failure: Option<String>,
+    /// Installs begun from a page, by the state their link carried, oldest
+    /// first: which installation came back under each, once one has — see
+    /// `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
+    begun: installations::Begun,
+    /// Setup redirects being answered, by the identifier the platform's
+    /// answer carries: the browser's request held for it.
+    installs: installations::Installs,
+    /// Why the last installation was not kept, until the next one is.
+    install_failure: Option<String>,
+    /// Listings being assembled for forms, by the request each holds.
+    reaching: installations::Reachings,
+    /// Which listing each platform answer is for, by the identifier the
+    /// answer carries.
+    reaches: installations::Reaches,
+    /// Tokens minted for listing what each installation covers, until
+    /// shortly before each hour is up.
+    listing_tokens: installations::ListingTokens,
+    /// Tokens minted for projects' jobs, until shortly before each hour is
+    /// up.
+    minted: installations::Tokens,
+    /// Tokens being minted, by the identifier the answer carries.
+    minting: installations::Mintings,
+    /// Wrappers' requests waiting on a token being minted, per project.
+    awaiting_tokens: installations::Awaiting,
     /// Requests made to a channel, by the identifier the answer carries:
     /// what each was sent for.
     sent: BTreeMap<EffectId, channel::Sent>,
@@ -687,6 +712,15 @@ impl Running {
             registrations: apps::Registrations::new(),
             exchanging: apps::Exchanging::new(),
             app_failure: None,
+            begun: installations::Begun::new(),
+            installs: installations::Installs::new(),
+            install_failure: None,
+            reaching: installations::Reachings::new(),
+            reaches: installations::Reaches::new(),
+            listing_tokens: installations::ListingTokens::new(),
+            minted: installations::Tokens::new(),
+            minting: installations::Mintings::new(),
+            awaiting_tokens: installations::Awaiting::new(),
             sent: BTreeMap::new(),
             deferred: VecDeque::new(),
             immediate: Vec::new(),
@@ -1010,6 +1044,9 @@ impl Running {
                 // since each is answered to a held request rather than to a
                 // channel; everything else was sent for a channel's sake.
                 if !self.exchanged(id, &responded, &mut effects)
+                    && !self.installed_answered(id, &responded, &mut effects)
+                    && !self.reached_answered(id, &responded, &mut effects)
+                    && !self.minted_answered(id, &responded, &mut effects)
                     && !self.checked(id, &responded, &mut effects)
                 {
                     self.responded(id, &responded, at, &mut effects);
@@ -1271,6 +1308,24 @@ impl Running {
             mint(&mut self.rng).simple(),
             mint(&mut self.rng).simple()
         )
+    }
+
+    /// The account a job's checkout attributes commits to, when its
+    /// project reaches the platform through an installation of the App:
+    /// the App's bot, as the platform names it. Nothing for a token, whose
+    /// account the platform's tool is asked for — see
+    /// `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
+    fn actor_for(&self, project: ProjectId) -> Option<String> {
+        let platform = stageman_core::Platform::GitHub;
+        let watched = self.state.projects.get(&project)?;
+        match watched.access.get(&platform)? {
+            stageman_core::Access::Token(_) => None,
+            stageman_core::Access::Installation { .. } => self
+                .state
+                .apps
+                .get(&platform)
+                .map(|app| stageman_platform::bot_name(platform, &app.slug)),
+        }
     }
 
     /// Where a job's wrapper fetches its credential from, for a job that

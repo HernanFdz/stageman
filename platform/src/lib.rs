@@ -19,12 +19,13 @@
 //! name none; the module under each platform does.
 
 mod github;
+mod installation;
 mod registration;
 
 use std::collections::BTreeMap;
 
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC};
-use stageman_core::{Platform, RepositoryAddress, Secret};
+use stageman_core::{Platform, PlatformApp, RepositoryAddress, Secret, Timestamp};
 
 /// What a query string carries as it is: the unreserved characters, and
 /// nothing else. Everything else is percent-encoded, spaces included, so a
@@ -163,7 +164,156 @@ pub fn app_link(platform: Platform, slug: &str) -> String {
     }
 }
 
+pub use github::{Listing, Repository};
+pub use installation::{Installed, Minted};
 pub use registration::Registered;
+
+/// Where a person installs the App, carrying a state the platform brings
+/// back with the installation.
+///
+/// See
+/// `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
+/// The state names the page the tab was opened from and nothing about the
+/// installation, per
+/// `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`:
+/// the App's key confirms whatever comes back.
+#[must_use]
+pub fn install_link(platform: Platform, slug: &str, state: &str) -> String {
+    match platform {
+        Platform::GitHub => installation::install_link(slug, state),
+    }
+}
+
+/// Renders listing what a token can read — see
+/// `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
+#[must_use]
+pub fn readable(platform: Platform, credential: &Secret) -> Request {
+    match platform {
+        Platform::GitHub => github::readable(credential),
+    }
+}
+
+/// What the platform's answer to [`readable`] means.
+///
+/// # Errors
+///
+/// Fails if the platform does not accept the token, refused to say, could
+/// not be reached, or answered with something this does not read as a
+/// listing.
+pub fn readable_listed(
+    platform: Platform,
+    status: u16,
+    body: &[u8],
+) -> Result<Listing, PlatformError> {
+    match platform {
+        Platform::GitHub => github::readable_listed(status, body),
+    }
+}
+
+/// What the platform calls the App's own account, which commits made with
+/// an installation's token are attributed to: the slug, marked as a bot.
+#[must_use]
+pub fn bot_name(platform: Platform, slug: &str) -> String {
+    match platform {
+        Platform::GitHub => format!("{slug}[bot]"),
+    }
+}
+
+/// The path under the instance's address the browser comes back to after
+/// an installation, with the installation's identifier.
+#[must_use]
+pub const fn installed_path(platform: Platform) -> &'static str {
+    match platform {
+        Platform::GitHub => registration::INSTALLED_PATH,
+    }
+}
+
+/// Renders fetching an installation with the App's key, at `now`.
+///
+/// # Errors
+///
+/// Fails if the App's key cannot sign.
+pub fn installation(
+    platform: Platform,
+    app: &PlatformApp,
+    id: u64,
+    now: Timestamp,
+) -> Result<Request, PlatformError> {
+    match platform {
+        Platform::GitHub => installation::installation(app, id, now),
+    }
+}
+
+/// What the platform's answer to [`installation`] means, for this App.
+///
+/// # Errors
+///
+/// Fails if the installation is not this App's, if the key was refused,
+/// if the platform could not be reached, or if the answer does not read as
+/// an installation.
+pub fn installed(
+    platform: Platform,
+    app: u64,
+    status: u16,
+    body: &[u8],
+) -> Result<Installed, PlatformError> {
+    match platform {
+        Platform::GitHub => installation::installed(app, status, body),
+    }
+}
+
+/// Renders minting a token from an installation with the App's key: for
+/// the one repository named, or for everything the installation covers
+/// when none is.
+///
+/// # Errors
+///
+/// Fails if the App's key cannot sign.
+pub fn mint(
+    platform: Platform,
+    app: &PlatformApp,
+    id: u64,
+    repository: Option<&RepositoryAddress>,
+    now: Timestamp,
+) -> Result<Request, PlatformError> {
+    match platform {
+        Platform::GitHub => installation::mint(app, id, repository, now),
+    }
+}
+
+/// What the platform's answer to [`mint`] means.
+///
+/// # Errors
+///
+/// Fails if the installation is not this App's or does not cover the
+/// repository, if the key was refused, if the platform could not be
+/// reached, or if the answer does not read as a token.
+pub fn minted(platform: Platform, status: u16, body: &[u8]) -> Result<Minted, PlatformError> {
+    match platform {
+        Platform::GitHub => installation::minted(status, body),
+    }
+}
+
+/// Renders listing the repositories an installation covers, with a token
+/// minted from it.
+#[must_use]
+pub fn repositories(platform: Platform, token: &Secret) -> Request {
+    match platform {
+        Platform::GitHub => installation::repositories(token),
+    }
+}
+
+/// What the platform's answer to [`repositories`] means.
+///
+/// # Errors
+///
+/// Fails if the token was refused, if the platform could not be reached,
+/// or if the answer does not read as a listing.
+pub fn listed(platform: Platform, status: u16, body: &[u8]) -> Result<Listing, PlatformError> {
+    match platform {
+        Platform::GitHub => installation::listed(status, body),
+    }
+}
 
 /// What a person calls the platform.
 #[must_use]
@@ -196,13 +346,43 @@ pub enum Call {
         /// The code the browser came back with.
         code: String,
     },
+    /// An installation fetched with the App's key.
+    Installation {
+        /// Which platform.
+        platform: Platform,
+        /// The installation's identifier.
+        id: u64,
+    },
+    /// A token minted from an installation with the App's key.
+    Mint {
+        /// Which platform.
+        platform: Platform,
+        /// The installation's identifier.
+        id: u64,
+        /// The repositories it is restricted to, by name; none for a token
+        /// covering everything the installation does.
+        repositories: Vec<String>,
+    },
+    /// The repositories an installation covers, listed with a token
+    /// minted from it.
+    Repositories {
+        /// Which platform.
+        platform: Platform,
+    },
+    /// What a token can read, listed with it.
+    Readable {
+        /// Which platform.
+        platform: Platform,
+    },
 }
 
 impl Call {
     /// What a request asks, if it is one this crate renders.
     #[must_use]
     pub fn parse(request: &Request) -> Option<Self> {
-        github::call(request).or_else(|| registration::call(request))
+        github::call(request)
+            .or_else(|| registration::call(request))
+            .or_else(|| installation::call(request))
     }
 }
 
@@ -265,6 +445,28 @@ pub enum PlatformError {
         /// Which platform.
         platform: Platform,
     },
+    /// The App's key could not sign, or could not be read.
+    #[error("the App's key on {} could not be used: {why}", shown(*.platform))]
+    Key {
+        /// Which platform.
+        platform: Platform,
+        /// What was wrong with it.
+        why: String,
+    },
+    /// It answered, and knows no installation by that identifier for this
+    /// App: the identifier the redirect carried is not one of this App's,
+    /// or the installation has since been removed.
+    #[error("{} knows no installation with that identifier for this App", shown(*.platform))]
+    NoSuchInstallation {
+        /// Which platform.
+        platform: Platform,
+    },
+    /// It answered with an installation that names another App.
+    #[error("that installation belongs to another App on {}", shown(*.platform))]
+    Foreign {
+        /// Which platform.
+        platform: Platform,
+    },
     /// It answered with something this cannot read.
     #[error("{} answered something unreadable: {why}", shown(*.platform))]
     Unreadable {
@@ -288,10 +490,396 @@ impl PlatformError {
 #[cfg(test)]
 mod tests {
     use super::{
-        Call, PlatformError, app_link, exchange, manifest, reach, reached, register_form,
-        registered, shown, token_form,
+        Call, PlatformError, app_link, bot_name, exchange, install_link, installation, installed,
+        installed_path, listed, manifest, mint, minted, reach, reached, readable, readable_listed,
+        register_form, registered, repositories, shown, token_form,
     };
-    use stageman_core::{Platform, RepositoryAddress, Secret};
+    use stageman_core::{Platform, PlatformApp, RepositoryAddress, Secret, Timestamp};
+
+    /// A key made for these tests and used for nothing, in the shape the
+    /// platform hands out: what the simulated App signs with.
+    pub const TEST_KEY: &str = "-----BEGIN RSA PRIVATE KEY-----\n\
+         MIIEpAIBAAKCAQEAv48aiq9x2RBccn267zi6TArEnVXppTczV2jP6z4mRT06Pk4n\n\
+         s9QqKi+t/cSfX+9cgVFj/UHvB43UwZm8ZbcnyZhg5BdOF8m+POt79O4AbJWtlCQF\n\
+         fdBhmAvn685Mak+9mI+VQbboU86Xf2bhJl48kuaiqP6YPpo8MCA9xnjMn1+8OiOr\n\
+         Er5X/hmMVv7tIIaipeEAl6WEYifX+SD1B5WU8TsYImB/2pviNKhdZ4m5hCZ3z1fU\n\
+         zJkv/0eSiJtq1hZ8c3BoY4d4sAfzETnNmmhVIc2E8Zfvs8tyZuZocyudOiqlz7O3\n\
+         7Z4DwDjHc6WM1f4GFblxWMpq9jR/lb1E6WBtUwIDAQABAoIBAQCsuIeiDNeGdO4m\n\
+         fZ+UG34/GmZ1xwVI5yDv652t6vfu7moZy7aYuvDZ4OvtKODbS6QJJi4WKOEx2ny/\n\
+         o7Lvs9m4OCEFCM5tPIa/v0ShcAgJ4FwGewRIkR+uTO3s/LKCGSxG5xAZlKafCmQn\n\
+         h8fzJH1Rp4t6/TShHcivTCLnVfyKpeRe1LPFCWm0M6smwzaQZZ5zwjes3OemrHBm\n\
+         gVkmh656n14ESmAu5n1htza/J3nlsa4l4UitRbPhHRnaTyr80oQgwy6eeioNtdy6\n\
+         63w29/Q9Thc4koUGsd09nIKlaFUCDMVUU3CtwAtli10Lf5tr3Ivgj3t3gOjlejlr\n\
+         5/nUxPihAoGBAN/9BCjjYiLhjkuYqK0VF8rI74BjseSJZJTDW2bpjL9ugRtNRahW\n\
+         OiXhBSQ0KbgjjZWiKlEVFMDicN1p6MXfuPncJcm+Yp5+vnnIVtl3fi6SGWn0w9VE\n\
+         LB0XIBEJArkE8B6ZRppyzNwhD7iKrfQNWzUiw4k9PMYMjc2rsuZJSYvdAoGBANrv\n\
+         mzDnpeU8TUma+ccBAAwRsI3y4QurRiJtpl1WQ2JQve+Tyl1GAOIV5GDN55UMmxW/\n\
+         zNfAQhOfAl0Ok9hlBWxTkrXtjt5IXpZOp/hEcgNBw+yn6Ml8x6P8ta/wlaMgpsjZ\n\
+         ijku+4lMQ6Wbb09CbHlP3Rdv8Ya7k8+tEkObOaLvAoGAIcHLH7JtNt6RiHkgar10\n\
+         EX7JAauEwvGl8/mhS9hE+xDXalrx9ZXRO6Y3FSa7ZuIM05FWGVQ5BXzbD7OHflLi\n\
+         WN3B4C7ORB7L7CSyWiH1JWWlaN+XqAuXLmcu0QJvo5zH54SoLFzC3SYqbWCRKOfe\n\
+         aBquJ3/QKfT4ZhfLZYOEDw0CgYEAyBMdnLSlK3dPHgvNZWppk5363c3ukU5lGoNf\n\
+         /H4fuFIXMUC7N0AJAJOHEFw63UAW3epYlXYyLGIss8PlomS3bwZ01WMSI9q47d1V\n\
+         rRFHq+hG1xefKbqpaxg/JVjUNq5ZHMWIhreD0TXrwATq1ODb5oTwhEGd1EXJT4lX\n\
+         XocVResCgYBam6iJqyhk3ExJ0eu4MT5sWdeqliLd5NRZ/XLIBQ2fuiZU1nFSbgIz\n\
+         nFaZU3jL1az+IsGuqjcB+GwqFt0P9HolFKfaK4y2xiH9UaEI08AqEZqDRB2VMNOv\n\
+         W3w9IvDekeaSfWp+tELfYbY3v+k+BDpTlHTKyIX9QiKEv+UAjjRo3A==\n\
+         -----END RSA PRIVATE KEY-----\n";
+
+    fn app() -> PlatformApp {
+        PlatformApp {
+            id: 4242,
+            slug: "stageman-sim".to_owned(),
+            client_id: "Iv1.sim".to_owned(),
+            private_key: Secret::new(TEST_KEY.to_owned()),
+            installations: std::collections::BTreeMap::new(),
+        }
+    }
+
+    fn at() -> Timestamp {
+        Timestamp::from_second(1_790_000_000).expect("a time")
+    }
+
+    /// The bearer an App's request carries.
+    fn bearer(request: &super::Request) -> String {
+        request
+            .headers
+            .get("authorization")
+            .and_then(|header| header.strip_prefix("Bearer "))
+            .expect("a bearer")
+            .to_owned()
+    }
+
+    /// The token is three parts the platform documents, signed with the
+    /// App's key so that its own public half verifies it, and the same
+    /// twice for the same instant.
+    #[test]
+    fn a_token_is_signed_for_the_app_and_verifies_with_its_key() {
+        use base64::Engine as _;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+        let asking = installation(Platform::GitHub, &app(), 77, at()).expect("signs");
+        let token = bearer(&asking);
+        let parts: Vec<&str> = token.split('.').collect();
+        assert_eq!(parts.len(), 3, "{token}");
+        assert_eq!(
+            String::from_utf8(URL_SAFE_NO_PAD.decode(parts[0]).expect("base64")).expect("text"),
+            r#"{"alg":"RS256","typ":"JWT"}"#
+        );
+        assert_eq!(
+            String::from_utf8(URL_SAFE_NO_PAD.decode(parts[1]).expect("base64")).expect("text"),
+            r#"{"iat":1789999940,"exp":1790000600,"iss":"Iv1.sim"}"#,
+            "issued a minute back, good for ten, by the client identifier"
+        );
+        let signature = URL_SAFE_NO_PAD.decode(parts[2]).expect("base64");
+        let der = super::installation::der_of(TEST_KEY).expect("the test key is a PEM");
+        let pair = ring::signature::RsaKeyPair::from_der(&der).expect("the test key reads");
+        ring::signature::UnparsedPublicKey::new(
+            &ring::signature::RSA_PKCS1_2048_8192_SHA256,
+            pair.public().as_ref(),
+        )
+        .verify(format!("{}.{}", parts[0], parts[1]).as_bytes(), &signature)
+        .expect("the App's own public key verifies what its private key signed");
+
+        let again = installation(Platform::GitHub, &app(), 77, at()).expect("signs");
+        assert_eq!(bearer(&again), token, "signing is deterministic");
+    }
+
+    /// A key that is not the PEM the platform hands out cannot sign, and
+    /// says so before anything is asked.
+    #[test]
+    fn a_key_that_is_not_the_platforms_pem_is_refused() {
+        for broken in [
+            "-----BEGIN RSA PRIVATE KEY-----\nk\n-----END RSA PRIVATE KEY-----\n",
+            "not a key",
+            "",
+        ] {
+            let mut app = app();
+            app.private_key = Secret::new(broken.to_owned());
+            assert!(
+                matches!(
+                    installation(Platform::GitHub, &app, 77, at()),
+                    Err(PlatformError::Key { .. })
+                ),
+                "{broken:?}"
+            );
+        }
+        assert_eq!(
+            PlatformError::Key {
+                platform: Platform::GitHub,
+                why: "it would not sign".to_owned()
+            }
+            .to_string(),
+            "the App's key on GitHub could not be used: it would not sign"
+        );
+    }
+
+    /// An installation is fetched with the key, reads back as what it
+    /// asked, and is read as this App's or refused: by the platform, which
+    /// knows no installation of another App's under the key, or by the
+    /// answer naming another App.
+    #[test]
+    fn an_installation_is_fetched_with_the_key_and_read_as_this_apps_or_refused() {
+        let asking = installation(Platform::GitHub, &app(), 77, at()).expect("signs");
+        assert_eq!(asking.method, "GET");
+        assert_eq!(asking.url, "https://api.github.com/app/installations/77");
+        assert_eq!(
+            Call::parse(&asking),
+            Some(Call::Installation {
+                platform: Platform::GitHub,
+                id: 77,
+            })
+        );
+        let read =
+            |status: u16, body: &str| installed(Platform::GitHub, 4242, status, body.as_bytes());
+        assert_eq!(
+            read(
+                200,
+                r#"{"id":77,"app_id":4242,"account":{"login":"example"},"repository_selection":"selected"}"#
+            ),
+            Ok(super::Installed {
+                id: 77,
+                account: "example".to_owned(),
+                every_repository: false,
+            })
+        );
+        assert_eq!(
+            read(
+                200,
+                r#"{"id":77,"app_id":9999,"account":{"login":"example"},"repository_selection":"all"}"#
+            ),
+            Err(PlatformError::Foreign {
+                platform: Platform::GitHub
+            })
+        );
+        assert_eq!(
+            read(404, r#"{"message":"Not Found"}"#),
+            Err(PlatformError::NoSuchInstallation {
+                platform: Platform::GitHub
+            })
+        );
+        assert_eq!(
+            read(401, r#"{"message":"Bad credentials"}"#),
+            Err(PlatformError::Refused {
+                platform: Platform::GitHub
+            })
+        );
+        assert_eq!(
+            read(200, r#"{"app_id":4242}"#),
+            Err(PlatformError::Unreadable {
+                platform: Platform::GitHub,
+                why: "the installation came without its id".to_owned(),
+            })
+        );
+        assert_eq!(
+            PlatformError::NoSuchInstallation {
+                platform: Platform::GitHub
+            }
+            .to_string(),
+            "GitHub knows no installation with that identifier for this App"
+        );
+        assert_eq!(
+            PlatformError::Foreign {
+                platform: Platform::GitHub
+            }
+            .to_string(),
+            "that installation belongs to another App on GitHub"
+        );
+    }
+
+    /// A token is minted for the one repository named with the App's own
+    /// permissions, or for everything the installation covers when none
+    /// is, and read with its expiry.
+    #[test]
+    fn a_token_is_minted_for_one_repository_and_read() {
+        let asking = mint(Platform::GitHub, &app(), 77, Some(&repository()), at()).expect("signs");
+        assert_eq!(asking.method, "POST");
+        assert_eq!(
+            asking.url,
+            "https://api.github.com/app/installations/77/access_tokens"
+        );
+        assert_eq!(
+            asking.body.as_deref().map(String::from_utf8_lossy),
+            Some(
+                r#"{"repositories":["name"],"permissions":{"contents":"write","issues":"write","pull_requests":"write","metadata":"read"}}"#
+                    .into()
+            )
+        );
+        assert_eq!(
+            asking.headers.get("content-type").map(String::as_str),
+            Some("application/json")
+        );
+        assert_eq!(
+            Call::parse(&asking),
+            Some(Call::Mint {
+                platform: Platform::GitHub,
+                id: 77,
+                repositories: vec!["name".to_owned()],
+            })
+        );
+        let everything = mint(Platform::GitHub, &app(), 77, None, at()).expect("signs");
+        assert_eq!(everything.body, None);
+        assert_eq!(
+            Call::parse(&everything),
+            Some(Call::Mint {
+                platform: Platform::GitHub,
+                id: 77,
+                repositories: Vec::new(),
+            })
+        );
+
+        let read = minted(
+            Platform::GitHub,
+            201,
+            br#"{"token":"ghs_not_a_real_token","expires_at":"2026-09-24T08:00:00Z","permissions":{"contents":"write"}}"#,
+        )
+        .expect("a token");
+        assert_eq!(read.token.expose(), "ghs_not_a_real_token");
+        assert_eq!(
+            read.expires,
+            "2026-09-24T08:00:00Z".parse::<Timestamp>().expect("a time")
+        );
+        assert_eq!(
+            minted(
+                Platform::GitHub,
+                422,
+                br#"{"message":"There is at least one repository that does not exist or is not accessible to the parent installation."}"#
+            )
+            .err(),
+            Some(PlatformError::Forbidden {
+                platform: Platform::GitHub,
+                why: "There is at least one repository that does not exist or is not accessible to the parent installation.".to_owned(),
+            })
+        );
+        assert!(matches!(
+            minted(Platform::GitHub, 201, br#"{"token":"ghs_x"}"#).err(),
+            Some(PlatformError::Unreadable { .. })
+        ));
+    }
+
+    /// The repositories an installation covers are listed with a token
+    /// minted from it, one page at most, and read as addresses with their
+    /// visibility, skipping what is not an address and saying whether
+    /// more were left out.
+    #[test]
+    fn the_installations_repositories_are_listed_and_read() {
+        let asking = repositories(Platform::GitHub, &Secret::new("ghs_x".to_owned()));
+        assert_eq!(asking.method, "GET");
+        assert_eq!(
+            asking.url,
+            "https://api.github.com/installation/repositories?per_page=100"
+        );
+        assert_eq!(bearer(&asking), "ghs_x");
+        assert_eq!(
+            Call::parse(&asking),
+            Some(Call::Repositories {
+                platform: Platform::GitHub
+            })
+        );
+        let read = listed(
+            Platform::GitHub,
+            200,
+            br#"{"total_count":4,"repositories":[{"html_url":"https://github.com/example/a","private":true},{"html_url":"https://github.com/example/b","private":false},{"html_url":"not-an-address"}]}"#,
+        )
+        .expect("a listing");
+        assert_eq!(
+            read.repositories
+                .iter()
+                .map(|repository| (repository.address.https(), repository.private))
+                .collect::<Vec<_>>(),
+            [
+                ("https://github.com/example/a".to_owned(), true),
+                ("https://github.com/example/b".to_owned(), false)
+            ]
+        );
+        assert!(read.more, "four covered, three listed, two read");
+        let whole = listed(
+            Platform::GitHub,
+            200,
+            br#"{"total_count":1,"repositories":[{"html_url":"https://github.com/example/a"}]}"#,
+        )
+        .expect("a listing");
+        assert!(!whole.more);
+        assert!(matches!(
+            listed(Platform::GitHub, 200, b"{}").err(),
+            Some(PlatformError::Unreadable { .. })
+        ));
+    }
+
+    /// What a token can read is listed with it, one page at most, and
+    /// read as addresses with their visibility; a full page says there
+    /// was more, and a token the platform does not accept is refused.
+    #[test]
+    fn what_a_token_can_read_is_listed_and_read() {
+        let asking = readable(
+            Platform::GitHub,
+            &Secret::new("github_pat_not_a_real_token".to_owned()),
+        );
+        assert_eq!(asking.method, "GET");
+        assert_eq!(asking.url, "https://api.github.com/user/repos?per_page=100");
+        assert_eq!(bearer(&asking), "github_pat_not_a_real_token");
+        assert_eq!(
+            Call::parse(&asking),
+            Some(Call::Readable {
+                platform: Platform::GitHub
+            })
+        );
+        let read = readable_listed(
+            Platform::GitHub,
+            200,
+            br#"[{"html_url":"https://github.com/example/a","private":true},{"html_url":"https://github.com/example/b","private":false},{"html_url":"not-an-address"}]"#,
+        )
+        .expect("a listing");
+        assert_eq!(
+            read.repositories
+                .iter()
+                .map(|repository| (repository.address.https(), repository.private))
+                .collect::<Vec<_>>(),
+            [
+                ("https://github.com/example/a".to_owned(), true),
+                ("https://github.com/example/b".to_owned(), false)
+            ]
+        );
+        assert!(!read.more, "two listed, of a page of a hundred");
+        let page: Vec<String> = (0..100)
+            .map(|n| format!(r#"{{"html_url":"https://github.com/example/r{n}","private":false}}"#))
+            .collect();
+        let full = readable_listed(
+            Platform::GitHub,
+            200,
+            format!("[{}]", page.join(",")).as_bytes(),
+        )
+        .expect("a full page");
+        assert!(full.more, "a full page says there was more");
+        assert_eq!(
+            readable_listed(Platform::GitHub, 401, br#"{"message":"Bad credentials"}"#),
+            Err(PlatformError::Refused {
+                platform: Platform::GitHub
+            })
+        );
+        assert!(matches!(
+            readable_listed(Platform::GitHub, 200, b"{}").err(),
+            Some(PlatformError::Unreadable { .. })
+        ));
+    }
+
+    /// Where a person installs the App and where they come back to, and
+    /// what the App's own account is called.
+    #[test]
+    fn the_install_link_names_the_app() {
+        assert_eq!(
+            install_link(Platform::GitHub, "stageman-sim", "f00d"),
+            "https://github.com/apps/stageman-sim/installations/new?state=f00d"
+        );
+        assert_eq!(
+            installed_path(Platform::GitHub),
+            "/instance/apps/github/installed"
+        );
+        assert_eq!(
+            bot_name(Platform::GitHub, "stageman-sim"),
+            "stageman-sim[bot]"
+        );
+    }
 
     /// The manifest, asserted whole per `docs/conventions.md` §4: a
     /// document this project composes. No webhook in it, for the reason the
