@@ -640,10 +640,10 @@ fn a_project(jobs: BTreeMap<JobId, Job>, bound: bool) -> Project {
     if bound {
         channels.insert(
             Channel::Slack,
-            ChannelConfig {
+            stageman_core::Binding::Own(ChannelConfig {
                 credential: Secret::new("xoxb-not-a-real-token".to_owned()),
                 listen_credential: Secret::new("xapp-not-a-real-token".to_owned()),
-            },
+            }),
         );
     }
     Project {

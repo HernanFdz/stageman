@@ -398,10 +398,10 @@ fn watching(name: &str, repository: &str) -> State {
                 access: BTreeMap::new(),
                 channels: BTreeMap::from([(
                     Channel::Slack,
-                    ChannelConfig {
+                    stageman_core::Binding::Own(ChannelConfig {
                         credential: Secret::new(CHANNEL_CREDENTIAL.to_owned()),
                         listen_credential: Secret::new(LISTEN_CREDENTIAL.to_owned()),
-                    },
+                    }),
                 )]),
                 variables: BTreeMap::from([(
                     stageman_core::VariableName::new("STRIPE_API_KEY").expect("a deliverable name"),

@@ -856,10 +856,10 @@ mod tests {
         let channels = if bound {
             BTreeMap::from([(
                 Channel::Slack,
-                ChannelConfig {
+                stageman_core::Binding::Own(ChannelConfig {
                     credential: Secret::new("xoxb-token".to_owned()),
                     listen_credential: Secret::new("xapp-token".to_owned()),
-                },
+                }),
             )])
         } else {
             BTreeMap::new()

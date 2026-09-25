@@ -3453,10 +3453,10 @@ mod tests {
             .channels
             .insert(
                 Channel::Slack,
-                stageman_core::ChannelConfig {
+                stageman_core::Binding::Own(stageman_core::ChannelConfig {
                     credential: Secret::new("xoxb-not-a-real-token".to_owned()),
                     listen_credential: Secret::new("xapp-not-a-real-token".to_owned()),
-                },
+                }),
             );
         (state, id)
     }

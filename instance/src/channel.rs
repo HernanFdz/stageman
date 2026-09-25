@@ -456,8 +456,8 @@ impl Running {
         let Some((channel, speaking, room)) =
             self.state.projects.get(&project).and_then(|watched| {
                 let room = watched.foreman_room.clone()?;
-                let bound = watched.channels.get(&room.channel)?;
-                Some((room.channel, bound.speaking(), room.id))
+                let speaking = self.state.speaking(project, room.channel)?;
+                Some((room.channel, speaking, room.id))
             })
         else {
             return;
@@ -521,8 +521,8 @@ impl Running {
         let Some((channel, speaking, room)) =
             self.state.projects.get(&project).and_then(|watched| {
                 let room = watched.jobs.get(job)?.room.clone()?;
-                let bound = watched.channels.get(&room.channel)?;
-                Some((room.channel, bound.speaking(), room.id))
+                let speaking = self.state.speaking(project, room.channel)?;
+                Some((room.channel, speaking, room.id))
             })
         else {
             return;

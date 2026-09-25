@@ -710,6 +710,9 @@ pub fn from_inconsistent(reason: &Inconsistent) -> Refusal {
         Inconsistent::UnknownInstallation { installation, .. } => {
             Refusal::NoSuchInstallation { id: *installation }
         }
+        Inconsistent::UnknownWorkspace { workspace, .. } => Refusal::NoSuchWorkspace {
+            id: workspace.clone(),
+        },
     }
 }
 

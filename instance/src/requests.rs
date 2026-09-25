@@ -14,8 +14,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use stageman_core::{
-    Access, AgentConfig, Channel, ChannelConfig, JobId, Kit, KitConfig, KitName, Outcome, Platform,
-    Progress, Project, ProjectId, RepositoryAddress, Secret, State, Variable, VariableName,
+    Access, AgentConfig, Binding, Channel, ChannelConfig, JobId, Kit, KitConfig, KitName, Outcome,
+    Platform, Progress, Project, ProjectId, RepositoryAddress, Secret, State, Variable,
+    VariableName,
 };
 use stageman_wire::{
     AccessDraft, ChannelDraft, Draft, Ending, KitDraft, Refusal, Through, VariableDraft,
@@ -493,7 +494,12 @@ impl Running {
                 foreman_kit,
                 kits,
                 access: BTreeMap::from([(Platform::GitHub, access)]),
-                channels,
+                // A draft's bindings are apps of the project's own; a
+                // workspace of the instance's app comes to a form later.
+                channels: channels
+                    .into_iter()
+                    .map(|(channel, config)| (channel, Binding::Own(config)))
+                    .collect(),
                 variables,
                 jobs: BTreeMap::new(),
                 attending: stageman_core::Attending::default(),
@@ -1308,10 +1314,10 @@ mod tests {
             .insert(Platform::GitHub, token("ghp-the-old-one"));
         project.channels.insert(
             Channel::Slack,
-            ChannelConfig {
+            stageman_core::Binding::Own(ChannelConfig {
                 credential: Secret::new("xoxb-not-a-real-token".to_owned()),
                 listen_credential: Secret::new("xapp-token".to_owned()),
-            },
+            }),
         );
         let deep = KitConfig {
             description: "refactors touching many files".to_owned(),

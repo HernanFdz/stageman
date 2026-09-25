@@ -407,26 +407,27 @@ pub fn pull_requests_of(state: &State, job: &JobId) -> Vec<String> {
 pub fn speaking_for(state: &State, job: &JobId) -> Option<(Speaking, Place)> {
     let project = state.project_of(job)?;
     let room = state.job(job)?.room.clone()?;
-    let bound = state
-        .projects
-        .get(&project)?
-        .channels
-        .get(&room.channel)?
-        .speaking();
+    let bound = state.speaking(project, room.channel)?;
     Some((bound, Place::root(room)))
 }
 
-/// What to listen to on one project, if it has a binding.
+/// What to listen to on one project's own app, if its binding is one.
 ///
-/// None only for a project the last release wrote without one, which is
+/// None for a project the last release wrote without a binding, which is
 /// named at startup — see `unbound` in the boot — so that its silence is not
-/// mistaken for a platform that has sent nothing.
+/// mistaken for a platform that has sent nothing; and none for a project
+/// speaking through a workspace of the instance's app, whose stream is the
+/// app's and listened to once for every such project — see
+/// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
 pub fn listening_on(project: &Project) -> Option<(Channel, Secret, Speaking)> {
     project
         .channels
         .iter()
         .next()
-        .map(|(channel, bound)| (*channel, bound.listen_credential.clone(), bound.speaking()))
+        .and_then(|(channel, binding)| {
+            let bound = binding.own()?;
+            Some((*channel, bound.listen_credential.clone(), bound.speaking()))
+        })
 }
 
 /// A failure and everything underneath it, as one line of prose.
@@ -1450,10 +1451,10 @@ mod tests {
             .channels
             .insert(
                 Channel::Slack,
-                ChannelConfig {
+                stageman_core::Binding::Own(ChannelConfig {
                     credential: Secret::new("xoxb-not-a-real-token".to_owned()),
                     listen_credential: Secret::new("xapp-not-a-real-token".to_owned()),
-                },
+                }),
             );
         let (bound, place) = speaking_for(&state, &job).expect("somewhere to speak");
         assert_eq!(bound.credential.expose(), "xoxb-not-a-real-token");

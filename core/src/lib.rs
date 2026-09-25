@@ -1004,7 +1004,7 @@ pub enum Channel {
 /// Deriving `Debug` is safe and deliberate. Both credentials redact
 /// themselves, so there is nothing here for a hand-written formatter to hide
 /// that the field types do not already.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelConfig {
     /// What the channel is reached with.
     ///
@@ -1028,6 +1028,48 @@ pub struct ChannelConfig {
     /// a project that speaks and is never answered is a project whose jobs
     /// wait for answers that have no way to arrive.
     pub listen_credential: Secret,
+}
+
+/// How a project is bound to a channel.
+///
+/// Through an app of its own, or through a workspace the instance's app on
+/// that channel is installed on — see
+/// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+/// One of two shapes, and a project holds one per channel. Whichever it
+/// holds, a job is handed the credential that speaks and never the one that
+/// listens: [`State::speaking`] resolves the first through the app where
+/// the binding is a workspace, and the second belongs to the app and never
+/// to a project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Binding {
+    /// An app the project owns, with both credentials pasted: what every
+    /// project had before the instance owned an app.
+    Own(ChannelConfig),
+    /// A workspace the instance's app is installed on, by the workspace's
+    /// identifier on the platform: the credential that speaks is the
+    /// workspace's bot token, kept beside the app, and the one that listens
+    /// is the app's.
+    Workspace(String),
+}
+
+impl Binding {
+    /// The app of its own, where the binding is one.
+    #[must_use]
+    pub const fn own(&self) -> Option<&ChannelConfig> {
+        match self {
+            Self::Own(config) => Some(config),
+            Self::Workspace(_) => None,
+        }
+    }
+
+    /// The workspace, where the binding is one.
+    #[must_use]
+    pub fn workspace(&self) -> Option<&str> {
+        match self {
+            Self::Own(_) => None,
+            Self::Workspace(team) => Some(team),
+        }
+    }
 }
 
 /// One room on a channel: for Slack, one Slack channel.
@@ -1809,7 +1851,7 @@ pub struct Project {
     /// open a file over a missing binding would put the repair behind the
     /// door it locks. Such a project is named at startup and can start no
     /// job until one is bound.
-    pub channels: BTreeMap<Channel, ChannelConfig>,
+    pub channels: BTreeMap<Channel, Binding>,
     /// The rooms its foreman watches: where another app's message is a
     /// signal rather than nothing, per
     /// `docs/decisions/0063-another-app-is-heard-in-a-watched-room.md`.
@@ -1927,6 +1969,39 @@ impl State {
             .map(|(id, _)| *id)
     }
 
+    /// The credential that speaks for a project on a channel, whichever
+    /// shape its binding is.
+    ///
+    /// Its own app's, or its workspace's bot token from the instance's app —
+    /// see `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+    /// None where the project has no binding on the channel, or names a
+    /// workspace the app does not hold, which [`State::check`] refuses.
+    #[must_use]
+    pub fn speaking(&self, project: ProjectId, channel: Channel) -> Option<Speaking> {
+        match self.projects.get(&project)?.channels.get(&channel)? {
+            Binding::Own(config) => Some(config.speaking()),
+            Binding::Workspace(team) => {
+                self.channel_apps
+                    .get(&channel)?
+                    .workspaces
+                    .get(team)
+                    .map(|workspace| Speaking {
+                        credential: workspace.bot_token.clone(),
+                    })
+            }
+        }
+    }
+
+    /// The projects bound to a workspace of the instance's app on a
+    /// channel: the candidates a message from that workspace is routed
+    /// among.
+    pub fn bound_to(&self, channel: Channel, team: &str) -> impl Iterator<Item = ProjectId> + '_ {
+        let team = team.to_owned();
+        self.projects.iter().filter_map(move |(id, project)| {
+            (project.channels.get(&channel)?.workspace()? == team).then_some(*id)
+        })
+    }
+
     /// Whether this describes an instance that can exist.
     ///
     /// The invariant `docs/decisions/0021-an-instance-starts-empty.md` moved
@@ -1978,6 +2053,19 @@ impl State {
                     return Err(Inconsistent::UnknownInstallation {
                         project: *id,
                         installation: *installation,
+                    });
+                }
+            }
+            for (channel, binding) in &project.channels {
+                if let Binding::Workspace(team) = binding
+                    && !self
+                        .channel_apps
+                        .get(channel)
+                        .is_some_and(|app| app.workspaces.contains_key(team))
+                {
+                    return Err(Inconsistent::UnknownWorkspace {
+                        project: *id,
+                        workspace: team.clone(),
                     });
                 }
             }
@@ -2204,14 +2292,19 @@ impl State {
                 let channels = project
                     .channels
                     .iter()
-                    .map(|(channel, config)| {
+                    .map(|(channel, binding)| {
                         Ok((
                             *channel,
-                            SealedChannelConfig {
-                                credential: config.credential.seal(key, nonces())?,
-                                listen_credential: Some(
-                                    config.listen_credential.seal(key, nonces())?,
-                                ),
+                            match binding {
+                                Binding::Own(config) => SealedBinding::Own(SealedChannelConfig {
+                                    credential: config.credential.seal(key, nonces())?,
+                                    listen_credential: Some(
+                                        config.listen_credential.seal(key, nonces())?,
+                                    ),
+                                }),
+                                Binding::Workspace(team) => SealedBinding::Workspace {
+                                    workspace: team.clone(),
+                                },
                             },
                         ))
                     })
@@ -2396,6 +2489,16 @@ pub enum Inconsistent {
         project: ProjectId,
         /// The installation it names.
         installation: u64,
+    },
+    /// A project speaks through a workspace the instance's app is not
+    /// installed on — or holds no app at all — see
+    /// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+    #[error("project {project} names workspace {workspace}, which the app is not installed on")]
+    UnknownWorkspace {
+        /// The project holding the dangling reference.
+        project: ProjectId,
+        /// The workspace it names.
+        workspace: String,
     },
 }
 
@@ -2726,6 +2829,26 @@ pub struct SealedWorkspace {
     pub bot_token: SealedSecret,
 }
 
+/// A binding as it appears on disk.
+///
+/// An app of the project's own, written as the last release wrote it, or a
+/// workspace of the instance's app by its identifier — see
+/// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+/// Untagged, so that the pair the last release wrote reads as the first
+/// shape with nothing added, and the second is told apart by the one field
+/// it has.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SealedBinding {
+    /// An app of the project's own.
+    Own(SealedChannelConfig),
+    /// A workspace of the instance's app.
+    Workspace {
+        /// The workspace's identifier on the platform.
+        workspace: String,
+    },
+}
+
 /// A channel binding as it appears on disk.
 ///
 /// The last release wrote an `address` beside these, the one room a project
@@ -2920,7 +3043,7 @@ pub struct SealedProject {
     /// existed described a project that had none, and a project with none is
     /// valid.
     #[serde(default)]
-    pub channels: BTreeMap<Channel, SealedChannelConfig>,
+    pub channels: BTreeMap<Channel, SealedBinding>,
     /// The rooms its foreman watches, which hold nothing needing sealing.
     ///
     /// Defaulted, because it was added after snapshots existed, and empty
@@ -3139,16 +3262,23 @@ impl SealedProject {
         let channels = self
             .channels
             .into_iter()
-            .filter_map(|(channel, sealed)| {
-                let listening = sealed.listen_credential?;
-                Some((channel, sealed.credential, listening))
+            .filter_map(|(channel, sealed)| match sealed {
+                SealedBinding::Own(sealed) => {
+                    let listening = sealed.listen_credential?;
+                    Some((channel, Some((sealed.credential, listening)), None))
+                }
+                SealedBinding::Workspace { workspace } => Some((channel, None, Some(workspace))),
             })
-            .map(|(channel, credential, listening)| {
+            .map(|(channel, own, workspace)| {
                 Ok((
                     channel,
-                    ChannelConfig {
-                        credential: credential.open(key)?,
-                        listen_credential: listening.open(key)?,
+                    match (own, workspace) {
+                        (Some((credential, listening)), _) => Binding::Own(ChannelConfig {
+                            credential: credential.open(key)?,
+                            listen_credential: listening.open(key)?,
+                        }),
+                        (None, Some(team)) => Binding::Workspace(team),
+                        (None, None) => return Err(OpenError::Encoding),
                     },
                 ))
             })
@@ -3491,7 +3621,7 @@ impl Handout {
             // project's credentials for third parties are the clearest
             // possible example of something it has no business holding.
             variables: BTreeMap::new(),
-            channels: speaking(watching),
+            channels: speaking(state, project),
             // Narrowed by [`Handout::speaking_in`] to the thread of the
             // message being answered, every turn; nothing is fixed here.
             place: None,
@@ -3532,19 +3662,19 @@ impl Handout {
             .agents
             .get(&agent)
             .ok_or(HandoutError::UnconfiguredAgent(agent))?;
-        let project = state
+        let watched = state
             .projects
             .get(&project)
             .ok_or(HandoutError::UnknownProject(project))?;
         Ok(Self {
             kit,
             role: Role::Job,
-            repository: Some(project.repository.https()),
+            repository: Some(watched.repository.https()),
             agent_credential: config.auth_token.clone(),
-            platforms: project.access.keys().copied().collect(),
+            platforms: watched.access.keys().copied().collect(),
             warrant: Some(warrant),
-            variables: project.variables.clone(),
-            channels: speaking(project),
+            variables: watched.variables.clone(),
+            channels: speaking(state, project),
             // Narrowed by [`Handout::speaking_in`] once the job has a room.
             place: None,
         })
@@ -3715,11 +3845,13 @@ impl fmt::Debug for Handout {
 ///
 /// A function rather than a `clone`, because a clone is what carried the
 /// listening credential into a handout in the first place.
-fn speaking(project: &Project) -> BTreeMap<Channel, Speaking> {
-    project
-        .channels
-        .iter()
-        .map(|(channel, bound)| (*channel, bound.speaking()))
+fn speaking(state: &State, project: ProjectId) -> BTreeMap<Channel, Speaking> {
+    state
+        .projects
+        .get(&project)
+        .into_iter()
+        .flat_map(|watched| watched.channels.keys())
+        .filter_map(|channel| Some((*channel, state.speaking(project, *channel)?)))
         .collect()
 }
 
@@ -3737,13 +3869,13 @@ pub enum HandoutError {
 #[cfg(test)]
 mod tests {
     use super::{
-        Access, Agent, AgentConfig, Arriving, Attending, BASE64, Channel, ChannelApp,
+        Access, Agent, AgentConfig, Arriving, Attending, BASE64, Binding, Channel, ChannelApp,
         ChannelConfig, ClaudeEffort, ClaudeModel, Errand, Handout, HandoutError, Inbox,
         Inconsistent, Installation, Job, JobId, Key, Kit, KitConfig, KitName, KitNameError,
         NONCE_LEN, Nonce, OpenError, Outcome, Place, Platform, PlatformApp, Progress, Project,
         ProjectId, Recipient, RepositoryAddress, RepositoryError, Room, SealedAccess,
-        SealedChannelApp, SealedJob, SealedPlatformApp, Secret, Snapshot, State, Taken, Thread,
-        Variable, VariableName, VariableNameError, Waiting, Workspace,
+        SealedBinding, SealedChannelApp, SealedJob, SealedPlatformApp, Secret, Snapshot, State,
+        Taken, Thread, Variable, VariableName, VariableNameError, Waiting, Workspace,
     };
     use base64::Engine as _;
     use jiff::Timestamp;
@@ -3855,11 +3987,11 @@ mod tests {
         }
     }
 
-    fn a_slack_binding() -> ChannelConfig {
-        ChannelConfig {
+    fn a_slack_binding() -> Binding {
+        Binding::Own(ChannelConfig {
             credential: Secret::new(CHANNEL_TOKEN.to_owned()),
             listen_credential: Secret::new(LISTEN_TOKEN.to_owned()),
-        }
+        })
     }
 
     /// The room a job of the fixture speaks in.
@@ -4358,7 +4490,8 @@ mod tests {
         let bound = project
             .channels
             .get(&Channel::Slack)
-            .expect("the binding survived");
+            .and_then(Binding::own)
+            .expect("the binding survived, as an app of its own");
         assert_eq!(bound.credential.expose(), CHANNEL_TOKEN);
         assert_eq!(
             bound.listen_credential.expose(),
@@ -4393,12 +4526,10 @@ mod tests {
             panic!("the credential is there, as a token");
         };
         let project_nonce = &sealed_token.nonce;
-        let channel_nonce = &project
-            .channels
-            .get(&Channel::Slack)
-            .expect("the binding is there")
-            .credential
-            .nonce;
+        let Some(SealedBinding::Own(sealed_binding)) = project.channels.get(&Channel::Slack) else {
+            panic!("the binding is there, as an app of its own");
+        };
+        let channel_nonce = &sealed_binding.credential.nonce;
         assert_ne!(agent_nonce, project_nonce);
         assert_ne!(project_nonce, channel_nonce);
         assert_ne!(agent_nonce, channel_nonce);
@@ -5024,6 +5155,118 @@ mod tests {
         assert!(bare.workspaces.is_empty());
     }
 
+    /// A binding through a workspace of the instance's app travels through
+    /// the file as the workspace's identifier alone, in the clear, and comes
+    /// back as that shape; the pair the last release wrote still comes back
+    /// as an app of the project's own; and a project naming a workspace the
+    /// app is not installed on is refused, with no app and with the app
+    /// installed elsewhere.
+    #[test]
+    fn a_binding_through_a_workspace_is_written_by_its_identifier_and_checked() {
+        let mut state = populated();
+        let project = *state.projects.keys().next().expect("a project");
+        state
+            .projects
+            .get_mut(&project)
+            .expect("the project")
+            .channels
+            .insert(Channel::Slack, Binding::Workspace("T0TEAM".to_owned()));
+        assert_eq!(
+            state.check(),
+            Err(Inconsistent::UnknownWorkspace {
+                project,
+                workspace: "T0TEAM".to_owned()
+            })
+        );
+        state.channel_apps.insert(
+            Channel::Slack,
+            ChannelApp {
+                client_id: "1234.5678".to_owned(),
+                client_secret: Secret::new("not-a-real-secret".to_owned()),
+                app_token: Secret::new("xapp-not-a-real-token".to_owned()),
+                workspaces: BTreeMap::from([(
+                    "T0OTHER".to_owned(),
+                    Workspace {
+                        name: "Other".to_owned(),
+                        bot_user: "U0BOT".to_owned(),
+                        bot_token: Secret::new("xoxb-not-a-real-token".to_owned()),
+                    },
+                )]),
+            },
+        );
+        assert!(matches!(
+            state.check(),
+            Err(Inconsistent::UnknownWorkspace { .. })
+        ));
+        state
+            .channel_apps
+            .get_mut(&Channel::Slack)
+            .expect("the app")
+            .workspaces
+            .insert(
+                "T0TEAM".to_owned(),
+                Workspace {
+                    name: "Acme".to_owned(),
+                    bot_user: "U0ACMEBOT".to_owned(),
+                    bot_token: Secret::new("xoxb-acme-not-real".to_owned()),
+                },
+            );
+        assert_eq!(state.check(), Ok(()));
+        assert_eq!(
+            state
+                .speaking(project, Channel::Slack)
+                .map(|speaking| speaking.credential.expose().to_owned()),
+            Some("xoxb-acme-not-real".to_owned()),
+            "what speaks is the workspace's bot token, from the app"
+        );
+        assert_eq!(
+            state.bound_to(Channel::Slack, "T0TEAM").collect::<Vec<_>>(),
+            vec![project]
+        );
+        assert!(state.bound_to(Channel::Slack, "T0OTHER").next().is_none());
+
+        let json = serde_json::to_string(
+            &state
+                .seal(&key(), &mut counting_nonces())
+                .expect("sealing cannot fail"),
+        )
+        .expect("a snapshot serialises");
+        assert!(
+            json.contains(r#""channels":{"Slack":{"workspace":"T0TEAM"}}"#),
+            "{json}"
+        );
+        let reopened: Snapshot = serde_json::from_str(&json).expect("and parses back");
+        let reopened = reopened.open(&key()).expect("and opens");
+        assert_eq!(
+            reopened
+                .projects
+                .get(&project)
+                .map(|watched| watched.channels.clone()),
+            state
+                .projects
+                .get(&project)
+                .map(|watched| watched.channels.clone())
+        );
+
+        // The pair the last release wrote is an app of the project's own.
+        let sealed_key = serde_json::to_string(
+            &Secret::new("xoxb-not-a-real-token".to_owned())
+                .seal(&key(), [1; NONCE_LEN])
+                .expect("sealing a well-formed secret"),
+        )
+        .expect("a sealed secret serialises");
+        let older: SealedBinding = serde_json::from_str(&format!(
+            r#"{{"address":"C0123456789","credential":{sealed_key},"listen_credential":{sealed_key}}}"#
+        ))
+        .expect("the last release's pair still parses");
+        assert!(matches!(older, SealedBinding::Own(_)));
+        let workspace: SealedBinding =
+            serde_json::from_str(r#"{"workspace":"T0TEAM"}"#).expect("the new shape parses");
+        assert!(
+            matches!(workspace, SealedBinding::Workspace { ref workspace } if workspace == "T0TEAM")
+        );
+    }
+
     /// A project reaching its repository through an installation names one
     /// the App holds, or the state is refused: with no App, and with an App
     /// installed elsewhere.
@@ -5240,6 +5483,7 @@ mod tests {
         let bound = listening
             .channels
             .get(&Channel::Slack)
+            .and_then(Binding::own)
             .expect("a binding with both credentials comes through whole");
         assert_eq!(bound.credential.expose(), "agent-token");
         assert_eq!(bound.listen_credential.expose(), "agent-token");
@@ -5376,10 +5620,10 @@ mod tests {
         );
         other.channels.insert(
             Channel::Slack,
-            ChannelConfig {
+            Binding::Own(ChannelConfig {
                 credential: Secret::new(ALIEN_CHANNEL_TOKEN.to_owned()),
                 listen_credential: Secret::new("xapp-not-yours-either".to_owned()),
-            },
+            }),
         );
         // The same name holding a different value, which is what makes the
         // escape test below able to fail: two projects whose variables merely
@@ -5745,7 +5989,8 @@ mod tests {
                 .expect("the project")
                 .channels
                 .get(&Channel::Slack)
-                .expect("its binding")
+                .and_then(Binding::own)
+                .expect("its binding, an app of its own")
                 .listen_credential
                 .expose(),
             LISTEN_TOKEN

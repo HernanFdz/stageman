@@ -975,8 +975,8 @@ impl Running {
             Speaker::Job(job) => crate::turns::speaking_for(&self.state, job),
             Speaker::Foreman(project) => self.state.projects.get(project).and_then(|watched| {
                 let room = watched.foreman_room.clone()?;
-                let bound = watched.channels.get(&room.channel)?;
-                Some((bound.speaking(), Place::root(room)))
+                let speaking = self.state.speaking(*project, room.channel)?;
+                Some((speaking, Place::root(room)))
             }),
         };
         let Some((speaking, own_root)) = own else {

@@ -53,11 +53,14 @@ pub fn exposed(state: &State) -> Value {
                         stageman_core::Access::Installation { id } => json!({ "installation": id }),
                     })
                 })),
-                "channels": keyed(project.channels.iter().map(|(channel, bound)| {
-                    (format!("{channel:?}"), json!({
-                        "credential": bound.credential.expose(),
-                        "listen_credential": bound.listen_credential.expose(),
-                    }))
+                "channels": keyed(project.channels.iter().map(|(channel, binding)| {
+                    (format!("{channel:?}"), match binding {
+                        stageman_core::Binding::Own(bound) => json!({
+                            "credential": bound.credential.expose(),
+                            "listen_credential": bound.listen_credential.expose(),
+                        }),
+                        stageman_core::Binding::Workspace(team) => json!({ "workspace": team }),
+                    })
                 })),
                 "variables": keyed(project.variables.iter().map(|(name, variable)| {
                     (name, json!({ "value": variable.value.expose(), "note": variable.note }))

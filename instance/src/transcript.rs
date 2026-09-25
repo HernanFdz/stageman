@@ -419,8 +419,8 @@ impl Running {
             Speaker::Foreman(project) => {
                 let watched = self.state.projects.get(project)?;
                 let room = watched.foreman_room.clone()?;
-                let bound = watched.channels.get(&room.channel)?;
-                Some((bound.speaking(), Place::root(room)))
+                let speaking = self.state.speaking(*project, room.channel)?;
+                Some((speaking, Place::root(room)))
             }
         }
     }
