@@ -687,6 +687,60 @@ pub struct Installation {
     pub every_repository: bool,
 }
 
+/// A Slack app this instance owns.
+///
+/// What an operator pasted once from the platform's own page, and the
+/// workspaces it has been installed on since — see
+/// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+/// One per channel, held by the instance rather than by a project, because
+/// a project speaks through a workspace of it and does not own it. Three
+/// values and no more: the client identifier an install names and the
+/// exchange of a code is made with, the client secret that exchange is made
+/// with, and the app-level token that opens the one event stream every
+/// workspace's events arrive on. Not the signing secret, which verifies
+/// requests this instance never receives, and not the verification token,
+/// which the platform deprecated: a secret kept for nothing is a secret to
+/// leak for nothing.
+///
+/// Deriving `Debug` is safe and deliberate: every credential in it redacts
+/// itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelApp {
+    /// Its client identifier on the platform: not a secret, and what the
+    /// install link names.
+    pub client_id: String,
+    /// Its client secret, which the exchange of an install's code is made
+    /// with.
+    pub client_secret: Secret,
+    /// Its app-level token, which opens the event stream and never leaves
+    /// the daemon.
+    pub app_token: Secret,
+    /// Where it is installed, by the workspace's identifier on the platform:
+    /// learned from the platform's redirect and kept here rather than on any
+    /// project, as the App's installations are. A project's binding names
+    /// one of these.
+    pub workspaces: BTreeMap<String, Workspace>,
+}
+
+/// One workspace the instance's app is installed in: what the platform
+/// answered when the install's code was exchanged, and all this instance
+/// keeps of one.
+///
+/// The bot token is the credential that speaks there, handed to a job
+/// exactly as a binding's own is; the bot user is what a mention names.
+///
+/// Deriving `Debug` is safe and deliberate: the one credential in it
+/// redacts itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Workspace {
+    /// The workspace's name, as the platform spells it: for a person.
+    pub name: String,
+    /// The bot user the install made, which a mention there names.
+    pub bot_user: String,
+    /// The bot token minted for the install: what speaks in that workspace.
+    pub bot_token: Secret,
+}
+
 /// How a project reaches its repository's platform — see
 /// `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
 ///
@@ -1826,6 +1880,10 @@ pub struct State {
     /// empty: a project reaches its repository with a pasted token until an
     /// App is registered, and after.
     pub apps: BTreeMap<Platform, PlatformApp>,
+    /// The apps it owns on each channel, at most one per channel. May be
+    /// empty: a project speaks through an app of its own until one is
+    /// registered, and after — see `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+    pub channel_apps: BTreeMap<Channel, ChannelApp>,
 }
 
 // Deliberately absent: where the container runtime lives. It was a field here
@@ -2132,22 +2190,7 @@ impl State {
             })
             .collect::<Result<BTreeMap<_, _>, SealError>>()?;
 
-        let apps = self
-            .apps
-            .iter()
-            .map(|(platform, app)| {
-                Ok((
-                    *platform,
-                    SealedPlatformApp {
-                        id: app.id,
-                        slug: app.slug.clone(),
-                        client_id: app.client_id.clone(),
-                        private_key: app.private_key.seal(key, nonces())?,
-                        installations: app.installations.clone(),
-                    },
-                ))
-            })
-            .collect::<Result<BTreeMap<_, _>, SealError>>()?;
+        let apps = sealed_apps(&self.apps, key, nonces)?;
 
         let projects = self
             .projects
@@ -2222,6 +2265,8 @@ impl State {
             })
             .collect::<Result<BTreeMap<_, _>, SealError>>()?;
 
+        let channel_apps = sealed_channel_apps(&self.channel_apps, key, nonces)?;
+
         Ok(Snapshot {
             // Left for whoever holds the file to fill in, for the reason the
             // field itself gives: this crate has no identity of its own to
@@ -2230,6 +2275,7 @@ impl State {
             agents,
             projects,
             apps,
+            channel_apps,
         })
     }
 }
@@ -2647,6 +2693,39 @@ pub struct SealedPlatformApp {
     pub installations: BTreeMap<u64, Installation>,
 }
 
+/// A Slack app this instance owns, as it appears on disk.
+///
+/// The client identifier in the clear, its two secrets sealed, and its
+/// workspaces under it — see
+/// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SealedChannelApp {
+    /// Its client identifier.
+    pub client_id: String,
+    /// Its client secret, sealed.
+    pub client_secret: SealedSecret,
+    /// Its app-level token, sealed.
+    pub app_token: SealedSecret,
+    /// Where it is installed. Defaulted, because a file written before
+    /// workspaces were kept described an app installed nowhere this
+    /// instance knew of, which is the true answer — see
+    /// `docs/conventions.md` §4.
+    #[serde(default)]
+    pub workspaces: BTreeMap<String, SealedWorkspace>,
+}
+
+/// One workspace the app is installed in, as it appears on disk: its name
+/// and bot user in the clear, its bot token sealed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SealedWorkspace {
+    /// The workspace's name.
+    pub name: String,
+    /// The bot user the install made.
+    pub bot_user: String,
+    /// The bot token minted for the install, sealed.
+    pub bot_token: SealedSecret,
+}
+
 /// A channel binding as it appears on disk.
 ///
 /// The last release wrote an `address` beside these, the one room a project
@@ -2920,6 +2999,11 @@ pub struct Snapshot {
     /// last release wrote has none, which is the true answer: it had none.
     #[serde(default)]
     pub apps: BTreeMap<Platform, SealedPlatformApp>,
+    /// The apps the instance owns on each channel, sealed. Defaulted,
+    /// because a file the last release wrote has none, which is the true
+    /// answer.
+    #[serde(default)]
+    pub channel_apps: BTreeMap<Channel, SealedChannelApp>,
 }
 
 /// The Apps of a file, their keys opened.
@@ -2937,6 +3021,97 @@ fn opened_apps(
                     client_id: sealed.client_id,
                     private_key: sealed.private_key.open(key)?,
                     installations: sealed.installations,
+                },
+            ))
+        })
+        .collect()
+}
+
+/// The Apps of a state, their keys sealed for the file.
+fn sealed_apps(
+    apps: &BTreeMap<Platform, PlatformApp>,
+    key: &Key,
+    nonces: &mut impl FnMut() -> Nonce,
+) -> Result<BTreeMap<Platform, SealedPlatformApp>, SealError> {
+    apps.iter()
+        .map(|(platform, app)| {
+            Ok((
+                *platform,
+                SealedPlatformApp {
+                    id: app.id,
+                    slug: app.slug.clone(),
+                    client_id: app.client_id.clone(),
+                    private_key: app.private_key.seal(key, nonces())?,
+                    installations: app.installations.clone(),
+                },
+            ))
+        })
+        .collect()
+}
+
+/// The channel apps of a state, their secrets sealed for the file.
+fn sealed_channel_apps(
+    apps: &BTreeMap<Channel, ChannelApp>,
+    key: &Key,
+    nonces: &mut impl FnMut() -> Nonce,
+) -> Result<BTreeMap<Channel, SealedChannelApp>, SealError> {
+    apps.iter()
+        .map(|(channel, app)| {
+            let workspaces = app
+                .workspaces
+                .iter()
+                .map(|(id, workspace)| {
+                    Ok((
+                        id.clone(),
+                        SealedWorkspace {
+                            name: workspace.name.clone(),
+                            bot_user: workspace.bot_user.clone(),
+                            bot_token: workspace.bot_token.seal(key, nonces())?,
+                        },
+                    ))
+                })
+                .collect::<Result<BTreeMap<_, _>, SealError>>()?;
+            Ok((
+                *channel,
+                SealedChannelApp {
+                    client_id: app.client_id.clone(),
+                    client_secret: app.client_secret.seal(key, nonces())?,
+                    app_token: app.app_token.seal(key, nonces())?,
+                    workspaces,
+                },
+            ))
+        })
+        .collect()
+}
+
+/// The channel apps of a file, their secrets opened.
+fn opened_channel_apps(
+    apps: BTreeMap<Channel, SealedChannelApp>,
+    key: &Key,
+) -> Result<BTreeMap<Channel, ChannelApp>, OpenError> {
+    apps.into_iter()
+        .map(|(channel, sealed)| {
+            let workspaces = sealed
+                .workspaces
+                .into_iter()
+                .map(|(id, workspace)| {
+                    Ok((
+                        id,
+                        Workspace {
+                            name: workspace.name,
+                            bot_user: workspace.bot_user,
+                            bot_token: workspace.bot_token.open(key)?,
+                        },
+                    ))
+                })
+                .collect::<Result<BTreeMap<_, _>, OpenError>>()?;
+            Ok((
+                channel,
+                ChannelApp {
+                    client_id: sealed.client_id,
+                    client_secret: sealed.client_secret.open(key)?,
+                    app_token: sealed.app_token.open(key)?,
+                    workspaces,
                 },
             ))
         })
@@ -3049,6 +3224,7 @@ impl Snapshot {
             agents,
             projects,
             apps,
+            channel_apps,
         } = self;
 
         let agents = agents
@@ -3064,6 +3240,7 @@ impl Snapshot {
             .collect::<Result<BTreeMap<_, _>, OpenError>>()?;
 
         let apps = opened_apps(apps, key)?;
+        let channel_apps = opened_channel_apps(channel_apps, key)?;
 
         let projects = projects
             .into_iter()
@@ -3074,6 +3251,7 @@ impl Snapshot {
             agents,
             projects,
             apps,
+            channel_apps,
         };
         // A file is untrusted input, so this is where believing it stops.
         state.check().map_err(OpenError::Inconsistent)?;
@@ -3559,12 +3737,13 @@ pub enum HandoutError {
 #[cfg(test)]
 mod tests {
     use super::{
-        Access, Agent, AgentConfig, Arriving, Attending, BASE64, Channel, ChannelConfig,
-        ClaudeEffort, ClaudeModel, Errand, Handout, HandoutError, Inbox, Inconsistent,
-        Installation, Job, JobId, Key, Kit, KitConfig, KitName, KitNameError, NONCE_LEN, Nonce,
-        OpenError, Outcome, Place, Platform, PlatformApp, Progress, Project, ProjectId, Recipient,
-        RepositoryAddress, RepositoryError, Room, SealedAccess, SealedJob, SealedPlatformApp,
-        Secret, Snapshot, State, Taken, Thread, Variable, VariableName, VariableNameError, Waiting,
+        Access, Agent, AgentConfig, Arriving, Attending, BASE64, Channel, ChannelApp,
+        ChannelConfig, ClaudeEffort, ClaudeModel, Errand, Handout, HandoutError, Inbox,
+        Inconsistent, Installation, Job, JobId, Key, Kit, KitConfig, KitName, KitNameError,
+        NONCE_LEN, Nonce, OpenError, Outcome, Place, Platform, PlatformApp, Progress, Project,
+        ProjectId, Recipient, RepositoryAddress, RepositoryError, Room, SealedAccess,
+        SealedChannelApp, SealedJob, SealedPlatformApp, Secret, Snapshot, State, Taken, Thread,
+        Variable, VariableName, VariableNameError, Waiting, Workspace,
     };
     use base64::Engine as _;
     use jiff::Timestamp;
@@ -3611,6 +3790,7 @@ mod tests {
     fn configured() -> State {
         State {
             apps: std::collections::BTreeMap::new(),
+            channel_apps: std::collections::BTreeMap::new(),
             agents: BTreeMap::from([(
                 Agent::Claude,
                 AgentConfig {
@@ -4778,6 +4958,70 @@ mod tests {
         ))
         .expect("an App written before installations still parses");
         assert!(older.installations.is_empty());
+    }
+
+    /// A channel app's client identifier and its workspaces' names travel
+    /// through the file in the clear, its secrets sealed; a file written
+    /// before the instance owned one opens with none, as does an app written
+    /// before workspaces were kept.
+    #[test]
+    fn a_channel_apps_secrets_are_sealed_and_a_file_without_one_opens() {
+        let mut state = populated();
+        state.channel_apps.insert(
+            Channel::Slack,
+            ChannelApp {
+                client_id: "1234.5678".to_owned(),
+                client_secret: Secret::new("not-a-real-secret".to_owned()),
+                app_token: Secret::new("xapp-not-a-real-token".to_owned()),
+                workspaces: BTreeMap::from([(
+                    "T0TEAM".to_owned(),
+                    Workspace {
+                        name: "Acme".to_owned(),
+                        bot_user: "U0BOT".to_owned(),
+                        bot_token: Secret::new("xoxb-not-a-real-token".to_owned()),
+                    },
+                )]),
+            },
+        );
+        let json = serde_json::to_string(
+            &state
+                .seal(&key(), &mut counting_nonces())
+                .expect("sealing cannot fail"),
+        )
+        .expect("a snapshot serialises");
+        assert!(json.contains(r#""client_id":"1234.5678""#), "{json}");
+        assert!(
+            json.contains(r#""T0TEAM":{"name":"Acme","bot_user":"U0BOT","bot_token":{"#),
+            "{json}"
+        );
+        for secret in [
+            "not-a-real-secret",
+            "xapp-not-a-real-token",
+            "xoxb-not-a-real-token",
+        ] {
+            assert!(!json.contains(secret), "{secret} is sealed: {json}");
+        }
+        let reopened: Snapshot = serde_json::from_str(&json).expect("and parses back");
+        let reopened = reopened.open(&key()).expect("and opens");
+        assert_eq!(reopened.channel_apps, state.channel_apps);
+
+        // As the last release wrote the file: no channel apps at all.
+        let older: Snapshot =
+            serde_json::from_str(&written_by_the_last_release()).expect("the older file parses");
+        assert!(older.channel_apps.is_empty());
+
+        // As an app would be written before workspaces were kept.
+        let sealed = serde_json::to_string(
+            &Secret::new("not-a-real-secret".to_owned())
+                .seal(&key(), [1; NONCE_LEN])
+                .expect("sealing a well-formed secret"),
+        )
+        .expect("a sealed secret serialises");
+        let bare: SealedChannelApp = serde_json::from_str(&format!(
+            r#"{{"client_id":"1234.5678","client_secret":{sealed},"app_token":{sealed}}}"#
+        ))
+        .expect("an app written before workspaces still parses");
+        assert!(bare.workspaces.is_empty());
     }
 
     /// A project reaching its repository through an installation names one

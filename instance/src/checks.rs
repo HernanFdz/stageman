@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use stageman_channel::ChannelError;
-use stageman_core::{Access, Channel, Platform, RepositoryAddress};
+use stageman_core::{Access, Channel, Platform, RepositoryAddress, Secret};
 use stageman_platform::{Owned, PlatformError};
 use stageman_vocabulary::{Bytes, Effect as Generic, EffectId, Responded};
 use stageman_wire::Refusal;
@@ -189,6 +189,31 @@ impl Running {
                     }
                 })?;
                 drafted(draft, Some(watched), &self.begun)?
+            }
+            // The app-level token of an app the instance owns, asked where
+            // to connect, as a binding's is; the client pair cannot be
+            // checked — the exchange refuses a bogus code before it looks at
+            // the pair, measured — and is kept unchecked, per
+            // `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+            Request::RegisterChannelApp {
+                channel,
+                client_id,
+                client_secret,
+                app_token,
+            } => {
+                let channel = views::channel_named(channel)?;
+                let app_token = app_token.trim();
+                if client_id.trim().is_empty()
+                    || client_secret.trim().is_empty()
+                    || app_token.is_empty()
+                {
+                    return Err(Refusal::ChannelAppIncomplete);
+                }
+                let opening = Secret::new(app_token.to_owned());
+                return Ok(vec![(
+                    Check::Listening { channel },
+                    stageman_channel::open_socket(channel, &opening).into(),
+                )]);
             }
             _ => return Ok(Vec::new()),
         };

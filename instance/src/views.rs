@@ -275,6 +275,29 @@ pub fn platform_named(identifier: &str) -> Result<Platform, Refusal> {
     }
 }
 
+/// What the wire calls a channel when a request names one: the platform's
+/// own lowercase spelling, as a platform's is.
+pub const fn channel_identifier(channel: Channel) -> &'static str {
+    match channel {
+        Channel::Slack => "slack",
+    }
+}
+
+/// The channel named by a wire identifier.
+///
+/// # Errors
+///
+/// Fails if nothing is called that.
+pub fn channel_named(identifier: &str) -> Result<Channel, Refusal> {
+    if identifier == channel_identifier(Channel::Slack) {
+        Ok(Channel::Slack)
+    } else {
+        Err(Refusal::ChannelAppMissing {
+            channel: identifier.to_owned(),
+        })
+    }
+}
+
 /// What a screen calls a channel.
 pub const fn wire_channel(channel: Channel) -> &'static str {
     match channel {
@@ -655,6 +678,7 @@ pub fn watching_now(
     state: &State,
     identities: &Identities,
     app_registered: bool,
+    instance: &str,
     now: Timestamp,
 ) -> stageman_wire::Watching {
     stageman_wire::Watching {
@@ -670,7 +694,7 @@ pub fn watching_now(
             .collect(),
         guides: stageman_wire::Guides {
             token_form: stageman_platform::token_form(Platform::GitHub, None),
-            app_form: stageman_channel::app_form(Channel::Slack),
+            app_form: stageman_channel::app_form(Channel::Slack, instance),
         },
         app_registered,
     }
@@ -835,6 +859,7 @@ mod tests {
     fn watching(name: &str) -> State {
         State {
             apps: std::collections::BTreeMap::new(),
+            channel_apps: std::collections::BTreeMap::new(),
             agents: BTreeMap::from([(
                 Agent::Claude,
                 AgentConfig {

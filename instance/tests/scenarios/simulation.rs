@@ -666,6 +666,7 @@ fn a_project(jobs: BTreeMap<JobId, Job>, bound: bool) -> Project {
 fn configured(project: Project) -> State {
     State {
         apps: std::collections::BTreeMap::new(),
+        channel_apps: std::collections::BTreeMap::new(),
         agents: BTreeMap::from([(
             Agent::Claude,
             AgentConfig {

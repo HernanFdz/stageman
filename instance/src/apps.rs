@@ -18,11 +18,13 @@
 
 use std::collections::VecDeque;
 
-use stageman_core::{Platform, PlatformApp};
+use std::collections::BTreeMap;
+
+use stageman_core::{Channel, ChannelApp, Platform, PlatformApp, Secret};
 use stageman_vocabulary::{
     Answer, Arrival, Bytes, Effect as Generic, EffectId, RequestId, Responded,
 };
-use stageman_wire::{Apps, PlatformAppView, Refusal, Registration};
+use stageman_wire::{Apps, ChannelAppView, PlatformAppView, Refusal, Registration, WorkspaceView};
 
 use crate::checks::CHECKED_WITHIN;
 use crate::requests::Response;
@@ -89,6 +91,8 @@ impl Running {
     #[must_use]
     pub fn apps(&self) -> Apps {
         let platform = Platform::GitHub;
+        let channel = Channel::Slack;
+        let instance = crate::tunnel::dashboard(&self.domain, self.serving);
         Apps {
             github: self.state.apps.get(&platform).map(|app| PlatformAppView {
                 slug: app.slug.clone(),
@@ -97,7 +101,84 @@ impl Running {
                 install_failure: self.install_failure.clone(),
             }),
             failed: self.app_failure.clone(),
+            slack: self
+                .state
+                .channel_apps
+                .get(&channel)
+                .map(|app| ChannelAppView {
+                    client_id: app.client_id.clone(),
+                    workspaces: app
+                        .workspaces
+                        .iter()
+                        .map(|(id, workspace)| WorkspaceView {
+                            id: id.clone(),
+                            name: workspace.name.clone(),
+                            used_by: Vec::new(),
+                        })
+                        .collect(),
+                }),
+            slack_form: stageman_channel::app_form(channel, &instance),
         }
+    }
+
+    /// Keeps the app this instance owns on a channel, from the three values
+    /// pasted on the Instance page — see `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+    ///
+    /// Its app-level token was checked before this is reached, as a
+    /// binding's is; the client pair cannot be, and is kept as pasted.
+    /// Registering over an app already kept replaces its values, since
+    /// rotating a credential is the ordinary reason to come back to the
+    /// page; the workspaces stay when the app is the same one, by its
+    /// client identifier, and go when it is another's, since an install of
+    /// one app is not an install of another.
+    ///
+    /// # Errors
+    ///
+    /// Fails if any of the three values is blank.
+    pub fn register_channel_app(
+        &mut self,
+        channel: Channel,
+        client_id: &str,
+        client_secret: &str,
+        app_token: &str,
+    ) -> Result<Response, Refusal> {
+        let (client_id, client_secret, app_token) =
+            (client_id.trim(), client_secret.trim(), app_token.trim());
+        if client_id.is_empty() || client_secret.is_empty() || app_token.is_empty() {
+            return Err(Refusal::ChannelAppIncomplete);
+        }
+        let workspaces = match self.state.channel_apps.remove(&channel) {
+            Some(had) if had.client_id == client_id => had.workspaces,
+            _ => BTreeMap::new(),
+        };
+        self.state.channel_apps.insert(
+            channel,
+            ChannelApp {
+                client_id: client_id.to_owned(),
+                client_secret: Secret::new(client_secret.to_owned()),
+                app_token: Secret::new(app_token.to_owned()),
+                workspaces,
+            },
+        );
+        self.dirty = true;
+        Ok(Response::Apps(self.apps()))
+    }
+
+    /// Forgets the app on a channel.
+    ///
+    /// Left on the platform for the operator to delete, as the App is.
+    ///
+    /// # Errors
+    ///
+    /// Fails if no app is registered on that channel.
+    pub fn forget_channel_app(&mut self, channel: Channel) -> Result<Response, Refusal> {
+        if self.state.channel_apps.remove(&channel).is_none() {
+            return Err(Refusal::ChannelAppMissing {
+                channel: crate::views::wire_channel(channel).to_owned(),
+            });
+        }
+        self.dirty = true;
+        Ok(Response::Apps(self.apps()))
     }
 
     /// Forgets the App on a platform.

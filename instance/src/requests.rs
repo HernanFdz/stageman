@@ -147,6 +147,25 @@ pub enum Request {
         /// The installation, by its identifier on the platform.
         id: u64,
     },
+    /// Registers the app the instance owns on a channel, from the three
+    /// values pasted on the Instance page: kept once its app-level token
+    /// has been checked — see
+    /// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+    RegisterChannelApp {
+        /// Which channel, by its wire identifier.
+        channel: String,
+        /// Its client identifier.
+        client_id: String,
+        /// Its client secret.
+        client_secret: String,
+        /// Its app-level token.
+        app_token: String,
+    },
+    /// Forgets the app the instance owns on a channel.
+    ForgetChannelApp {
+        /// Which channel, by its wire identifier.
+        channel: String,
+    },
     /// What an access reaches, for the project form: held while the
     /// platform lists it, and never kept — see `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
     Reaches {
@@ -231,6 +250,19 @@ impl fmt::Debug for Request {
                 .field("platform", platform)
                 .field("id", id)
                 .finish(),
+            Self::RegisterChannelApp {
+                channel, client_id, ..
+            } => f
+                .debug_struct("RegisterChannelApp")
+                .field("channel", channel)
+                .field("client_id", client_id)
+                .field("client_secret", &"<redacted>")
+                .field("app_token", &"<redacted>")
+                .finish(),
+            Self::ForgetChannelApp { channel } => f
+                .debug_struct("ForgetChannelApp")
+                .field("channel", channel)
+                .finish(),
             Self::Reaches { through } => {
                 f.debug_struct("Reaches").field("through", through).finish()
             }
@@ -297,59 +329,69 @@ impl Running {
         learned: Option<stageman_platform::Owned>,
         effects: &mut Vec<Effect>,
     ) {
-        let answered = match request {
-            Request::Instance => Ok(Response::Instance(views::instance(
-                &self.state,
-                &self.runtime.display().to_string(),
-                &self.domain,
-            ))),
-            Request::Home => Ok(Response::Home(views::home(
-                &self.state,
-                &self.identities(),
-                &self.domain,
-                self.serving,
-                self.stamp(),
-            ))),
-            Request::Agents => Ok(Response::Agents(views::listed(&self.state))),
-            Request::Configure { agent, credential } => self.configure(&agent, &credential),
-            Request::ForgetAgent { agent } => self.forget_agent(&agent),
-            Request::Projects => Ok(Response::Projects(self.projects_screen())),
-            Request::Create { draft } => self.create(&draft, learned),
-            Request::Amend { project, draft } => self.amend(&project, &draft, learned),
-            Request::Forget { project } => self.forget(&project),
-            Request::Jobs { project } => self.jobs(&project),
-            Request::Job { project, job } => self.job_page(&project, &job),
-            Request::Start {
-                project,
-                kit,
-                work,
-                title,
-            } => self.start_by_hand(&project, &kit, &work, &title),
-            Request::Stop { project, job } => self.stop(&project, &job, effects),
-            Request::Retire {
-                project,
-                job,
-                ending,
-            } => self.retire(&project, &job, ending),
-            Request::Apps => Ok(Response::Apps(self.apps())),
-            Request::Registration { platform, anywhere } => views::platform_named(&platform)
-                .and_then(|platform| self.registration(platform, anywhere))
-                .map(Response::Registration),
-            Request::ForgetApp { platform } => {
-                views::platform_named(&platform).and_then(|platform| self.forget_app(platform))
-            }
-            Request::InstallLink { platform } => {
-                views::platform_named(&platform).and_then(|platform| self.install_link(platform))
-            }
-            Request::ForgetInstallation { platform, id } => views::platform_named(&platform)
-                .and_then(|platform| self.forget_installation(platform, id)),
-            // Routed before anything is held, above; a listing that reaches
-            // here was carried by a check it cannot have had.
-            Request::Reaches { .. } => {
-                tracing::error!("a listing was answered as if it had been checked");
-                Err(Refusal::Failed)
-            }
-        };
+        let answered =
+            match request {
+                Request::Instance => Ok(Response::Instance(views::instance(
+                    &self.state,
+                    &self.runtime.display().to_string(),
+                    &self.domain,
+                ))),
+                Request::Home => Ok(Response::Home(views::home(
+                    &self.state,
+                    &self.identities(),
+                    &self.domain,
+                    self.serving,
+                    self.stamp(),
+                ))),
+                Request::Agents => Ok(Response::Agents(views::listed(&self.state))),
+                Request::Configure { agent, credential } => self.configure(&agent, &credential),
+                Request::ForgetAgent { agent } => self.forget_agent(&agent),
+                Request::Projects => Ok(Response::Projects(self.projects_screen())),
+                Request::Create { draft } => self.create(&draft, learned),
+                Request::Amend { project, draft } => self.amend(&project, &draft, learned),
+                Request::Forget { project } => self.forget(&project),
+                Request::Jobs { project } => self.jobs(&project),
+                Request::Job { project, job } => self.job_page(&project, &job),
+                Request::Start {
+                    project,
+                    kit,
+                    work,
+                    title,
+                } => self.start_by_hand(&project, &kit, &work, &title),
+                Request::Stop { project, job } => self.stop(&project, &job, effects),
+                Request::Retire {
+                    project,
+                    job,
+                    ending,
+                } => self.retire(&project, &job, ending),
+                Request::Apps => Ok(Response::Apps(self.apps())),
+                Request::Registration { platform, anywhere } => views::platform_named(&platform)
+                    .and_then(|platform| self.registration(platform, anywhere))
+                    .map(Response::Registration),
+                Request::ForgetApp { platform } => {
+                    views::platform_named(&platform).and_then(|platform| self.forget_app(platform))
+                }
+                Request::InstallLink { platform } => views::platform_named(&platform)
+                    .and_then(|platform| self.install_link(platform)),
+                Request::ForgetInstallation { platform, id } => views::platform_named(&platform)
+                    .and_then(|platform| self.forget_installation(platform, id)),
+                Request::RegisterChannelApp {
+                    channel,
+                    client_id,
+                    client_secret,
+                    app_token,
+                } => views::channel_named(&channel).and_then(|channel| {
+                    self.register_channel_app(channel, &client_id, &client_secret, &app_token)
+                }),
+                Request::ForgetChannelApp { channel } => views::channel_named(&channel)
+                    .and_then(|channel| self.forget_channel_app(channel)),
+                // Routed before anything is held, above; a listing that reaches
+                // here was carried by a check it cannot have had.
+                Request::Reaches { .. } => {
+                    tracing::error!("a listing was answered as if it had been checked");
+                    Err(Refusal::Failed)
+                }
+            };
         let response = answered.unwrap_or_else(Response::Refused);
         self.defer(AppEffect::Respond { id, response });
     }
@@ -1834,6 +1876,7 @@ mod tests {
     fn a_job_is_found_on_its_own_project_and_nowhere_else() {
         let mut state = State {
             apps: std::collections::BTreeMap::new(),
+            channel_apps: std::collections::BTreeMap::new(),
             agents: BTreeMap::from([(
                 Agent::Claude,
                 AgentConfig {

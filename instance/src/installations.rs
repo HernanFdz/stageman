@@ -401,6 +401,7 @@ impl Running {
             &self.state,
             &self.identities(),
             self.state.apps.contains_key(&Platform::GitHub),
+            &crate::tunnel::dashboard(&self.domain, self.serving),
             self.stamp(),
         )
     }

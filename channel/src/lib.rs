@@ -471,10 +471,14 @@ pub const fn manifest(channel: Channel) -> &'static str {
 /// The guide a page offers beside the boxes that take the app's
 /// credentials, per
 /// `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`.
+///
+/// `instance` is this instance's own address, scheme and all, which the
+/// redirect address the manifest carries hangs off — see
+/// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
 #[must_use]
-pub fn app_form(channel: Channel) -> String {
+pub fn app_form(channel: Channel, instance: &str) -> String {
     match channel {
-        Channel::Slack => slack::app_form(),
+        Channel::Slack => slack::app_form(instance),
     }
 }
 
@@ -696,7 +700,7 @@ mod tests {
     /// survives an address bar and decodes back to the text it came from.
     #[test]
     fn the_app_form_carries_the_manifest_whole() {
-        let link = app_form(Channel::Slack);
+        let link = app_form(Channel::Slack, "http://localhost:8080");
         let (form, carried) = link
             .split_once("&manifest_yaml=")
             .expect("the manifest is the last parameter");
@@ -709,6 +713,23 @@ mod tests {
             percent_encoding::percent_decode_str(carried).decode_utf8_lossy(),
             manifest(Channel::Slack)
         );
+    }
+
+    /// The manifest the link carries brings the platform back to the
+    /// instance the page was served from, wherever that is, and never to the
+    /// example address the file spells.
+    #[test]
+    fn the_manifest_carries_the_instances_own_redirect_address() {
+        let link = app_form(Channel::Slack, "https://stageman.example");
+        let (_, carried) = link
+            .split_once("&manifest_yaml=")
+            .expect("the manifest is the last parameter");
+        let decoded = percent_encoding::percent_decode_str(carried).decode_utf8_lossy();
+        assert!(
+            decoded.contains("- https://stageman.example/instance/apps/slack/installed"),
+            "{decoded}"
+        );
+        assert!(!decoded.contains("localhost:8080"), "{decoded}");
     }
 
     /// The manifest `README.md` shows a reader is this crate's, word for

@@ -48,6 +48,13 @@ pub struct Apps {
     pub github: Option<PlatformAppView>,
     /// Why the last registration was not kept, if the last one was not.
     pub failed: Option<String>,
+    /// The Slack app, if one is registered — see
+    /// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+    pub slack: Option<ChannelAppView>,
+    /// Where the platform's form for a new Slack app is, with the manifest
+    /// filled in: the guide beside the boxes that register one, and beside
+    /// a project's own.
+    pub slack_form: String,
 }
 
 /// An App the instance owns, as much of it as a page may know: never its
@@ -63,6 +70,29 @@ pub struct PlatformAppView {
     pub installations: Vec<InstallationView>,
     /// Why the last installation was not kept, if the last one was not.
     pub install_failure: Option<String>,
+}
+
+/// A Slack app the instance owns, as much of it as a page may know: never
+/// its secrets — see `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelAppView {
+    /// Its client identifier, which is what a person reads and what tells
+    /// it from another app on the platform's page.
+    pub client_id: String,
+    /// The workspaces it is installed in, as the instance has learned.
+    pub workspaces: Vec<WorkspaceView>,
+}
+
+/// One workspace the instance's app is installed in, as a page shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceView {
+    /// Its identifier on the platform.
+    pub id: String,
+    /// Its name, for a person.
+    pub name: String,
+    /// The projects that speak through it, by name; empty when none does,
+    /// which is when it may be forgotten.
+    pub used_by: Vec<String>,
 }
 
 /// One installation of the App, as a page shows it.
@@ -1336,6 +1366,16 @@ pub enum Refusal {
     },
     /// An installation cannot be forgotten while a project reaches its
     /// repository through it.
+    /// A Slack app was registered without one of its three values — see
+    /// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+    #[error("the app needs its client ID, its client secret and an app-level token")]
+    ChannelAppIncomplete,
+    /// No app is registered on the channel.
+    #[error("no {channel} app is registered on this instance")]
+    ChannelAppMissing {
+        /// The channel, as the screen names it.
+        channel: String,
+    },
     #[error("that installation is still used by {}", projects.join(", "))]
     InstallationInUse {
         /// The projects that would be left without access, by name.
@@ -1365,7 +1405,8 @@ impl Refusal {
             Self::UnknownAgent { .. }
             | Self::UnknownProject { .. }
             | Self::UnknownJob { .. }
-            | Self::AppMissing { .. } => 404,
+            | Self::AppMissing { .. }
+            | Self::ChannelAppMissing { .. } => 404,
             // Well-formed requests that describe something invalid, which
             // the operator can fix by typing something different.
             Self::CredentialMissing
@@ -1382,6 +1423,7 @@ impl Refusal {
             | Self::VariableRepeated { .. }
             | Self::VariableValueMissing
             | Self::ChannelIncomplete
+            | Self::ChannelAppIncomplete
             | Self::TokenRefused { .. }
             | Self::NoSuchInstallation { .. }
             | Self::ArrivalUnknown
@@ -1441,6 +1483,8 @@ impl Refusal {
             | Self::AgentInUse { .. }
             | Self::UnknownProject { .. }
             | Self::ChannelMissing { .. }
+            | Self::ChannelAppIncomplete
+            | Self::ChannelAppMissing { .. }
             | Self::AgentNotConfigured { .. }
             | Self::KitNotOnProject { .. }
             | Self::UnknownSetting { .. }

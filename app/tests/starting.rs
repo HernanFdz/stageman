@@ -377,6 +377,7 @@ const VARIABLE_VALUE: &str = "not-a-real-third-party-key";
 fn watching(name: &str, repository: &str) -> State {
     State {
         apps: std::collections::BTreeMap::new(),
+        channel_apps: std::collections::BTreeMap::new(),
         agents: BTreeMap::from([(
             Agent::Claude,
             AgentConfig {
@@ -1262,6 +1263,7 @@ const WRAPPER_TOOLS_PORT: &str = "47116";
 fn two_projects_each_with_a_job() -> (State, Vec<(JobId, &'static str, &'static str)>) {
     let mut state = State {
         apps: BTreeMap::new(),
+        channel_apps: BTreeMap::new(),
         agents: BTreeMap::from([(
             Agent::Claude,
             AgentConfig {
@@ -1577,5 +1579,61 @@ fn the_instance_page_says_which_project_uses_an_installation() {
     assert!(
         !page.contains("Forget the installation on acme"),
         "the way to forget it is not offered: {page}"
+    );
+}
+
+/// The Instance page offers the form to register a Slack app while none is,
+/// with the guide onto Slack's form carrying the manifest, and once one is
+/// kept shows it by its client identifier and where it is installed, with
+/// nothing of its secrets on the page — rendered on the server before the
+/// page is awake.
+#[test]
+fn the_instance_page_shows_the_slack_app_or_the_form_to_register_one() {
+    let (_kept, snapshot) = scratch();
+    let mut watched = watching("aviary", "https://github.com/example/aviary");
+    written(&snapshot, &watched);
+    let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
+    let page = running.get("/instance");
+    assert!(page.contains("200 OK"), "{page}");
+    assert!(page.contains("Slack app"), "the card is there: {page}");
+    assert!(
+        page.contains("Register the app"),
+        "the form is offered while none is registered: {page}"
+    );
+    assert!(
+        page.contains("manifest_yaml=") && page.contains("redirect_urls"),
+        "the guide carries the manifest with the redirect in it: {page}"
+    );
+    assert!(!page.contains("Nowhere yet."), "{page}");
+    drop(running);
+
+    watched.channel_apps.insert(
+        Channel::Slack,
+        stageman_core::ChannelApp {
+            client_id: "1234567890.1234567890123".to_owned(),
+            client_secret: Secret::new("not-a-real-secret".to_owned()),
+            app_token: Secret::new("xapp-not-a-real-token".to_owned()),
+            workspaces: BTreeMap::new(),
+        },
+    );
+    written(&snapshot, &watched);
+    let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
+    let page = running.get("/instance");
+    assert!(page.contains("200 OK"), "{page}");
+    assert!(
+        page.contains("1234567890.1234567890123"),
+        "the app is shown by its client identifier: {page}"
+    );
+    assert!(
+        page.contains("Nowhere yet."),
+        "and installed nowhere: {page}"
+    );
+    assert!(
+        !page.contains("Register the app"),
+        "the form is not offered once one is registered: {page}"
+    );
+    assert!(
+        !page.contains("not-a-real-secret") && !page.contains("xapp-not-a-real-token"),
+        "nothing of its secrets is on the page: {page}"
     );
 }

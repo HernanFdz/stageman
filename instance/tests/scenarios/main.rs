@@ -14,6 +14,7 @@
 mod apps;
 mod booting;
 mod channel;
+mod channel_apps;
 mod checks;
 mod credentials;
 mod dashboard;

@@ -56,6 +56,19 @@ pub const MANIFEST: &str = include_str!("slack/manifest.yaml");
 /// address, URL-encoded, per its documentation.
 const NEW_APP: &str = "https://api.slack.com/apps?new_app=1&manifest_yaml=";
 
+/// The path under this instance's address the platform brings the browser
+/// back to after an install of the instance's own app, with a code and the
+/// state: the instance's own, answered before the proxy — see
+/// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+pub const INSTALLED_PATH: &str = "/instance/apps/slack/installed";
+
+/// The redirect address as the manifest file spells it: an example
+/// instance's, replaced with the address the page is served from when the
+/// link is composed. Spelled in the file rather than composed whole so that
+/// `README.md` can show a reader the same block, and the platform's form a
+/// complete one.
+const REDIRECT_IN_MANIFEST: &str = "http://localhost:8080/instance/apps/slack/installed";
+
 /// Where Slack takes a message.
 const POST_MESSAGE: &str = "https://slack.com/api/chat.postMessage";
 
@@ -366,8 +379,9 @@ pub fn mention(user: &str) -> String {
 }
 
 /// Where the platform's form for a new app is, with the manifest filled in.
-pub fn app_form() -> String {
-    format!("{NEW_APP}{}", utf8_percent_encode(MANIFEST, QUERY))
+pub fn app_form(instance: &str) -> String {
+    let manifest = MANIFEST.replace(REDIRECT_IN_MANIFEST, &format!("{instance}{INSTALLED_PATH}"));
+    format!("{NEW_APP}{}", utf8_percent_encode(&manifest, QUERY))
 }
 
 /// Renders asking who this instance is, with the credential that speaks.

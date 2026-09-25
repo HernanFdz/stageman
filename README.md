@@ -139,6 +139,8 @@ features:
     display_name: stageman
     always_online: false
 oauth_config:
+  redirect_urls:
+    - http://localhost:8080/instance/apps/slack/installed  # this instance's address, filled in
   scopes:
     bot:
       - chat:write
