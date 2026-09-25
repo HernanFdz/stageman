@@ -749,6 +749,19 @@ justify is usually obsolete.
   the app crate is still an Axum server and is no longer *the* listener, and
   a server function is the one thing that still asks the instance directly —
   everything else arrives as a request the instance answers itself.
+
+  **Under the framework's own tooling there are two ports, and a platform is
+  told the person's.** `dx serve` binds its own port, the one a person types,
+  and hands this process a door on a port it chooses anew each start and
+  proxies to; host routing and the instance's own paths answer on the door,
+  and the tooling forwards the rest. So an address a platform keeps and
+  brings a browser back to — an App's manifest, the Slack app's manifest and
+  its install link — is composed from the port the person reaches, which the
+  tooling names in its own variable, and from the door's otherwise; a
+  tunnel's address stays the door's. Measured on 2026-09-25: an install link
+  composed from the door's port sent the operator's browser back to a port
+  Slack's app did not know, and the same link works from the tooling's
+  port, which is also the one that is the same tomorrow.
 - **The app's `server` feature is a contract with the framework, not a name.**
   The server-function macro emits `#[cfg(feature = "server")]` literally, so a
   feature spelled anything else silently moves every server function's body to

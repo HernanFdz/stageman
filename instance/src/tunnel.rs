@@ -210,6 +210,11 @@ pub fn address(domain: &Domain, job: &JobId, serving: u16) -> String {
 
 /// Where a person is told to look for the dashboard: the apex of the same
 /// domain, on the same terms as a job's address.
+///
+/// Which port a caller passes is the caller's to know: the door's for what
+/// a person is merely told, and the one a person reaches the dashboard on
+/// for what a platform is told to bring a browser back to — see
+/// `crate::paths::reached_port`.
 #[must_use]
 pub fn dashboard(domain: &Domain, serving: u16) -> String {
     if domain.is_local() {

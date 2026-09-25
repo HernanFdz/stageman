@@ -138,6 +138,7 @@ fn whole(running: &Running) -> Value {
             "path": running.path.display().to_string(),
             "domain": running.domain.to_string(),
             "serving": running.serving,
+            "reached": running.reached,
             "address": running.address,
             "runtime": running.runtime.display().to_string(),
             "runtime_environment": value(&running.runtime_environment),

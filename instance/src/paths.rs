@@ -84,6 +84,22 @@ fn said<'a>(environment: &'a Environment, named: &str) -> Option<&'a str> {
         .filter(|value| !value.is_empty())
 }
 
+/// The port a person reaches the dashboard on when the framework's own
+/// tooling stands in front of this process, spelled exactly as that tooling
+/// sets it; none when nothing does.
+///
+/// Under that tooling the door this process binds is on a port the tooling
+/// chooses anew each start and proxies to, while a browser is on the
+/// tooling's own port. Everything a platform is told to bring a browser
+/// back to has to be the second, since it is where the person is and the
+/// only one that is the same tomorrow — see
+/// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+/// A tunnel's address stays the door's, because host routing happens there.
+#[must_use]
+pub fn reached_port(environment: &Environment) -> Option<u16> {
+    said(environment, "DIOXUS_DEVSERVER_PORT").and_then(|named| named.parse::<u16>().ok())
+}
+
 /// What a variable of this project's says, for whoever is not in this module.
 #[must_use]
 pub fn told(environment: &Environment, named: &str) -> Option<String> {
@@ -414,6 +430,31 @@ mod tests {
         assert_eq!(
             dashboard_address(&environment(&[("IP", "::1"), ("PORT", "8080")])),
             "[::1]:8080"
+        );
+    }
+
+    /// The port a person reaches the dashboard on is the framework's
+    /// tooling's when it stands in front, and nothing otherwise, a mistyped
+    /// one included.
+    #[test]
+    fn the_port_a_person_reaches_is_the_toolings_when_it_stands_in_front() {
+        use super::reached_port;
+
+        assert_eq!(reached_port(&environment(&[])), None);
+        assert_eq!(
+            reached_port(&environment(&[
+                ("PORT", "50873"),
+                ("DIOXUS_DEVSERVER_PORT", "8080")
+            ])),
+            Some(8080)
+        );
+        assert_eq!(
+            reached_port(&environment(&[("DIOXUS_DEVSERVER_PORT", "not a port")])),
+            None
+        );
+        assert_eq!(
+            reached_port(&environment(&[("DIOXUS_DEVSERVER_PORT", " ")])),
+            None
         );
     }
 

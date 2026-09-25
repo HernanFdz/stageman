@@ -160,7 +160,7 @@ impl Running {
             });
         };
         let state = crate::mint(&mut self.rng).simple().to_string();
-        let instance = crate::tunnel::dashboard(&self.domain, self.serving);
+        let instance = crate::tunnel::dashboard(&self.domain, self.reached);
         let link = stageman_channel::install_link(channel, &app.client_id, &state, &instance);
         self.workspaces_begun.push_back((
             state.clone(),
@@ -221,7 +221,7 @@ impl Running {
             self.workspace_refused(id, "no Slack app is registered on this instance".to_owned());
             return true;
         };
-        let instance = crate::tunnel::dashboard(&self.domain, self.serving);
+        let instance = crate::tunnel::dashboard(&self.domain, self.reached);
         let rendered = stageman_channel::exchange(
             channel,
             &app.client_id,

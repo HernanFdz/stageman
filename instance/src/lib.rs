@@ -473,6 +473,10 @@ pub struct Facts {
     pub address: String,
     /// The port it is served on.
     pub port: u16,
+    /// The port a person reaches it on: the framework's tooling's when it
+    /// stands in front, and the served one otherwise — see
+    /// `paths::reached_port`.
+    pub reached: u16,
 }
 
 /// Whether a step's time is earlier than the last step's, which the world
@@ -500,8 +504,15 @@ pub struct Running {
     path: PathBuf,
     /// The domain this instance answers on.
     domain: Domain,
-    /// The port the dashboard is served on.
+    /// The port the dashboard is served on: the door this process binds,
+    /// which is where host routing happens and what a tunnel's address
+    /// names.
     serving: u16,
+    /// The port a person reaches the dashboard on, which is what a platform
+    /// is told to bring a browser back to: the framework's tooling's when it
+    /// stands in front, and the door's otherwise — see
+    /// `paths::reached_port`.
+    reached: u16,
     /// The address the dashboard is served on, for the startup block.
     address: String,
     /// The runtime that answered.
@@ -682,6 +693,7 @@ impl Running {
             presenting,
             address,
             port,
+            reached,
         } = facts;
         let id = named.unwrap_or_else(|| {
             let minted = InstanceId::from_uuid(mint(&mut rng));
@@ -697,6 +709,7 @@ impl Running {
             path,
             domain,
             serving: port,
+            reached,
             address,
             runtime,
             runtime_environment,

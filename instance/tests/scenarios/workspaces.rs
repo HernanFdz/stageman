@@ -567,3 +567,64 @@ fn forgetting_the_app_forgets_what_was_held_for_its_installs() {
         "the state minted before the forget is nobody's now: {page}"
     );
 }
+
+/// What a platform is told to bring a browser back to is the port a person
+/// reaches the dashboard on, not the door this process binds: under the
+/// framework's own tooling the door is on a port the tooling chooses and
+/// proxies to, and the person is on the tooling's own. The install link,
+/// the manifest the guide carries, and the App's manifest all say the
+/// tooling's port, and the instance's own address stays the door's.
+#[test]
+fn a_platform_is_told_the_port_a_person_reaches_and_not_the_door() {
+    let mut sim = Simulation::new();
+    sim.holding(&holding_the_app());
+    let mut environment = Simulation::environment();
+    environment.insert("PORT".to_owned(), "50873".to_owned());
+    environment.insert("DIOXUS_DEVSERVER_PORT".to_owned(), "8080".to_owned());
+    let mut instance = sim.wake_given(seed(1), environment);
+
+    let minted = pressed(&mut sim, &mut instance, 1);
+    assert!(
+        minted.link.ends_with(&format!(
+            "&state={}&redirect_uri=http%3A%2F%2Flocalhost%3A8080%2Finstance%2Fapps%2Fslack%2Finstalled",
+            minted.state
+        )),
+        "the install link comes back to the tooling's port: {}",
+        minted.link
+    );
+    let shown = instance_page(&mut sim, &mut instance, 2);
+    // The guide carries the manifest percent-encoded in its address.
+    assert!(
+        shown
+            .slack_form
+            .contains("localhost%3A8080%2Finstance%2Fapps%2Fslack%2Finstalled"),
+        "the manifest the guide carries too: {}",
+        shown.slack_form
+    );
+    assert!(!shown.slack_form.contains("50873"), "{}", shown.slack_form);
+
+    let Response::Registration(form) = ask(
+        &mut sim,
+        &mut instance,
+        3,
+        Request::Registration {
+            platform: "github".to_owned(),
+            anywhere: false,
+        },
+    ) else {
+        panic!("a registration form");
+    };
+    assert!(
+        form.manifest
+            .contains(r#""redirect_url":"http://localhost:8080/instance/apps/github/registered""#),
+        "and the App's manifest: {}",
+        form.manifest
+    );
+
+    let page = arrives(
+        &mut sim,
+        &mut instance,
+        &back(Some("c0de"), None, Some(&minted.state)),
+    );
+    assert!(closes_saying_installed_on(&page, "Acme"), "{page}");
+}

@@ -64,7 +64,7 @@ impl Running {
         platform: Platform,
         anywhere: bool,
     ) -> Result<Registration, Refusal> {
-        let instance = crate::tunnel::dashboard(&self.domain, self.serving);
+        let instance = crate::tunnel::dashboard(&self.domain, self.reached);
         let manifest =
             stageman_platform::manifest(platform, &instance, anywhere).map_err(|why| {
                 tracing::error!(%why, "the App's manifest could not be composed");
@@ -92,7 +92,7 @@ impl Running {
     pub fn apps(&self) -> Apps {
         let platform = Platform::GitHub;
         let channel = Channel::Slack;
-        let instance = crate::tunnel::dashboard(&self.domain, self.serving);
+        let instance = crate::tunnel::dashboard(&self.domain, self.reached);
         Apps {
             github: self.state.apps.get(&platform).map(|app| PlatformAppView {
                 slug: app.slug.clone(),

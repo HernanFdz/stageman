@@ -818,6 +818,7 @@ impl Boot {
             presenting,
             address,
             port,
+            reached: paths::reached_port(&self.environment).unwrap_or(port),
         });
         let mut asked = effects;
         asked.extend(running.waking_up(&containers));
