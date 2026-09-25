@@ -2207,39 +2207,67 @@ impl State {
         channel: Channel,
         arriving: &Arriving<'_>,
     ) -> Recipient {
+        self.recipient_among(&[project], channel, arriving)
+    }
+
+    /// Who a message is for, among the projects it could be for: one, for
+    /// a message on a project's own app; every project bound to the
+    /// workspace it came from, for one on the instance's app — see
+    /// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+    ///
+    /// The room decides among them, as it does for one: a job's room is
+    /// that job's, a foreman's room and a watched room are that project's
+    /// foreman's, and a room none of them owns is the foreman's where there
+    /// is one project, and [`Recipient::Unowned`] where there are several.
+    /// An app's message is a watching project's foreman's and nobody's
+    /// otherwise, whatever the count.
+    #[must_use]
+    pub fn recipient_among(
+        &self,
+        candidates: &[ProjectId],
+        channel: Channel,
+        arriving: &Arriving<'_>,
+    ) -> Recipient {
         // Nothing this instance said, before anything else can match, so that
         // a job's own room is no exception.
         if arriving.from_us {
             return Recipient::Nobody;
         }
-        let Some(watched) = self.projects.get(&project) else {
-            return Recipient::Nobody;
-        };
+        let in_room = |room: &Room| room.channel == channel && room.id == arriving.room;
+        let projects: Vec<(ProjectId, &Project)> = candidates
+            .iter()
+            .filter_map(|id| Some((*id, self.projects.get(id)?)))
+            .collect();
         // Another app's message is the foreman's exactly when the room is
         // watched, whatever room it is, and nobody's otherwise: an app
         // mentions nobody, so the room is the whole of the rule for it.
         if arriving.from_app {
-            let heard = watched
-                .watched
+            return projects
                 .iter()
-                .any(|room| room.channel == channel && room.id == arriving.room);
-            return if heard {
-                Recipient::Foreman(project)
-            } else {
-                Recipient::Nobody
-            };
+                .find(|(_, watched)| watched.watched.iter().any(in_room))
+                .map_or(Recipient::Nobody, |(id, _)| Recipient::Foreman(*id));
         }
-        watched
-            .jobs
-            .iter()
-            .find(|(_, job)| {
-                job.room
-                    .as_ref()
-                    .is_some_and(|room| room.channel == channel && room.id == arriving.room)
-            })
-            .map_or(Recipient::Foreman(project), |(job, _)| {
-                Recipient::Job(job.clone())
-            })
+        for (id, watched) in &projects {
+            if let Some((job, _)) = watched
+                .jobs
+                .iter()
+                .find(|(_, job)| job.room.as_ref().is_some_and(in_room))
+            {
+                return Recipient::Job(job.clone());
+            }
+            if watched.foreman_room.as_ref().is_some_and(in_room)
+                || watched.watched.iter().any(in_room)
+            {
+                return Recipient::Foreman(*id);
+            }
+        }
+        match projects.as_slice() {
+            [] => Recipient::Nobody,
+            [(id, _)] => Recipient::Foreman(*id),
+            several => Recipient::Unowned {
+                among: several.iter().map(|(id, _)| *id).collect(),
+            },
+        }
     }
 
     /// Converts to the form that goes on disk, sealing every credential.
@@ -3470,6 +3498,15 @@ pub enum Recipient {
     /// what this instance said itself, heard back, or a message for a project
     /// this instance does not watch.
     Nobody,
+    /// A person's mention in a room none of several projects owns, on a
+    /// workspace they share: answered where it was said with a notice naming
+    /// each project's foreman room, and costing no turn — see
+    /// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`. Never for one project alone, whose foreman every unowned
+    /// mention is for.
+    Unowned {
+        /// The projects sharing the workspace, in the order they are kept.
+        among: Vec<ProjectId>,
+    },
 }
 
 /// Which of the two things that run an agent this is for.
@@ -4235,6 +4272,100 @@ mod tests {
             from_app: true,
             ..arriving(room, thread)
         }
+    }
+
+    /// Among several projects on one workspace the room decides: a job's
+    /// room is that job's, a foreman's room and a watched room are that
+    /// project's foreman's, an app's message is a watching project's or
+    /// nobody's, and a person's mention in a room none of them owns is
+    /// nobody's to answer but the notice; with one project it is that
+    /// foreman's, and with none it is nobody's.
+    #[test]
+    fn among_several_projects_the_room_decides_and_an_unowned_mention_is_pointed() {
+        let mut state = populated();
+        let mine = *state.projects.keys().next().expect("a project");
+        let other = ProjectId::from_uuid(Uuid::from_u128(77));
+        let mut theirs = state.projects.get(&mine).expect("the project").clone();
+        theirs.jobs.clear();
+        theirs.foreman_room = Some(Room {
+            channel: Channel::Slack,
+            id: "C0THEIRFOREMAN".to_owned(),
+        });
+        theirs.watched.insert(Room {
+            channel: Channel::Slack,
+            id: "C0THEIRWATCH".to_owned(),
+        });
+        state.projects.insert(other, theirs);
+        let job = state
+            .projects
+            .get(&mine)
+            .expect("the project")
+            .jobs
+            .keys()
+            .next()
+            .expect("a job")
+            .clone();
+        state.job_mut(&job).expect("the job").room = Some(Room {
+            channel: Channel::Slack,
+            id: "C0MYJOB".to_owned(),
+        });
+        let arriving = |room: &'static str, from_app: bool| Arriving {
+            room,
+            id: "1788000000.000100",
+            thread: None,
+            from_us: false,
+            from_app,
+        };
+        let both = [mine, other];
+        assert_eq!(
+            state.recipient_among(&both, Channel::Slack, &arriving("C0MYJOB", false)),
+            Recipient::Job(job)
+        );
+        assert_eq!(
+            state.recipient_among(&both, Channel::Slack, &arriving("C0THEIRFOREMAN", false)),
+            Recipient::Foreman(other)
+        );
+        assert_eq!(
+            state.recipient_among(&both, Channel::Slack, &arriving("C0THEIRWATCH", false)),
+            Recipient::Foreman(other)
+        );
+        assert_eq!(
+            state.recipient_among(&both, Channel::Slack, &arriving("C0THEIRWATCH", true)),
+            Recipient::Foreman(other)
+        );
+        assert_eq!(
+            state.recipient_among(&both, Channel::Slack, &arriving("C0NOBODYS", true)),
+            Recipient::Nobody
+        );
+        assert_eq!(
+            state.recipient_among(&both, Channel::Slack, &arriving("C0NOBODYS", false)),
+            Recipient::Unowned {
+                among: vec![mine, other]
+            }
+        );
+        assert_eq!(
+            state.recipient_among(&[mine], Channel::Slack, &arriving("C0NOBODYS", false)),
+            Recipient::Foreman(mine)
+        );
+        assert_eq!(
+            state.recipient_among(&[], Channel::Slack, &arriving("C0NOBODYS", false)),
+            Recipient::Nobody
+        );
+        assert_eq!(
+            state.recipient_among(
+                &both,
+                Channel::Slack,
+                &Arriving {
+                    room: "C0NOBODYS",
+                    id: "1788000000.000100",
+                    thread: None,
+                    from_us: true,
+                    from_app: false,
+                }
+            ),
+            Recipient::Nobody,
+            "what this instance said itself is nobody's, among any number"
+        );
     }
 
     /// Another app's message is the foreman's in a room the project watches,

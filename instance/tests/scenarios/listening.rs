@@ -69,7 +69,10 @@ fn listening_begins_on_waking_and_a_message_is_acknowledged_before_it_is_acted_o
         listener(&instance, project())["phase"],
         serde_json::json!({ "Listening": { "socket": world.sockets_open()[0] } })
     );
-    assert_eq!(listener(&instance, project())["us"]["user"], "U0BOT");
+    assert_eq!(
+        listener(&instance, project())["voices"]["us"]["user"],
+        "U0BOT"
+    );
 
     world.says_at_root(100, 1, "look at the parser");
     world.run_until(&mut instance, 100);

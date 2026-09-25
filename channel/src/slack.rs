@@ -670,6 +670,17 @@ pub fn acknowledgement(envelope: &str) -> String {
     serde_json::json!({ "envelope_id": envelope }).to_string()
 }
 
+/// The workspace a frame's event is from, where the frame carries one: the
+/// platform says it in every event's payload, and an app-level token hears
+/// every workspace the app is installed on at once — see
+/// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`. None for a frame that is no event: a greeting, or a
+/// disconnect.
+#[must_use]
+pub fn workspace_of(frame: &str) -> Option<String> {
+    let envelope: Envelope = serde_json::from_str(frame).ok()?;
+    envelope.payload?.team_id
+}
+
 /// What a frame from the socket means.
 ///
 /// Pure, so that every shape the platform sends can be tested without one.
@@ -773,6 +784,11 @@ struct Envelope {
 
 #[derive(serde::Deserialize)]
 struct Payload {
+    /// The workspace the event is from, which every event payload carries
+    /// — measured on every envelope recorded — and which is what routes a
+    /// frame on the instance's own app to the projects bound to that
+    /// workspace.
+    team_id: Option<String>,
     event: Option<Said>,
 }
 

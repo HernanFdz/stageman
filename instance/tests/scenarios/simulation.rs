@@ -423,6 +423,9 @@ pub struct Simulation {
     locate_failures: VecDeque<String>,
     /// Why the next exchange of an install's code is refused, if scripted.
     exchange_failures: VecDeque<String>,
+    /// The workspace every frame is stamped as from, where a scenario said:
+    /// what a frame on the instance's own app is routed by.
+    workspace: Option<String>,
     /// Why the next sockets cannot be opened, front first.
     socket_failures: VecDeque<String>,
     /// Every image this project has built, as the runtime holds them.
@@ -825,6 +828,7 @@ impl Simulation {
             listen_failures: VecDeque::new(),
             locate_failures: VecDeque::new(),
             exchange_failures: VecDeque::new(),
+            workspace: None,
             socket_failures: VecDeque::new(),
             images: vec!["stageman:unneeded".to_owned()],
             listeners: BTreeMap::new(),
@@ -2786,10 +2790,14 @@ impl Simulation {
         }
         self.said.push(serde_json::Value::Object(held));
         let text = serde_json::Value::String(text.to_owned()).to_string();
+        let team = self
+            .workspace
+            .as_ref()
+            .map_or_else(String::new, |team| format!(r#""team_id":"{team}","#));
         Event::Frame {
             id: socket,
             text: format!(
-                r#"{{"envelope_id":"{envelope}","type":"events_api","payload":{{"event":{{"type":"{kind}","channel":"{room}",{speaker},"text":{text},"ts":"{id}"{thread_ts}}}}}}}"#
+                r#"{{"envelope_id":"{envelope}","type":"events_api","payload":{{{team}"event":{{"type":"{kind}","channel":"{room}",{speaker},"text":{text},"ts":"{id}"{thread_ts}}}}}}}"#
             ),
         }
     }
@@ -2853,12 +2861,17 @@ impl Simulation {
         // Remembered as the platform would give it back in a thread: the
         // event itself, which is what a thread's messages are shaped like.
         self.said.push(serde_json::Value::Object(event.clone()));
+        let mut payload = serde_json::Map::new();
+        if let Some(team) = &self.workspace {
+            payload.insert("team_id".to_owned(), team.clone().into());
+        }
+        payload.insert("event".to_owned(), serde_json::Value::Object(event));
         Event::Frame {
             id: socket,
             text: serde_json::json!({
                 "envelope_id": envelope,
                 "type": "events_api",
-                "payload": {"event": serde_json::Value::Object(event)},
+                "payload": serde_json::Value::Object(payload),
             })
             .to_string(),
         }
@@ -2930,6 +2943,22 @@ impl Simulation {
             socket,
             &room(n).id,
             "1788000099.000004",
+            None,
+            &format!("<@U0BOT> {text}"),
+            Spoken::Mention,
+        );
+        self.schedule(at, event);
+    }
+
+    /// Somebody mentioning this instance at the root of a room named by its
+    /// identifier rather than by its place in the rooms made, under the
+    /// identifier given: what a room seeded by a scenario needs.
+    pub fn says_in_room_id(&mut self, at: Now, room: &str, id: &str, text: &str) {
+        let socket = self.live_socket();
+        let event = self.frame_on(
+            socket,
+            room,
+            id,
             None,
             &format!("<@U0BOT> {text}"),
             Spoken::Mention,
@@ -3025,6 +3054,12 @@ impl Simulation {
     /// connect, and that one alone: a wrong app-level token, as measured.
     pub fn next_locate_fails(&mut self, why: &str) {
         self.locate_failures.push_back(why.to_owned());
+    }
+
+    /// Stamps every frame from now as from a workspace, as the platform does
+    /// on every event: what a frame on the instance's own app is routed by.
+    pub fn on_workspace(&mut self, team: &str) {
+        self.workspace = Some(team.to_owned());
     }
 
     /// Scripts the platform to refuse the next exchange of an install's

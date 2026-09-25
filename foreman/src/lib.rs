@@ -208,6 +208,30 @@ pub fn handled_elsewhere_notice(room: Option<&str>) -> String {
     )
 }
 
+/// What a person is told when they mention this instance in a room no
+/// project owns, on a workspace several projects share.
+///
+/// Where to ask instead, by each project's foreman room where it has one —
+/// see
+/// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+/// The one notice a mention can earn without waking anybody.
+#[must_use]
+pub fn unowned_notice(projects: &[(&str, Option<&str>)]) -> String {
+    let where_to: Vec<String> = projects
+        .iter()
+        .map(|(project, room)| {
+            room.map_or_else(
+                || format!("for {project} from its page on the dashboard, since its foreman has no room yet"),
+                |room| format!("in {room} for {project}"),
+            )
+        })
+        .collect();
+    format!(
+        "🔀 This room is nobody's here, since several projects talk on this workspace. Ask {}.",
+        where_to.join(", or ")
+    )
+}
+
 /// What a foreman's room is for, as the sidebar shows it beside the name.
 #[must_use]
 pub fn foreman_room_purpose(project: &str) -> String {
@@ -1265,6 +1289,20 @@ here is between people._"
         assert_eq!(
             super::foreman_room_purpose("aviary"),
             "Where aviary's foreman thinks: what it is handling, what it decided, and why."
+        );
+        assert_eq!(
+            super::unowned_notice(&[
+                ("Closed Loop", Some("<#C0FOREMAN1>")),
+                ("loquent", Some("<#C0FOREMAN2>")),
+            ]),
+            "🔀 This room is nobody's here, since several projects talk on this workspace. Ask \
+             in <#C0FOREMAN1> for Closed Loop, or in <#C0FOREMAN2> for loquent."
+        );
+        assert_eq!(
+            super::unowned_notice(&[("Closed Loop", Some("<#C0FOREMAN1>")), ("loquent", None)]),
+            "🔀 This room is nobody's here, since several projects talk on this workspace. Ask \
+             in <#C0FOREMAN1> for Closed Loop, or for loquent from its page on the dashboard, \
+             since its foreman has no room yet."
         );
         assert_eq!(
             super::foreman_room_opening("aviary", "<@U0BOT>"),

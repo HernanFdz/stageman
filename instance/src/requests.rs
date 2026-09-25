@@ -518,7 +518,7 @@ impl Running {
         // Listened to from now, not from the next restart: binding a channel
         // used to do nothing until the daemon was restarted, and nothing said
         // so.
-        if let Some(question) = self.listen(created) {
+        for question in self.listen(crate::listening::Listening::Own(created)) {
             self.defer(question);
         }
         Ok(Response::Projects(self.projects_screen()))
@@ -621,7 +621,7 @@ impl Running {
         self.defer(reclaiming);
         // Its channel is no longer listened to, and what is said there from
         // now reaches nobody here.
-        for disconnect in self.stop_listening(identifier) {
+        for disconnect in self.stop_listening(crate::listening::Listening::Own(identifier)) {
             self.defer(disconnect);
         }
         self.state.projects.remove(&identifier);
@@ -656,9 +656,13 @@ impl Running {
     /// has said: held by the listener and never kept, so a page links a room
     /// while the channel is connected and shows its identifier otherwise.
     pub(crate) fn identities(&self) -> views::Identities {
-        self.listeners
+        self.state
+            .projects
             .iter()
-            .filter_map(|(id, listener)| listener.us.clone().map(|us| (*id, us)))
+            .filter_map(|(id, project)| {
+                let channel = project.channels.keys().next().copied()?;
+                Some((*id, self.identity_of(*id, channel)?.clone()))
+            })
             .collect()
     }
 

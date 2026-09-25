@@ -589,6 +589,14 @@ pub fn socket_url(channel: Channel, status: u16, body: &[u8]) -> Result<String, 
     }
 }
 
+/// The workspace a frame's event is from, where the frame carries one.
+#[must_use]
+pub fn workspace_of(channel: Channel, frame: &str) -> Option<String> {
+    match channel {
+        Channel::Slack => slack::workspace_of(frame),
+    }
+}
+
 /// What one frame from the event stream means, given who this instance is
 /// on the channel.
 #[must_use]
@@ -760,7 +768,7 @@ mod tests {
         archive, create_room, decode, done, exchange, foreman_room_name, identity, install_link,
         installed, installed_path, invite, manifest, mention, open_socket, permalink, pieces, post,
         posted, react, reference, referenced, replies, room_address, room_created, room_link,
-        room_name, set_purpose, set_topic, socket_url, thread_read, update, who_am_i,
+        room_name, set_purpose, set_topic, socket_url, thread_read, update, who_am_i, workspace_of,
     };
     use stageman_core::{Channel, JobId, ProjectId, Secret, Speaking, Uuid};
 
@@ -923,6 +931,31 @@ mod tests {
             )),
             "{link}"
         );
+    }
+
+    /// A frame's event says which workspace it is from, as every recorded
+    /// envelope did; a greeting and a disconnect say nothing of one.
+    #[test]
+    fn a_frames_event_says_which_workspace_it_is_from() {
+        assert_eq!(
+            workspace_of(
+                Channel::Slack,
+                r#"{"envelope_id":"e1","type":"events_api","accepts_response_payload":false,"payload":{"team_id":"T0BTGA3HFRB","context_team_id":"T0BTGA3HFRB","api_app_id":"A0APP","event":{"type":"app_mention","channel":"C0ROOM","user":"U0HUMAN","text":"<@U0BOT> hello","ts":"1788000000.000100"}}}"#
+            ),
+            Some("T0BTGA3HFRB".to_owned())
+        );
+        assert_eq!(
+            workspace_of(Channel::Slack, r#"{"type":"hello","num_connections":1}"#),
+            None
+        );
+        assert_eq!(
+            workspace_of(
+                Channel::Slack,
+                r#"{"type":"disconnect","reason":"warning"}"#
+            ),
+            None
+        );
+        assert_eq!(workspace_of(Channel::Slack, "not json"), None);
     }
 
     /// The manifest `README.md` shows a reader is this crate's, word for

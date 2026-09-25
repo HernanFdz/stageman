@@ -180,17 +180,20 @@ pub enum Keeping {
 }
 
 /// What a listener asked, on its way to a connection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Question {
-    /// Who this instance is on the channel.
+    /// Who this instance is on the channel, with one voice.
     Introducing {
-        /// Whose channel.
-        project: ProjectId,
+        /// With which app.
+        listening: crate::listening::Listening,
+        /// With which workspace's credential, on the instance's app; none
+        /// on a project's own.
+        team: Option<String>,
     },
     /// Where to connect for the event stream.
     Locating {
-        /// Whose channel.
-        project: ProjectId,
+        /// With which app.
+        listening: crate::listening::Listening,
     },
 }
 
@@ -560,13 +563,10 @@ impl Running {
     /// name the setup instructions give the app until then.
     #[must_use]
     pub fn own_mention(&self, project: ProjectId, channel: Channel) -> String {
-        self.listeners
-            .get(&project)
-            .and_then(|listener| listener.us.as_ref())
-            .map_or_else(
-                || "@stageman".to_owned(),
-                |us| stageman_channel::mention(channel, &us.user),
-            )
+        self.identity_of(project, channel).map_or_else(
+            || "@stageman".to_owned(),
+            |us| stageman_channel::mention(channel, &us.user),
+        )
     }
 
     /// Asks the platform for a thread, once the record that the message in
@@ -615,9 +615,7 @@ impl Running {
         message: &str,
         thread: Option<&str>,
     ) -> Option<String> {
-        self.listeners
-            .get(&project)
-            .and_then(|listener| listener.us.as_ref())
+        self.identity_of(project, channel)
             .map(|us| stageman_channel::permalink(channel, us, room, message, thread))
     }
 
@@ -692,7 +690,7 @@ impl Running {
                 }
             }
             Purpose::Question(question) => {
-                self.questioned(sent.channel, question, responded, at, effects);
+                self.questioned(id, sent.channel, question, responded, at, effects);
             }
             Purpose::Growing { speaker, run } => {
                 let outcome = match responded {
@@ -713,8 +711,8 @@ impl Running {
                     Speaker::Foreman(project) => Some(*project),
                     Speaker::Job(job) => self.state.project_of(job),
                 }
-                .and_then(|project| self.listeners.get(&project))
-                .and_then(|listener| listener.us.clone());
+                .and_then(|project| self.identity_of(project, sent.channel))
+                .cloned();
                 let outcome = match (responded, us) {
                     (Responded::Answered { status, body, .. }, Some(us)) => {
                         stageman_channel::thread_read(
@@ -795,8 +793,8 @@ impl Running {
                 tracing::debug!(?keeping, "not done: {}", never());
             }
             Purpose::Question(
-                Question::Introducing { project } | Question::Locating { project },
-            ) => self.unasked(project, effects),
+                Question::Introducing { listening, .. } | Question::Locating { listening },
+            ) => self.unasked(listening, effects),
             Purpose::Growing { speaker, run } => self.run_grown(&speaker, run, Err(never())),
             Purpose::Reading { speaker, .. } => self.thread_unasked(speaker),
         }

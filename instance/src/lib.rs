@@ -135,10 +135,10 @@ fn out_of_order(asked: EffectId, id: EffectId) {
 enum Timer {
     /// The settling sweep: which containers still deserve to be up.
     Settling,
-    /// A project's channel, tried again after something went wrong.
+    /// A channel's connection, tried again after something went wrong.
     Reconnecting {
-        /// Whose.
-        project: ProjectId,
+        /// With which app.
+        listening: listening::Listening,
     },
     /// A message of a turn's transcript, grown by editing if it has grown.
     Growing {
@@ -652,10 +652,10 @@ pub struct Running {
     timers: BTreeMap<EffectId, Timer>,
     /// Every project whose channel is being listened to, and where its
     /// connection has got to.
-    listeners: BTreeMap<ProjectId, listening::Listener>,
+    listeners: BTreeMap<listening::Listening, listening::Listener>,
     /// Every socket open, by the identifier the world knows it under: whose
     /// channel each is, for as long as it is open.
-    sockets: BTreeMap<EffectId, ProjectId>,
+    sockets: BTreeMap<EffectId, listening::Listening>,
     /// Sockets the platform said it would close, read until they do while
     /// their replacements are opened.
     draining: BTreeSet<EffectId>,
@@ -1119,7 +1119,7 @@ impl Running {
                 let settling = self.settle_later();
                 effects.push(settling);
             }
-            Some(Timer::Reconnecting { project }) => self.try_again(project, effects),
+            Some(Timer::Reconnecting { listening }) => self.try_again(listening, effects),
             Some(Timer::Growing { speaker, run }) => self.grow(&speaker, run),
             Some(Timer::Cancelling { speaker }) => self.cancel_overdue(&speaker, effects),
             None => tracing::warn!("woken for a timer this instance did not set; ignored"),

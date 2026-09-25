@@ -161,12 +161,22 @@ fn whole(running: &Running) -> Value {
             "exchanging": value(&running.exchanging.iter().collect::<Vec<_>>()),
             "app_failure": value(&running.app_failure),
             "sent": value(&running.sent.iter().collect::<Vec<_>>()),
-            "listeners": keyed(running.listeners.iter().map(|(project, listener)| {
-                (project, json!({
+            "listeners": keyed(running.listeners.iter().map(|(listening, listener)| {
+                (listening, json!({
                     "channel": format!("{:?}", listener.channel),
                     "opening": listener.opening.expose(),
-                    "credential": listener.speaking.credential.expose(),
-                    "us": value(&listener.us),
+                    "voices": match &listener.voices {
+                        crate::listening::Voices::Own(voice) => json!({
+                            "credential": voice.speaking.credential.expose(),
+                            "us": value(&voice.us),
+                        }),
+                        crate::listening::Voices::Workspaces(voices) => keyed(voices.iter().map(|(team, voice)| {
+                            (team, json!({
+                                "credential": voice.speaking.credential.expose(),
+                                "us": value(&voice.us),
+                            }))
+                        })),
+                    },
                     "phase": value(&listener.phase),
                     "deaf_since": listener.deaf_since,
                 }))

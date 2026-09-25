@@ -114,8 +114,26 @@ fn handling(errand: &Errand) -> &str {
 }
 
 impl Running {
-    /// Hands one message heard on a project's socket to whoever it is for.
+    /// Hands one message heard on a project's own app to whoever it is for.
     pub fn heard(&mut self, project: ProjectId, channel: Channel, message: &Message) {
+        self.route(&[project], channel, message);
+    }
+
+    /// Hands one message heard on the instance's app to whoever it is for:
+    /// among the projects bound to the workspace it came from, which is
+    /// none for a workspace nothing is bound to — see `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+    pub fn heard_on_workspace(&mut self, channel: Channel, team: Option<&str>, message: &Message) {
+        let candidates: Vec<ProjectId> = team
+            .map(|team| self.state.bound_to(channel, team).collect())
+            .unwrap_or_default();
+        self.route(&candidates, channel, message);
+    }
+
+    /// Hands a message to whoever it is for, among the projects it can be
+    /// for: the job whose room it is in, a project's foreman, nobody, or —
+    /// where several projects share the workspace and none owns the room
+    /// — the notice that says where to ask.
+    fn route(&mut self, candidates: &[ProjectId], channel: Channel, message: &Message) {
         let arriving = Arriving {
             room: &message.room,
             id: &message.id,
@@ -123,8 +141,11 @@ impl Running {
             from_us: message.from_us,
             from_app: message.app.is_some(),
         };
-        match self.state.recipient(project, channel, &arriving) {
+        match self.state.recipient_among(candidates, channel, &arriving) {
             Recipient::Job(job) => {
+                let Some(project) = self.state.project_of(&job) else {
+                    return;
+                };
                 tracing::info!(%job, "handing a reply to the job whose room it is in");
                 self.replied(project, &job, channel, message);
             }
@@ -136,10 +157,54 @@ impl Running {
                 }
                 self.for_foreman(project, channel, message);
             }
+            Recipient::Unowned { among } => {
+                tracing::info!(room = %message.room, "a mention in a room none of several projects owns");
+                self.point_elsewhere(channel, &among, message);
+            }
             // Ordinary: what this instance said itself, heard back, or
             // another app posting in a room nobody watches.
             Recipient::Nobody => tracing::debug!("nobody that message was for"),
         }
+    }
+
+    /// Answers a mention in a room none of several projects owns, where it
+    /// was said, with where to ask instead: each project's foreman room,
+    /// linked where it has one. Said with the workspace's own credential,
+    /// which every project on it shares, and costing no turn.
+    fn point_elsewhere(&mut self, channel: Channel, among: &[ProjectId], message: &Message) {
+        let Some(speaking) = among
+            .iter()
+            .find_map(|project| self.state.speaking(*project, channel))
+        else {
+            return;
+        };
+        // By name, which is how a person tells the projects apart.
+        let mut rooms: Vec<(String, Option<String>)> = among
+            .iter()
+            .filter_map(|project| self.state.projects.get(project))
+            .map(|watched| {
+                (
+                    watched.name.clone(),
+                    watched
+                        .foreman_room
+                        .as_ref()
+                        .map(|room| stageman_channel::room_link(room.channel, &room.id)),
+                )
+            })
+            .collect();
+        rooms.sort();
+        let named: Vec<(&str, Option<&str>)> = rooms
+            .iter()
+            .map(|(name, room)| (name.as_str(), room.as_deref()))
+            .collect();
+        let place = Place {
+            room: Room {
+                channel,
+                id: message.room.clone(),
+            },
+            thread: Some(message.thread.clone().unwrap_or_else(|| message.id.clone())),
+        };
+        self.say(&speaking, &place, &stageman_foreman::unowned_notice(&named));
     }
 
     /// Receives a message for the job whose room it arrived in.

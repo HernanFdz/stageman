@@ -286,6 +286,7 @@ impl Running {
                     self.workspace_refused(request, "the app was forgotten meanwhile".to_owned());
                     return true;
                 };
+                let bot_token = installed.bot_token.clone();
                 app.workspaces.insert(
                     installed.team.clone(),
                     Workspace {
@@ -296,6 +297,14 @@ impl Running {
                 );
                 self.workspace_failure = None;
                 self.dirty = true;
+                // Heard from now, with a voice of its own on the app's one
+                // connection; the first workspace is what opens it.
+                let speaking = stageman_core::Speaking {
+                    credential: bot_token,
+                };
+                for question in self.workspace_added(channel, &installed.team, &speaking) {
+                    self.defer(question);
+                }
                 // A tab that came back under no state at all is nobody's
                 // to announce, and closing it is right where it was opened
                 // by script and harmless where it was not.
@@ -373,6 +382,9 @@ impl Running {
         };
         if app.workspaces.remove(id).is_none() {
             return Err(Refusal::NoSuchWorkspace { id: id.to_owned() });
+        }
+        for disconnect in self.workspace_dropped(channel, id) {
+            self.defer(disconnect);
         }
         self.dirty = true;
         Ok(Response::Apps(self.apps()))

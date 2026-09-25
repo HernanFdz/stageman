@@ -176,6 +176,9 @@ impl Running {
             });
         }
         self.forget_workspaces();
+        for disconnect in self.stop_listening(crate::listening::Listening::App(channel)) {
+            self.defer(disconnect);
+        }
         self.dirty = true;
         Ok(Response::Apps(self.apps()))
     }
