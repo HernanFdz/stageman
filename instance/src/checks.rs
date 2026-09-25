@@ -212,6 +212,9 @@ impl Running {
             // panel and kept nowhere: both credentials, as a draft's are.
             Request::Binds { binding: pair, .. } => {
                 let bound = binding(pair)?;
+                self.not_the_instances_app(
+                    bound.iter().map(|(channel, config)| (*channel, config)),
+                )?;
                 return Ok(own_checks(
                     bound.iter().map(|(channel, config)| (*channel, config)),
                 ));
@@ -288,8 +291,42 @@ impl Running {
                 ));
             }
         }
+        if resolved.channels_changed {
+            self.not_the_instances_app(
+                resolved
+                    .channels
+                    .iter()
+                    .filter_map(|(channel, binding)| Some((*channel, binding.own()?))),
+            )?;
+        }
         checks.extend(channel_checks(&resolved));
         Ok(checks)
+    }
+
+    /// Refuses an app of a project's own that carries the instance's own
+    /// app's app-level token, before the platform is asked anything: that
+    /// app's stream is opened once, as the instance's, so a project reaches
+    /// it through a workspace — see
+    /// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+    fn not_the_instances_app<'a>(
+        &self,
+        mut bound: impl Iterator<Item = (Channel, &'a ChannelConfig)>,
+    ) -> Result<(), Refusal> {
+        let theirs = bound.any(|(channel, config)| {
+            self.state
+                .channel_apps
+                .get(&channel)
+                .is_some_and(|app| app.app_token == config.listen_credential)
+        });
+        if theirs {
+            return Err(Refusal::ChannelRefused {
+                listening: true,
+                why: "it belongs to the instance's own app, which a project speaks through by a \
+                      workspace instead"
+                    .to_owned(),
+            });
+        }
+        Ok(())
     }
 
     /// A platform answered about a credential. False when the answer was to

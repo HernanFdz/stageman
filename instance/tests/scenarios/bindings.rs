@@ -3,16 +3,18 @@
 //! a project created on the workspace its tab brought back, the state
 //! spent by the save; one moved onto the workspace from an app of its own
 //! and back, with what listens following; a binding kept not checked
-//! again, and an own pair pasted again its own; and the panel's check,
-//! answering where the app speaks and refusing a pair already heard with.
+//! again, and an own pair pasted again its own; the panel's check,
+//! answering where the app speaks and refusing a pair already heard with;
+//! and one connection per app-level token, where an app a project owns is
+//! also the instance's, with a pair carrying that token refused.
 
-use stageman_core::{Binding, Channel};
+use stageman_core::{Binding, Channel, Secret};
 use stageman_instance::{Request, Response};
 use stageman_wire::{BindingDraft, BindingView, Bound, ChannelDraft, Refusal, WorkspaceArrival};
 
 use crate::dashboard::{a_draft, a_draft_on_its_own_app, ask, count};
 use crate::shared_app::{TEAM, on_the_shared_app, the_app};
-use crate::simulation::{Simulation, project, seed, watching_a_channel};
+use crate::simulation::{Simulation, project, seed, watching, watching_a_channel};
 
 /// A draft bound to the workspace that came back under a state.
 fn on_the_workspace(name: &str, state: &str) -> stageman_wire::Draft {
@@ -387,6 +389,127 @@ fn the_panels_check_says_where_the_app_speaks_and_refuses_a_pair_already_heard_w
             },
         ),
         Response::Refused(Refusal::ChannelIncomplete)
+    );
+    assert_eq!(instance.state().projects.len(), 1, "nothing was kept");
+}
+
+/// An app a project owns that the instance then registers as its own
+/// shares one app-level token, and the platform splits a token's events
+/// between its connections: so it is heard on one connection, the
+/// project's, while the project keeps it — the workspace installed
+/// meanwhile opens nothing — and moving the project onto that workspace
+/// closes the project's connection and opens the instance's app's, on
+/// which a person's mention reaches the project by its workspace.
+#[test]
+fn an_app_a_project_owns_and_the_instance_registered_is_heard_on_one_connection() {
+    let mut sim = Simulation::new();
+    let mut state = watching_a_channel(&[]);
+    let mut app = the_app(false);
+    app.workspaces.clear();
+    // The project's own app-level token, pasted a second time.
+    app.app_token = Secret::new("xapp-not-a-real-token".to_owned());
+    state.channel_apps.insert(Channel::Slack, app);
+    sim.holding(&state);
+    let mut instance = sim.wake(seed(1));
+    sim.run_until(&mut instance, 5_000);
+    assert_eq!(sim.listening(), 1, "the project's own connection");
+
+    let opens_before = count(&sim, "apps.connections.open");
+    let arrived = installed_under(&mut sim, &mut instance);
+    assert_eq!(
+        count(&sim, "apps.connections.open"),
+        opens_before,
+        "the workspace installed opens no second connection on the token"
+    );
+    assert_eq!(sim.listening(), 1);
+
+    let disconnects_before = count(&sim, "-> Disconnect");
+    let Response::Projects(_) = ask(
+        &mut sim,
+        &mut instance,
+        7,
+        Request::Amend {
+            project: project().to_string(),
+            draft: on_the_workspace("example", &arrived),
+        },
+    ) else {
+        panic!("moved onto the workspace");
+    };
+    let until = sim.now() + 5_000;
+    sim.run_until(&mut instance, until);
+    assert_eq!(
+        count(&sim, "-> Disconnect"),
+        disconnects_before + 1,
+        "the project's connection is closed"
+    );
+    assert_eq!(
+        count(&sim, "apps.connections.open"),
+        opens_before + 1,
+        "and the instance's app's is opened"
+    );
+    assert_eq!(sim.listening(), 1);
+
+    sim.on_workspace(TEAM);
+    let at = sim.now() + 100;
+    sim.says_at_root(at, 1, "is anybody there?");
+    let until = sim.now() + 2_000;
+    sim.run_until(&mut instance, until);
+    assert!(
+        sim.talks_in(&stageman_foreman::container(project()))
+            .iter()
+            .any(|run| run.was_told("is anybody there?")),
+        "the mention reached the project's foreman by its workspace"
+    );
+}
+
+/// A pair carrying the instance's own app's app-level token is refused
+/// before anything is asked, in the form's panel as on the save: that app
+/// is reached through a workspace.
+#[test]
+fn a_pair_carrying_the_instances_app_level_token_is_refused_before_anything_is_asked() {
+    let mut sim = Simulation::new();
+    let mut state = watching(&[]);
+    state.channel_apps.insert(Channel::Slack, the_app(false));
+    sim.holding(&state);
+    let mut instance = sim.wake(seed(1));
+    sim.run_until(&mut instance, 5_000);
+    let trace_before = sim.trace().len();
+
+    let refused = Response::Refused(Refusal::ChannelRefused {
+        listening: true,
+        why: "it belongs to the instance's own app, which a project speaks through by a workspace \
+              instead"
+            .to_owned(),
+    });
+    let pair = ChannelDraft {
+        credential: "xoxb-burrow".to_owned(),
+        listen_credential: "xapp-instance".to_owned(),
+    };
+    assert_eq!(
+        ask(
+            &mut sim,
+            &mut instance,
+            1,
+            Request::Binds {
+                project: None,
+                binding: pair.clone(),
+            },
+        ),
+        refused
+    );
+    let mut draft = a_draft("burrow");
+    draft.binding = BindingDraft::Own(pair);
+    assert_eq!(
+        ask(&mut sim, &mut instance, 2, Request::Create { draft }),
+        refused
+    );
+    assert!(
+        !sim.trace().iter().skip(trace_before).any(|line| {
+            line.contains("auth.test")
+                || line.contains("apps.connections.open")
+                || line.contains("api.github.com")
+        }),
+        "nothing was asked of Slack or of GitHub"
     );
     assert_eq!(instance.state().projects.len(), 1, "nothing was kept");
 }

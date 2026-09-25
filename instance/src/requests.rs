@@ -640,8 +640,8 @@ impl Running {
         // it left closed, and one for an app of its own opened. Nothing to
         // open for a workspace, whose app is listened to already.
         if channels_changed {
-            for disconnect in self.stop_listening(Listening::Own(identifier)) {
-                self.defer(disconnect);
+            for effect in self.stop_listening_own(identifier) {
+                self.defer(effect);
             }
             for question in self.listen(Listening::Own(identifier)) {
                 self.defer(question);
@@ -688,7 +688,7 @@ impl Running {
         self.defer(reclaiming);
         // Its channel is no longer listened to, and what is said there from
         // now reaches nobody here.
-        for disconnect in self.stop_listening(crate::listening::Listening::Own(identifier)) {
+        for disconnect in self.stop_listening_own(identifier) {
             self.defer(disconnect);
         }
         self.state.projects.remove(&identifier);

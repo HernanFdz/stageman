@@ -132,7 +132,9 @@ Slack before they are kept. A project made either way can be moved to the
 other from its settings. Its channels stay where they are, and the app it
 moves to is not in them yet: invite that app into the project's foreman
 channel, into the channel of any job still going, and into every channel
-the project watches, as into any channel.
+the project watches, as into any channel. An app a project already has can
+be registered as the instance's too: it goes on being heard through the
+project until the project is moved onto a workspace of it.
 
 ```yaml
 display_information:

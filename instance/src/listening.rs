@@ -256,6 +256,24 @@ impl Running {
                 (channel, app.app_token.clone(), Voices::Workspaces(voices))
             }
         };
+        // One connection per app-level token, per
+        // `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`:
+        // the platform hands each event to one of an app's connections, so a
+        // second on a token already open would hear half of what is said,
+        // and say nothing. An app a project owns that the instance then
+        // registered as its own is heard through the project's connection
+        // until the project leaves it, which is when this one opens.
+        if let Some(holder) = self.listeners.iter().find_map(|(other, listener)| {
+            (listener.channel == channel && listener.opening == opening).then_some(*other)
+        }) {
+            tracing::warn!(
+                %listening,
+                %holder,
+                "not listening: that app's stream is already open, and a second connection would \
+                 hear half of it"
+            );
+            return Vec::new();
+        }
         let (asked, questions) = self.introducing_each(listening, channel, &voices);
         self.listeners.insert(
             listening,
@@ -749,6 +767,19 @@ impl Running {
                     }
                 })
             })
+    }
+
+    /// Stops listening with a project's own app, and listens with the
+    /// instance's app where it was waiting on the stream that connection
+    /// held — see [`Running::listen`]: what a project moved off its own
+    /// app, or forgotten, leaves behind.
+    pub fn stop_listening_own(&mut self, project: ProjectId) -> Vec<Effect> {
+        let mut effects = self.stop_listening(Listening::Own(project));
+        let channels: Vec<Channel> = self.state.channel_apps.keys().copied().collect();
+        for channel in channels {
+            effects.extend(self.listen(Listening::App(channel)));
+        }
+        effects
     }
 
     /// A workspace was installed on the instance's app: heard from now,

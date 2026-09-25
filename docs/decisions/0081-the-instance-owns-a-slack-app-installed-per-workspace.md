@@ -180,7 +180,13 @@ workspace and then by the room it was said in.**
   project's foreman room, and costs no turn; an app's message there is
   nobody's, as it is today. Who this instance is on a workspace is asked
   with that workspace's bot token, per workspace, as it is asked per binding
-  today, since each install has a bot user of its own.
+  today, since each install has a bot user of its own. The rule is kept
+  where a connection is opened rather than by the listeners' keys: an app a
+  project owns that is then registered as the instance's shares one
+  app-level token, so it is heard on the project's connection until the
+  project moves onto a workspace of it, which is when the instance's opens;
+  and a pair of a project's own carrying the instance's app-level token is
+  refused before the platform is asked.
 
 - **A room in a shared workspace is watched from the foreman's own room,
   naming it.** With one project in a workspace, asking in the room works as
