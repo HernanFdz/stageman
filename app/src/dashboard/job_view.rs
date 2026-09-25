@@ -20,7 +20,7 @@ use stageman_instance::{Request, Response};
 
 use super::error::{DashboardError, DashboardResult};
 use super::jobs_view::{JobControls, Showing, Toned as _};
-use super::live::Live;
+use super::live::{Live, Reading, use_reading};
 use crate::ui::{Badge, Card, Chip, Icon, Info, KitChip, PageHeader, Reference, Skeleton, When};
 
 pub use stageman_wire::JobPage;
@@ -40,27 +40,33 @@ pub async fn job_page(project: String, job: String) -> DashboardResult<JobPage> 
 }
 
 /// One job's screen.
+///
+/// Keyed by the job, for the reason the project's screen is: another job's
+/// address is another page, read afresh, rather than this one re-read with
+/// the last job showing until the read lands.
 #[component]
 pub fn ProjectJobView(project: String, job: String) -> Element {
-    // `use_reactive!` for the reason the project's screen gives: a plain
-    // value is read once, and the screen would keep showing the first job
-    // it was opened on.
+    rsx! {
+        JobOf { key: "{project}/{job}", project, job }
+    }
+}
+
+/// The screen itself, for one job for as long as it is shown.
+#[component]
+fn JobOf(project: String, job: String) -> Element {
     let live = use_context::<Live>();
-    let reading = use_server_future(use_reactive!(|project, job| {
-        let _ = live.follow();
-        job_page(project, job)
-    }))?;
+    let reading = use_reading(live, move || job_page(project.clone(), job.clone()))?;
     let failure = use_signal(|| None::<DashboardError>);
 
     rsx! {
-        match reading.cloned() {
-            Some(Ok(page)) => rsx! { Shown { page, failure } },
-            Some(Err(reason)) => rsx! {
+        match reading {
+            Reading::Read(read) => rsx! { Shown { page: read(), failure } },
+            Reading::Failed(reason) => rsx! {
                 Card { title: "This job could not be read",
                     p { class: "text-sm text-failed", "{reason}" }
                 }
             },
-            None => rsx! { Skeleton {} },
+            Reading::NotYet => rsx! { Skeleton {} },
         }
     }
 }

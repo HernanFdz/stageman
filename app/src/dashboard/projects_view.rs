@@ -17,7 +17,7 @@ use stageman_instance::{Request, Response};
 
 use super::agents_view::Agent;
 use super::error::DashboardResult;
-use super::live::Live;
+use super::live::{Live, Reading, use_reading};
 use crate::ui::{
     Badge, BadgeTone, ButtonVariant, Card, EmptyState, Icon, KitChip, Reference, Skeleton, Tooltip,
 };
@@ -161,68 +161,68 @@ fn noted(project: &Project) -> String {
 #[component]
 pub fn ProjectsView() -> Element {
     let live = use_context::<Live>();
-    let reading = use_server_future(move || {
-        let _ = live.follow();
-        projects()
-    })?;
+    let reading = use_reading(live, projects)?;
 
     rsx! {
         div { class: "flex flex-col gap-4",
-            match reading.cloned() {
-                Some(Ok(watching)) => rsx! {
-                    Card {
-                        title: "Projects",
-                        note: "A repository, the agents that work on it, and what they need to reach it.",
-                        badge: rsx! {
-                            Badge { "{watching.projects.len()}" }
-                        },
-                        // Offered only once an agent could be named: a page
-                        // that let somebody fill a form the instance must
-                        // refuse would be inviting the refusal.
-                        aside: if watching.available.is_empty() { None } else {
-                            Some(rsx! {
-                                Tooltip { text: "New project",
-                                    Link {
-                                        to: super::Route::ProjectNewView {},
-                                        class: ButtonVariant::Primary.styled("px-2"),
-                                        aria_label: "New project",
-                                        {Icon::Add.draw(16)}
+            match reading {
+                Reading::Read(read) => {
+                    let watching = read();
+                    rsx! {
+                        Card {
+                            title: "Projects",
+                            note: "A repository, the agents that work on it, and what they need to reach it.",
+                            badge: rsx! {
+                                Badge { "{watching.projects.len()}" }
+                            },
+                            // Offered only once an agent could be named: a page
+                            // that let somebody fill a form the instance must
+                            // refuse would be inviting the refusal.
+                            aside: if watching.available.is_empty() { None } else {
+                                Some(rsx! {
+                                    Tooltip { text: "New project",
+                                        Link {
+                                            to: super::Route::ProjectNewView {},
+                                            class: ButtonVariant::Primary.styled("px-2"),
+                                            aria_label: "New project",
+                                            {Icon::Add.draw(16)}
+                                        }
                                     }
+                                })
+                            },
+                            if watching.projects.is_empty() {
+                                EmptyState {
+                                    title: "Nothing is being watched yet.",
+                                    note: if watching.available.is_empty() {
+                                        "A project names one agent to think with and at least one its \
+                                         jobs run on, so configuring an agent comes first."
+                                    } else {
+                                        "Add one. It needs the agents that work on it, a way to reach \
+                                         GitHub, and the repository chosen from what that reaches."
+                                    },
                                 }
-                            })
-                        },
-                        if watching.projects.is_empty() {
-                            EmptyState {
-                                title: "Nothing is being watched yet.",
-                                note: if watching.available.is_empty() {
-                                    "A project names one agent to think with and at least one its \
-                                     jobs run on, so configuring an agent comes first."
-                                } else {
-                                    "Add one. It needs the agents that work on it, a way to reach \
-                                     GitHub, and the repository chosen from what that reaches."
-                                },
-                            }
-                        } else {
-                            ul { class: "divide-y divide-border",
-                                for project in watching.projects.iter().cloned() {
-                                    li { key: "{project.id}",
-                                        WatchedProject {
-                                            project,
-                                            available: watching.available.clone(),
-                                            shapes: watching.shapes.clone(),
+                            } else {
+                                ul { class: "divide-y divide-border",
+                                    for project in watching.projects.iter().cloned() {
+                                        li { key: "{project.id}",
+                                            WatchedProject {
+                                                project,
+                                                available: watching.available.clone(),
+                                                shapes: watching.shapes.clone(),
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
                     }
-                },
-                Some(Err(reason)) => rsx! {
+                }
+                Reading::Failed(reason) => rsx! {
                     Card { title: "The projects could not be read",
                         p { class: "text-sm text-failed", "{reason}" }
                     }
                 },
-                None => rsx! { Skeleton {} },
+                Reading::NotYet => rsx! { Skeleton {} },
             }
         }
     }

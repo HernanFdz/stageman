@@ -18,7 +18,7 @@ use dioxus::prelude::*;
 use stageman_instance::{Request, Response};
 
 use super::error::{DashboardError, DashboardResult};
-use super::live::Live;
+use super::live::{Live, Reading, use_reading};
 use crate::ui::{
     Badge, BadgeTone, Button, ButtonVariant, Card, EmptyState, FIELD, Field, Icon, KitChip, Modal,
     Reference, Skeleton, TextArea, Tooltip, When,
@@ -138,17 +138,26 @@ pub async fn retire(project: String, job: String, ending: Ending) -> DashboardRe
 }
 
 /// One project's screen.
+///
+/// Keyed by the project, so that another project's address is another
+/// page: a fresh read, which shows nothing until it lands, and none of this
+/// page's state. A page keeps its last reading while it re-reads — see
+/// `docs/decisions/0082-a-page-keeps-its-reading-while-it-re-reads.md` —
+/// and the last reading here would be another project's jobs, shown under
+/// this one's address.
 #[component]
 pub fn ProjectJobsView(project: String) -> Element {
-    // `use_reactive!` because `project` is a plain value rather than a signal:
-    // without it this resource keeps its first identifier when the route
-    // changes, and the screen shows another project's jobs while claiming to
-    // be this one.
+    rsx! {
+        JobsOf { key: "{project}", project }
+    }
+}
+
+/// The screen itself, for one project for as long as it is shown.
+#[component]
+fn JobsOf(project: String) -> Element {
     let live = use_context::<Live>();
-    let mut reading = use_server_future(use_reactive!(|project| {
-        let _ = live.follow();
-        jobs(project)
-    }))?;
+    let read_of = project.clone();
+    let reading = use_reading(live, move || jobs(read_of.clone()))?;
     let mut failure = use_signal(|| None::<DashboardError>);
     let mut starting = use_signal(|| false);
     let mut draft = use_signal(Wanted::default);
@@ -156,129 +165,132 @@ pub fn ProjectJobsView(project: String) -> Element {
 
     rsx! {
         div { class: "flex flex-col gap-4",
-            match reading.cloned() {
-                Some(Ok(working)) => rsx! {
-                    Card {
-                        title: working.name.clone(),
-                        badge: rsx! {
-                            Badge { "{working.jobs.len()}" }
-                            Reference {
-                                mark: "github",
-                                says: working.repository.to_string(),
-                                link: Some(working.repository_link.clone()),
-                            }
-                        },
-                        aside: rsx! {
-                            div { class: "flex items-center gap-2",
-                            Tooltip { text: "Settings",
-                                Link {
-                                    to: super::Route::ProjectSettingsView {
-                                        project: identifier.clone(),
-                                    },
-                                    class: ButtonVariant::Secondary.styled("px-2"),
-                                    aria_label: "Settings",
-                                    {Icon::Edit.draw(16)}
+            match reading {
+                Reading::Read(mut read) => {
+                    let working = read();
+                    rsx! {
+                        Card {
+                            title: working.name.clone(),
+                            badge: rsx! {
+                                Badge { "{working.jobs.len()}" }
+                                Reference {
+                                    mark: "github",
+                                    says: working.repository.to_string(),
+                                    link: Some(working.repository_link.clone()),
                                 }
-                            }
-                            Tooltip { text: "Start a job",
-                            Button {
-                                class: "px-2",
-                                aria_label: "Start a job",
-                                onclick: {
-                                    // The first kit the project offers, which
-                                    // is the one a select with a single option
-                                    // would have chosen anyway.
-                                    let first = working.kits.first().map(|kit| kit.name.clone());
-                                    move |_| {
-                                        draft.set(Wanted {
-                                            kit: first.clone().unwrap_or_default(),
-                                            work: String::new(),
-                                            title: String::new(),
-                                        });
-                                        failure.set(None);
-                                        starting.set(true);
-                                    }
-                                },
-                                {Icon::Add.draw(16)}
-                            }
-                            }
-                            }
-                        },
-                        if working.jobs.is_empty() {
-                            EmptyState {
-                                title: "Nothing has run on this project yet.",
-                                note: "Describe a piece of work and an agent will do it in a \
-                                       container of its own, stopping at a proposal.",
-                            }
-                        } else {
-                            // The list owns the columns and every row shares
-                            // them, so a badge is as wide as its word and the
-                            // titles still start together — see [`JobRow`].
-                            ul { class: ROWS,
-                                for job in working.jobs {
-                                    li { key: "{job.id}", class: ROW,
-                                        RanJob {
-                                            job,
+                            },
+                            aside: rsx! {
+                                div { class: "flex items-center gap-2",
+                                Tooltip { text: "Settings",
+                                    Link {
+                                        to: super::Route::ProjectSettingsView {
                                             project: identifier.clone(),
-                                            // The child awaits and this
-                                            // decides what the screen does
-                                            // with the answer, so a row needs
-                                            // to know nothing about how the
-                                            // page holds its state.
-                                            onchanged: move |answered| match answered {
-                                                Ok(fresh) => {
-                                                    failure.set(None);
-                                                    reading.set(Some(Ok(fresh)));
-                                                }
-                                                Err(reason) => failure.set(Some(reason)),
-                                            },
-                                        }
+                                        },
+                                        class: ButtonVariant::Secondary.styled("px-2"),
+                                        aria_label: "Settings",
+                                        {Icon::Edit.draw(16)}
                                     }
                                 }
-                            }
-                        }
-                    }
-                    if starting() {
-                        Modal {
-                            title: "Start a job",
-                            onclose: move |()| starting.set(false),
-                            actions: rsx! {
-                                Tooltip { text: "Start",
+                                Tooltip { text: "Start a job",
                                 Button {
                                     class: "px-2",
-                                    aria_label: "Start",
-                                    disabled: !draft().is_complete(),
-                                    onclick: move |_| {
-                                        let identifier = identifier.clone();
-                                        let asked = draft();
-                                        async move {
-                                            match start(identifier, asked.kit, asked.work, asked.title).await {
-                                                Ok(fresh) => {
-                                                    failure.set(None);
-                                                    reading.set(Some(Ok(fresh)));
-                                                    starting.set(false);
-                                                }
-                                                Err(reason) => failure.set(Some(reason)),
-                                            }
+                                    aria_label: "Start a job",
+                                    onclick: {
+                                        // The first kit the project offers, which
+                                        // is the one a select with a single option
+                                        // would have chosen anyway.
+                                        let first = working.kits.first().map(|kit| kit.name.clone());
+                                        move |_| {
+                                            draft.set(Wanted {
+                                                kit: first.clone().unwrap_or_default(),
+                                                work: String::new(),
+                                                title: String::new(),
+                                            });
+                                            failure.set(None);
+                                            starting.set(true);
                                         }
                                     },
-                                    {Icon::Save.draw(16)}
+                                    {Icon::Add.draw(16)}
+                                }
                                 }
                                 }
                             },
-                            if let Some(reason) = failure() {
-                                p { class: "mb-3 text-sm text-failed", "{reason}" }
+                            if working.jobs.is_empty() {
+                                EmptyState {
+                                    title: "Nothing has run on this project yet.",
+                                    note: "Describe a piece of work and an agent will do it in a \
+                                           container of its own, stopping at a proposal.",
+                                }
+                            } else {
+                                // The list owns the columns and every row shares
+                                // them, so a badge is as wide as its word and the
+                                // titles still start together — see [`JobRow`].
+                                ul { class: ROWS,
+                                    for job in working.jobs {
+                                        li { key: "{job.id}", class: ROW,
+                                            RanJob {
+                                                job,
+                                                project: identifier.clone(),
+                                                // The child awaits and this
+                                                // decides what the screen does
+                                                // with the answer, so a row needs
+                                                // to know nothing about how the
+                                                // page holds its state.
+                                                onchanged: move |answered| match answered {
+                                                    Ok(fresh) => {
+                                                        failure.set(None);
+                                                        read.set(fresh);
+                                                    }
+                                                    Err(reason) => failure.set(Some(reason)),
+                                                },
+                                            }
+                                        }
+                                    }
+                                }
                             }
-                            JobForm { draft, kits: working.kits }
+                        }
+                        if starting() {
+                            Modal {
+                                title: "Start a job",
+                                onclose: move |()| starting.set(false),
+                                actions: rsx! {
+                                    Tooltip { text: "Start",
+                                    Button {
+                                        class: "px-2",
+                                        aria_label: "Start",
+                                        disabled: !draft().is_complete(),
+                                        onclick: move |_| {
+                                            let identifier = identifier.clone();
+                                            let asked = draft();
+                                            async move {
+                                                match start(identifier, asked.kit, asked.work, asked.title).await {
+                                                    Ok(fresh) => {
+                                                        failure.set(None);
+                                                        read.set(fresh);
+                                                        starting.set(false);
+                                                    }
+                                                    Err(reason) => failure.set(Some(reason)),
+                                                }
+                                            }
+                                        },
+                                        {Icon::Save.draw(16)}
+                                    }
+                                    }
+                                },
+                                if let Some(reason) = failure() {
+                                    p { class: "mb-3 text-sm text-failed", "{reason}" }
+                                }
+                                JobForm { draft, kits: working.kits }
+                            }
                         }
                     }
-                },
-                Some(Err(reason)) => rsx! {
+                }
+                Reading::Failed(reason) => rsx! {
                     Card { title: "This project could not be read",
                         p { class: "text-sm text-failed", "{reason}" }
                     }
                 },
-                None => rsx! { Skeleton {} },
+                Reading::NotYet => rsx! { Skeleton {} },
             }
         }
     }

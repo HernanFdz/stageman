@@ -6,7 +6,11 @@ Accepted. Answers the question `docs/open-questions.md` carried since the
 first page was served: how a page finds out that something changed. Taken
 beside `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`,
 whose first page is a list of things that change while somebody is looking
-at it.
+at it. Amended by
+`docs/decisions/0082-a-page-keeps-its-reading-while-it-re-reads.md`: the
+read a page restarts on a tick runs in the background and the page keeps
+its last reading until the next has landed, because a page that suspended
+on every tick was measured to be torn down and rebuilt on each.
 
 ## Context
 
