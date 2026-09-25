@@ -466,3 +466,104 @@ fn a_daemon_dying_mid_exchange_keeps_nothing() {
         "{page}"
     );
 }
+
+/// Only the last few installs begun are remembered: a page mints one per
+/// press, and a state older than those is one no tab can still come back
+/// with. The seventeenth press forgets the first and only the first: the
+/// first's arrival is kept but told no page will learn of it, and the
+/// second's is announced.
+#[test]
+fn only_the_last_few_installs_begun_are_remembered() {
+    let mut sim = Simulation::new();
+    sim.holding(&holding_the_app());
+    let mut instance = sim.wake(seed(1));
+    // As many as the instance remembers, and one more.
+    let remembered = 16;
+    let states: Vec<String> = (0..=remembered)
+        .map(|n| pressed(&mut sim, &mut instance, 100 + n).state)
+        .collect();
+
+    let page = arrives(
+        &mut sim,
+        &mut instance,
+        &back(Some("c0de"), None, Some(&states[0])),
+    );
+    assert!(
+        page.contains("opened before stageman last started") && !page.contains("window.close()"),
+        "the oldest state has been forgotten: {page}"
+    );
+    let page = arrives(
+        &mut sim,
+        &mut instance,
+        &back(Some("c0de2"), None, Some(&states[1])),
+    );
+    assert!(
+        closes_saying_installed_on(&page, "Acme"),
+        "the next oldest is still honoured: {page}"
+    );
+}
+
+/// Forgetting the app forgets what was held for its installs: the states
+/// minted, so that a tab coming back under one to an app registered again
+/// is told no page will learn of it; and the last refusal, so that the
+/// page registered anew says nothing of it.
+#[test]
+fn forgetting_the_app_forgets_what_was_held_for_its_installs() {
+    let mut sim = Simulation::new();
+    sim.holding(&holding_the_app());
+    let mut instance = sim.wake(seed(1));
+    let minted = pressed(&mut sim, &mut instance, 1);
+    sim.next_exchange_fails("invalid_code");
+    arrives(
+        &mut sim,
+        &mut instance,
+        &back(Some("st4le"), None, Some(&minted.state)),
+    );
+    assert!(
+        instance_page(&mut sim, &mut instance, 2)
+            .slack
+            .expect("the app")
+            .install_failure
+            .is_some(),
+        "the refusal is said until the app is forgotten"
+    );
+
+    let Response::Apps(_) = ask(
+        &mut sim,
+        &mut instance,
+        3,
+        Request::ForgetChannelApp {
+            channel: "slack".to_owned(),
+        },
+    ) else {
+        panic!("the Instance page");
+    };
+    let Response::Apps(shown) = ask(
+        &mut sim,
+        &mut instance,
+        4,
+        Request::RegisterChannelApp {
+            channel: "slack".to_owned(),
+            client_id: "1234.5678".to_owned(),
+            client_secret: "s3cret".to_owned(),
+            app_token: "xapp-1".to_owned(),
+        },
+    ) else {
+        panic!("the Instance page");
+    };
+    assert_eq!(
+        shown.slack.expect("the app").install_failure,
+        None,
+        "nothing of the refusal survives the forget"
+    );
+
+    let page = arrives(
+        &mut sim,
+        &mut instance,
+        &back(Some("c0de"), None, Some(&minted.state)),
+    );
+    assert!(
+        page.contains("opened before stageman last started") && !page.contains("window.close()"),
+        "the state minted before the forget is nobody's now: {page}"
+    );
+}

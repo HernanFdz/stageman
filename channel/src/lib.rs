@@ -758,9 +758,9 @@ mod tests {
     use super::{
         Call, ChannelError, Identity, Incoming, Reaction, ThreadRead, acknowledgement, app_form,
         archive, create_room, decode, done, exchange, foreman_room_name, identity, install_link,
-        installed, invite, manifest, mention, open_socket, permalink, pieces, post, posted, react,
-        reference, referenced, replies, room_address, room_created, room_link, room_name,
-        set_purpose, set_topic, socket_url, thread_read, update, who_am_i,
+        installed, installed_path, invite, manifest, mention, open_socket, permalink, pieces, post,
+        posted, react, reference, referenced, replies, room_address, room_created, room_link,
+        room_name, set_purpose, set_topic, socket_url, thread_read, update, who_am_i,
     };
     use stageman_core::{Channel, JobId, ProjectId, Secret, Speaking, Uuid};
 
@@ -891,6 +891,38 @@ mod tests {
             ),
             Err(ChannelError::NoAnswer)
         ));
+    }
+
+    /// The path an install comes back to is the one the manifest spells,
+    /// and the one the authorisation address names: one path, said three
+    /// ways, pinned to each other.
+    #[test]
+    fn the_install_comes_back_to_the_path_the_manifest_spells() {
+        assert_eq!(
+            installed_path(Channel::Slack),
+            "/instance/apps/slack/installed"
+        );
+        assert!(
+            manifest(Channel::Slack).contains(&format!(
+                "- http://localhost:8080{}",
+                installed_path(Channel::Slack)
+            )),
+            "{}",
+            manifest(Channel::Slack)
+        );
+        let link = install_link(
+            Channel::Slack,
+            "1234.5678",
+            "5ta7e",
+            "https://stageman.example",
+        );
+        assert!(
+            link.ends_with(&format!(
+                "&redirect_uri=https%3A%2F%2Fstageman.example{}",
+                installed_path(Channel::Slack).replace('/', "%2F")
+            )),
+            "{link}"
+        );
     }
 
     /// The manifest `README.md` shows a reader is this crate's, word for
