@@ -143,10 +143,7 @@ impl Running {
         app_token: &str,
     ) -> Result<Response, Refusal> {
         let (client_id, client_secret, app_token) =
-            (client_id.trim(), client_secret.trim(), app_token.trim());
-        if client_id.is_empty() || client_secret.is_empty() || app_token.is_empty() {
-            return Err(Refusal::ChannelAppIncomplete);
-        }
+            three_values(client_id, client_secret, app_token)?;
         let workspaces = match self.state.channel_apps.remove(&channel) {
             Some(had) if had.client_id == client_id => had.workspaces,
             _ => BTreeMap::new(),
@@ -326,6 +323,29 @@ impl Running {
     }
 }
 
+/// The three values a channel app is registered from, trimmed, or the
+/// refusal for one left blank.
+///
+/// One function for the two places that need it — the check that asks the
+/// platform about the app-level token, which must refuse before asking,
+/// and the keeper, which must refuse if reached any other way — so that
+/// neither can drift from the other.
+///
+/// # Errors
+///
+/// Fails if any of the three is blank.
+pub fn three_values<'a>(
+    client_id: &'a str,
+    client_secret: &'a str,
+    app_token: &'a str,
+) -> Result<(&'a str, &'a str, &'a str), Refusal> {
+    let trimmed = (client_id.trim(), client_secret.trim(), app_token.trim());
+    if trimmed.0.is_empty() || trimmed.1.is_empty() || trimmed.2.is_empty() {
+        return Err(Refusal::ChannelAppIncomplete);
+    }
+    Ok(trimmed)
+}
+
 /// One parameter of a query string, where it is made of the characters a
 /// code or a state token is made of: letters, digits and the three marks
 /// the platform uses. Anything else is not the parameter.
@@ -357,6 +377,27 @@ mod tests {
 
     /// A parameter is read by name from wherever it is in the query, and
     /// refused when it carries anything a code or a state could not.
+    /// Each value blank on its own is refused, whichever it is, and all
+    /// three given are handed back trimmed.
+    #[test]
+    fn a_registration_needs_each_of_its_three_values() {
+        for (client_id, client_secret, app_token) in [
+            ("", "s3cret", "xapp-1"),
+            ("1234.5678", "  ", "xapp-1"),
+            ("1234.5678", "s3cret", "\t"),
+        ] {
+            assert_eq!(
+                super::three_values(client_id, client_secret, app_token),
+                Err(stageman_wire::Refusal::ChannelAppIncomplete),
+                "{client_id:?} {client_secret:?} {app_token:?}"
+            );
+        }
+        assert_eq!(
+            super::three_values(" 1234.5678 ", "s3cret\n", " xapp-1"),
+            Ok(("1234.5678", "s3cret", "xapp-1"))
+        );
+    }
+
     #[test]
     fn a_query_parameter_is_read_by_name_and_only_when_well_formed() {
         assert_eq!(

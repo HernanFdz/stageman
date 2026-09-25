@@ -202,13 +202,8 @@ impl Running {
                 app_token,
             } => {
                 let channel = views::channel_named(channel)?;
-                let app_token = app_token.trim();
-                if client_id.trim().is_empty()
-                    || client_secret.trim().is_empty()
-                    || app_token.is_empty()
-                {
-                    return Err(Refusal::ChannelAppIncomplete);
-                }
+                let (_, _, app_token) =
+                    crate::apps::three_values(client_id, client_secret, app_token)?;
                 let opening = Secret::new(app_token.to_owned());
                 return Ok(vec![(
                     Check::Listening { channel },

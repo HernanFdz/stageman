@@ -555,22 +555,8 @@ fn RegisteringSlack(form: String, onchanged: EventHandler<DashboardResult<Apps>>
     let mut client_secret = use_signal(String::new);
     let mut app_token = use_signal(String::new);
     let mut refused = use_signal(|| None::<DashboardError>);
-    let complete = !client_id().trim().is_empty()
-        && !client_secret().trim().is_empty()
-        && !app_token().trim().is_empty();
-    // A refusal that names the token's box is said there, and any other at
-    // the top of the form: of the three, only the token has a check of its
-    // own.
-    let pointed = refused().and_then(|why| match why {
-        DashboardError::Refused(refusal) => refusal.part(),
-        DashboardError::NoInstance | DashboardError::Failed => None,
-    });
-    let beside_token = refused()
-        .filter(|_| pointed == Some(Part::Listening))
-        .map(|why| why.to_string());
-    let unplaced = refused()
-        .filter(|_| pointed != Some(Part::Listening))
-        .map(|why| why.to_string());
+    let complete = complete(&client_id(), &client_secret(), &app_token());
+    let (beside_token, unplaced) = placed(refused().as_ref());
 
     rsx! {
         div { class: "flex flex-col gap-3",
@@ -647,5 +633,78 @@ fn RegisteringSlack(form: String, onchanged: EventHandler<DashboardResult<Apps>>
                 }
             }
         }
+    }
+}
+
+/// Whether the three boxes of the registration form hold something to
+/// send: what enables the press.
+fn complete(client_id: &str, client_secret: &str, app_token: &str) -> bool {
+    !client_id.trim().is_empty() && !client_secret.trim().is_empty() && !app_token.trim().is_empty()
+}
+
+/// Where a refusal is said on the registration form: beside the token's
+/// box where it names the token, and above the form otherwise. Of the
+/// three values, only the token has a check of its own, so only a refusal
+/// of the token has a box to be said beside.
+fn placed(refused: Option<&DashboardError>) -> (Option<String>, Option<String>) {
+    let Some(why) = refused else {
+        return (None, None);
+    };
+    let pointed = match why {
+        DashboardError::Refused(refusal) => refusal.part(),
+        DashboardError::NoInstance | DashboardError::Failed => None,
+    };
+    let said = Some(why.to_string());
+    if pointed == Some(Part::Listening) {
+        (said, None)
+    } else {
+        (None, said)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DashboardError, complete, placed};
+    use stageman_wire::Refusal;
+
+    /// The press waits for all three values, whichever is missing.
+    #[test]
+    fn the_press_waits_for_all_three_values() {
+        assert!(complete("1234.5678", "s3cret", "xapp-1"));
+        assert!(!complete(" ", "s3cret", "xapp-1"));
+        assert!(!complete("1234.5678", "", "xapp-1"));
+        assert!(!complete("1234.5678", "s3cret", "\t"));
+    }
+
+    /// A refusal of the app-level token is said beside its box; a refusal
+    /// of anything else, and a failure that is nobody's box, above the
+    /// form; and nothing is said of nothing.
+    #[test]
+    fn a_refusal_is_said_beside_the_token_where_it_names_it_and_above_otherwise() {
+        let listening = DashboardError::from(Refusal::ChannelRefused {
+            listening: true,
+            why: "Slack refused it (invalid_auth)".to_owned(),
+        });
+        assert_eq!(
+            placed(Some(&listening)),
+            (
+                Some(
+                    "the app-level token was not kept: Slack refused it (invalid_auth)".to_owned()
+                ),
+                None
+            )
+        );
+        let speaking = DashboardError::from(Refusal::ChannelRefused {
+            listening: false,
+            why: "Slack refused it (invalid_auth)".to_owned(),
+        });
+        assert_eq!(placed(Some(&speaking)), (None, Some(speaking.to_string())));
+        let blank = DashboardError::from(Refusal::ChannelAppIncomplete);
+        assert_eq!(placed(Some(&blank)), (None, Some(blank.to_string())));
+        assert_eq!(
+            placed(Some(&DashboardError::Failed)),
+            (None, Some(DashboardError::Failed.to_string()))
+        );
+        assert_eq!(placed(None), (None, None));
     }
 }
