@@ -403,7 +403,7 @@ fn what_an_awake_instance_holds_reads_in_full() {
     let projects = held["kept"]["projects"].as_object().expect("the projects");
     let project = projects.values().next().expect("one project");
     assert_eq!(project["name"], "example");
-    assert_eq!(project["repository"], "https://example.invalid/repo");
+    assert_eq!(project["repository"], "https://github.com/example/repo");
     assert!(
         !project["jobs"].as_object().expect("its jobs").is_empty(),
         "and the job it is watching: {project:?}"

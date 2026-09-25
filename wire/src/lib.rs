@@ -35,6 +35,67 @@ pub struct Agent {
     pub used_by: Vec<String>,
 }
 
+// ------------------------------------------------------------------ apps
+
+/// What the Instance page shows.
+///
+/// The Apps this instance owns on each platform, and what the last
+/// registration said if it failed — see
+/// `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Apps {
+    /// The GitHub App, if one is registered.
+    pub github: Option<PlatformAppView>,
+    /// Why the last registration was not kept, if the last one was not.
+    pub failed: Option<String>,
+}
+
+/// An App the instance owns, as much of it as a page may know: never its
+/// key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlatformAppView {
+    /// Its slug, which is what a person reads.
+    pub slug: String,
+    /// Where it is seen on the platform.
+    pub link: String,
+    /// Where it is installed, as the instance has learned — see
+    /// `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
+    pub installations: Vec<InstallationView>,
+    /// Why the last installation was not kept, if the last one was not.
+    pub install_failure: Option<String>,
+}
+
+/// One installation of the App, as a page shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallationView {
+    /// Its identifier on the platform, which is what a draft names.
+    pub id: u64,
+    /// The account it is on, as the platform spells it.
+    pub account: String,
+    /// Whether it covers every repository of that account rather than
+    /// chosen ones.
+    pub every_repository: bool,
+    /// The projects reaching their repository through it, by name: what
+    /// forgetting it would leave without access. Empty means it can go.
+    pub used_by: Vec<String>,
+}
+
+/// The form that registers an App, as the browser posts it.
+///
+/// Where to, and the manifest it carries, with the state token minted for
+/// this one attempt. Composed on the server, like every address a page
+/// uses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Registration {
+    /// Where the form posts to.
+    pub action: String,
+    /// The manifest, as the form's one field.
+    pub manifest: String,
+    /// The state token the platform hands back, for the page to show and
+    /// nobody to type.
+    pub state: String,
+}
+
 // -------------------------------------------------------------- instance
 
 /// One instance, as the line at the foot of every page shows it: this
@@ -62,6 +123,10 @@ pub struct Instance {
 /// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Home {
+    /// Every token about to stop working, soonest first, and every one
+    /// that has: what a person replaces — see
+    /// `docs/decisions/0080-a-tokens-owner-and-expiry-are-kept-beside-it.md`.
+    pub expiring: Vec<ExpiringToken>,
     /// Every idle job, longest waiting first: the ones a person does
     /// something about, which is what *idle* means.
     pub needs_you: Vec<ProjectJob>,
@@ -69,6 +134,22 @@ pub struct Home {
     pub working: Vec<ProjectJob>,
     /// Every project.
     pub projects: Vec<Project>,
+}
+
+/// A project's token that is about to stop working, or has: raised on the
+/// first page for the person who replaces it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExpiringToken {
+    /// The project, by identifier.
+    pub project: String,
+    /// The project, by name.
+    pub project_name: String,
+    /// Whose the token is, where that was read.
+    pub owner: Option<String>,
+    /// When it expires, as the wire spells a moment.
+    pub expires: String,
+    /// Whether that moment has passed.
+    pub expired: bool,
 }
 
 /// One job beside the project it belongs to, for a list that spans projects.
@@ -84,6 +165,28 @@ pub struct ProjectJob {
 
 // -------------------------------------------------------------- projects
 
+/// A repository on the platform, as a page names it: an owner and a name,
+/// shown as `owner/name` — see
+/// `docs/decisions/0079-a-repository-is-an-owner-and-a-name.md`.
+///
+/// Two parts rather than text or an address, so that a page shows what a
+/// person says and composes nothing: the address a browser opens comes
+/// beside it, composed on the server.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+pub struct Repository {
+    /// Who owns it, as the platform spells it.
+    pub owner: String,
+    /// What it is called there.
+    pub name: String,
+}
+
+impl fmt::Display for Repository {
+    /// `owner/name`, as the platform says it.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.owner, self.name)
+    }
+}
+
 /// One project, as much of it as a page is allowed to know.
 ///
 /// Which platforms have a credential and which channels are bound is here;
@@ -97,19 +200,22 @@ pub struct Project {
     /// What to call it.
     pub name: String,
     /// Where its jobs work.
-    pub repository: String,
-    /// The same, as an address a browser can open, when what it holds is
-    /// one. Absent for a project written before addresses were checked,
-    /// whose text is shown and linked to nothing.
-    pub repository_link: Option<String>,
+    pub repository: Repository,
+    /// The same, as an address a browser can open. Composed on the server,
+    /// like every address a page links.
+    pub repository_link: String,
     /// How its foreman's agent is set, as the identifiers a browser sends
     /// back — not the names a person reads.
     pub foreman: Fitted,
     /// The kits its jobs may run on, as the form edits them. Never empty in
     /// a valid instance.
     pub kits: Vec<KitDraft>,
-    /// The platforms it has a credential for.
-    pub platforms: Vec<String>,
+    /// How it reaches its repository's platform, in one of two shapes, or
+    /// not at all — see
+    /// `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`
+    /// and `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`. None only for a project the last release wrote without a
+    /// token.
+    pub access: Option<AccessView>,
     /// The channels bound to it. Empty is valid: a project with nowhere to
     /// escalate can still run work that never needs to ask.
     pub channels: Vec<String>,
@@ -152,6 +258,245 @@ impl Project {
     }
 }
 
+/// How a project reaches its repository's platform, as a page sees it.
+///
+/// The shape, and for an installation the account it is on. Never the
+/// token, and never the installation's identifier, which is the
+/// instance's business — see
+/// `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "shape", rename_all = "snake_case")]
+pub enum AccessView {
+    /// A token, pasted and checked, with what the platform said of it —
+    /// see `docs/decisions/0080-a-tokens-owner-and-expiry-are-kept-beside-it.md`.
+    Token {
+        /// Whose it is, where that was read: an account's name.
+        owner: Option<String>,
+        /// When the platform stops accepting it, as the wire spells a
+        /// moment, where the platform said.
+        expires: Option<String>,
+        /// Whether that moment has passed, as the instance read the page.
+        expired: bool,
+    },
+    /// An installation of the App.
+    Installation {
+        /// The account it is on.
+        account: String,
+    },
+}
+
+/// Where a person installs the App, minted for one press — see
+/// `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
+///
+/// The link carries the state, and the state is what the page keeps: the
+/// installation the platform brings back under it is that page's, and no
+/// other's. Composed on the server, like every address a page links.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallLink {
+    /// Where the tab goes.
+    pub link: String,
+    /// What the page asks by, once the tab has come back.
+    pub state: String,
+}
+
+impl fmt::Debug for InstallLink {
+    /// Names neither: the state buys an installation for whoever holds
+    /// it, and the link carries the state.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("InstallLink { .. }")
+    }
+}
+
+/// How the form says the repository is reached, as the browser sends it
+/// back — see `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
+///
+/// One of three shapes, with the repository inside the shape: so a form
+/// cannot send a token and an installation at once, cannot send a
+/// repository with no access to reach it, and drops the repository when
+/// it leaves the shape that reached it. An access left unsaid is the one
+/// the project holds, which only an existing project has: a token, or an
+/// installation. An installation is otherwise named by the state its
+/// install came back under, never by its identifier, so a form can name
+/// only what its own tab brought back.
+#[derive(Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "shape", rename_all = "snake_case")]
+pub enum AccessDraft {
+    /// Nothing chosen yet. Refused, whichever form this is.
+    #[default]
+    None,
+    /// Through the App, on an installation of it.
+    App {
+        /// The state the install came back under, or none for the
+        /// installation the project holds.
+        arrival: Option<String>,
+        /// The repository, once one is chosen.
+        repository: Option<Repository>,
+    },
+    /// With a token: one set in the form, or the one the project holds.
+    Token {
+        /// The token, or none for the one the project holds.
+        token: Option<String>,
+        /// The repository, once one is chosen.
+        repository: Option<Repository>,
+    },
+}
+
+impl AccessDraft {
+    /// The repository this reaches, once one is chosen.
+    #[must_use]
+    pub const fn repository(&self) -> Option<&Repository> {
+        match self {
+            Self::None => None,
+            Self::App { repository, .. } | Self::Token { repository, .. } => repository.as_ref(),
+        }
+    }
+
+    /// Whether this says how the repository is reached, for the form given:
+    /// an installation come back or a token set, or whichever the project
+    /// holds where there is one.
+    #[must_use]
+    pub fn is_reached(&self, filling: &Filling) -> bool {
+        match self {
+            Self::None => false,
+            Self::App {
+                arrival: Some(state),
+                ..
+            } => !state.trim().is_empty(),
+            Self::Token {
+                token: Some(token), ..
+            } => !token.trim().is_empty(),
+            Self::App { arrival: None, .. } | Self::Token { token: None, .. } => {
+                !filling.creating()
+            }
+        }
+    }
+}
+
+impl fmt::Debug for AccessDraft {
+    /// Names the shape and the repository, and neither the token nor the
+    /// state, which buys an installation for whoever holds it.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::None => f.write_str("None"),
+            Self::App {
+                arrival,
+                repository,
+            } => f
+                .debug_struct("App")
+                .field("arrival", &arrival.as_ref().map(|_| "<redacted>"))
+                .field("repository", repository)
+                .finish(),
+            Self::Token { token, repository } => f
+                .debug_struct("Token")
+                .field("token", &token.as_ref().map(|_| "<redacted>"))
+                .field("repository", repository)
+                .finish(),
+        }
+    }
+}
+
+/// What a form asks the repositories of.
+///
+/// The installation its own tab brought back, a token it is about to set,
+/// or what a project already holds — see
+/// `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
+/// Never the App as a whole: a form is shown what its own access reaches
+/// and nothing of the instance's other installations.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "through", rename_all = "snake_case")]
+pub enum Through {
+    /// The installation that came back under a state minted for this page.
+    Arrived {
+        /// The state the install link carried.
+        state: String,
+    },
+    /// A token, as pasted and not yet kept.
+    Token {
+        /// The token.
+        token: String,
+    },
+    /// Whatever the project holds.
+    Held {
+        /// The project, by identifier.
+        project: String,
+    },
+}
+
+impl fmt::Debug for Through {
+    /// Names what is asked and neither the token nor the state.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Arrived { .. } => f
+                .debug_struct("Arrived")
+                .field("state", &"<redacted>")
+                .finish(),
+            Self::Token { .. } => f
+                .debug_struct("Token")
+                .field("token", &"<redacted>")
+                .finish(),
+            Self::Held { project } => f.debug_struct("Held").field("project", project).finish(),
+        }
+    }
+}
+
+/// What an access reaches, as far as one page of the platform says — or
+/// why the platform would not say, or that nothing has come back yet.
+///
+/// An answer either way rather than a refusal, because the question was
+/// asked and answered: a token the platform does not accept is what the
+/// form wanted to know, and a refusal would have the browser log an error
+/// for a check that did its job.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "reached", rename_all = "snake_case")]
+pub enum Reached {
+    /// The repositories, each with its visibility.
+    Listed {
+        /// The account the access is on, where the platform says one:
+        /// an installation's, or the account a token was made under.
+        account: Option<String>,
+        /// When a token expires, as the wire spells a moment, where the
+        /// platform said; none for an installation.
+        expires: Option<String>,
+        /// The rows, by address.
+        repositories: Vec<Reachable>,
+        /// Whether the platform had more than were listed.
+        more: bool,
+    },
+    /// The platform would not list, and this is why: a clause for the box
+    /// the credential was typed in.
+    Unlisted {
+        /// What went wrong, as a clause.
+        why: String,
+    },
+    /// The state is this instance's and nothing has come back under it:
+    /// the tab is still on the platform. Asked again on the next tick.
+    NotYet,
+}
+
+impl Default for Reached {
+    /// Nothing reached, and nothing wrong: what an access that lists
+    /// nothing is answered with.
+    fn default() -> Self {
+        Self::Listed {
+            account: None,
+            expires: None,
+            repositories: Vec::new(),
+            more: false,
+        }
+    }
+}
+
+/// One repository an access reaches.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reachable {
+    /// The repository, as a draft names it back.
+    pub repository: Repository,
+    /// Whether it is private. Under a token, a private repository is one
+    /// the token was certainly granted, and a public one may not have
+    /// been — see `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
+    pub private: bool,
+}
+
 /// What the projects screen needs in order to draw itself.
 ///
 /// One answer rather than two, because the screen cannot offer to create a
@@ -171,6 +516,12 @@ pub struct Watching {
     /// Where each platform's own form is, filled in, for a project that
     /// does not exist yet.
     pub guides: Guides,
+    /// Whether an App is registered on the platform, which is what makes
+    /// installing it possible from the form. Nothing more of it: where it
+    /// is installed is the instance's business, and a form reaches an
+    /// installation through the tab it opened — see
+    /// `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
+    pub app_registered: bool,
 }
 
 /// Where the platforms' own forms are, filled in as this project would
@@ -353,14 +704,13 @@ impl fmt::Debug for VariableDraft {
 pub struct Draft {
     /// What to call it.
     pub name: String,
-    /// Where its jobs work.
-    pub repository: String,
     /// How its foreman's agent is set.
     pub foreman: Fitted,
     /// The kits its jobs may run on.
     pub kits: Vec<KitDraft>,
-    /// What reaches the repository.
-    pub credential: String,
+    /// How its repository is reached, in one of two shapes, with the
+    /// repository inside the shape.
+    pub access: AccessDraft,
     /// Where this project's conversation happens, if anywhere.
     pub channel: ChannelDraft,
     /// What its jobs are given that this project never reads.
@@ -371,14 +721,14 @@ pub struct Draft {
 }
 
 impl fmt::Debug for Draft {
-    /// Names the fields and neither credential.
+    /// Names the fields and neither credential: the access redacts its
+    /// own, as the channel does.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Draft")
             .field("name", &self.name)
-            .field("repository", &self.repository)
             .field("foreman", &self.foreman)
             .field("kits", &self.kits)
-            .field("credential", &"<redacted>")
+            .field("access", &self.access)
             .field("channel", &self.channel)
             .field("variables", &self.variables)
             .field("brief", &self.brief)
@@ -399,8 +749,8 @@ pub enum Part {
     Kits,
     /// One kit, counting from nought.
     Kit(usize),
-    /// The token for the repository.
-    Credential,
+    /// How the repository is reached: the access, in either shape.
+    Access,
     /// The Slack binding, and its bot token in particular.
     Channel,
     /// The Slack binding's app-level token, which listens.
@@ -426,11 +776,12 @@ impl Draft {
     /// The same conditions the instance enforces, deliberately, so the form
     /// can say which box before asking rather than after being refused. It is
     /// not a second definition of validity — the instance still checks — but
-    /// it is the screen refusing to ask the question badly. Creating needs a
-    /// credential and a whole channel binding; amending needs neither,
-    /// because a blank credential there means the one already held and the
-    /// channel is not offered at all. A row of variables needs a value unless
-    /// the project already holds that name.
+    /// it is the screen refusing to ask the question badly. The access is
+    /// set in either shape, or kept where there is one to keep; the
+    /// repository is chosen; creating needs a whole channel binding, and
+    /// amending does not, because the channel is not offered at all. A row
+    /// of variables needs a value unless the project already holds that
+    /// name.
     #[must_use]
     pub fn problems(&self, filling: &Filling, held: &[String]) -> Vec<Problem> {
         let mut found = Vec::new();
@@ -443,8 +794,18 @@ impl Draft {
         if self.name.trim().is_empty() {
             problem(Part::Name, "It needs a name.");
         }
-        if self.repository.trim().is_empty() {
-            problem(Part::Repository, "It needs the repository's address.");
+        if !self.access.is_reached(filling) {
+            problem(
+                Part::Access,
+                if matches!(self.access, AccessDraft::Token { .. }) {
+                    "Set a token."
+                } else {
+                    "Choose how the repository is reached."
+                },
+            );
+        }
+        if self.access.repository().is_none() {
+            problem(Part::Repository, "Choose the repository.");
         }
         if !self.foreman.is_complete() {
             problem(Part::Foreman, "The foreman needs an agent and a model.");
@@ -472,15 +833,11 @@ impl Draft {
                 "Two kits share a name, and a name has to pick one out.",
             );
         }
-        if filling.creating() {
-            if self.credential.trim().is_empty() {
-                problem(Part::Credential, "It needs a token for the repository.");
-            }
-            if self.channel.credential.trim().is_empty()
-                || self.channel.listen_credential.trim().is_empty()
-            {
-                problem(Part::Channel, "It needs both Slack tokens.");
-            }
+        if filling.creating()
+            && (self.channel.credential.trim().is_empty()
+                || self.channel.listen_credential.trim().is_empty())
+        {
+            problem(Part::Channel, "It needs both Slack tokens.");
         }
         for (position, row) in self.variables.iter().enumerate() {
             if row.name.trim().is_empty() {
@@ -676,8 +1033,8 @@ pub struct Job {
 pub struct PullRequest {
     /// The number, as the platform counts them.
     pub number: u64,
-    /// Where it is, when that can be said.
-    pub link: Option<String>,
+    /// Where it is, composed on the server from the project's repository.
+    pub link: String,
 }
 
 /// One job's page: the job, the project it is on, and what the page links to.
@@ -692,9 +1049,9 @@ pub struct JobPage {
     /// The project, by name.
     pub project_name: String,
     /// Where its jobs work.
-    pub repository: String,
-    /// The same, as an address a browser can open, when what it holds is one.
-    pub repository_link: Option<String>,
+    pub repository: Repository,
+    /// The same, as an address a browser can open, composed on the server.
+    pub repository_link: String,
     /// The job, as a list shows it: its kit, its room and its tunnel are
     /// on it, since a row shows them too.
     pub job: Job,
@@ -726,9 +1083,9 @@ pub struct Working {
     /// What to call the project.
     pub name: String,
     /// Where its jobs work.
-    pub repository: String,
-    /// The same, as an address a browser can open, when what it holds is one.
-    pub repository_link: Option<String>,
+    pub repository: Repository,
+    /// The same, as an address a browser can open, composed on the server.
+    pub repository_link: String,
     /// The kits its jobs may run on. Never empty in a valid instance.
     pub kits: Vec<Offered>,
     /// Its jobs, newest first.
@@ -923,6 +1280,67 @@ pub enum Refusal {
     /// A turn is running in that job, so it cannot be retired yet.
     #[error("that job is still working — stop it before retiring it")]
     JobWorking,
+    /// No App is registered on that platform, so there is nothing to
+    /// forget.
+    #[error("no App is registered on {platform}")]
+    AppMissing {
+        /// The platform, as the screen names it.
+        platform: String,
+    },
+    /// The App cannot be forgotten while a project reaches its repository
+    /// through an installation of it.
+    #[error("the App on {platform} is still installed on {}", projects.join(", "))]
+    AppInUse {
+        /// The platform, as the screen names it.
+        platform: String,
+        /// The projects that would be left without access, by name.
+        projects: Vec<String>,
+    },
+    /// A project names an installation the App is not installed as — see
+    /// `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
+    #[error("the App is not installed as {id}")]
+    NoSuchInstallation {
+        /// The identifier the draft named.
+        id: u64,
+    },
+    /// The form named an install by a state nothing has come back under:
+    /// the tab is still on the platform, the state was minted before the
+    /// instance last started, or it was spent by a save already.
+    #[error(
+        "no installation has come back for this form, or it came back before the instance last \
+         started: press Install the App again"
+    )]
+    ArrivalUnknown,
+    /// The access does not reach the repository chosen: a token was not
+    /// granted it, or the installation does not cover it.
+    #[error("the access does not reach {repository}: {why}")]
+    NotReached {
+        /// The repository, as the platform names it.
+        repository: Repository,
+        /// What the platform said, as a clause.
+        why: String,
+    },
+    /// The platform would not mint from the installation, so it was not
+    /// kept.
+    #[error("the installation was not kept: {why}")]
+    InstallationRefused {
+        /// What the platform said, as a clause for the box.
+        why: String,
+    },
+    /// The platform could not be asked about the installation, so it was
+    /// not kept: not wrong, and not known to be right.
+    #[error("the installation was not kept, because it could not be checked: {why}")]
+    InstallationUnchecked {
+        /// What went wrong on the way there.
+        why: String,
+    },
+    /// An installation cannot be forgotten while a project reaches its
+    /// repository through it.
+    #[error("that installation is still used by {}", projects.join(", "))]
+    InstallationInUse {
+        /// The projects that would be left without access, by name.
+        projects: Vec<String>,
+    },
     /// Something went wrong that the operator cannot act on from here.
     #[error("that did not work — the server log says why")]
     Failed,
@@ -944,9 +1362,10 @@ impl Refusal {
     pub const fn status(&self) -> u16 {
         match self {
             Self::Failed => 500,
-            Self::UnknownAgent { .. } | Self::UnknownProject { .. } | Self::UnknownJob { .. } => {
-                404
-            }
+            Self::UnknownAgent { .. }
+            | Self::UnknownProject { .. }
+            | Self::UnknownJob { .. }
+            | Self::AppMissing { .. } => 404,
             // Well-formed requests that describe something invalid, which
             // the operator can fix by typing something different.
             Self::CredentialMissing
@@ -964,14 +1383,22 @@ impl Refusal {
             | Self::VariableValueMissing
             | Self::ChannelIncomplete
             | Self::TokenRefused { .. }
+            | Self::NoSuchInstallation { .. }
+            | Self::ArrivalUnknown
+            | Self::NotReached { .. }
+            | Self::InstallationRefused { .. }
             | Self::ChannelRefused { .. } => 400,
             // The platform behind the credential could not be reached, which
             // is what a bad gateway means: not the request's fault, and not
             // this instance's.
-            Self::TokenUnchecked { .. } | Self::ChannelUnchecked { .. } => 502,
+            Self::TokenUnchecked { .. }
+            | Self::InstallationUnchecked { .. }
+            | Self::ChannelUnchecked { .. } => 502,
             // The request is well formed and the instance is in a state that
             // forbids it, which is what a conflict means.
             Self::AgentInUse { .. }
+            | Self::AppInUse { .. }
+            | Self::InstallationInUse { .. }
             | Self::ProjectBusy { .. }
             | Self::JobWorking
             | Self::ChannelMissing { .. } => 409,
@@ -986,13 +1413,18 @@ impl Refusal {
             Self::Incomplete { field } => match field.as_str() {
                 "name" => Some(Part::Name),
                 "repository" => Some(Part::Repository),
-                "credential" => Some(Part::Credential),
+                "access" => Some(Part::Access),
                 _ => None,
             },
-            Self::RepositoryRefused { .. } => Some(Part::Repository),
+            Self::RepositoryRefused { .. } | Self::NotReached { .. } => Some(Part::Repository),
             Self::KitsMissing | Self::KitNameTaken { .. } => Some(Part::Kits),
             Self::ChannelIncomplete => Some(Part::Channel),
-            Self::TokenRefused { .. } | Self::TokenUnchecked { .. } => Some(Part::Credential),
+            Self::TokenRefused { .. }
+            | Self::TokenUnchecked { .. }
+            | Self::NoSuchInstallation { .. }
+            | Self::ArrivalUnknown
+            | Self::InstallationRefused { .. }
+            | Self::InstallationUnchecked { .. } => Some(Part::Access),
             Self::ChannelRefused { listening, .. } | Self::ChannelUnchecked { listening, .. } => {
                 Some(if *listening {
                     Part::Listening
@@ -1016,6 +1448,9 @@ impl Refusal {
             | Self::ProjectBusy { .. }
             | Self::UnknownJob { .. }
             | Self::JobWorking
+            | Self::AppMissing { .. }
+            | Self::AppInUse { .. }
+            | Self::InstallationInUse { .. }
             | Self::Failed => None,
         }
     }
@@ -1024,8 +1459,8 @@ impl Refusal {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChannelDraft, Draft, Filling, Fitted, KitDraft, Refusal, Standing, VariableDraft, distinct,
-        titled,
+        AccessDraft, ChannelDraft, Draft, Filling, Fitted, InstallLink, KitDraft, Reached, Refusal,
+        Repository, Standing, Through, VariableDraft, distinct, titled,
     };
 
     /// A job started by hand with no title is titled by the first words of
@@ -1061,10 +1496,12 @@ mod tests {
     fn filled() -> Draft {
         Draft {
             name: "aviary".to_owned(),
-            repository: "https://example.invalid/aviary".to_owned(),
             foreman: as_it_comes(),
             kits: vec![default_kit()],
-            credential: "ghp-not-a-real-token".to_owned(),
+            access: AccessDraft::Token {
+                token: Some("ghp-not-a-real-token".to_owned()),
+                repository: Some(aviary()),
+            },
             channel: ChannelDraft {
                 credential: "xoxb-not-a-real-token".to_owned(),
                 listen_credential: "xapp-not-a-real-token".to_owned(),
@@ -1075,6 +1512,14 @@ mod tests {
                 value: "sk-test-not-a-real-key".to_owned(),
                 note: String::new(),
             }],
+        }
+    }
+
+    /// The repository every fixture is on.
+    fn aviary() -> Repository {
+        Repository {
+            owner: "owner".to_owned(),
+            name: "aviary".to_owned(),
         }
     }
 
@@ -1092,42 +1537,137 @@ mod tests {
 
     #[test]
     fn a_draft_with_every_answer_is_complete() {
-        assert!(filled().is_complete(&Filling::Creating, NOTHING_HELD));
+        assert!(filled().is_complete(&Filling::Creating, NOTHING_HELD,));
     }
 
     /// Every field is required, one at a time.
     #[test]
     fn a_draft_missing_any_answer_is_not() {
-        assert!(!without(|draft| draft.name.clear()).is_complete(&Filling::Creating, NOTHING_HELD));
         assert!(
-            !without(|draft| draft.repository.clear())
-                .is_complete(&Filling::Creating, NOTHING_HELD)
+            !without(|draft| draft.name.clear()).is_complete(&Filling::Creating, NOTHING_HELD,)
+        );
+        assert!(
+            !without(|draft| draft.access = AccessDraft::Token {
+                token: Some("ghp-not-a-real-token".to_owned()),
+                repository: None,
+            })
+            .is_complete(&Filling::Creating, NOTHING_HELD)
         );
         assert!(
             !without(|draft| draft.foreman.agent.clear())
-                .is_complete(&Filling::Creating, NOTHING_HELD)
+                .is_complete(&Filling::Creating, NOTHING_HELD,)
         );
-        assert!(!without(|draft| draft.kits.clear()).is_complete(&Filling::Creating, NOTHING_HELD));
         assert!(
-            !without(|draft| draft.credential.clear())
+            !without(|draft| draft.kits.clear()).is_complete(&Filling::Creating, NOTHING_HELD,)
+        );
+        assert!(
+            !without(|draft| draft.access = AccessDraft::None)
                 .is_complete(&Filling::Creating, NOTHING_HELD)
         );
     }
 
-    /// The one field the two callers disagree about.
+    /// The one field the two callers disagree about: what the project
+    /// holds — its token, or its installation — is an answer only when
+    /// amending, nothing chosen is never one, and each shape needs its
+    /// repository — see
+    /// `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
     #[test]
-    fn amending_does_not_require_a_credential_and_creating_does() {
-        let blank = without(|draft| draft.credential.clear());
+    fn the_access_is_an_answer_by_shape_and_its_repository_is_required() {
+        let held = without(|draft| {
+            draft.access = AccessDraft::Token {
+                token: None,
+                repository: Some(aviary()),
+            };
+        });
+        assert!(held.is_complete(&amending(), NOTHING_HELD));
+        assert!(!held.is_complete(&Filling::Creating, NOTHING_HELD));
+        let held_installation = without(|draft| {
+            draft.access = AccessDraft::App {
+                arrival: None,
+                repository: Some(aviary()),
+            };
+        });
+        assert!(held_installation.is_complete(&amending(), NOTHING_HELD));
+        assert!(!held_installation.is_complete(&Filling::Creating, NOTHING_HELD));
 
-        assert!(blank.is_complete(&amending(), NOTHING_HELD));
-        assert!(!blank.is_complete(&Filling::Creating, NOTHING_HELD));
+        let none = without(|draft| draft.access = AccessDraft::None);
+        assert!(!none.is_complete(&amending(), NOTHING_HELD));
+        assert!(!none.is_complete(&Filling::Creating, NOTHING_HELD));
+        let problems = none.problems(&Filling::Creating, NOTHING_HELD);
+        assert_eq!(
+            problems
+                .iter()
+                .map(|problem| (problem.part, problem.why.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (super::Part::Access, "Choose how the repository is reached."),
+                (super::Part::Repository, "Choose the repository."),
+            ]
+        );
+
+        let on_the_app = without(|draft| {
+            draft.access = AccessDraft::App {
+                arrival: Some("f00d".to_owned()),
+                repository: Some(aviary()),
+            };
+        });
+        assert!(on_the_app.is_complete(&amending(), NOTHING_HELD));
+        assert!(on_the_app.is_complete(&Filling::Creating, NOTHING_HELD));
+        assert_eq!(on_the_app.access.repository(), Some(&aviary()));
+        let unchosen = without(|draft| {
+            draft.access = AccessDraft::App {
+                arrival: Some("f00d".to_owned()),
+                repository: None,
+            };
+        });
+        assert_eq!(
+            unchosen
+                .problems(&Filling::Creating, NOTHING_HELD)
+                .iter()
+                .map(|problem| problem.part)
+                .collect::<Vec<_>>(),
+            [super::Part::Repository]
+        );
+        let blank_state = without(|draft| {
+            draft.access = AccessDraft::App {
+                arrival: Some("  ".to_owned()),
+                repository: Some(aviary()),
+            };
+        });
+        assert!(!blank_state.is_complete(&Filling::Creating, NOTHING_HELD));
+
+        let unset_token = without(|draft| {
+            draft.access = AccessDraft::Token {
+                token: Some("  ".to_owned()),
+                repository: Some(aviary()),
+            };
+        });
+        assert_eq!(
+            unset_token
+                .problems(&amending(), NOTHING_HELD)
+                .first()
+                .map(|problem| (problem.part, problem.why.as_str())),
+            Some((super::Part::Access, "Set a token."))
+        );
+
+        assert!(
+            !without(|draft| draft.channel.credential.clear())
+                .is_complete(&Filling::Creating, NOTHING_HELD),
+            "the Slack binding is still required"
+        );
     }
 
     #[test]
     fn amending_still_requires_everything_a_project_is() {
-        assert!(!without(|draft| draft.name.clear()).is_complete(&amending(), NOTHING_HELD));
-        assert!(!without(|draft| draft.repository.clear()).is_complete(&amending(), NOTHING_HELD));
-        assert!(!without(|draft| draft.kits.clear()).is_complete(&amending(), NOTHING_HELD));
+        assert!(!without(|draft| draft.name.clear()).is_complete(&amending(), NOTHING_HELD,));
+        assert!(
+            !without(|draft| draft.access = AccessDraft::Token {
+                token: None,
+                repository: None,
+            })
+            .is_complete(&amending(), NOTHING_HELD)
+        );
+        assert!(!without(|draft| draft.kits.clear()).is_complete(&amending(), NOTHING_HELD,));
     }
 
     #[test]
@@ -1148,8 +1688,8 @@ mod tests {
                 note: String::new(),
             }];
         });
-        assert!(!added.is_complete(&amending(), NOTHING_HELD));
-        assert!(!added.is_complete(&Filling::Creating, NOTHING_HELD));
+        assert!(!added.is_complete(&amending(), NOTHING_HELD,));
+        assert!(!added.is_complete(&Filling::Creating, NOTHING_HELD,));
 
         let kept = without(|draft| {
             draft.variables = vec![VariableDraft {
@@ -1158,7 +1698,7 @@ mod tests {
                 note: String::new(),
             }];
         });
-        assert!(kept.is_complete(&amending(), &["STRIPE_API_KEY".to_owned()]));
+        assert!(kept.is_complete(&amending(), &["STRIPE_API_KEY".to_owned()],));
 
         let renamed = without(|draft| {
             draft.variables = vec![VariableDraft {
@@ -1167,7 +1707,7 @@ mod tests {
                 note: String::new(),
             }];
         });
-        assert!(!renamed.is_complete(&amending(), &["STRIPE_API_KEY".to_owned()]));
+        assert!(!renamed.is_complete(&amending(), &["STRIPE_API_KEY".to_owned()],));
     }
 
     /// Amending never offers a channel, so whatever is left in those boxes
@@ -1176,11 +1716,11 @@ mod tests {
     fn amending_ignores_the_channel_boxes_entirely() {
         assert!(
             without(|draft| draft.channel.listen_credential.clear())
-                .is_complete(&amending(), NOTHING_HELD)
+                .is_complete(&amending(), NOTHING_HELD,)
         );
         assert!(
             without(|draft| draft.channel.credential.clear())
-                .is_complete(&amending(), NOTHING_HELD)
+                .is_complete(&amending(), NOTHING_HELD,)
         );
     }
 
@@ -1191,15 +1731,15 @@ mod tests {
     fn a_channel_is_required_whole() {
         assert!(
             !without(|draft| draft.channel = ChannelDraft::default())
-                .is_complete(&Filling::Creating, NOTHING_HELD)
+                .is_complete(&Filling::Creating, NOTHING_HELD,)
         );
         assert!(
             !without(|draft| draft.channel.credential.clear())
-                .is_complete(&Filling::Creating, NOTHING_HELD)
+                .is_complete(&Filling::Creating, NOTHING_HELD,)
         );
         assert!(
             !without(|draft| draft.channel.listen_credential.clear())
-                .is_complete(&Filling::Creating, NOTHING_HELD)
+                .is_complete(&Filling::Creating, NOTHING_HELD,)
         );
     }
 
@@ -1234,10 +1774,10 @@ mod tests {
             "{problems:?}"
         );
         assert!(problems.iter().all(|problem| !problem.why.is_empty()));
-        assert!(!draft.is_complete(&Filling::Creating, NOTHING_HELD));
+        assert!(!draft.is_complete(&Filling::Creating, NOTHING_HELD,));
         assert!(
             filled()
-                .problems(&Filling::Creating, NOTHING_HELD)
+                .problems(&Filling::Creating, NOTHING_HELD,)
                 .is_empty()
         );
 
@@ -1263,21 +1803,96 @@ mod tests {
         );
         assert_eq!(Refusal::VariableRepeated { position: 0 }.part(), None);
         assert_eq!(Refusal::JobWorking.part(), None);
-        // A checked credential's refusal points at the box it was typed
-        // in, the two Slack boxes apart.
+        assert_eq!(
+            Refusal::RepositoryRefused {
+                rule: "it has to be on github.com".to_owned()
+            }
+            .status(),
+            400
+        );
+    }
+
+    /// A checked access's refusal points at the access, whichever its
+    /// shape, and one about the repository at the repository; the two
+    /// Slack boxes apart. Each carries the status its kind answers with.
+    #[test]
+    fn a_refusal_about_the_access_points_at_the_access_or_the_repository() {
+        use super::{Part, Refusal};
+
         assert_eq!(
             Refusal::TokenRefused {
                 why: "GitHub does not accept it".to_owned()
             }
             .part(),
-            Some(Part::Credential)
+            Some(Part::Access)
         );
         assert_eq!(
             Refusal::TokenUnchecked {
                 why: "GitHub could not be reached: dns".to_owned()
             }
             .part(),
-            Some(Part::Credential)
+            Some(Part::Access)
+        );
+        assert_eq!(
+            Refusal::Incomplete {
+                field: "access".to_owned()
+            }
+            .part(),
+            Some(Part::Access)
+        );
+        assert_eq!(
+            Refusal::NoSuchInstallation { id: 77 }.part(),
+            Some(Part::Access)
+        );
+        assert_eq!(
+            Refusal::InstallationRefused {
+                why: "GitHub refused: no".to_owned()
+            }
+            .part(),
+            Some(Part::Access)
+        );
+        assert_eq!(
+            Refusal::InstallationUnchecked {
+                why: "GitHub could not be reached: dns".to_owned()
+            }
+            .part(),
+            Some(Part::Access)
+        );
+        assert_eq!(
+            Refusal::NotReached {
+                repository: Repository {
+                    owner: "example".to_owned(),
+                    name: "a".to_owned(),
+                },
+                why: "the installation does not cover it".to_owned()
+            }
+            .part(),
+            Some(Part::Repository)
+        );
+        assert_eq!(
+            Refusal::InstallationInUse {
+                projects: vec!["aviary".to_owned()]
+            }
+            .part(),
+            None
+        );
+        assert_eq!(
+            Refusal::InstallationInUse {
+                projects: vec!["aviary".to_owned()]
+            }
+            .status(),
+            409
+        );
+        assert_eq!(
+            Refusal::NotReached {
+                repository: Repository {
+                    owner: "example".to_owned(),
+                    name: "a".to_owned(),
+                },
+                why: "the installation does not cover it".to_owned()
+            }
+            .to_string(),
+            "the access does not reach example/a: the installation does not cover it"
         );
         assert_eq!(
             Refusal::ChannelRefused {
@@ -1308,23 +1923,80 @@ mod tests {
     fn whitespace_does_not_count_as_an_answer() {
         let mut draft = filled();
         draft.name = "   ".to_owned();
-        assert!(!draft.is_complete(&Filling::Creating, NOTHING_HELD));
+        assert!(!draft.is_complete(&Filling::Creating, NOTHING_HELD,));
 
         let mut draft = filled();
-        draft.credential = "\t ".to_owned();
+        draft.access = AccessDraft::Token {
+            token: Some("\t ".to_owned()),
+            repository: Some(aviary()),
+        };
         assert!(!draft.is_complete(&Filling::Creating, NOTHING_HELD));
 
         let mut draft = filled();
         draft.channel.listen_credential = "  ".to_owned();
-        assert!(!draft.is_complete(&Filling::Creating, NOTHING_HELD));
+        assert!(!draft.is_complete(&Filling::Creating, NOTHING_HELD,));
     }
 
-    /// `docs/conventions.md` §4, for the three credentials a draft holds.
+    /// `docs/conventions.md` §4, for the three credentials a draft holds,
+    /// and for the one a listing is asked with.
     #[test]
     fn a_draft_does_not_leak_any_credential_when_formatted() {
         let shown = format!("{:?}", filled());
 
         assert!(!shown.contains("ghp-not-a-real-token"), "{shown}");
+        assert!(
+            shown.contains("Token") && shown.contains("<redacted>"),
+            "the access is named by its shape, with the token redacted: {shown}"
+        );
+        let asked = format!(
+            "{:?}",
+            Through::Token {
+                token: "ghp-not-a-real-token".to_owned()
+            }
+        );
+        assert!(!asked.contains("ghp-not-a-real-token"), "{asked}");
+        assert!(asked.contains("<redacted>"), "{asked}");
+        // A state buys an installation for whoever holds it, so it is kept
+        // out of every formatting too: the link that carries it, the
+        // question asked by it, and the draft naming it.
+        let minted = format!(
+            "{:?}",
+            InstallLink {
+                link: "https://github.com/apps/x/installations/new?state=f00d".to_owned(),
+                state: "f00d".to_owned(),
+            }
+        );
+        assert_eq!(minted, "InstallLink { .. }");
+        let arrived = format!(
+            "{:?}",
+            Through::Arrived {
+                state: "f00d".to_owned()
+            }
+        );
+        assert!(
+            !arrived.contains("f00d") && arrived.contains("Arrived"),
+            "{arrived}"
+        );
+        let naming = format!(
+            "{:?}",
+            AccessDraft::App {
+                arrival: Some("f00d".to_owned()),
+                repository: None,
+            }
+        );
+        assert!(
+            !naming.contains("f00d") && naming.contains("App"),
+            "{naming}"
+        );
+        assert_eq!(
+            Reached::default(),
+            Reached::Listed {
+                account: None,
+                expires: None,
+                repositories: Vec::new(),
+                more: false,
+            }
+        );
         assert!(!shown.contains("xoxb-not-a-real-token"), "{shown}");
         assert!(!shown.contains("xapp-not-a-real-token"), "{shown}");
         assert!(!shown.contains("sk-test-not-a-real-key"), "{shown}");
@@ -1352,7 +2024,7 @@ mod tests {
             description: "something".to_owned(),
             fitted: as_it_comes(),
         });
-        assert!(!unnamed.is_complete(&Filling::Creating, NOTHING_HELD));
+        assert!(!unnamed.is_complete(&Filling::Creating, NOTHING_HELD,));
 
         let mut undescribed = filled();
         undescribed.kits.push(KitDraft {
@@ -1360,7 +2032,7 @@ mod tests {
             description: " ".to_owned(),
             fitted: as_it_comes(),
         });
-        assert!(!undescribed.is_complete(&Filling::Creating, NOTHING_HELD));
+        assert!(!undescribed.is_complete(&Filling::Creating, NOTHING_HELD,));
 
         let mut twice = filled();
         twice.kits.push(KitDraft {
@@ -1368,7 +2040,7 @@ mod tests {
             description: "again".to_owned(),
             fitted: as_it_comes(),
         });
-        assert!(!twice.is_complete(&Filling::Creating, NOTHING_HELD));
+        assert!(!twice.is_complete(&Filling::Creating, NOTHING_HELD,));
         assert!(!distinct(&twice.kits));
         assert!(distinct(&filled().kits));
     }
@@ -1496,7 +2168,7 @@ mod tests {
         };
         assert_eq!(incomplete("name"), Some(Part::Name));
         assert_eq!(incomplete("repository"), Some(Part::Repository));
-        assert_eq!(incomplete("credential"), Some(Part::Credential));
+        assert_eq!(incomplete("access"), Some(Part::Access));
         assert_eq!(incomplete("kit name"), None);
     }
 
@@ -1543,11 +2215,11 @@ mod tests {
         let project = super::Project {
             id: "an-identifier".to_owned(),
             name: "aviary".to_owned(),
-            repository: "https://example.invalid/aviary".to_owned(),
-            repository_link: None,
+            repository: aviary(),
+            repository_link: "https://github.com/owner/aviary".to_owned(),
             foreman: as_it_comes(),
             kits: vec![default_kit()],
-            platforms: Vec::new(),
+            access: None,
             channels: Vec::new(),
             variables: Vec::new(),
             brief: String::new(),

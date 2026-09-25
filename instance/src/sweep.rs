@@ -361,6 +361,7 @@ impl Running {
                     kit,
                     warrant,
                     tools: self.tools.clone(),
+                    fetching: self.fetching_for(job),
                     text: stageman_foreman::resumption_with(&given),
                 }),
             );
@@ -540,6 +541,7 @@ mod tests {
         let project = ProjectId::from_uuid(Uuid::from_u128(1));
         let job = JobId::from_uuid(Uuid::from_u128(2));
         let mut state = State {
+            apps: std::collections::BTreeMap::new(),
             agents: BTreeMap::from([(
                 Agent::Claude,
                 AgentConfig {
@@ -552,13 +554,14 @@ mod tests {
             project,
             Project {
                 name: "example".to_owned(),
-                repository: "https://example.invalid/repo".to_owned(),
+                repository: stageman_core::RepositoryAddress::new("example", "repo")
+                    .expect("an address"),
                 foreman_kit: Kit::defaults(Agent::Claude),
                 kits: BTreeMap::from([(
                     KitName::new("Claude").expect("a name"),
                     KitConfig::defaults(Agent::Claude),
                 )]),
-                credentials: BTreeMap::new(),
+                access: BTreeMap::new(),
                 channels: BTreeMap::new(),
                 jobs: BTreeMap::from([(
                     job.clone(),
@@ -567,6 +570,7 @@ mod tests {
                         "an issue was opened".to_owned(),
                         "work on it".to_owned(),
                         Timestamp::UNIX_EPOCH,
+                        stageman_core::Secret::new("warrant-of-a-test-job".to_owned()),
                     ),
                 )]),
                 variables: BTreeMap::new(),
@@ -668,6 +672,7 @@ mod tests {
                 "a reason".to_owned(),
                 "some work".to_owned(),
                 Timestamp::UNIX_EPOCH,
+                stageman_core::Secret::new("warrant-of-a-test-job".to_owned()),
             );
             job.progress = progress;
             state

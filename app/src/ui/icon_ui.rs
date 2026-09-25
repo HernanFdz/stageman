@@ -15,8 +15,8 @@
 use dioxus::prelude::*;
 use lucide_dioxus::{
     Activity, ArrowLeft, Bot, Calendar, Check, ChevronRight, CircleCheck, CircleOff, CircleX,
-    ClipboardPaste, ExternalLink, Eye, EyeOff, GitPullRequest, Hammer, HardHat, Info, LoaderCircle,
-    Moon, Pencil, Plus, Square, Sun, SunMoon, Trash2, X,
+    ClipboardPaste, ExternalLink, Eye, EyeOff, GitPullRequest, Globe, Hammer, HardHat, Info,
+    LoaderCircle, Lock, Moon, Pencil, Plus, Square, Sun, SunMoon, Trash2, X,
 };
 
 /// A concept a screen can point at, and nothing about how it is drawn.
@@ -81,6 +81,13 @@ pub enum Icon {
     /// Paste a file's worth of something, rather than typing it a row at
     /// a time.
     Paste,
+    /// A repository only its grantees can read: under a token, one the
+    /// token was certainly granted — see
+    /// `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
+    Private,
+    /// A repository anybody can read: under a token, one the token may not
+    /// have been granted.
+    Public,
 }
 
 impl Icon {
@@ -116,6 +123,8 @@ impl Icon {
         Self::PullRequest,
         Self::Disclose,
         Self::Paste,
+        Self::Private,
+        Self::Public,
     ];
 
     /// Drawn at `size` pixels, in the current text colour.
@@ -164,6 +173,8 @@ impl Icon {
             Self::PullRequest => rsx! { GitPullRequest { size, class } },
             Self::Disclose => rsx! { ChevronRight { size, class } },
             Self::Paste => rsx! { ClipboardPaste { size, class } },
+            Self::Private => rsx! { Lock { size, class } },
+            Self::Public => rsx! { Globe { size, class } },
         }
     }
 }

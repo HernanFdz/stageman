@@ -351,6 +351,9 @@ impl Running {
                 kit: handout.kit().clone(),
                 warrant,
                 tools: self.tools.clone(),
+                // A foreman's image carries no tool to wrap, and its handout
+                // no warrant to fetch with.
+                fetching: None,
                 text: asked,
             }
         } else {
@@ -390,11 +393,13 @@ impl Running {
                 environment,
                 repository: handout.repository().map(str::to_owned),
                 platform: handout
-                    .platform(stageman_core::Platform::GitHub)
-                    .map(|_| stageman_core::Platform::GitHub),
+                    .reaches(stageman_core::Platform::GitHub)
+                    .then_some(stageman_core::Platform::GitHub),
+                actor: None,
                 kit: handout.kit().clone(),
                 warrant,
                 tools: self.tools.clone(),
+                fetching: None,
                 kickoff: format!("{}\n\n{asked}", stageman_foreman::opening(&repository)),
             }
         };
@@ -574,7 +579,7 @@ impl Running {
             .state
             .projects
             .get(&project)
-            .map(|watched| watched.repository.clone())
+            .map(|watched| watched.repository.https())
             .ok_or(stageman_core::HandoutError::UnknownProject(project))?;
         let handout =
             Handout::for_foreman(&self.state, project)?.speaking_in(thread.clone().into());
@@ -631,6 +636,7 @@ mod tests {
     fn watching() -> (State, ProjectId) {
         let project = ProjectId::from_uuid(Uuid::from_u128(11));
         let mut state = State {
+            apps: std::collections::BTreeMap::new(),
             agents: BTreeMap::from([(
                 Agent::Claude,
                 AgentConfig {
@@ -643,7 +649,8 @@ mod tests {
             project,
             Project {
                 name: "example".to_owned(),
-                repository: "https://example.invalid/repo".to_owned(),
+                repository: stageman_core::RepositoryAddress::new("example", "repo")
+                    .expect("an address"),
                 foreman_kit: Kit::defaults(Agent::Claude),
                 kits: BTreeMap::from([
                     (
@@ -658,7 +665,7 @@ mod tests {
                         },
                     ),
                 ]),
-                credentials: BTreeMap::new(),
+                access: BTreeMap::new(),
                 channels: BTreeMap::new(),
                 jobs: BTreeMap::new(),
                 variables: BTreeMap::new(),

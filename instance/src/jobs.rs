@@ -2,7 +2,8 @@
 //! container, and the container before the agent speaks.
 
 use stageman_core::{
-    Handout, HandoutError, Job, JobId, Kit, Place, Progress, ProjectId, Room, Timestamp, Waiting,
+    Handout, HandoutError, Job, JobId, Kit, Place, Progress, ProjectId, Room, Secret, Timestamp,
+    Waiting,
 };
 
 use crate::Running;
@@ -96,11 +97,8 @@ impl Running {
             .state
             .projects
             .get(&project)
-            .map(|watched| (watched.name.clone(), watched.repository.clone()))
+            .map(|watched| (watched.name.clone(), watched.repository.https()))
             .ok_or(BeginError::UnknownProject(project))?;
-        // The kit arrives decided — by a foreman naming one of the project's,
-        // or by a person picking one — and is never composed here.
-        let handout = Handout::for_job(&self.state, kit, project).map_err(BeginError::Handout)?;
         // The channel the job's room is made on. Refused before anything is
         // recorded when there is none, which only a project the last
         // release wrote can lack.
@@ -110,14 +108,24 @@ impl Running {
             .get(&project)
             .and_then(|watched| watched.channels.keys().next().copied())
             .ok_or(BeginError::NoChannel(project))?;
-        let speaking = handout
-            .channel(channel)
-            .cloned()
-            .ok_or(BeginError::NoChannel(project))?;
         // Named before the instruction, because the instruction names where
         // this job can be reached and that address is built from the name —
         // and before the room's name, for the same reason.
         let job = self.name_job(title)?;
+        // The one thing its container may ask of this instance: its own
+        // project's credential, per
+        // `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
+        // Minted with the job and kept on its record, so that a restart
+        // knows what the container was created presenting.
+        let warrant = Secret::new(self.unguessable());
+        // The kit arrives decided — by a foreman naming one of the project's,
+        // or by a person picking one — and is never composed here.
+        let handout = Handout::for_job(&self.state, kit, project, warrant.clone())
+            .map_err(BeginError::Handout)?;
+        let speaking = handout
+            .channel(channel)
+            .cloned()
+            .ok_or(BeginError::NoChannel(project))?;
         // Names and what each is for, never a value: the handout has no
         // method that would hand a value to a prompt.
         let variables: Vec<_> = handout
@@ -133,7 +141,13 @@ impl Running {
         let name = stageman_channel::room_name(channel, &called, &job);
 
         if let Some(watched) = self.state.projects.get_mut(&project) {
-            let mut recorded = Job::new(handout.kit().clone(), reason.to_owned(), kickoff, at);
+            let mut recorded = Job::new(
+                handout.kit().clone(),
+                reason.to_owned(),
+                kickoff,
+                at,
+                warrant,
+            );
             recorded.asked_by = origin.as_ref().and_then(|origin| origin.user.clone());
             watched.jobs.insert(job.clone(), recorded);
             self.dirty = true;
@@ -201,7 +215,7 @@ impl Running {
                 Some((
                     *channel,
                     bound.speaking(),
-                    watched.repository.clone(),
+                    watched.repository.https(),
                     recorded.reason.clone(),
                 ))
             })
@@ -275,7 +289,23 @@ impl Running {
         let Some((room, kit)) = self.recorded(job) else {
             return;
         };
-        let handout = match Handout::for_job(&self.state, kit, project) {
+        // On the record since the job was, so this cannot be reached without
+        // one; refused loudly rather than substituted for, all the same.
+        let Some(warrant) = self
+            .state
+            .job(job)
+            .and_then(|recorded| recorded.warrant().cloned())
+        else {
+            tracing::warn!(%job, "the job holds no warrant, so its agent cannot be handed one");
+            self.record(
+                job,
+                Progress::Idle(Waiting::Failed(
+                    "it holds no warrant to fetch its credential with".to_owned(),
+                )),
+            );
+            return;
+        };
+        let handout = match Handout::for_job(&self.state, kit, project, warrant) {
             Ok(handout) => handout,
             Err(why) => {
                 tracing::warn!(%job, %why, "the job's handout could not be decided");
@@ -317,11 +347,13 @@ impl Running {
             environment,
             repository: handout.repository().map(str::to_owned),
             platform: handout
-                .platform(stageman_core::Platform::GitHub)
-                .map(|_| stageman_core::Platform::GitHub),
+                .reaches(stageman_core::Platform::GitHub)
+                .then_some(stageman_core::Platform::GitHub),
+            actor: self.actor_for(project),
             kit: handout.kit().clone(),
             warrant,
             tools: self.tools.clone(),
+            fetching: Some(self.fetching.clone()),
             kickoff,
         };
         // Told at the root of its room when it ends, if it has one.

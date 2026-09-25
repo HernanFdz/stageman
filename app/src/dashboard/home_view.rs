@@ -16,9 +16,11 @@ use stageman_instance::{Request, Response};
 use super::error::DashboardResult;
 use super::jobs_view::{JobRow, ROW, ROWS};
 use super::live::Live;
-use crate::ui::{Badge, BadgeTone, Card, EmptyState, Icon, Reference, Skeleton, Tooltip};
+use crate::ui::{
+    Badge, BadgeTone, Card, EmptyState, Icon, Mark, Reference, Skeleton, Tooltip, When,
+};
 
-pub use stageman_wire::{Home, Project, ProjectJob};
+pub use stageman_wire::{ExpiringToken, Home, Project, ProjectJob};
 
 /// Everything the first page shows, read from the instance this process is
 /// operating.
@@ -75,16 +77,24 @@ fn Overview(home: Home) -> Element {
         div { class: "flex flex-col gap-4",
             Card {
                 title: "Needs you",
-                note: "Jobs waiting on a person, longest waiting first.",
-                badge: rsx! { Badge { "{home.needs_you.len()}" } },
-                if home.needs_you.is_empty() {
+                note: "Tokens about to stop working, then jobs waiting on a person, longest waiting first.",
+                badge: rsx! { Badge { "{home.needs_you.len() + home.expiring.len()}" } },
+                if home.needs_you.is_empty() && home.expiring.is_empty() {
                     EmptyState {
                         title: "Nothing needs you.",
                         note: "A job that asks, proposes, fails or is paused lands here, with \
-                               what to do about it.",
+                               what to do about it; so does a token a week from expiring.",
                     }
                 } else {
                     ul { class: ROWS,
+                        // A token about to expire is raised before the jobs,
+                        // because every job on its project stops with it —
+                        // see `docs/decisions/0080-a-tokens-owner-and-expiry-are-kept-beside-it.md`.
+                        for token in home.expiring {
+                            li { key: "token-{token.project}", class: ROW,
+                                Expiring { token }
+                            }
+                        }
                         for placed in home.needs_you {
                             li { key: "{placed.job.id}", class: ROW,
                                 Placed { placed }
@@ -121,7 +131,7 @@ fn Overview(home: Home) -> Element {
                     // requires: nothing can be named before it exists.
                     EmptyState {
                         title: "Nothing is being watched yet.",
-                        note: "Three steps, in this order.",
+                        note: "Four steps, in this order; the second is optional.",
                         action: rsx! {
                             ol { class: "list-decimal space-y-1 pl-5 text-xs text-muted-foreground",
                                 li {
@@ -129,8 +139,12 @@ fn Overview(home: Home) -> Element {
                                     ", so a project has something to think with."
                                 }
                                 li {
+                                    Link { to: super::Route::InstanceView {}, class: "underline", "Register the App on GitHub" }
+                                    " and install it where your repositories are, if you would rather not paste a token."
+                                }
+                                li {
                                     Link { to: super::Route::ProjectsView {}, class: "underline", "Add a project" }
-                                    ": its repository, a token for it, and the Slack app it talks through."
+                                    ": how it reaches GitHub, the repository chosen from what that reaches, and the Slack app it talks through."
                                 }
                                 li { "Invite the app into a channel, and mention it." }
                             }
@@ -142,6 +156,45 @@ fn Overview(home: Home) -> Element {
                             li { key: "{project.id}", Watched { project } }
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+/// One token about to stop working, or stopped: whose it is, on which
+/// project, when, and the way to the page it is replaced on.
+#[component]
+fn Expiring(token: ExpiringToken) -> Element {
+    let ExpiringToken {
+        project,
+        project_name,
+        owner,
+        expires,
+        expired,
+    } = token;
+    let whose = owner.map_or_else(
+        || "its token".to_owned(),
+        |owner| format!("{owner}'s token"),
+    );
+    let verb = if expired { "expired" } else { "expires" };
+
+    rsx! {
+        div { class: "flex items-center gap-3",
+            Badge { tone: if expired { BadgeTone::Failed } else { BadgeTone::Idle },
+                if expired { "expired" } else { "expiring" }
+            }
+            Mark { agent: "github".to_owned(), size: 16 }
+            span { class: "text-sm",
+                span { class: "font-medium", "{project_name}" }
+                ": {whose} {verb} "
+                When { at: expires, ahead: true, class: "text-sm".to_owned() }
+            }
+            span { class: "ml-auto",
+                Link {
+                    to: super::Route::ProjectSettingsView { project },
+                    class: "text-sm underline decoration-border-strong underline-offset-2 hover:decoration-foreground",
+                    "Replace it"
                 }
             }
         }
@@ -197,8 +250,8 @@ fn Watched(project: Project) -> Element {
             }
             Reference {
                 mark: "github",
-                says: project.repository.clone(),
-                link: project.repository_link.clone(),
+                says: project.repository.to_string(),
+                link: Some(project.repository_link.clone()),
             }
             span { class: "ml-auto flex shrink-0 items-center gap-2",
                 if project.attending {

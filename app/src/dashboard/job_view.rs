@@ -98,8 +98,8 @@ fn Shown(page: JobPage, failure: Signal<Option<DashboardError>>) -> Element {
                     }
                     Reference {
                         mark: "github",
-                        says: page.repository.clone(),
-                        link: page.repository_link.clone(),
+                        says: page.repository.to_string(),
+                        link: Some(page.repository_link.clone()),
                     }
                 }
                 div { class: "flex items-center gap-2",
@@ -218,12 +218,9 @@ fn Shown(page: JobPage, failure: Signal<Option<DashboardError>>) -> Element {
 
 /// One pull request, as a chip: the number, going where it is.
 #[component]
-pub(super) fn PullRequestChip(number: u64, link: Option<String>) -> Element {
-    let says = link
-        .clone()
-        .unwrap_or_else(|| format!("Pull request {number}"));
+pub(super) fn PullRequestChip(number: u64, link: String) -> Element {
     rsx! {
-        Chip { says, link,
+        Chip { says: link.clone(), link: Some(link),
             {Icon::PullRequest.draw(12)}
             "#{number}"
         }

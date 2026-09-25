@@ -11,13 +11,16 @@
               report to; the virtual clock adds"
 )]
 
+mod apps;
 mod booting;
 mod channel;
 mod checks;
+mod credentials;
 mod dashboard;
 mod foreman;
 mod foreman_room;
 mod inbox;
+mod installations;
 mod listening;
 mod notices;
 mod replies;

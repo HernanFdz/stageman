@@ -35,17 +35,6 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   whether it can be done but which hosts belong on the list, and that is
   answered by watching what a job actually reaches for.
 
-- **Should a job's platform credentials be scoped and short-lived?** The other
-  mitigation from 0009, and independent of the first. A credential limited to
-  the one repository a job is working on, minted per job and expiring, turns a
-  leak from an estate-wide problem into a bounded one. Deferred for the same
-  reason. Settled by finding out what the platforms actually support: a token
-  narrow enough to be worth minting per job, and an issuing path that does not
-  need a human. Note the interaction with
-  `docs/decisions/0002-never-merge-never-deploy.md` — whether a scope exists
-  that permits opening a pull request but not merging one is the same question
-  wearing a different hat, and answering it once answers both.
-
 - **Where does a log line go?**
   `docs/decisions/0018-diagnostics-are-emitted-through-tracing.md` settled how
   one is *emitted* and deliberately settled nothing about where it ends up.
@@ -389,36 +378,28 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   and every kit the last release wrote one to bridge or refuse. Settled with
   a record amending 0048 either way.
 
+- **Should where the App is installed be refreshed from the platform?**
+  It is learned from the platform's redirects and kept, per `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`, so an
+  installation removed on the platform stays listed here until a mint
+  fails and somebody forgets it. The platform lists an App's
+  installations for the App's key in one request, which a control on the
+  Instance page could ask on demand and reconcile against. Worth doing
+  when a ghost is met, and not before: a request on every page read is
+  what the record refused.
+
 ## Next
 
 Intended next steps, in order, each with its reason. Written as intentions, not
 progress: "next X, because Y" — never "X is 60% done", which is both derivable
 and wrong within a day.
 
-- Next, what the dashboard pass of
+- Next, the small things the dashboard pass of
   `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md` left:
-  the small things seen and not yet done — the projects list's rows padding
-  themselves on a rule that always matches, which the job rows had and
-  fixed on the list item; and whether the dialog takes focus when it opens
-  in a headed browser, which a headless one said it did not. Then a GitHub
-  App the operator owns, which is the destination
-  `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`
-  names for the guides and a record of its own, because it changes what a
-  project holds. The platform documents the whole flow: the settings page
-  posts a form to the platform with a manifest naming the App, its
-  permissions — contents, issues and pull requests — and a redirect
-  address of this instance's own, with webhooks declared and switched off,
-  since signals arrive through Slack; the browser comes back with a code
-  the instance exchanges within the hour for the App's identifier and
-  private key, kept sealed like every credential; the operator installs
-  the App on the one repository and comes back again with the
-  installation's identifier; and from then on a token is minted per turn,
-  good for an hour and scoped to that installation, so nothing is pasted
-  and nothing long-lived leaves the file. It answers the open question
-  above on scoped, short-lived credentials for the one platform there is,
-  and it is worth checking first that the redirect reaches an instance on
-  localhost, which the platform's documentation neither promises nor
-  denies.
+  the projects list's rows padding themselves on a rule that always
+  matches, which the job rows had and fixed on the list item; and whether
+  the dialog takes focus when it opens in a headed browser, which a
+  headless one said it did not. Then the Slack app the instance owns, on
+  the same page, with its own record.
 
 - Then make the container tests a recorder, because what they check is what
   the pinned runtime and the pinned agent actually do, which is a recording

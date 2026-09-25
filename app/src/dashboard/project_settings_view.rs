@@ -15,21 +15,28 @@
 //! are empty, and the page says so beside each once a save has been tried.
 //!
 //! Every closed set here is a row of options rather than a dropdown, and
-//! every longer text a box that grows, per `docs/conventions.md` §3.
+//! every longer text a box that grows, per `docs/conventions.md` §3. The
+//! one long set — the repositories an access reaches — is a box that
+//! filters with its list in the page, per
+//! `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`,
+//! which is also why the GitHub card is the enum it is: the access first,
+//! in one of two shapes, and the repository chosen from what it reaches.
 
 use dioxus::prelude::*;
 
 use super::agents_view::Agent;
 use super::error::DashboardError;
+use super::instance_view::install_link;
 use super::live::Live;
-use super::projects_view::{amend, create, forget, projects};
+use super::projects_view::{amend, create, forget, projects, reaches};
 use crate::ui::{
-    BESIDE, Button, ButtonVariant, Card, FIELD, Field, Guide, Icon, Modal, PageHeader, Segmented,
-    Skeleton, TextArea, Tooltip,
+    BESIDE, Button, ButtonVariant, Card, Combobox, ComboboxItem, FIELD, Field, Guide, Icon, Modal,
+    PageHeader, Segmented, Skeleton, TextArea, Tooltip, When,
 };
 
 pub use stageman_wire::{
-    ChannelDraft, Draft, Filling, Fitted, KitDraft, Part, Problem, Shape, VariableDraft, Watching,
+    AccessDraft, AccessView, ChannelDraft, Draft, Filling, Fitted, KitDraft, Part, Problem,
+    Reachable, Reached, Repository, Shape, Through, VariableDraft, Watching,
 };
 
 /// The project a page is for, where it is for one that exists.
@@ -64,6 +71,410 @@ fn beside(
                 None
             }
         })
+}
+
+/// Which shape the access is in — see
+/// `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum AccessShape {
+    /// Nothing chosen yet.
+    #[default]
+    None,
+    /// Through the App.
+    App,
+    /// With a token, set or held.
+    Token,
+}
+
+/// What can be done about the access, from the sentence that says where
+/// it stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Action {
+    /// Open the platform to install the App; the form moves onto it when
+    /// the tab comes back.
+    Install,
+    /// Open the panel a token is set in, for the first or in place of one.
+    UseToken,
+    /// Put the form back on the token it remembers: the project's, or
+    /// one set here before.
+    BackToToken,
+    /// Put the form back on the installation it remembers: the project's,
+    /// or one its tab brought back before.
+    BackToApp,
+}
+
+/// One piece of the sentence: words, words that do something, or a
+/// moment drawn once the page is awake.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Segment {
+    /// Words.
+    Text(String),
+    /// Words that do something when pressed.
+    Act(Action, String),
+    /// A moment, as the wire spells it, read as how far off it is.
+    When(String),
+}
+
+/// What the form holds for the App shape, live or remembered: which
+/// installation, and what it reaches once listed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AppSlot {
+    /// The state the install came back under; none for the installation
+    /// the project holds.
+    arrival: Option<String>,
+    /// The account it is on.
+    account: String,
+    /// What it reaches, once the instance has listed it.
+    listing: Option<Result<Reached, String>>,
+}
+
+/// What the form holds for the token shape, live or remembered: which
+/// token, and what it reaches once listed.
+#[derive(Clone, PartialEq, Eq)]
+struct TokenSlot {
+    /// The token set in this form; none for the one the project holds.
+    token: Option<String>,
+    /// Whose it is, where the platform has said — see
+    /// `docs/decisions/0080-a-tokens-owner-and-expiry-are-kept-beside-it.md`.
+    owner: Option<String>,
+    /// When the platform stops accepting it, as the wire spells a moment,
+    /// where the platform has said.
+    expires: Option<String>,
+    /// Whether that moment has passed, as the instance last read it. Never
+    /// for a token set here, which the platform just accepted.
+    expired: bool,
+    /// What it can read, once the instance has listed it.
+    listing: Option<Result<Reached, String>>,
+}
+
+impl std::fmt::Debug for TokenSlot {
+    /// Names the listing and never the token.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenSlot")
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("owner", &self.owner)
+            .field("expires", &self.expires)
+            .field("expired", &self.expired)
+            .field("listing", &self.listing)
+            .finish()
+    }
+}
+
+/// The GitHub card as the form holds it: which shape it is in, what it
+/// holds for each shape — the current one live, the other remembered, so
+/// that going back finds what was there — the repository, and whether
+/// the repository was carried in from another access and is not yet
+/// settled against what this one reaches. What the wire is sent is
+/// derived from it by [`Access::draft`], so a form cannot send what it
+/// does not hold — see
+/// `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct Access {
+    /// The shape the form is in.
+    shape: AccessShape,
+    /// The App shape's slot, where the form has been on it.
+    app: Option<AppSlot>,
+    /// The token shape's slot, where the form has been on it.
+    token: Option<TokenSlot>,
+    /// The repository, once one is chosen.
+    repository: Option<Repository>,
+    /// Whether the repository came from another access than the one the
+    /// form is on now, and waits to be settled against its listing.
+    carried: bool,
+}
+
+impl Access {
+    /// What the form starts on: the shape the project holds, with its
+    /// repository, and nothing for a project that does not exist yet.
+    fn starting(project: Option<&stageman_wire::Project>) -> Self {
+        let Some(project) = project else {
+            return Self::default();
+        };
+        let repository = Some(project.repository.clone());
+        match &project.access {
+            Some(AccessView::Installation { account }) => Self {
+                shape: AccessShape::App,
+                app: Some(AppSlot {
+                    arrival: None,
+                    account: account.clone(),
+                    listing: None,
+                }),
+                repository,
+                ..Self::default()
+            },
+            Some(AccessView::Token {
+                owner,
+                expires,
+                expired,
+            }) => Self {
+                shape: AccessShape::Token,
+                token: Some(TokenSlot {
+                    token: None,
+                    owner: owner.clone(),
+                    expires: expires.clone(),
+                    expired: *expired,
+                    listing: None,
+                }),
+                repository,
+                ..Self::default()
+            },
+            None => Self::default(),
+        }
+    }
+
+    /// What the wire is sent: the shape, what names its access, and the
+    /// repository.
+    fn draft(&self) -> AccessDraft {
+        match self.shape {
+            AccessShape::None => AccessDraft::None,
+            AccessShape::App => AccessDraft::App {
+                arrival: self.app.as_ref().and_then(|slot| slot.arrival.clone()),
+                repository: self.repository.clone(),
+            },
+            AccessShape::Token => AccessDraft::Token {
+                token: self.token.as_ref().and_then(|slot| slot.token.clone()),
+                repository: self.repository.clone(),
+            },
+        }
+    }
+
+    /// The current shape's listing, where the shape has one and it has
+    /// come.
+    fn listing(&self) -> Option<&Result<Reached, String>> {
+        match self.shape {
+            AccessShape::None => None,
+            AccessShape::App => self.app.as_ref().and_then(|slot| slot.listing.as_ref()),
+            AccessShape::Token => self.token.as_ref().and_then(|slot| slot.listing.as_ref()),
+        }
+    }
+
+    /// The rows the current shape reaches, once listed.
+    fn rows(&self) -> &[Reachable] {
+        match self.listing() {
+            Some(Ok(Reached::Listed { repositories, .. })) => repositories,
+            _ => &[],
+        }
+    }
+
+    /// Whether the current shape's listing is still being asked for.
+    fn busy(&self) -> bool {
+        self.shape != AccessShape::None && self.listing().is_none()
+    }
+
+    /// Why the current shape could not be listed, where it could not.
+    fn unlisted(&self) -> Option<String> {
+        match self.listing() {
+            Some(Ok(Reached::Unlisted { why }) | Err(why)) => {
+                Some(format!("Could not list what it reaches: {why}"))
+            }
+            Some(Ok(Reached::Listed { .. } | Reached::NotYet)) | None => None,
+        }
+    }
+
+    /// Whether the platform had more than it listed.
+    fn more(&self) -> bool {
+        matches!(self.listing(), Some(Ok(Reached::Listed { more: true, .. })))
+    }
+
+    /// The account the current access is on, where the platform names one.
+    fn account(&self) -> Option<&str> {
+        match self.shape {
+            AccessShape::App => self
+                .app
+                .as_ref()
+                .map(|slot| slot.account.as_str())
+                .filter(|account| !account.is_empty()),
+            AccessShape::None | AccessShape::Token => None,
+        }
+    }
+
+    /// The form moved onto a shape, or onto another access in the same
+    /// shape: the repository is carried until the listing settles it.
+    const fn moved(&mut self, shape: AccessShape) {
+        self.shape = shape;
+        self.carried = true;
+    }
+
+    /// Settles the repository against what the current access reaches,
+    /// once listed, and says what to show over the field's line.
+    ///
+    /// A repository carried in from another access is kept where this one
+    /// reaches it and otherwise dropped and said, never another put in its
+    /// place, since a repository the person did not choose is not theirs
+    /// to save. One chosen under this access, or the project's own, is
+    /// kept and said where the listing no longer reaches it, so an edit
+    /// to anything else still saves. Where none is chosen, the one
+    /// repository the listing holds fills in where it holds exactly one.
+    fn settle(&mut self) -> Option<String> {
+        let Some(Ok(Reached::Listed { .. })) = self.listing() else {
+            return None;
+        };
+        let reached =
+            |rows: &[Reachable], have: &Repository| rows.iter().any(|row| &row.repository == have);
+        let rows = self.rows().to_vec();
+        match self.repository.take() {
+            Some(have) if reached(&rows, &have) => {
+                self.repository = Some(have);
+                self.carried = false;
+                None
+            }
+            Some(have) if self.carried => {
+                self.carried = false;
+                Some(not_reached_words(&have))
+            }
+            Some(have) => {
+                let said = not_reached_words(&have);
+                self.repository = Some(have);
+                Some(said)
+            }
+            None => {
+                if let [row] = rows.as_slice() {
+                    self.repository = Some(row.repository.clone());
+                }
+                self.carried = false;
+                None
+            }
+        }
+    }
+}
+
+/// The sentence the Access control is, by where the form stands: which
+/// shape it is in, or that none is chosen, and what can be done about it,
+/// inline — the same three sentences whether what it holds is the
+/// project's or was set in this form, since the whole form is unsaved
+/// until Save. Nothing of the instance's other installations: a form is
+/// told the account its own access is on and no more.
+fn sentence(access: &Access, app_registered: bool) -> Vec<Segment> {
+    let text = |words: &str| Segment::Text(words.to_owned());
+    let act = |action: Action, words: &str| Segment::Act(action, words.to_owned());
+    let mut said = Vec::new();
+    match access.shape {
+        AccessShape::None => {
+            said.push(text("Not chosen yet. "));
+            if app_registered {
+                said.push(act(Action::Install, "Install the App"));
+                said.push(text(" on the repository's account, or "));
+                said.push(act(Action::UseToken, "use a token"));
+                said.push(text("."));
+            } else {
+                said.push(act(Action::UseToken, "Use a token"));
+                said.push(text(" granted the one repository."));
+            }
+        }
+        AccessShape::App => {
+            said.push(text(&access.account().map_or_else(
+                || "Through the App. ".to_owned(),
+                |account| format!("Through the App, installed on {account}. "),
+            )));
+            said.push(act(Action::Install, "Install it elsewhere"));
+            said.push(text(", or "));
+            if access.token.is_some() {
+                said.push(act(Action::BackToToken, "go back to the token"));
+            } else {
+                said.push(act(Action::UseToken, "use a token"));
+            }
+            said.push(text(" instead."));
+        }
+        AccessShape::Token => {
+            // Whose, and until when, where the platform has said: the two
+            // facts kept beside a token, per
+            // `docs/decisions/0080-a-tokens-owner-and-expiry-are-kept-beside-it.md`.
+            let slot = access.token.as_ref();
+            let whose = slot.and_then(|slot| slot.owner.as_deref()).map_or_else(
+                || "With a token".to_owned(),
+                |owner| format!("With {owner}'s token"),
+            );
+            match slot.and_then(|slot| slot.expires.clone()) {
+                Some(at) if slot.is_some_and(|slot| slot.expired) => {
+                    said.push(text(&format!("{whose}, which expired ")));
+                    said.push(Segment::When(at));
+                    said.push(text(". "));
+                }
+                Some(at) => {
+                    said.push(text(&format!("{whose}, expiring ")));
+                    said.push(Segment::When(at));
+                    said.push(text(". "));
+                }
+                None => said.push(text(&format!("{whose}. "))),
+            }
+            said.push(act(Action::UseToken, "Replace it"));
+            if app_registered {
+                said.push(text(", or "));
+                if access.app.is_some() {
+                    said.push(act(Action::BackToApp, "go back to the App"));
+                } else {
+                    said.push(act(Action::Install, "install the App"));
+                }
+                said.push(text(" instead."));
+            } else {
+                said.push(text("."));
+            }
+        }
+    }
+    said
+}
+
+/// What the Repository box says while nothing is chosen or typed, by
+/// where the listing has got to.
+const fn placeholder(shape: AccessShape, busy: bool, listed: usize) -> &'static str {
+    match (shape, busy, listed) {
+        (AccessShape::None, _, _) => "choose the access first",
+        (_, true, _) => "asking GitHub…",
+        (AccessShape::App, false, 0) => "nothing reached yet",
+        (AccessShape::Token, false, 0) => "set a token first",
+        (_, false, _) => "type to filter",
+    }
+}
+
+/// What the Repository field says over its line for a repository the
+/// listing does not hold.
+fn not_reached_words(repository: &Repository) -> String {
+    format!("{repository} is not reached this way.")
+}
+
+/// The rows a listing gives the box: `owner/name` as what is sent back and
+/// read, the owner as the group where the rows span more than one, and
+/// the visibility as the mark.
+fn items_of(rows: &[Reachable]) -> Vec<ComboboxItem> {
+    let owners: std::collections::BTreeSet<&str> = rows
+        .iter()
+        .map(|row| row.repository.owner.as_str())
+        .collect();
+    rows.iter()
+        .map(|row| ComboboxItem {
+            id: row.repository.to_string(),
+            label: row.repository.to_string(),
+            group: (owners.len() > 1).then(|| row.repository.owner.clone()),
+            icon: Some(if row.private {
+                (Icon::Private, "private".to_owned())
+            } else {
+                (Icon::Public, "public".to_owned())
+            }),
+        })
+        .collect()
+}
+
+/// Changes the card's state, settles the repository against what the
+/// access now reaches, hands the draft what the wire is sent, and says
+/// what the settling said. Every change to the card goes through here, so
+/// the three cannot drift apart.
+// Skipped by mutation testing: it writes three signals of the page, which
+// only a running page has, and what it composes — `settle` and `draft` —
+// is tested on its own. The probe drives it in a real browser.
+#[mutants::skip]
+fn apply(
+    mut access: Signal<Access>,
+    mut draft: Signal<Draft>,
+    mut not_reached: Signal<Option<String>>,
+    change: impl FnOnce(&mut Access),
+) {
+    let said = {
+        let mut current = access.write();
+        change(&mut current);
+        current.settle()
+    };
+    draft.write().access = access.peek().draft();
+    not_reached.set(said);
 }
 
 /// Whether a save stops before asking the instance: the page refuses to
@@ -189,10 +600,9 @@ fn starting(watching: &Watching, filling: &Filling) -> Draft {
         Filling::Amending(_) => watched(watching, filling)
             .map(|project| Draft {
                 name: project.name.clone(),
-                repository: project.repository.clone(),
                 foreman: project.foreman.clone(),
                 kits: project.kits.clone(),
-                credential: String::new(),
+                access: Access::starting(Some(project)).draft(),
                 channel: ChannelDraft::default(),
                 variables: project
                     .variables
@@ -277,6 +687,9 @@ pub fn ProjectSettingsView(project: String) -> Element {
 #[component]
 fn Editing(watching: Watching, filling: Filling) -> Element {
     let seed = starting(&watching, &filling);
+    // What the access starts as, which is what the project holds: a save
+    // that changed it is checked against GitHub, and says so.
+    let seed_access = seed.access.clone();
     let mut draft = use_signal(move || seed);
     let mut tried = use_signal(|| false);
     let mut refused = use_signal(|| None::<DashboardError>);
@@ -298,6 +711,105 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
     // means *keep*. Empty while creating, which is the true answer: a
     // project that does not exist yet holds nothing.
     let project = watched(&watching, &filling);
+    // Whether an App is registered, which is what makes installing it
+    // possible; nothing more of it reaches a form.
+    let app_registered = watching.app_registered;
+    let project_id = project.map(|project| project.id.clone());
+    let holds_something = project.is_some_and(|project| project.access.is_some());
+    // The GitHub card, as the form holds it — see `Access`. Every change
+    // goes through `apply`, which settles the repository and hands the
+    // draft what the wire is sent.
+    let starting_access = Access::starting(project);
+    let access = use_signal(move || starting_access);
+    // What the Repository field says over its line, when the listing does
+    // not reach the repository the person had.
+    let not_reached = use_signal(|| None::<String>);
+    // What the Access field says over its line: an install that could not
+    // begin, or a tab that came back to nothing.
+    let mut access_problem = use_signal(|| None::<String>);
+    // What the project holds is listed once, for the form to choose from.
+    use_future(move || {
+        let project_id = project_id.clone();
+        async move {
+            if let Some(project) = project_id
+                && holds_something
+            {
+                let listed = reaches(Through::Held { project })
+                    .await
+                    .map_err(|why| why.to_string());
+                apply(access, draft, not_reached, |access| match access.shape {
+                    AccessShape::App => {
+                        if let Some(slot) = &mut access.app {
+                            slot.listing = Some(listed);
+                        }
+                    }
+                    AccessShape::Token => {
+                        if let Some(slot) = &mut access.token {
+                            slot.listing = Some(listed);
+                        }
+                    }
+                    AccessShape::None => {}
+                });
+            }
+        }
+    });
+    // The state an install was pressed under, while its tab is out. Asked
+    // about on every tick, since the tick is how the form learns the tab
+    // came back; the form moves onto the App when it has — see
+    // `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
+    let live = use_context::<Live>();
+    let mut pending = use_signal(|| None::<String>);
+    let _arriving = use_resource(move || {
+        let _ = live.follow();
+        let state = pending();
+        async move {
+            let Some(state) = state else {
+                return;
+            };
+            match reaches(Through::Arrived {
+                state: state.clone(),
+            })
+            .await
+            {
+                Ok(Reached::NotYet) => {}
+                Ok(listed @ Reached::Listed { .. }) => {
+                    pending.set(None);
+                    access_problem.set(None);
+                    let account = match &listed {
+                        Reached::Listed { account, .. } => account.clone().unwrap_or_default(),
+                        Reached::Unlisted { .. } | Reached::NotYet => String::new(),
+                    };
+                    apply(access, draft, not_reached, |access| {
+                        access.app = Some(AppSlot {
+                            arrival: Some(state),
+                            account,
+                            listing: Some(Ok(listed)),
+                        });
+                        access.moved(AccessShape::App);
+                    });
+                }
+                Ok(Reached::Unlisted { why }) => {
+                    pending.set(None);
+                    access_problem.set(Some(why));
+                }
+                Err(why) => {
+                    pending.set(None);
+                    access_problem.set(Some(why.to_string()));
+                }
+            }
+        }
+    });
+    // The panel a token is set in, and what it holds while it is open.
+    let mut token_panel = use_signal(|| false);
+    let mut token_text = use_signal(String::new);
+    let mut token_problem = use_signal(|| None::<String>);
+    let mut checking_token = use_signal(|| false);
+    let shape = access.read().shape;
+    let busy = access.read().busy() || checking_token();
+    let rows: Vec<Reachable> = access.read().rows().to_vec();
+    let unlisted = access.read().unlisted();
+    let more = access.read().more();
+    let items = items_of(&rows);
     let held: Vec<String> = project
         .map(|project| {
             project
@@ -412,8 +924,11 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
                             // Named for the wait while it lasts: a token or a
                             // binding is being asked about, and that is what
                             // takes the time.
+                            // Named for the wait: an access set is checked
+                            // against the platform, and so is one kept
+                            // under a repository that moved.
                             if saving() {
-                                if creating || !draft().credential.trim().is_empty() {
+                                if draft().access != seed_access {
                                     "Checking…"
                                 } else {
                                     "Saving…"
@@ -536,55 +1051,234 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
                 }
             }
 
-            // The repository and the token that reaches it, together: the
-            // token is granted the repository and checked against it, so
-            // the two boxes are one decision.
-            Card { title: "GitHub",
-                div { class: "flex flex-col gap-3",
-                Field {
-                    label: "Repository",
-                    note: "The address on GitHub its jobs work on.",
-                    problem: saying(Part::Repository),
-                    input {
-                        class: "{FIELD} font-mono",
-                        placeholder: "https://github.com/owner/repository",
-                        value: "{draft().repository}",
-                        oninput: move |event| draft.with_mut(|draft| draft.repository = event.value()),
-                    }
-                }
-                Field {
-                    label: "Token",
-                    note: if creating {
-                        "A fine-grained token granted this repository alone, with contents, issues and pull requests write."
-                    } else {
-                        "Leave empty to keep the current one; a new one replaces it."
-                    },
-                    info: "Every job on this project holds this token, so a token that reaches \
-                           more than this repository is a token every job could misuse. Grant it \
-                           the one repository, with contents, issues and pull requests write and \
-                           nothing else. It is checked against GitHub before it is kept: a token \
-                           GitHub does not accept, or one that cannot see the repository, is \
-                           refused here.",
-                    problem: saying(Part::Credential),
-                    // The platform's own form, filled in — see
-                    // `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`.
-                    aside: rsx! {
-                        Guide {
-                            mark: "github",
-                            label: "New token",
-                            says: "Opens GitHub's form with the name and the permissions filled \
-                                   in. Choose the repository there; the form cannot be told which.",
-                            link: token_form,
+            // The access first, in one of three shapes, and the repository
+            // chosen from what it reaches: the card is the enum, per
+            // `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
+            // Installing opens the platform in a tab of its own, which
+            // closes itself when the platform brings it back, and the form
+            // moves onto the App through the tick.
+            Card {
+                title: "GitHub",
+                note: "How its jobs reach the repository, and which one.",
+                div { class: "flex flex-col gap-4",
+                    Field {
+                        label: "Access",
+                        note: "How its jobs reach GitHub: through the App this instance owns, or with a token.",
+                        info: "A token is pasted, checked, and held for as long as the project is; \
+                               the App mints a token per hour for the one repository, and nothing \
+                               is pasted. Either way no job carries a credential: each command \
+                               fetches it from this instance. Whatever the sentence below says \
+                               replaces what the project holds when you save, and never before.",
+                        problem: saying(Part::Access).or_else(|| access_problem.read().clone()),
+                        // A sentence saying where things stand, with what
+                        // can be done about it inline — `docs/conventions.md`
+                        // §3.
+                        p { class: "text-sm text-foreground",
+                            for (position, segment) in sentence(&access.read(), app_registered).into_iter().enumerate() {
+                                match segment {
+                                    Segment::Text(words) => rsx! { span { key: "{position}", "{words}" } },
+                                    Segment::When(at) => rsx! {
+                                        When { key: "{position}", at, ahead: true, class: "text-sm text-foreground".to_owned() }
+                                    },
+                                    Segment::Act(action, words) => rsx! {
+                                        button {
+                                            key: "{position}",
+                                            r#type: "button",
+                                            class: "rounded underline decoration-border-strong underline-offset-2 \
+                                                    hover:decoration-foreground focus-visible:outline-none \
+                                                    focus-visible:ring-2 focus-visible:ring-primary",
+                                            onclick: move |_| match action {
+                                                Action::Install => {
+                                                    // The tab in the press, the address after it:
+                                                    // a browser opens a tab for a press and
+                                                    // refuses one for what comes later, and the
+                                                    // address is minted by the instance.
+                                                    super::open_a_tab();
+                                                    spawn(async move {
+                                                        match install_link("github".to_owned()).await {
+                                                            Ok(minted) => {
+                                                                super::send_the_tab(&minted.link);
+                                                                access_problem.set(None);
+                                                                pending.set(Some(minted.state));
+                                                            }
+                                                            Err(why) => {
+                                                                super::close_the_tab();
+                                                                access_problem.set(Some(why.to_string()));
+                                                            }
+                                                        }
+                                                    });
+                                                }
+                                                Action::UseToken => {
+                                                    token_problem.set(None);
+                                                    token_panel.set(true);
+                                                }
+                                                Action::BackToToken => {
+                                                    apply(access, draft, not_reached, |access| access.moved(AccessShape::Token));
+                                                }
+                                                Action::BackToApp => {
+                                                    apply(access, draft, not_reached, |access| access.moved(AccessShape::App));
+                                                }
+                                            },
+                                            "{words}"
+                                        }
+                                    },
+                                }
+                            }
                         }
-                    },
-                    input {
-                        r#type: "password",
-                        class: "{FIELD} font-mono",
-                        placeholder: "github_pat_…",
-                        value: "{draft().credential}",
-                        oninput: move |event| draft.with_mut(|draft| draft.credential = event.value()),
+                    }
+                    Field {
+                        label: "Repository",
+                        note: "One the access reaches, chosen from GitHub's own list.",
+                        info: "Through the App, exactly what its installation covers. With a \
+                               token, everything GitHub lists for it: a private repository here was \
+                               granted to the token, and a public one is listed because anybody can \
+                               read it, so a push to one you did not grant fails there. Either way \
+                               the choice is checked against GitHub when you save.",
+                        problem: saying(Part::Repository).or_else(|| unlisted.clone()).or_else(|| not_reached.read().clone()),
+                        Combobox {
+                            label: "Repository",
+                            items: items.clone(),
+                            value: access.read().repository.as_ref().map(ToString::to_string).unwrap_or_default(),
+                            placeholder: placeholder(shape, busy, items.len()).to_owned(),
+                            disabled: items.is_empty(),
+                            busy,
+                            onchange: {
+                                move |picked: String| {
+                                    let Some(row) = rows.iter().find(|row| row.repository.to_string() == picked) else {
+                                        return;
+                                    };
+                                    let repository = row.repository.clone();
+                                    apply(access, draft, not_reached, |access| {
+                                        access.repository = Some(repository);
+                                        access.carried = false;
+                                    });
+                                }
+                            },
+                        }
+                        if more {
+                            p { class: "text-xs text-faint-foreground",
+                                "GitHub listed a hundred, and the rest is not shown."
+                            }
+                        }
                     }
                 }
+            }
+
+            // The panel a token is set in: one action, which lists what the
+            // token can read before the panel closes, so that a token the
+            // platform does not accept never reaches the draft. The token
+            // lives in the form until the save checks it once more and
+            // keeps it.
+            if token_panel() {
+                {
+                    // Pressed on the button and on Enter in the box alike.
+                    let check = Callback::new(move |()| {
+                        let token = token_text().trim().to_owned();
+                        if token.is_empty() || checking_token() {
+                            return;
+                        }
+                        checking_token.set(true);
+                        token_problem.set(None);
+                        spawn(async move {
+                            let listed = reaches(Through::Token { token: token.clone() }).await;
+                            checking_token.set(false);
+                            match listed {
+                                Ok(listed @ Reached::Listed { .. }) => {
+                                    let (owner, expires) = match &listed {
+                                        Reached::Listed { account, expires, .. } => (account.clone(), expires.clone()),
+                                        Reached::Unlisted { .. } | Reached::NotYet => (None, None),
+                                    };
+                                    apply(access, draft, not_reached, |access| {
+                                        access.token = Some(TokenSlot {
+                                            token: Some(token),
+                                            owner,
+                                            expires,
+                                            expired: false,
+                                            listing: Some(Ok(listed)),
+                                        });
+                                        access.moved(AccessShape::Token);
+                                    });
+                                    token_text.set(String::new());
+                                    token_panel.set(false);
+                                }
+                                Ok(Reached::Unlisted { why }) => {
+                                    token_problem.set(Some(format!("The token was not kept: {why}.")));
+                                }
+                                Ok(Reached::NotYet) => {
+                                    token_problem.set(Some("The token was not checked.".to_owned()));
+                                }
+                                Err(why) => token_problem.set(Some(why.to_string())),
+                            }
+                        });
+                    });
+                    rsx! {
+                        Modal {
+                            title: "Use a token",
+                            onclose: move |()| {
+                                token_panel.set(false);
+                                token_problem.set(None);
+                            },
+                            actions: rsx! {
+                                // Not disabled while the platform is asked, though it
+                                // says so: a control disabled under the pointer drops
+                                // its focus, and Escape would then reach nothing. The
+                                // guard in the check is what stops a second press.
+                                Button {
+                                    disabled: token_text().trim().is_empty(),
+                                    onclick: move |_| check.call(()),
+                                    if checking_token() { "Checking…" } else { "Use it" }
+                                }
+                            },
+                            Field {
+                                label: "Token",
+                                note: "A fine-grained token, granted the one repository, with contents, issues and pull requests write.",
+                                info: "Every job on this project fetches this token from the instance when \
+                                       a command needs it, and no container carries it — so a token that \
+                                       reaches more than the one repository is still a token every job \
+                                       could misuse. Grant it the one repository, with contents, issues and \
+                                       pull requests write and nothing else. GitHub is asked what it can \
+                                       read before this closes, and asked again about the repository you \
+                                       choose when you save.",
+                                problem: token_problem(),
+                                // The platform's own form, filled in — see
+                                // `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`.
+                                aside: rsx! {
+                                    Guide {
+                                        mark: "github",
+                                        label: "New token",
+                                        says: "Opens GitHub's form with the name and the permissions filled \
+                                               in. Choose the repository there; the form cannot be told which.",
+                                        link: token_form,
+                                    }
+                                },
+                                input {
+                                    r#type: "password",
+                                    class: "{FIELD} font-mono",
+                                    placeholder: "github_pat_…",
+                                    value: "{token_text}",
+                                    // Focused by script once it exists: the autofocus
+                                    // attribute is honoured only until the person has
+                                    // focused anything, and the control that opened this
+                                    // panel took their click.
+                                    onmounted: move |event: MountedEvent| {
+                                        spawn(async move {
+                                            // Nothing to do for a focus that failed: the
+                                            // panel's own focus, set the same way, still
+                                            // takes the keys.
+                                            let _ = event.set_focus(true).await;
+                                        });
+                                    },
+                                    oninput: move |event| token_text.set(event.value()),
+                                    onkeydown: move |event: KeyboardEvent| {
+                                        if event.key() == Key::Enter {
+                                            event.prevent_default();
+                                            check.call(());
+                                        }
+                                    },
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -1013,9 +1707,10 @@ fn FittedEditor(
 mod tests {
     use super::super::agents_view::Agent;
     use super::{
-        Draft, Filling, Fitted, KitDraft, Part, Problem, Shape, Watching, beside,
-        refused_before_asking, seeded, shape_for, starting, takes_effort, watched, with_agent,
-        with_model,
+        Access, AccessDraft, AccessShape, AccessView, Action, AppSlot, Draft, Filling, Fitted,
+        Icon, KitDraft, Part, Problem, Reachable, Reached, Repository, Segment, Shape, TokenSlot,
+        Watching, beside, items_of, not_reached_words, placeholder, refused_before_asking, seeded,
+        sentence, shape_for, starting, takes_effort, watched, with_agent, with_model,
     };
     use stageman_wire::{Choice, ModelChoice};
 
@@ -1051,14 +1746,16 @@ mod tests {
         assert!(refused_before_asking(&blank, &Filling::Creating, &[]));
         let whole = Draft {
             name: "aviary".to_owned(),
-            repository: "https://github.com/owner/aviary".to_owned(),
             foreman: as_it_comes(),
             kits: vec![KitDraft {
                 name: "Claude".to_owned(),
                 description: "does the work".to_owned(),
                 fitted: as_it_comes(),
             }],
-            credential: "github_pat_not_a_real_token".to_owned(),
+            access: AccessDraft::Token {
+                token: Some("github_pat_not_a_real_token".to_owned()),
+                repository: Some(named("owner/aviary")),
+            },
             channel: stageman_wire::ChannelDraft {
                 credential: "xoxb-not-a-real-token".to_owned(),
                 listen_credential: "xapp-not-a-real-token".to_owned(),
@@ -1067,6 +1764,472 @@ mod tests {
             brief: String::new(),
         };
         assert!(!refused_before_asking(&whole, &Filling::Creating, &[]));
+    }
+
+    fn words(said: &[Segment]) -> String {
+        said.iter()
+            .map(|segment| match segment {
+                Segment::Text(words) | Segment::Act(_, words) => words.clone(),
+                Segment::When(at) => format!("<{at}>"),
+            })
+            .collect()
+    }
+
+    fn actions(said: &[Segment]) -> Vec<(Action, &str)> {
+        said.iter()
+            .filter_map(|segment| match segment {
+                Segment::Act(action, words) => Some((*action, words.as_str())),
+                Segment::Text(_) | Segment::When(_) => None,
+            })
+            .collect()
+    }
+
+    fn row(full_name: &str, private: bool) -> Reachable {
+        Reachable {
+            repository: named(full_name),
+            private,
+        }
+    }
+
+    fn named(full_name: &str) -> Repository {
+        let (owner, name) = full_name.split_once('/').expect("owner/name");
+        Repository {
+            owner: owner.to_owned(),
+            name: name.to_owned(),
+        }
+    }
+
+    fn listed(rows: &[Reachable]) -> Reached {
+        Reached::Listed {
+            account: None,
+            expires: None,
+            repositories: rows.to_vec(),
+            more: false,
+        }
+    }
+
+    fn on_the_app(account: &str, arrival: Option<&str>) -> AppSlot {
+        AppSlot {
+            arrival: arrival.map(str::to_owned),
+            account: account.to_owned(),
+            listing: None,
+        }
+    }
+
+    fn with_a_token(token: Option<&str>) -> TokenSlot {
+        TokenSlot {
+            token: token.map(str::to_owned),
+            owner: None,
+            expires: None,
+            expired: false,
+            listing: None,
+        }
+    }
+
+    /// The sentence says where the form stands and offers what can be done,
+    /// by shape, the same whether what it holds is the project's or was
+    /// set here: nothing chosen, against whether an App is registered; the
+    /// App, naming its own account and no other; a token; and the way back
+    /// to the other shape where the form remembers one. An action's words
+    /// are the verb alone, never the comma that leads into it.
+    #[test]
+    fn the_sentence_says_the_shape_and_offers_its_actions() {
+        let said = sentence(&Access::default(), false);
+        assert_eq!(
+            words(&said),
+            "Not chosen yet. Use a token granted the one repository."
+        );
+        assert_eq!(actions(&said), [(Action::UseToken, "Use a token")]);
+        let said = sentence(&Access::default(), true);
+        assert_eq!(
+            words(&said),
+            "Not chosen yet. Install the App on the repository's account, or use a token."
+        );
+        assert_eq!(
+            actions(&said),
+            [
+                (Action::Install, "Install the App"),
+                (Action::UseToken, "use a token")
+            ]
+        );
+
+        let on_acme = Access {
+            shape: AccessShape::App,
+            app: Some(on_the_app("acme", Some("f00d"))),
+            ..Access::default()
+        };
+        let said = sentence(&on_acme, true);
+        assert_eq!(
+            words(&said),
+            "Through the App, installed on acme. Install it elsewhere, or use a token instead."
+        );
+        assert_eq!(
+            actions(&said),
+            [
+                (Action::Install, "Install it elsewhere"),
+                (Action::UseToken, "use a token")
+            ]
+        );
+        let remembering_a_token = Access {
+            token: Some(with_a_token(None)),
+            ..on_acme.clone()
+        };
+        assert_eq!(
+            words(&sentence(&remembering_a_token, true)),
+            "Through the App, installed on acme. Install it elsewhere, or go back to the token \
+             instead."
+        );
+        assert_eq!(
+            actions(&sentence(&remembering_a_token, true))[1].0,
+            Action::BackToToken
+        );
+        let unnamed = Access {
+            app: Some(on_the_app("", None)),
+            ..on_acme
+        };
+        assert_eq!(
+            words(&sentence(&unnamed, true)),
+            "Through the App. Install it elsewhere, or use a token instead."
+        );
+
+        let token = Access {
+            shape: AccessShape::Token,
+            token: Some(with_a_token(Some("github_pat_not_a_real_token"))),
+            ..Access::default()
+        };
+        let said = sentence(&token, true);
+        assert_eq!(
+            words(&said),
+            "With a token. Replace it, or install the App instead."
+        );
+        assert_eq!(
+            actions(&said),
+            [
+                (Action::UseToken, "Replace it"),
+                (Action::Install, "install the App")
+            ]
+        );
+        assert_eq!(words(&sentence(&token, false)), "With a token. Replace it.");
+        let remembering_the_app = Access {
+            app: Some(on_the_app("acme", None)),
+            ..token
+        };
+        let said = sentence(&remembering_the_app, true);
+        assert_eq!(
+            words(&said),
+            "With a token. Replace it, or go back to the App instead."
+        );
+        assert_eq!(actions(&said)[1], (Action::BackToApp, "go back to the App"));
+        assert!(
+            format!("{remembering_the_app:?}").contains("<redacted>"),
+            "a slot names its token to nobody"
+        );
+    }
+
+    /// The token's sentence says whose it is and when it expires, where the
+    /// platform has said either: the moment drawn once the page is awake,
+    /// and *which expired* once it has passed — see
+    /// `docs/decisions/0080-a-tokens-owner-and-expiry-are-kept-beside-it.md`.
+    #[test]
+    fn the_sentence_says_whose_the_token_is_and_when_it_expires() {
+        let token = Access {
+            shape: AccessShape::Token,
+            token: Some(with_a_token(Some("github_pat_not_a_real_token"))),
+            ..Access::default()
+        };
+        let owned = Access {
+            token: Some(TokenSlot {
+                owner: Some("acme".to_owned()),
+                expires: Some("2026-10-24T12:00:00Z".to_owned()),
+                ..with_a_token(None)
+            }),
+            ..token
+        };
+        assert_eq!(
+            words(&sentence(&owned, false)),
+            "With acme's token, expiring <2026-10-24T12:00:00Z>. Replace it.",
+            "whose, and until when, drawn as a moment"
+        );
+        let expired = Access {
+            token: Some(TokenSlot {
+                expired: true,
+                ..owned.token.clone().expect("the slot")
+            }),
+            ..owned.clone()
+        };
+        assert_eq!(
+            words(&sentence(&expired, false)),
+            "With acme's token, which expired <2026-10-24T12:00:00Z>. Replace it."
+        );
+        let owner_only = Access {
+            token: Some(TokenSlot {
+                expires: None,
+                ..owned.token.clone().expect("the slot")
+            }),
+            ..owned
+        };
+        assert_eq!(
+            words(&sentence(&owner_only, false)),
+            "With acme's token. Replace it."
+        );
+    }
+
+    /// The form starts on what the project holds, with its repository, and
+    /// on nothing for a project that does not exist yet; and what the wire
+    /// is sent names the access the way the instance resolves it — the
+    /// state for an installation come back, none for the one held.
+    #[test]
+    fn the_card_starts_on_what_the_project_holds_and_drafts_what_the_wire_needs() {
+        let mut project = stageman_wire::Project {
+            id: "p".to_owned(),
+            name: "aviary".to_owned(),
+            repository: named("acme/aviary"),
+            repository_link: "https://github.com/acme/aviary".to_owned(),
+            foreman: as_it_comes(),
+            kits: Vec::new(),
+            access: Some(AccessView::Installation {
+                account: "acme".to_owned(),
+            }),
+            channels: Vec::new(),
+            variables: Vec::new(),
+            brief: String::new(),
+            watched: Vec::new(),
+            foreman_room: None,
+            foreman_room_link: None,
+            attending: false,
+            working: 0,
+            jobs: 0,
+            token_form: String::new(),
+        };
+        let starting = Access::starting(Some(&project));
+        assert_eq!(starting.shape, AccessShape::App);
+        assert_eq!(starting.app, Some(on_the_app("acme", None)));
+        assert_eq!(starting.token, None);
+        assert_eq!(starting.repository, Some(named("acme/aviary")));
+        assert!(!starting.carried);
+        assert_eq!(
+            starting.draft(),
+            AccessDraft::App {
+                arrival: None,
+                repository: Some(named("acme/aviary")),
+            }
+        );
+        project.access = Some(AccessView::Token {
+            owner: Some("acme".to_owned()),
+            expires: Some("2026-10-24T12:00:00Z".to_owned()),
+            expired: false,
+        });
+        let starting = Access::starting(Some(&project));
+        assert_eq!(starting.shape, AccessShape::Token);
+        assert_eq!(
+            starting.token,
+            Some(TokenSlot {
+                owner: Some("acme".to_owned()),
+                expires: Some("2026-10-24T12:00:00Z".to_owned()),
+                ..with_a_token(None)
+            })
+        );
+        assert_eq!(
+            starting.draft(),
+            AccessDraft::Token {
+                token: None,
+                repository: Some(named("acme/aviary")),
+            }
+        );
+        project.access = None;
+        assert_eq!(Access::starting(Some(&project)), Access::default());
+        assert_eq!(Access::starting(None).draft(), AccessDraft::None);
+
+        let arrived = Access {
+            shape: AccessShape::App,
+            app: Some(on_the_app("acme", Some("f00d"))),
+            token: Some(with_a_token(Some("github_pat_not_a_real_token"))),
+            repository: None,
+            carried: true,
+        };
+        assert_eq!(
+            arrived.draft(),
+            AccessDraft::App {
+                arrival: Some("f00d".to_owned()),
+                repository: None,
+            }
+        );
+        let back_on_the_token = Access {
+            shape: AccessShape::Token,
+            ..arrived
+        };
+        assert_eq!(
+            back_on_the_token.draft(),
+            AccessDraft::Token {
+                token: Some("github_pat_not_a_real_token".to_owned()),
+                repository: None,
+            }
+        );
+    }
+
+    /// A listing settles the repository: one carried in from another
+    /// access is kept where reached and otherwise dropped and said, never
+    /// another put in its place; the project's own, or one chosen here,
+    /// is kept and said where the listing no longer reaches it; and where
+    /// none is chosen the one row fills in. Nothing settles while the
+    /// listing has not come, or could not be made.
+    #[test]
+    fn a_listing_settles_the_repository_by_where_it_came_from() {
+        let a_and_b = [row("acme/a", true), row("acme/b", false)];
+        let only_a = [row("acme/a", true)];
+        let on_acme =
+            |rows: Option<&[Reachable]>, repository: Option<&str>, carried: bool| Access {
+                shape: AccessShape::App,
+                app: Some(AppSlot {
+                    listing: rows.map(|rows| Ok(listed(rows))),
+                    ..on_the_app("acme", None)
+                }),
+                token: None,
+                repository: repository.map(named),
+                carried,
+            };
+
+        let mut still_listing = on_acme(None, Some("acme/c"), true);
+        assert_eq!(still_listing.settle(), None);
+        assert_eq!(
+            still_listing.repository,
+            Some(named("acme/c")),
+            "nothing settles before the listing"
+        );
+        assert!(still_listing.carried);
+
+        let mut carried_and_reached = on_acme(Some(&a_and_b), Some("acme/b"), true);
+        assert_eq!(carried_and_reached.settle(), None);
+        assert_eq!(carried_and_reached.repository, Some(named("acme/b")));
+        assert!(!carried_and_reached.carried, "settled");
+
+        let mut carried_and_not = on_acme(Some(&only_a), Some("acme/c"), true);
+        assert_eq!(
+            carried_and_not.settle(),
+            Some("acme/c is not reached this way.".to_owned())
+        );
+        assert_eq!(
+            carried_and_not.repository, None,
+            "dropped, and the one row is not put in its place"
+        );
+        assert!(!carried_and_not.carried);
+
+        let mut held_and_not = on_acme(Some(&only_a), Some("acme/c"), false);
+        assert_eq!(
+            held_and_not.settle(),
+            Some("acme/c is not reached this way.".to_owned())
+        );
+        assert_eq!(
+            held_and_not.repository,
+            Some(named("acme/c")),
+            "the project's own is kept, and said"
+        );
+
+        let mut none_and_one = on_acme(Some(&only_a), None, true);
+        assert_eq!(none_and_one.settle(), None);
+        assert_eq!(
+            none_and_one.repository,
+            Some(named("acme/a")),
+            "the one row fills in where nothing was chosen"
+        );
+        let mut none_and_two = on_acme(Some(&a_and_b), None, true);
+        assert_eq!(none_and_two.settle(), None);
+        assert_eq!(none_and_two.repository, None, "two rows wait for a choice");
+
+        let mut unlisted = on_acme(None, Some("acme/c"), true);
+        unlisted.app = Some(AppSlot {
+            listing: Some(Ok(Reached::Unlisted {
+                why: "GitHub does not accept it".to_owned(),
+            })),
+            ..on_the_app("acme", None)
+        });
+        assert_eq!(unlisted.settle(), None);
+        assert_eq!(
+            unlisted.unlisted().as_deref(),
+            Some("Could not list what it reaches: GitHub does not accept it")
+        );
+        assert!(unlisted.rows().is_empty());
+        assert!(!unlisted.busy());
+        assert!(!unlisted.more());
+        let mut a_page_of = on_acme(Some(&a_and_b), None, false);
+        a_page_of.app = Some(AppSlot {
+            listing: Some(Ok(Reached::Listed {
+                account: None,
+                expires: None,
+                repositories: a_and_b.to_vec(),
+                more: true,
+            })),
+            ..on_the_app("acme", None)
+        });
+        assert!(a_page_of.more(), "the platform had more than it listed");
+        assert!(on_acme(None, None, false).busy(), "listing not come");
+        assert!(!Access::default().busy(), "nothing to list");
+
+        let mut moved = on_acme(Some(&a_and_b), Some("acme/a"), false);
+        moved.moved(AccessShape::Token);
+        assert_eq!(moved.shape, AccessShape::Token);
+        assert!(
+            moved.carried,
+            "carried until the token's listing settles it"
+        );
+        assert_eq!(
+            not_reached_words(&named("acme/d")),
+            "acme/d is not reached this way."
+        );
+    }
+
+    #[test]
+    fn the_box_says_what_it_waits_for() {
+        assert_eq!(
+            placeholder(AccessShape::None, false, 0),
+            "choose the access first"
+        );
+        assert_eq!(placeholder(AccessShape::App, true, 0), "asking GitHub…");
+        assert_eq!(placeholder(AccessShape::Token, true, 3), "asking GitHub…");
+        assert_eq!(
+            placeholder(AccessShape::App, false, 0),
+            "nothing reached yet"
+        );
+        assert_eq!(
+            placeholder(AccessShape::Token, false, 0),
+            "set a token first"
+        );
+        assert_eq!(placeholder(AccessShape::App, false, 2), "type to filter");
+        assert_eq!(placeholder(AccessShape::Token, false, 9), "type to filter");
+    }
+
+    /// A listing becomes the box's rows: the address sent back, the owner
+    /// and name read, the visibility marked, and the owner as the group
+    /// only where the rows span more than one.
+    #[test]
+    fn a_listing_becomes_items() {
+        let rows = vec![row("acme/site", true), row("example/pub", false)];
+        let items = items_of(&rows);
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| (item.id.as_str(), item.label.as_str(), item.group.as_deref()))
+                .collect::<Vec<_>>(),
+            [
+                ("acme/site", "acme/site", Some("acme")),
+                ("example/pub", "example/pub", Some("example")),
+            ]
+        );
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.icon.clone())
+                .collect::<Vec<_>>(),
+            [
+                Some((Icon::Private, "private".to_owned())),
+                Some((Icon::Public, "public".to_owned())),
+            ]
+        );
+        let one_owner = items_of(&[row("acme/site", true), row("acme/other", false)]);
+        assert!(
+            one_owner.iter().all(|item| item.group.is_none()),
+            "no group where every row is one owner's"
+        );
     }
 
     /// The agent's defaults, as a browser holds them.
@@ -1186,15 +2349,19 @@ mod tests {
             projects: vec![stageman_wire::Project {
                 id: "p".to_owned(),
                 name: "aviary".to_owned(),
-                repository: "https://github.com/owner/aviary".to_owned(),
-                repository_link: Some("https://github.com/owner/aviary".to_owned()),
+                repository: named("owner/aviary"),
+                repository_link: "https://github.com/owner/aviary".to_owned(),
                 foreman: as_it_comes(),
                 kits: vec![KitDraft {
                     name: "deep".to_owned(),
                     description: "big work".to_owned(),
                     fitted: as_it_comes(),
                 }],
-                platforms: vec!["github".to_owned()],
+                access: Some(AccessView::Token {
+                    owner: None,
+                    expires: None,
+                    expired: false,
+                }),
                 channels: vec!["Slack".to_owned()],
                 variables: vec![stageman_wire::Variable {
                     name: "STRIPE_API_KEY".to_owned(),
@@ -1218,6 +2385,7 @@ mod tests {
             }],
             shapes: vec![claude()],
             guides: stageman_wire::Guides::default(),
+            app_registered: false,
         };
 
         let fresh = starting(&watching, &Filling::Creating);
@@ -1227,7 +2395,8 @@ mod tests {
             fresh.kits.first().map(|kit| kit.name.as_str()),
             Some("Claude")
         );
-        assert!(fresh.name.is_empty() && fresh.credential.is_empty());
+        assert!(fresh.name.is_empty());
+        assert_eq!(fresh.access, AccessDraft::None, "nothing chosen yet");
 
         let existing = starting(&watching, &Filling::Amending("p".to_owned()));
         assert_eq!(existing.name, "aviary");
@@ -1236,7 +2405,14 @@ mod tests {
             existing.kits.first().map(|kit| kit.name.as_str()),
             Some("deep")
         );
-        assert!(existing.credential.is_empty(), "never seeded");
+        assert_eq!(
+            existing.access,
+            AccessDraft::Token {
+                token: None,
+                repository: Some(named("owner/aviary")),
+            },
+            "the token held, left unsaid, on its repository"
+        );
         assert_eq!(
             existing
                 .variables

@@ -8,7 +8,11 @@ decided here, and was settled by
 `docs/decisions/0033-the-job-endpoint-listens-beyond-loopback.md`. The warrant
 survives as the idea and changes delivery: 0034 makes it per session rather than
 per container, which is the "warrant, scoped" this record's own revisit trigger
-predicted.
+predicted. Amended again by
+`docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`:
+a job's container is now given a warrant of its own after all — the
+narrower one the revisit trigger below names — which buys exactly one
+thing, the job's own project's platform credential, and never the tools.
 
 ## Context
 

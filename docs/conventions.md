@@ -445,6 +445,21 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   rather than a decision about one process, and loses the part that matters:
   a handout is scoped to somebody, and the scoping is the point.
 
+- **warrant** — what one bearer presents to ask one thing of this instance:
+  minted here, checked here, and never leaving the machine. Two kinds since
+  `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
+  A turn's is minted when the turn starts and forgotten when it ends, and
+  buys the tools the instance serves. A job's is minted with the job, kept
+  sealed on its record, and delivered into its container's environment at
+  creation; it buys the job's own project's platform credential, fetched
+  by the wrapper the instance writes in the platform's tool's place, and
+  nothing else. Each kind is honoured on its own route and refused on the
+  other's, which is what keeps them apart. Not a *token*, the near-miss
+  `docs/decisions/0032-a-foreman-asks-the-instance-by-warrant.md` records:
+  that word already names what an agent authenticates with, what a job
+  reaches a platform with and what a channel is posted on, and none of
+  those is minted here or scoped to one bearer.
+
 - **instance** — everything one running stageman knows and every decision it
   makes, as one synchronous value: the projects and their jobs, the foremen's
   inboxes, what is in flight, and the rule for what to do about each thing
@@ -548,6 +563,65 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   something this project does to the text, where the platform is the one
   that answers.
 
+- **repository** — the one thing a project is about, named as an owner
+  and a name on the platform: an address, never text, since
+  `docs/decisions/0079-a-repository-is-an-owner-and-a-name.md`. Shown as
+  *owner/name*, which is how the platform and a person both say it, and
+  composed into the platform's own spelling only at the edges that need
+  one: the address a browser opens, a checkout's clone, a prompt. Not a
+  *URL*, which is the platform's spelling of one and is composed from it;
+  not an *address* on the wire, where a page is given the two parts and
+  the address beside them, composed on the server. Written to the file
+  as the address, as the last release wrote it, and parsed back on
+  opening, which is the one place text is believed and refused.
+- **installation** — the App, installed on an account for some or all of
+  its repositories, by the identifier the platform's setup redirect
+  carries: confirmed with the App's key and kept beside the App, with the
+  account and whether it covers every repository, since `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`. It is one
+  per account on the platform and may cover many repositories, so it is
+  the instance's record of where its App is installed rather than any
+  project's: a project's access names one, and a project's repository is
+  chosen from what that one covers, listed from the platform when a form
+  asks and kept nowhere. Which one a form may name is the one its own
+  tab brought back, under a state minted for the press, or the one its
+  project holds; a form is never shown the instance's installations, and
+  never names one by its identifier. Tokens are minted from it per
+  project for that project's one repository and an hour, and held, never
+  kept. Not a *connection* or a *link*, which describe nothing the
+  platform has a word for; not an *App* — an App is registered once, and
+  installed many times. Not a project's, which was 0077's shape and the
+  near-miss worth recording: the platform installs on an account, and a
+  link minted per project could route neither a project being created
+  nor the second project on one account.
+- **access** — how a project reaches its repository's platform: a token
+  pasted and checked, or an installation of the App. One per platform,
+  and a job never carries either: the credential route serves a token as
+  it is and mints one from an installation. A token is kept with what
+  the platform said of it when it was checked — whose it is, and when it
+  expires — since
+  `docs/decisions/0080-a-tokens-owner-and-expiry-are-kept-beside-it.md`:
+  two facts about the secret, which cannot change under it, said on the
+  project's page and raised on the first page a week before the expiry. The word this project uses
+  for the map that held *credentials* until
+  `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`,
+  renamed because an installation is not a credential and a map called
+  credentials holding one would read wrong. Set before the repository,
+  since `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`: the form's shape, App or Token, and then the repository
+  chosen from what that shape reaches. Not *authorisation*, which is
+  what the platform grants and this instance can only hold a record of.
+  Not *integration*, refused under **channel** for describing plumbing,
+  and the word the redesign began with.
+- **App** — what this instance owns on a platform: registered once, from
+  the Instance page, by the platform's own flow, and kept sealed with its
+  key; a project *installs* it on a repository rather than holding a
+  token, and its jobs run on tokens minted per turn — see
+  `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
+  Capitalised as the platform capitalises it, so that a sentence can hold
+  it beside the **app** crate and a Slack *app* without a second word. The
+  instance's, never a project's: a project installs and does not own. Not
+  *integration*, refused under **channel**; not *platform-wide*, which
+  names the platform where the instance is meant.
+
 ## 3. House rules
 
 Anything someone would otherwise get wrong: framework versions and their
@@ -588,6 +662,14 @@ justify is usually obsolete.
   where is a pure function in the core crate so it can be tested without
   spawning anything; delivering it belongs to the adapter. Reasoning in
   `docs/decisions/0008-one-credential-per-agent.md`.
+
+  **A job's process is handed no platform credential at all**, since
+  `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`:
+  its container carries a warrant, and a wrapper the instance writes in the
+  platform's tool's place fetches the credential for one command at a
+  time. The variable the tool reads stays reserved all the same, because
+  the wrapper sets it for the tool's process and an operator's variable
+  under that name would be overridden there and honoured nowhere.
 
   **A project's variables can reach that same failure from the other side, and
   are refused for it.** An operator naming one `ANTHROPIC_API_KEY` would change
@@ -739,6 +821,17 @@ justify is usually obsolete.
   with finished work is try to push it, and a rule enforced only by a remote's
   refusal teaches itself expensively.
 
+- **Two paths under the dashboard's host are the instance's own.** Where a
+  platform sends the browser back after an App is registered, and after it
+  is installed, the instance answers before the proxy, per
+  `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`:
+  it holds the request while the world asks the platform, and sends the
+  browser on to the page once the write has landed. They sit under the
+  Instance page's own path, where the framework serves nothing, so a path
+  the instance does not take falls through to the framework as it always
+  did. A state token minted here and spent on return is what makes a
+  browser's arrival a registration this instance began.
+
 - **Nothing posted is written in the platform's own markup.** Since
   `docs/decisions/0062-what-this-instance-says-is-markdown.md` the adapter
   posts everything as Markdown through the platform's own Markdown parameter,
@@ -854,10 +947,54 @@ justify is usually obsolete.
   nothing floats over anything. The browser's own select was what the form
   used and is refused for two reasons: it draws itself, outside the theme,
   and it hides the options a choice is made between. A listbox that floats is
-  for a set that is open or long; none exists here, and when one does it is
-  lifted from the components the framework's own registry publishes rather
-  than depended on, because the crate published under that name was a
-  placeholder when this was written.
+  for a set that is open or long. The one long set here — the
+  repositories an access reaches, since `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md` — gets a control of this
+  project's own, in the token set, with its list in the page rather than
+  floating: a box that filters and holds the choice, and rows shown while
+  it is typed in. The registry the framework publishes has a combobox,
+  and lifting it was measured, when the moment came, to cost a git
+  dependency on the primitives crate, an icon crate of its own and a
+  theme file of its own in the browser's half, which is the price the
+  earlier version of this rule did not know.
+
+- **What leaves for a platform opens a tab of its own, and the page
+  learns of the return through the tick.** A guide's link opens the
+  platform in a tab of its own, so the form and everything typed into it
+  stay where they were. The App's install opens its tab by script rather
+  than by a link, for one reason: a tab opened by script may be closed by
+  script, and one opened by a link may not once the platform has moved it
+  through its pages — so the page the platform brings that tab back to,
+  which is the instance's own, can close it and return the person to the
+  form they left. The tab is opened blank in the press and sent on once
+  the instance has minted the link, because a browser opens a tab for a
+  press and refuses one for what comes later; the link carries a state
+  minted for that press, and what comes back under it is that page's to
+  ask about and no other's. That landing page is outside the dashboard's
+  stylesheet, one sentence and one line of script, and stays open saying
+  why when the platform refused, or saying to press again when the state
+  is one the instance no longer holds. See
+  `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
+  Two things follow. A form keeps its draft in state a re-read does not
+  reset, which is what a hook is; one that seeded its draft from the read
+  on every render would lose the operator's typing to the tick that was
+  meant to help them. And what a form lists from a platform is asked as a
+  held request of its own — the shape's listing when the shape is
+  entered, and whether its state has come back on each tick while a tab
+  is out — never kept and never part of the screen's read, because a
+  listing on every tick would ask the platform on every write.
+
+- **A field that is one of a few shapes is a sentence with its actions
+  inline.** The GitHub card's access is one: its control says which shape
+  the project is in, or that none is chosen, and offers what can be done
+  about it as links in the sentence — install the App, use a token,
+  replace it — rather than a row of buttons for the shapes and another
+  for the actions. A row of buttons is right where choosing is the whole
+  of it, as it is for a model or an effort; a shape here is never chosen
+  by itself, since each is entered by an action of its own, and a
+  sentence carries the shape and the action together. The line under the
+  label stays what the field is for, whatever the shape: it is the
+  control that says where things stand, and a line that changed with it
+  would say the same thing twice.
 
 - **A theme is a token block, and a component never names one.** Since
   `docs/decisions/0072-the-dashboard-has-a-dark-theme.md` there are two,
@@ -1030,6 +1167,14 @@ it lands.
   rather than retiring it: the test is now evidence about what that container
   actually permits, and construction is only an argument about what the code
   asks for.
+
+  Since
+  `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`
+  the platform credential is not in the handout to escape from, so the
+  escape test on the handout cannot see it, and a container test does: a
+  job's wrapper, run in a real container against a real daemon, fetches its
+  own project's credential and prints no other's, and a warrant the daemon
+  never minted fails the command rather than running it as nobody.
 - **Killing stageman leaves nothing untracked, and nothing running that is not
   holding a live tunnel.** Hard-killing
   the process is a supported operation with a test, not an accident recovered

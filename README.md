@@ -45,8 +45,10 @@ into a state where nothing can run.
 
 A running stageman reads no credential from the machine's environment. Every
 one of them is entered in the dashboard, held encrypted, and handed to a
-container as it starts. Obtaining a credential is a one-time step you do
-wherever you happen to be, and only its result goes into stageman.
+container as it starts — all but a repository's, which no container carries:
+a job's commands fetch it from stageman one at a time, as they run. Obtaining
+a credential is a one-time step you do wherever you happen to be, and only
+its result goes into stageman.
 
 **It asks you nothing to start.** A fresh instance has no agents and no
 projects, and that is a perfectly good instance — it simply has nothing to do
@@ -54,13 +56,32 @@ yet. You give it those in the dashboard, in that order, because a project needs
 an agent to think with and at least one **kit** its jobs can run on — an agent,
 set a particular way: which model, and how hard it thinks.
 
-**A project needs a token for its repository**: a fine-grained one, granted
-that repository alone, with contents, issues and pull requests write. The
-project's settings page links to GitHub's form with that filled in — the
-repository is the one thing the form cannot be told, so pick it there — and
-a token pasted back is checked against GitHub before it is kept, as every
-credential you give a project is: a wrong one is refused beside the box,
-rather than found by the first job that needed it.
+**A project reaches its repository one of two ways, and the repository is
+chosen from what that reaches.** With a token: press *Use a token* on the
+project's page, mint one from GitHub's form — the page links to it with
+the name and the permissions filled in; grant it the one repository
+there, with contents, issues and pull requests write — paste it, and it
+is checked against GitHub before the panel closes, which also says whose
+it is and when it expires. Then pick the repository from what the token
+can read, each marked private or public. The first page raises a token a
+week before it expires, and after, until it is replaced.
+A public repository you did not grant the token is listed too, since
+anybody can read it, and fails at the first push; a private one is
+listed only because you granted it.
+
+**Or install the App.** The Instance page registers a GitHub App of your
+own by GitHub's own form, which sends you back here with the App's key;
+the key stays sealed in the instance's file and never leaves the machine.
+Install it on the account your repository is under, from the project's
+own page: *Install the App* opens GitHub in a tab of its own, which closes
+itself when GitHub brings you back, and the form is on the App with what
+that installation reaches listed; pick the repository there. A second
+project on the same account presses the same control, and GitHub brings it
+back the same way. Its jobs then run on tokens minted from the
+installation, good for an hour and for that one repository, and the
+commits they make are the App's. Register it under your account, or under
+an organisation whose repositories it should reach; the Instance page
+lists every installation.
 
 **It needs nothing named in the environment either.** Its file is encrypted
 under a key, and a key cannot live in the file it protects — so on a first run

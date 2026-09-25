@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use stageman::world::{Asking, Performer};
 use stageman_core::{
-    Agent, AgentConfig, JobId, Key, Kit, KitConfig, KitName, NONCE_LEN, Platform, Project,
+    Access, Agent, AgentConfig, JobId, Key, Kit, KitConfig, KitName, NONCE_LEN, Platform, Project,
     ProjectId, Secret, State, Uuid,
 };
 use stageman_instance::{Instance, Request, Response, Seed, Target};
@@ -89,19 +89,28 @@ async fn propose() -> Result<(), String> {
         },
     );
     let project = ProjectId::from_uuid(Uuid::new_v4());
-    let mut credentials = std::collections::BTreeMap::new();
-    credentials.insert(Platform::GitHub, platform_token);
+    let mut access = std::collections::BTreeMap::new();
+    access.insert(
+        Platform::GitHub,
+        Access::Token {
+            secret: platform_token,
+            owner: None,
+            expires: None,
+        },
+    );
     state.projects.insert(
         project,
         Project {
             name: "stageman".to_owned(),
-            repository: repository.clone(),
+            repository: stageman_core::RepositoryAddress::parse(&repository).map_err(|error| {
+                format!("the repository has to be an address on GitHub: {error}")
+            })?,
             foreman_kit: Kit::defaults(Agent::Claude),
             kits: std::collections::BTreeMap::from([(
                 KitName::new("Claude").map_err(|error| format!("a kit's name: {error}"))?,
                 KitConfig::defaults(Agent::Claude),
             )]),
-            credentials,
+            access,
             channels: std::collections::BTreeMap::new(),
             variables: std::collections::BTreeMap::new(),
             jobs: std::collections::BTreeMap::new(),

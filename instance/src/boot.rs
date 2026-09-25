@@ -865,13 +865,14 @@ mod tests {
         };
         Project {
             name: name.to_owned(),
-            repository: "https://example.invalid/repo".to_owned(),
+            repository: stageman_core::RepositoryAddress::new("example", "repo")
+                .expect("an address"),
             foreman_kit: stageman_core::Kit::defaults(Agent::Claude),
             kits: BTreeMap::from([(
                 stageman_core::KitName::new("Claude").expect("a name"),
                 stageman_core::KitConfig::defaults(Agent::Claude),
             )]),
-            credentials: BTreeMap::new(),
+            access: BTreeMap::new(),
             channels,
             jobs: BTreeMap::new(),
             variables: BTreeMap::new(),

@@ -10,10 +10,11 @@ use std::collections::BTreeMap;
 
 use stageman_channel::Identity;
 use stageman_core::{
-    Agent, Attending, Channel, ClaudeEffort, ClaudeModel, Inconsistent, Job, JobId, Kit, Outcome,
-    Platform, Progress, Project, ProjectId, RepositoryAddress, Room, State, Waiting,
+    Access, Agent, Attending, Channel, ClaudeEffort, ClaudeModel, Inconsistent, Installation, Job,
+    JobId, Kit, Outcome, Platform, Progress, Project, ProjectId, RepositoryAddress, Room, State,
+    Timestamp, Waiting,
 };
-use stageman_wire::{Choice, Fitted, KitDraft, ModelChoice, Refusal, Shape, Standing};
+use stageman_wire::{AccessView, Choice, Fitted, KitDraft, ModelChoice, Refusal, Shape, Standing};
 
 use crate::tunnel::{Domain, address};
 
@@ -230,10 +231,12 @@ fn room_address(us: &Identity, room: &Room) -> String {
 /// The repository as an address a browser can open, when what a project
 /// holds is one; a project written before addresses were checked may hold
 /// text that is not, which is shown and linked to nothing.
-fn linked(repository: &str) -> Option<String> {
-    RepositoryAddress::parse(repository)
-        .ok()
-        .map(|address| address.https())
+/// A repository as a page names it: its two parts, and nothing composed.
+pub fn wire_repository(address: &RepositoryAddress) -> stageman_wire::Repository {
+    stageman_wire::Repository {
+        owner: address.owner.clone(),
+        name: address.name.clone(),
+    }
 }
 
 /// What a screen calls an agent.
@@ -257,6 +260,21 @@ const fn wire_platform(platform: Platform) -> &'static str {
     }
 }
 
+/// The platform named by a wire identifier.
+///
+/// # Errors
+///
+/// Fails if nothing is called that.
+pub fn platform_named(identifier: &str) -> Result<Platform, Refusal> {
+    if identifier == wire_platform(Platform::GitHub) {
+        Ok(Platform::GitHub)
+    } else {
+        Err(Refusal::AppMissing {
+            platform: identifier.to_owned(),
+        })
+    }
+}
+
 /// What a screen calls a channel.
 pub const fn wire_channel(channel: Channel) -> &'static str {
     match channel {
@@ -265,17 +283,21 @@ pub const fn wire_channel(channel: Channel) -> &'static str {
 }
 
 /// One project, as the browser sees it: identifiers where it sends them back,
-/// names where a person reads them, and never a credential.
+/// names where a person reads them, and never a credential. The App's
+/// installations name the account an installation is on, where the
+/// project reaches its repository through one.
 pub fn projected(
     id: ProjectId,
     project: &Project,
     us: Option<&Identity>,
+    installations: Option<&BTreeMap<u64, Installation>>,
+    now: Timestamp,
 ) -> stageman_wire::Project {
     stageman_wire::Project {
         id: id.to_string(),
         name: project.name.clone(),
-        repository: project.repository.clone(),
-        repository_link: linked(&project.repository),
+        repository: wire_repository(&project.repository),
+        repository_link: project.repository.https(),
         foreman: fitted(&project.foreman_kit),
         kits: project
             .kits
@@ -286,11 +308,20 @@ pub fn projected(
                 fitted: fitted(&offered.kit),
             })
             .collect(),
-        platforms: project
-            .credentials
-            .keys()
-            .map(|platform| wire_platform(*platform).to_owned())
-            .collect(),
+        access: match project.access.get(&Platform::GitHub) {
+            Some(Access::Token { owner, expires, .. }) => Some(AccessView::Token {
+                owner: owner.clone(),
+                expires: expires.map(|at| at.to_string()),
+                expired: expires.is_some_and(|at| at <= now),
+            }),
+            Some(stageman_core::Access::Installation { id }) => Some(AccessView::Installation {
+                account: installations
+                    .and_then(|known| known.get(id))
+                    .map(|installation| installation.account.clone())
+                    .unwrap_or_default(),
+            }),
+            None => None,
+        },
         channels: project
             .channels
             .keys()
@@ -329,12 +360,60 @@ pub fn projected(
 }
 
 /// Every project this instance watches.
-pub fn watching(state: &State, identities: &Identities) -> Vec<stageman_wire::Project> {
+pub fn watching(
+    state: &State,
+    identities: &Identities,
+    now: Timestamp,
+) -> Vec<stageman_wire::Project> {
+    let installations = state
+        .apps
+        .get(&Platform::GitHub)
+        .map(|app| &app.installations);
     state
         .projects
         .iter()
-        .map(|(id, project)| projected(*id, project, identities.get(id)))
+        .map(|(id, project)| projected(*id, project, identities.get(id), installations, now))
         .collect()
+}
+
+/// How long before a token expires it is raised on the first page: a week,
+/// which is long enough to mint another and short enough not to nag.
+const RAISED_BEFORE_SECONDS: i64 = 7 * 24 * 60 * 60;
+
+/// Every token about to expire or expired, soonest first — see
+/// `docs/decisions/0080-a-tokens-owner-and-expiry-are-kept-beside-it.md`.
+fn expiring(state: &State, now: Timestamp) -> Vec<stageman_wire::ExpiringToken> {
+    let mut raised: Vec<(Timestamp, stageman_wire::ExpiringToken)> = state
+        .projects
+        .iter()
+        .filter_map(
+            |(id, project)| match project.access.get(&Platform::GitHub) {
+                Some(Access::Token {
+                    owner,
+                    expires: Some(at),
+                    ..
+                }) if at
+                    .as_second()
+                    .checked_sub(now.as_second())
+                    .is_some_and(|left| left <= RAISED_BEFORE_SECONDS) =>
+                {
+                    Some((
+                        *at,
+                        stageman_wire::ExpiringToken {
+                            project: id.to_string(),
+                            project_name: project.name.clone(),
+                            owner: owner.clone(),
+                            expires: at.to_string(),
+                            expired: *at <= now,
+                        },
+                    ))
+                }
+                _ => None,
+            },
+        )
+        .collect();
+    raised.sort_by_key(|(at, _)| *at);
+    raised.into_iter().map(|(_, token)| token).collect()
 }
 
 /// Every agent this build can run, as the browser sees them — the whole set,
@@ -402,8 +481,8 @@ pub fn working(
 
     Ok(stageman_wire::Working {
         name: watched.name.clone(),
-        repository: watched.repository.clone(),
-        repository_link: linked(&watched.repository),
+        repository: wire_repository(&watched.repository),
+        repository_link: watched.repository.https(),
         kits: watched
             .kits
             .iter()
@@ -444,8 +523,8 @@ pub fn job_page(
     Ok(stageman_wire::JobPage {
         project: identifier.to_string(),
         project_name: watched.name.clone(),
-        repository: watched.repository.clone(),
-        repository_link: linked(&watched.repository),
+        repository: wire_repository(&watched.repository),
+        repository_link: watched.repository.https(),
         job: job_view(
             &named,
             recorded,
@@ -461,10 +540,8 @@ pub fn job_page(
 /// here and never in the browser, per
 /// `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`,
 /// because the shape of an address is the platform's knowledge.
-pub fn pull_request_link(repository: &str, number: u64) -> Option<String> {
-    RepositoryAddress::parse(repository)
-        .ok()
-        .map(|address| format!("{}/pull/{number}", address.https()))
+pub fn pull_request_link(repository: &RepositoryAddress, number: u64) -> String {
+    format!("{}/pull/{number}", repository.https())
 }
 
 /// One job, as a page sees it: with its room as a link where the channel
@@ -472,7 +549,7 @@ pub fn pull_request_link(repository: &str, number: u64) -> Option<String> {
 fn job_view(
     id: &JobId,
     job: &Job,
-    repository: &str,
+    repository: &RepositoryAddress,
     us: Option<&Identity>,
     domain: &Domain,
     serving: u16,
@@ -522,6 +599,7 @@ pub fn home(
     identities: &Identities,
     domain: &Domain,
     serving: u16,
+    now: Timestamp,
 ) -> stageman_wire::Home {
     let mut idle: Vec<(ProjectId, &Project, &JobId, &Job)> = Vec::new();
     let mut running: Vec<(ProjectId, &Project, &JobId, &Job)> = Vec::new();
@@ -554,9 +632,10 @@ pub fn home(
         }
     };
     stageman_wire::Home {
+        expiring: expiring(state, now),
         needs_you: idle.into_iter().map(placed).collect(),
         working: running.into_iter().map(placed).collect(),
-        projects: watching(state, identities),
+        projects: watching(state, identities, now),
     }
 }
 
@@ -571,10 +650,15 @@ pub fn instance(state: &State, runtime: &str, domain: &Domain) -> stageman_wire:
 }
 
 /// What the projects screen shows: the projects, the agents that may be
-/// named, and the shape of each of those.
-pub fn watching_now(state: &State, identities: &Identities) -> stageman_wire::Watching {
+/// named, the shape of each of those, and whether an App is registered.
+pub fn watching_now(
+    state: &State,
+    identities: &Identities,
+    app_registered: bool,
+    now: Timestamp,
+) -> stageman_wire::Watching {
     stageman_wire::Watching {
-        projects: watching(state, identities),
+        projects: watching(state, identities, now),
         available: listed(state)
             .into_iter()
             .filter(|agent| agent.configured)
@@ -588,6 +672,7 @@ pub fn watching_now(state: &State, identities: &Identities) -> stageman_wire::Wa
             token_form: stageman_platform::token_form(Platform::GitHub, None),
             app_form: stageman_channel::app_form(Channel::Slack),
         },
+        app_registered,
     }
 }
 
@@ -598,6 +683,9 @@ pub fn from_inconsistent(reason: &Inconsistent) -> Refusal {
         Inconsistent::UnconfiguredProjectAgent { agent, .. } => Refusal::AgentNotConfigured {
             name: shown(*agent),
         },
+        Inconsistent::UnknownInstallation { installation, .. } => {
+            Refusal::NoSuchInstallation { id: *installation }
+        }
     }
 }
 
@@ -609,7 +697,8 @@ mod tests {
     };
     use stageman_core::{
         Agent, AgentConfig, ClaudeEffort, ClaudeModel, Job, JobId, Kit, KitConfig, KitName,
-        Outcome, Progress, Project, ProjectId, Secret, State, Timestamp, Uuid, Waiting,
+        Outcome, Progress, Project, ProjectId, RepositoryAddress, Secret, State, Timestamp, Uuid,
+        Waiting,
     };
     use stageman_wire::{Fitted, Refusal, Standing};
     use std::collections::BTreeMap;
@@ -745,6 +834,7 @@ mod tests {
 
     fn watching(name: &str) -> State {
         State {
+            apps: std::collections::BTreeMap::new(),
             agents: BTreeMap::from([(
                 Agent::Claude,
                 AgentConfig {
@@ -755,13 +845,14 @@ mod tests {
                 ProjectId::from_uuid(Uuid::nil()),
                 Project {
                     name: name.to_owned(),
-                    repository: "https://example.invalid/repo".to_owned(),
+                    repository: stageman_core::RepositoryAddress::new("example", "repo")
+                        .expect("an address"),
                     foreman_kit: Kit::defaults(Agent::Claude),
                     kits: BTreeMap::from([(
                         KitName::new("Claude").expect("a name"),
                         KitConfig::defaults(Agent::Claude),
                     )]),
-                    credentials: BTreeMap::new(),
+                    access: BTreeMap::new(),
                     channels: BTreeMap::new(),
                     jobs: BTreeMap::new(),
                     variables: BTreeMap::new(),
@@ -838,6 +929,7 @@ mod tests {
                 "because".to_owned(),
                 "do the thing".to_owned(),
                 Timestamp::UNIX_EPOCH,
+                stageman_core::Secret::new("warrant-of-a-test-job".to_owned()),
             );
             job.progress = progress;
             watched
@@ -845,17 +937,27 @@ mod tests {
                 .insert(JobId::from_uuid(Uuid::from_u128(which)), job);
         }
 
-        let shown = super::projected(ProjectId::from_uuid(Uuid::nil()), watched, None);
+        let shown = super::projected(
+            ProjectId::from_uuid(Uuid::nil()),
+            watched,
+            None,
+            None,
+            Timestamp::UNIX_EPOCH,
+        );
         assert_eq!(shown.working, 1);
         assert_eq!(shown.jobs, 3);
         assert_eq!(shown.name, "aviary");
         assert!(!shown.attending, "nothing in hand");
         assert_eq!(
-            shown.repository_link, None,
-            "text that is not an address on the platform links to nothing"
+            shown.repository,
+            stageman_wire::Repository {
+                owner: "example".to_owned(),
+                name: "repo".to_owned()
+            }
         );
+        assert_eq!(shown.repository_link, "https://github.com/example/repo");
 
-        // On a message, and on a repository that is an address.
+        // On a message, and on another repository.
         watched.attending.take(stageman_core::Errand {
             said: "fix the build".to_owned(),
             thread: stageman_core::Thread {
@@ -867,13 +969,16 @@ mod tests {
             message: None,
             app: None,
         });
-        watched.repository = "https://github.com/owner/aviary.git".to_owned();
-        let shown = super::projected(ProjectId::from_uuid(Uuid::nil()), watched, None);
-        assert!(shown.attending);
-        assert_eq!(
-            shown.repository_link.as_deref(),
-            Some("https://github.com/owner/aviary")
+        watched.repository = RepositoryAddress::new("owner", "aviary").expect("an address");
+        let shown = super::projected(
+            ProjectId::from_uuid(Uuid::nil()),
+            watched,
+            None,
+            None,
+            Timestamp::UNIX_EPOCH,
         );
+        assert!(shown.attending);
+        assert_eq!(shown.repository_link, "https://github.com/owner/aviary");
     }
 
     /// The first page lists what a person does something about, longest
@@ -904,6 +1009,7 @@ mod tests {
                 "because".to_owned(),
                 "do the thing".to_owned(),
                 Timestamp::from_second(second).expect("a time"),
+                stageman_core::Secret::new("warrant-of-a-test-job".to_owned()),
             );
             job.progress = progress;
             if !kept {
@@ -915,7 +1021,13 @@ mod tests {
         }
         let domain = Domain::parse("example.com").expect("a domain");
 
-        let shown = super::home(&state, &super::Identities::new(), &domain, 8080);
+        let shown = super::home(
+            &state,
+            &super::Identities::new(),
+            &domain,
+            8080,
+            Timestamp::UNIX_EPOCH,
+        );
 
         let named = |placed: &[stageman_wire::ProjectJob]| {
             placed
@@ -966,7 +1078,13 @@ mod tests {
             id: "C0BT53FM079".to_owned(),
         });
 
-        let shown = super::projected(ProjectId::from_uuid(Uuid::nil()), watched, None);
+        let shown = super::projected(
+            ProjectId::from_uuid(Uuid::nil()),
+            watched,
+            None,
+            None,
+            Timestamp::UNIX_EPOCH,
+        );
         assert_eq!(shown.brief, "Ignore alerts below error.");
         assert_eq!(shown.watched, vec!["C0BT53FM079".to_owned()]);
     }
@@ -1042,6 +1160,7 @@ mod tests {
                 "because".to_owned(),
                 "do the thing".to_owned(),
                 Timestamp::UNIX_EPOCH,
+                stageman_core::Secret::new("warrant-of-a-test-job".to_owned()),
             );
             job.progress = Progress::Idle(Waiting::Silent);
             watched
@@ -1071,17 +1190,22 @@ mod tests {
         );
     }
 
-    /// A pull request's address is the repository's with the number, where
-    /// the repository is an address, and nothing otherwise.
+    /// A pull request's address is the repository's with the number, and a
+    /// repository crosses to a page as its two parts with its address
+    /// beside it.
     #[test]
-    fn a_pull_request_is_addressed_on_the_repository_or_not_at_all() {
+    fn a_pull_request_is_addressed_on_the_repository() {
+        let named = RepositoryAddress::new("owner", "name").expect("an address");
         assert_eq!(
-            super::pull_request_link("https://github.com/owner/name.git", 12).as_deref(),
-            Some("https://github.com/owner/name/pull/12")
+            super::pull_request_link(&named, 12),
+            "https://github.com/owner/name/pull/12"
         );
         assert_eq!(
-            super::pull_request_link("https://example.invalid/name", 12),
-            None
+            super::wire_repository(&named),
+            stageman_wire::Repository {
+                owner: "owner".to_owned(),
+                name: "name".to_owned()
+            }
         );
     }
 }

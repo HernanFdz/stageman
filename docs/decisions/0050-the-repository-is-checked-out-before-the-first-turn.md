@@ -6,7 +6,12 @@ Accepted. Reverses half of
 clone, and when — and keeps the other half: nothing mounts or shares a
 repository, and the checkout is made inside the container, with the platform's
 own tool and the job's own credential. Changes what *workspace* means in
-`docs/conventions.md` §2 for the second time.
+`docs/conventions.md` §2 for the second time. Amended by
+`docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`:
+the credential is no longer in the container's environment but fetched by
+a wrapper the instance writes in the tool's place before the checkout, and
+the checkout writes git's helper itself, naming that wrapper, rather than
+leaving it to the tool's own `setup-git`.
 
 ## Context
 

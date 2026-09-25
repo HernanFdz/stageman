@@ -41,8 +41,9 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use stageman_core::{
-    Agent, AgentConfig, Channel, ChannelConfig, Job, JobId, Key, Kit, KitConfig, KitName,
-    NONCE_LEN, Outcome, Progress, Project, ProjectId, Secret, State, Timestamp, Waiting,
+    Access, Agent, AgentConfig, Channel, ChannelConfig, InstanceId, Job, JobId, Key, Kit,
+    KitConfig, KitName, NONCE_LEN, Outcome, Platform, Progress, Project, ProjectId, Role, Secret,
+    State, Timestamp, Waiting,
 };
 
 /// A key, as an operator would supply it: thirty-two bytes of base64.
@@ -335,10 +336,15 @@ fn job(progress: Progress) -> Job {
         "because a test said so".to_owned(),
         "do the thing".to_owned(),
         Timestamp::UNIX_EPOCH,
+        Secret::new(JOB_WARRANT.to_owned()),
     );
     job.progress = progress;
     job
 }
+
+/// A job's warrant: the fourth kind of credential a project's record holds,
+/// and the newest, so the browser test below has to know it.
+const JOB_WARRANT: &str = "not-a-real-warrant";
 
 /// A channel credential, distinct from the agent's so that a test finding one
 /// where it should not be can say which it was.
@@ -370,6 +376,7 @@ const VARIABLE_VALUE: &str = "not-a-real-third-party-key";
 /// the moment variables did.
 fn watching(name: &str, repository: &str) -> State {
     State {
+        apps: std::collections::BTreeMap::new(),
         agents: BTreeMap::from([(
             Agent::Claude,
             AgentConfig {
@@ -380,13 +387,14 @@ fn watching(name: &str, repository: &str) -> State {
             ProjectId::from_uuid(uuid::Uuid::nil()),
             Project {
                 name: name.to_owned(),
-                repository: repository.to_owned(),
+                repository: stageman_core::RepositoryAddress::parse(repository)
+                    .expect("an address on the platform"),
                 foreman_kit: Kit::defaults(Agent::Claude),
                 kits: BTreeMap::from([(
                     KitName::new("Claude").expect("a name"),
                     KitConfig::defaults(Agent::Claude),
                 )]),
-                credentials: BTreeMap::new(),
+                access: BTreeMap::new(),
                 channels: BTreeMap::from([(
                     Channel::Slack,
                     ChannelConfig {
@@ -417,11 +425,18 @@ fn watching(name: &str, repository: &str) -> State {
 /// Written here rather than through the binary, because what these tests are
 /// about is what a start does with a file that already exists.
 fn written(snapshot: &Path, state: &State) {
+    written_as(snapshot, state, None);
+}
+
+/// The same, naming the instance the file belongs to, for a test that has to
+/// label containers as that instance's before the binary wakes.
+fn written_as(snapshot: &Path, state: &State, instance: Option<InstanceId>) {
     let mut fresh = (1_u8..).map(|n| [n; NONCE_LEN]);
     let mut nonces = || fresh.next().expect("fewer credentials than a byte counts");
-    let sealed = state
+    let mut sealed = state
         .seal(&key(), &mut nonces)
         .expect("a well-formed state seals");
+    sealed.instance = instance;
     let encoded = serde_json::to_vec_pretty(&sealed).expect("a snapshot encodes");
     std::fs::write(snapshot, encoded).expect("the snapshot is written");
 }
@@ -713,7 +728,7 @@ fn two_instances_started_from_nothing_are_told_apart() {
 #[test]
 fn the_dashboard_arrives_with_the_instance_already_on_it() {
     let (_kept, snapshot) = scratch();
-    let watched = watching("aviary", "https://example.invalid/aviary");
+    let watched = watching("aviary", "https://github.com/example/aviary");
     written(&snapshot, &watched);
 
     let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
@@ -725,7 +740,7 @@ fn the_dashboard_arrives_with_the_instance_already_on_it() {
         "the page should name the project: {page}"
     );
     assert!(
-        page.contains("example.invalid/aviary"),
+        page.contains("example/aviary"),
         "the page should name the repository: {page}"
     );
 }
@@ -738,7 +753,7 @@ fn the_dashboard_arrives_with_the_instance_already_on_it() {
 #[test]
 fn the_route_the_page_reads_through_answers_on_its_own() {
     let (_kept, snapshot) = scratch();
-    let watched = watching("aviary", "https://example.invalid/aviary");
+    let watched = watching("aviary", "https://github.com/example/aviary");
     written(&snapshot, &watched);
 
     let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
@@ -760,7 +775,19 @@ fn the_route_the_page_reads_through_answers_on_its_own() {
 #[test]
 fn nothing_served_carries_a_credential() {
     let (_kept, snapshot) = scratch();
-    let watched = watching("aviary", "https://example.invalid/aviary");
+    let mut watched = watching("aviary", "https://github.com/example/aviary");
+    // A job too, so that its page below renders one: its warrant is the
+    // newest credential a record holds, and the one a page about a job
+    // would be the first to show.
+    watched
+        .projects
+        .get_mut(&ProjectId::from_uuid(uuid::Uuid::nil()))
+        .expect("the project")
+        .jobs
+        .insert(
+            JobId::from_uuid(uuid::Uuid::from_u128(7)),
+            job(Progress::Idle(Waiting::Asked)),
+        );
     written(&snapshot, &watched);
 
     let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
@@ -777,6 +804,7 @@ fn nothing_served_carries_a_credential() {
             "not-a-real-credential",
             CHANNEL_CREDENTIAL,
             LISTEN_CREDENTIAL,
+            JOB_WARRANT,
         ] {
             assert!(
                 !served.contains(secret),
@@ -861,7 +889,7 @@ fn saying_where_the_instance_goes_still_wins() {
 #[test]
 fn the_dashboard_counts_working_jobs_rather_than_all_of_them() {
     let (_kept, snapshot) = scratch();
-    let mut state = watching("aviary", "https://example.invalid/aviary");
+    let mut state = watching("aviary", "https://github.com/example/aviary");
     let project = state.projects.values_mut().next().expect("the project");
     project.jobs.insert(
         JobId::from_uuid(uuid::Uuid::from_u128(1)),
@@ -893,7 +921,7 @@ fn the_dashboard_counts_working_jobs_rather_than_all_of_them() {
 #[test]
 fn the_first_page_arrives_with_its_regions_and_the_projects() {
     let (_kept, snapshot) = scratch();
-    let mut state = watching("aviary", "https://example.invalid/aviary");
+    let mut state = watching("aviary", "https://github.com/example/aviary");
     let project = state.projects.values_mut().next().expect("the project");
     project.jobs.insert(
         JobId::from_uuid(uuid::Uuid::from_u128(1)),
@@ -930,7 +958,7 @@ fn the_first_page_arrives_with_its_regions_and_the_projects() {
 #[test]
 fn an_agent_a_project_still_names_cannot_be_forgotten() {
     let (_kept, snapshot) = scratch();
-    let watched = watching("aviary", "https://example.invalid/aviary");
+    let watched = watching("aviary", "https://github.com/example/aviary");
     written(&snapshot, &watched);
 
     let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
@@ -974,7 +1002,23 @@ fn a_credential_is_taken_once_and_never_returned() {
 #[test]
 fn a_project_has_a_settings_page_and_a_new_one_is_that_page_empty() {
     let (_kept, snapshot) = scratch();
-    let watched = watching("aviary", "https://example.invalid/aviary");
+    let mut watched = watching("aviary", "https://github.com/example/aviary");
+    // Reached with a token, so that the page has a repository to show: a
+    // project reaching nothing has nothing chosen, per
+    // `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
+    watched
+        .projects
+        .get_mut(&ProjectId::from_uuid(uuid::Uuid::nil()))
+        .expect("the project")
+        .access
+        .insert(
+            stageman_core::Platform::GitHub,
+            stageman_core::Access::Token {
+                secret: Secret::new("github_pat_not_a_real_token".to_owned()),
+                owner: Some("example".to_owned()),
+                expires: None,
+            },
+        );
     written(&snapshot, &watched);
     let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
 
@@ -992,7 +1036,16 @@ fn a_project_has_a_settings_page_and_a_new_one_is_that_page_empty() {
         settings.contains(r#"value="aviary""#),
         "the name should be in its box: {settings}"
     );
-    assert!(settings.contains("example.invalid/aviary"), "{settings}");
+    assert!(settings.contains("example/aviary"), "{settings}");
+    assert!(
+        // The apostrophe as the server escapes it in text.
+        settings.contains("With example&#39;s token."),
+        "the access sentence says the shape, and whose the token is, on the server too: {settings}"
+    );
+    assert!(
+        settings.contains("asking GitHub…"),
+        "the box waits on the listing, which only the browser asks for: {settings}"
+    );
     // A text area's value is its text and not an attribute, so a box the
     // server rendered from an attribute alone arrives empty. The kit's
     // description is the one text this helper fills.
@@ -1143,6 +1196,326 @@ fn the_page_carries_the_theme_script_and_no_theme_of_its_own() {
 ///
 /// Bounded at the tag's own `>` on purpose — see the test above for what
 /// happens when it is not.
+/// The container runtime, found rather than configured.
+///
+/// Not a breach of the rule `docs/conventions.md` §3 states: that rule is
+/// about a daemon which must work under a service manager, and this is a
+/// test which must work on a developer's machine — the exemption the agent
+/// crate's own container tests take.
+fn located_runtime() -> stageman_agent::ContainerRuntime {
+    let located = Command::new("sh")
+        .args(["-c", "command -v docker"])
+        .output()
+        .expect("looking for a container runtime");
+    let path = String::from_utf8(located.stdout).expect("a runtime path is text");
+    stageman_agent::ContainerRuntime::new(PathBuf::from(path.trim()))
+}
+
+/// Runs one runtime command to its end, inheriting this process's
+/// environment — the runtime needs its own configuration — with what a
+/// caller adds on top, and with text on its standard input where one is
+/// given.
+fn runtime_says(
+    runtime: &Path,
+    arguments: &[String],
+    added: &[(&str, &str)],
+    stdin: Option<&str>,
+) -> Output {
+    let mut command = Command::new(runtime);
+    command
+        .args(arguments)
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (name, value) in added {
+        command.env(name, value);
+    }
+    let mut child = command.spawn().expect("the runtime runs");
+    if let Some(text) = stdin {
+        let mut writing = child.stdin.take().expect("its input was piped");
+        writing
+            .write_all(text.as_bytes())
+            .expect("the input is written");
+        drop(writing);
+    }
+    child.wait_with_output().expect("the runtime finishes")
+}
+
+fn words(arguments: &[&str]) -> Vec<String> {
+    arguments.iter().map(|word| (*word).to_owned()).collect()
+}
+
+/// The port the tools are served on for the container test below: fixed,
+/// because the wrapper written into a container names the port, and the
+/// binary does not print the one it took. Unusual, so that it collides with
+/// nothing an operator's own daemon or the other recipes take.
+const WRAPPER_TOOLS_PORT: &str = "47116";
+
+/// Two projects, each holding a token of its own and one idle job holding a
+/// warrant of its own: the state the container test below runs the binary
+/// on, and what it hands back to name each job's container and check each
+/// job's answer.
+fn two_projects_each_with_a_job() -> (State, Vec<(JobId, &'static str, &'static str)>) {
+    let mut state = State {
+        apps: BTreeMap::new(),
+        agents: BTreeMap::from([(
+            Agent::Claude,
+            AgentConfig {
+                auth_token: Secret::new("not-a-real-credential".to_owned()),
+            },
+        )]),
+        projects: BTreeMap::new(),
+    };
+    let jobs = vec![
+        (
+            JobId::from_uuid(uuid::Uuid::from_u128(11)),
+            "warrant-of-the-job-on-one",
+            "ghp-not-a-real-token-of-one",
+        ),
+        (
+            JobId::from_uuid(uuid::Uuid::from_u128(12)),
+            "warrant-of-the-job-on-the-other",
+            "ghp-not-a-real-token-of-the-other",
+        ),
+    ];
+    for ((job, warrant, token), (n, name)) in jobs.iter().zip([(1_u128, "one"), (2, "other")]) {
+        let mut recorded = Job::new(
+            Kit::defaults(Agent::Claude),
+            "a test said so".to_owned(),
+            "fetch your credential".to_owned(),
+            Timestamp::UNIX_EPOCH,
+            Secret::new((*warrant).to_owned()),
+        );
+        recorded.progress = Progress::Idle(Waiting::Asked);
+        state.projects.insert(
+            ProjectId::from_uuid(uuid::Uuid::from_u128(n)),
+            Project {
+                name: name.to_owned(),
+                repository: stageman_core::RepositoryAddress::new("example", name)
+                    .expect("an address"),
+                foreman_kit: Kit::defaults(Agent::Claude),
+                kits: BTreeMap::from([(
+                    KitName::new("Claude").expect("a name"),
+                    KitConfig::defaults(Agent::Claude),
+                )]),
+                access: BTreeMap::from([(
+                    Platform::GitHub,
+                    Access::Token {
+                        secret: Secret::new((*token).to_owned()),
+                        owner: None,
+                        expires: None,
+                    },
+                )]),
+                channels: BTreeMap::new(),
+                variables: BTreeMap::new(),
+                jobs: BTreeMap::from([(job.clone(), recorded)]),
+                attending: stageman_core::Attending::default(),
+                brief: String::new(),
+                watched: std::collections::BTreeSet::new(),
+                foreman_room: None,
+            },
+        );
+    }
+    (state, jobs)
+}
+
+/// One job's container as the instance would have made it: from the job
+/// image, labelled as this instance's, the warrant forwarded from the
+/// environment, and left stopped.
+fn a_jobs_container(runtime: &Path, image: &str, instance: InstanceId, name: &str, warrant: &str) {
+    runtime_says(runtime, &words(&["rm", "--force", name]), &[], None);
+    let created = runtime_says(
+        runtime,
+        &stageman_agent::Command::Create {
+            name: name.to_owned(),
+            image: image.to_owned(),
+            agent: Agent::Claude,
+            instance,
+            variables: vec!["STAGEMAN_WARRANT".to_owned()],
+        }
+        .arguments(),
+        &[("STAGEMAN_WARRANT", warrant)],
+        None,
+    );
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+}
+
+/// Starts a container and writes the wrapper into it as the instance does,
+/// naming where to fetch from.
+fn wrapped(runtime: &Path, name: &str, endpoint: &str) {
+    let started = runtime_says(runtime, &words(&["start", name]), &[], None);
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let written = runtime_says(
+        runtime,
+        &stageman_agent::Command::Wrap {
+            name: name.to_owned(),
+        }
+        .arguments(),
+        &[],
+        Some(&stageman_agent::wrapper(endpoint)),
+    );
+    assert!(
+        written.status.success(),
+        "{}",
+        String::from_utf8_lossy(&written.stderr)
+    );
+}
+
+/// Asks the platform's tool, inside a container, for the token it holds —
+/// which reaches the tool through the wrapper — presenting the warrant the
+/// container was created with, or another in its place.
+fn token_through_the_wrapper(runtime: &Path, name: &str, presenting: Option<&str>) -> Output {
+    let mut arguments = vec!["exec".to_owned()];
+    if let Some(warrant) = presenting {
+        arguments.push("--env".to_owned());
+        arguments.push(format!("STAGEMAN_WARRANT={warrant}"));
+    }
+    arguments.extend(words(&[name, "gh", "auth", "token"]));
+    runtime_says(runtime, &arguments, &[], None)
+}
+
+/// A job's wrapper fetches its own project's credential from the running
+/// binary and nothing else's: the isolation test `docs/conventions.md` §4
+/// asks for since
+/// `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`,
+/// against a real container running the wrapper and a real listener
+/// serving the route.
+///
+/// Two projects, each with a token and a job; each job's container is
+/// created as the instance creates one — labelled as this instance's, the
+/// warrant forwarded from the environment — and the wrapper is written in
+/// as the instance writes it, naming the port the binary is told to take.
+/// The platform's tool, asked for its token through the wrapper, prints the
+/// project's own; a warrant the instance never minted fails the command
+/// loudly rather than running it as nobody, and prints neither; and what
+/// stands in the tool's place is the wrapper, with the tool beside it.
+///
+/// Here rather than beside the agent crate's container tests because the
+/// proof needs both halves at once: a container that runs the wrapper, and
+/// a daemon that serves the route — which only this crate's harness has.
+#[test]
+#[ignore = "needs a container runtime and the network; run `just image-handshake`"]
+fn a_jobs_wrapper_fetches_its_own_projects_credential_and_is_refused_anothers() {
+    let runtime = located_runtime();
+    let image = tokio::runtime::Runtime::new()
+        .expect("an async runtime")
+        .block_on(stageman_agent::build(&runtime, Agent::Claude, Role::Job))
+        .expect("the job image builds");
+    let instance = InstanceId::from_uuid(uuid::Uuid::from_u128(0x5747_2b2b));
+    let (state, jobs) = two_projects_each_with_a_job();
+    let (_kept, snapshot) = scratch();
+    written_as(&snapshot, &state, Some(instance));
+    // Stopped, so that waking finds each job with somewhere to resume and
+    // leaves it.
+    let containers: Vec<String> = jobs
+        .iter()
+        .map(|(job, _, _)| stageman_job::container(job))
+        .collect();
+    for ((_, warrant, _), name) in jobs.iter().zip(&containers) {
+        a_jobs_container(runtime.path(), image.as_argument(), instance, name, warrant);
+    }
+
+    let running = serving(
+        &snapshot,
+        &[
+            ("STAGEMAN_KEY", KEY),
+            ("STAGEMAN_JOB_PORT", WRAPPER_TOOLS_PORT),
+        ],
+    );
+    let endpoint = format!("http://host.docker.internal:{WRAPPER_TOOLS_PORT}/credential");
+    for name in &containers {
+        wrapped(runtime.path(), name, &endpoint);
+    }
+
+    for ((_, _, token), name) in jobs.iter().zip(&containers) {
+        let said = token_through_the_wrapper(runtime.path(), name, None);
+        assert!(
+            said.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&said.stderr),
+            running.said
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&said.stdout).trim(),
+            *token,
+            "its own project's credential, and no other's"
+        );
+    }
+
+    // A warrant this instance never minted buys nothing, and the command
+    // fails loudly rather than running as nobody; none at all is refused
+    // before anything is asked.
+    let stranger = token_through_the_wrapper(runtime.path(), &containers[0], Some("not-a-warrant"));
+    assert!(
+        !stranger.status.success(),
+        "a stranger was handed something"
+    );
+    let complained = String::from_utf8_lossy(&stranger.stderr);
+    assert!(
+        complained.contains("403") && complained.contains("did not hand over a credential"),
+        "{complained}"
+    );
+    let printed = String::from_utf8_lossy(&stranger.stdout);
+    for (_, _, token) in &jobs {
+        assert!(!printed.contains(token), "{printed}");
+    }
+    let unwarranted = token_through_the_wrapper(runtime.path(), &containers[0], Some(""));
+    assert!(!unwarranted.status.success());
+    assert!(
+        String::from_utf8_lossy(&unwarranted.stderr).contains("holds no warrant"),
+        "{}",
+        String::from_utf8_lossy(&unwarranted.stderr)
+    );
+
+    // What stands in the tool's place is the wrapper, and the tool is beside it.
+    let first_line = runtime_says(
+        runtime.path(),
+        &words(&[
+            "exec",
+            &containers[0],
+            "head",
+            "-c",
+            "9",
+            "/usr/local/bin/gh",
+        ]),
+        &[],
+        None,
+    );
+    assert_eq!(String::from_utf8_lossy(&first_line.stdout), "#!/bin/sh");
+    let aside = runtime_says(
+        runtime.path(),
+        &words(&[
+            "exec",
+            &containers[0],
+            "/usr/local/libexec/stageman/gh",
+            "--version",
+        ]),
+        &[],
+        None,
+    );
+    assert!(
+        aside.status.success(),
+        "the tool itself still runs from where it was moved"
+    );
+
+    for name in &containers {
+        runtime_says(runtime.path(), &words(&["rm", "--force", name]), &[], None);
+    }
+    drop(running);
+}
+
 fn anchor(page: &str, href: &str) -> String {
     let opening = format!("<a href=\"{href}\"");
     let from = page
@@ -1152,4 +1525,57 @@ fn anchor(page: &str, href: &str) -> String {
     let until = rest.find('>').unwrap_or(rest.len());
 
     rest.get(..until).unwrap_or_default().to_owned()
+}
+
+/// The Instance page lists where the App is installed, and an installation
+/// a project reaches its repository through says which project and offers
+/// no forgetting; the projects it lists come from the instance, rendered
+/// on the server before the page is awake.
+#[test]
+fn the_instance_page_says_which_project_uses_an_installation() {
+    let (_kept, snapshot) = scratch();
+    let mut watched = watching("aviary", "https://github.com/example/aviary");
+    watched.apps.insert(
+        stageman_core::Platform::GitHub,
+        stageman_core::PlatformApp {
+            id: 4242,
+            slug: "stageman-test".to_owned(),
+            client_id: "Iv1.test".to_owned(),
+            private_key: Secret::new("not-a-real-key".to_owned()),
+            installations: BTreeMap::from([(
+                77,
+                stageman_core::Installation {
+                    account: "acme".to_owned(),
+                    every_repository: false,
+                },
+            )]),
+        },
+    );
+    watched
+        .projects
+        .get_mut(&ProjectId::from_uuid(uuid::Uuid::nil()))
+        .expect("the project")
+        .access
+        .insert(
+            stageman_core::Platform::GitHub,
+            stageman_core::Access::Installation { id: 77 },
+        );
+    written(&snapshot, &watched);
+    let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
+
+    let page = running.get("/instance");
+    assert!(page.contains("200 OK"), "{page}");
+    assert!(page.contains("acme"), "the account is named: {page}");
+    assert!(
+        page.contains("used by aviary"),
+        "the project on the installation is named: {page}"
+    );
+    assert!(
+        page.contains("Used by aviary, so it cannot be forgotten"),
+        "forgetting is refused, and says why: {page}"
+    );
+    assert!(
+        !page.contains("Forget the installation on acme"),
+        "the way to forget it is not offered: {page}"
+    );
 }

@@ -63,9 +63,21 @@ pub fn Modal(props: ModalProps) -> Element {
                 aria_modal: "true",
                 aria_label: "{props.title}",
                 // Focused so the key handler below receives anything typed
-                // before the reader has clicked into a field.
+                // before the reader has clicked into a field. By script once
+                // it exists, not by the autofocus attribute: the browser
+                // honours that only until the person has focused anything,
+                // and the control that opened this panel took their click —
+                // measured, with Escape then reaching nothing. A field inside
+                // that focuses itself the same way is mounted after this and
+                // so keeps the focus.
                 tabindex: "-1",
-                autofocus: true,
+                onmounted: move |event: MountedEvent| {
+                    spawn(async move {
+                        // A focus that failed leaves the panel open and the
+                        // close control a click away; nothing to do about it.
+                        let _ = event.set_focus(true).await;
+                    });
+                },
                 class: tw_merge!(
                     "w-full max-w-lg rounded-lg border border-border bg-surface shadow-lg \
                      focus-visible:outline-none motion-safe:transition motion-safe:duration-150 \

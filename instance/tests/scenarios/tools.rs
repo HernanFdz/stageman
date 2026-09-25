@@ -674,11 +674,11 @@ fn a_jobs_pull_requests_are_kept_as_the_union_of_everything_claimed() {
         "sorted, and each once"
     );
     assert!(
-        world
-            .posts()
-            .iter()
-            .any(|(_, text)| text.contains("**Ready for review.** Opened #1, #3.")),
-        "its room was told what it opened, bare numbers where the repository is not an address: {:?}",
+        world.posts().iter().any(|(_, text)| text.contains(
+            "**Ready for review.** Opened [#1](https://github.com/example/repo/pull/1), \
+                 [#3](https://github.com/example/repo/pull/3)."
+        )),
+        "its room was told what it opened, each linked on the repository: {:?}",
         world.posts()
     );
 

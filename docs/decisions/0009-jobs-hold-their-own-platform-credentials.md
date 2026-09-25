@@ -3,7 +3,12 @@
 ## Status
 Accepted. Supersedes the first invariant in `docs/architecture.md` §2 as
 originally written, and the tool-hosting half of
-`docs/decisions/0001-drive-an-existing-coding-agent.md`.
+`docs/decisions/0001-drive-an-existing-coding-agent.md`. Amended by
+`docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`:
+a job no longer holds a platform credential in its container; it fetches
+one from the instance for one process at a time, with a warrant that buys
+its own project's and no other's, which narrows the exposure this record
+accepted without reversing the decision.
 
 ## Context
 

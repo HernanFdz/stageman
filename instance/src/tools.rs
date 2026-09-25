@@ -14,7 +14,7 @@
 //! `docs/decisions/0032-a-foreman-asks-the-instance-by-warrant.md`'s property
 //! surviving the move to a per-turn credential.
 
-use stageman_core::{Kit, Place, ProjectId, Room, State, Thread, Timestamp, Waiting};
+use stageman_core::{Kit, Place, Platform, ProjectId, Room, State, Thread, Timestamp, Waiting};
 
 use crate::channel::Origin;
 use crate::jobs::Commission;
@@ -556,6 +556,13 @@ const METHOD_NOT_ALLOWED: u16 = 405;
 /// The one path the tools are served on.
 const PATH: &str = "/mcp";
 
+/// The path a job's wrapper fetches its credential on, beside the tools —
+/// see
+/// `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
+/// One route and no parameter: what it answers is the credential the job's
+/// repository is reached with, and a job has one repository.
+pub const CREDENTIAL_PATH: &str = "/credential";
+
 /// How much of a call's body is read before giving up on it.
 ///
 /// A call is a small JSON object, and whoever sends one is somebody else's
@@ -744,6 +751,7 @@ impl Running {
                     answer: Answer::Read { limit: LIMIT },
                 });
             }
+            ("GET", CREDENTIAL_PATH) => self.credential_asked(id, request, effects),
             // Every tool answers within its own call, so there is nothing
             // this instance would ever push: the stream a client may offer
             // to open is declined. Measured — a client offered one, was
@@ -799,6 +807,77 @@ impl Running {
                 body: Bytes::new(Vec::new()),
             },
         });
+    }
+
+    /// Answers now with a line of text, because nothing changed.
+    pub(crate) fn say_now(id: RequestId, status: u16, text: &str, effects: &mut Vec<Effect>) {
+        effects.push(Effect::Answer {
+            id,
+            answer: Answer::Respond {
+                status,
+                headers: [("content-type".to_owned(), "text/plain".to_owned())].into(),
+                body: Bytes::new(text.as_bytes().to_vec()),
+            },
+        });
+    }
+
+    /// A job's wrapper asked for the credential its repository is reached
+    /// with — see
+    /// `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
+    ///
+    /// Answered to a job's own warrant and to nothing else. A turn's warrant
+    /// is looked up on the other route and never here, and a job's here and
+    /// never there, which is what keeps the two kinds apart: each buys
+    /// exactly what its route serves. A bad peer and an unknown warrant get
+    /// the same answer, for the reason the tools give one. Answered at once,
+    /// because nothing changes; a job whose project holds no credential is
+    /// told so, since its command is about to fail and the reason should be
+    /// the true one.
+    fn credential_asked(&mut self, id: RequestId, request: &Arrival, effects: &mut Vec<Effect>) {
+        if !nearby(&request.peer) {
+            tracing::warn!("a credential was asked for from beyond this machine");
+            Self::refuse(id, FORBIDDEN, effects);
+            return;
+        }
+        let Some((project, job)) =
+            presented(request).and_then(|presented| self.state.job_with_warrant(&presented))
+        else {
+            tracing::warn!(
+                "a credential was asked for with a warrant no job of this instance holds"
+            );
+            Self::refuse(id, FORBIDDEN, effects);
+            return;
+        };
+        // The one platform a repository can be on, until there is a second;
+        // the route answers for the job's repository, whichever that is.
+        let access = self
+            .state
+            .projects
+            .get(&project)
+            .and_then(|watched| watched.access.get(&Platform::GitHub))
+            .cloned();
+        match access {
+            Some(stageman_core::Access::Token { secret, .. }) => {
+                tracing::debug!(%job, "handed its project's token to its wrapper");
+                Self::say_now(id, OK, secret.expose(), effects);
+            }
+            // Minted for the project's one repository and kept for most of
+            // its hour, per
+            // `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
+            Some(stageman_core::Access::Installation { id: installation }) => {
+                tracing::debug!(%job, "handed a token minted from its project's installation");
+                self.credential_from_installation(id, project, installation, effects);
+            }
+            None => {
+                tracing::warn!(%job, "asked for a credential its project does not hold");
+                Self::say_now(
+                    id,
+                    NOT_FOUND,
+                    "this job's project holds no credential for its repository",
+                    effects,
+                );
+            }
+        }
     }
 
     /// Which project a bearer belongs to.
@@ -1440,6 +1519,7 @@ mod tests {
     #[test]
     fn a_kit_must_be_named_and_offered_or_it_is_refused() {
         let mut state = State {
+            apps: std::collections::BTreeMap::new(),
             agents: BTreeMap::from([(
                 Agent::Claude,
                 AgentConfig {
@@ -1452,13 +1532,14 @@ mod tests {
             a_project(),
             Project {
                 name: "example".to_owned(),
-                repository: "https://example.invalid/repo".to_owned(),
+                repository: stageman_core::RepositoryAddress::new("example", "repo")
+                    .expect("an address"),
                 foreman_kit: Kit::defaults(Agent::Claude),
                 kits: BTreeMap::from([(
                     KitName::new("Claude").expect("a name"),
                     KitConfig::defaults(Agent::Claude),
                 )]),
-                credentials: BTreeMap::new(),
+                access: BTreeMap::new(),
                 channels: BTreeMap::new(),
                 jobs: BTreeMap::new(),
                 variables: BTreeMap::new(),

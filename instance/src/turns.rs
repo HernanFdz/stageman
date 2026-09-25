@@ -83,9 +83,14 @@ pub enum Run {
         environment: BTreeMap<String, String>,
         /// The repository checked out before the agent speaks, for a job.
         repository: Option<String>,
-        /// The platform whose tool makes the checkout, if a credential for
-        /// one is held.
+        /// The platform whose tool makes the checkout, if the project holds
+        /// access to one.
         platform: Option<Platform>,
+        /// The account the checkout attributes commits to when the
+        /// project's access is an installation of the App: its bot, as the
+        /// platform names it. Nothing for a token, whose account the tool
+        /// is asked for.
+        actor: Option<String>,
         /// What the agent runs on.
         kit: Kit,
         /// What the agent presents to the tools endpoint.
@@ -93,6 +98,11 @@ pub enum Run {
         /// Where that endpoint is, as a container reaches it: the port
         /// actually taken rather than the one asked for.
         tools: String,
+        /// Where the wrapper written into the container fetches a credential
+        /// from, for a job — see
+        /// `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
+        /// Nothing for a foreman, which has no tool to wrap.
+        fetching: Option<String>,
         /// The instruction it begins from.
         kickoff: String,
     },
@@ -107,6 +117,11 @@ pub enum Run {
         warrant: String,
         /// Where that endpoint is, as a container reaches it.
         tools: String,
+        /// Where the wrapper, rewritten before the agent runs, fetches a
+        /// credential from, for a job that holds a warrant; nothing for a
+        /// foreman, and for a job the last release wrote, which keeps what
+        /// its container was created with.
+        fetching: Option<String>,
         /// What the resumed agent is told.
         text: String,
     },
@@ -124,6 +139,13 @@ impl Run {
     const fn kit(&self) -> &Kit {
         match self {
             Self::Begin { kit, .. } | Self::Resume { kit, .. } => kit,
+        }
+    }
+
+    /// Where the wrapper fetches a credential from, if one is to be written.
+    fn fetching(&self) -> Option<&str> {
+        match self {
+            Self::Begin { fetching, .. } | Self::Resume { fetching, .. } => fetching.as_deref(),
         }
     }
 
@@ -165,6 +187,9 @@ pub enum Stage {
     Creating,
     /// Its container being started.
     Starting,
+    /// Its wrapper being written in, ahead of anything that would run the
+    /// platform's tool.
+    Wrapping,
     /// Its repository being checked out.
     CheckingOut,
     /// The agent, over a process kept open.
@@ -359,13 +384,13 @@ pub fn pull_requests_of(state: &State, job: &JobId) -> Vec<String> {
     let repository = state
         .project_of(job)
         .and_then(|project| state.projects.get(&project))
-        .map(|project| project.repository.as_str());
+        .map(|project| &project.repository);
     recorded
         .pull_requests
         .iter()
         .map(|number| {
             repository
-                .and_then(|repository| crate::views::pull_request_link(repository, *number))
+                .map(|repository| crate::views::pull_request_link(repository, *number))
                 .map_or_else(
                     || format!("#{number}"),
                     |link| format!("[#{number}]({link})"),
@@ -698,13 +723,6 @@ impl Running {
     }
 
     /// The runtime said whether a turn's container is up.
-    ///
-    /// A job's first turn fills the workspace before the agent is run, and
-    /// inside the container it will run in: a coding agent reads a
-    /// project's instructions when its session starts, so a checkout made
-    /// during the first turn is one the agent's own machinery never loads —
-    /// see
-    /// `docs/decisions/0050-the-repository-is-checked-out-before-the-first-turn.md`.
     pub fn held(&mut self, speaker: Speaker, finished: &Finished, effects: &mut Vec<Effect>) {
         if self.stopped_before(&speaker, effects) {
             return;
@@ -714,6 +732,62 @@ impl Running {
             self.ended(&speaker, Err(why), effects);
             return;
         }
+        self.wrap(speaker, effects);
+    }
+
+    /// Writes the wrapper into a turn's container, where the run says one
+    /// fetches from, before anything in it could run the platform's tool.
+    ///
+    /// On every turn rather than once, so that a container never runs a
+    /// wrapper older than the instance driving it, and one resumed by an
+    /// instance answering on another port is told where — see
+    /// `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
+    /// The wrapper's text travels on the command's standard input, as a
+    /// build's recipe does.
+    fn wrap(&mut self, speaker: Speaker, effects: &mut Vec<Effect>) {
+        let Some(turn) = self.turns.get_mut(&speaker) else {
+            return;
+        };
+        let Some(fetching) = turn.run.fetching() else {
+            self.fill(speaker, effects);
+            return;
+        };
+        turn.stage = Stage::Wrapping;
+        let wrapper = stageman_agent::wrapper(fetching);
+        let command = Command::Wrap {
+            name: turn.run.container().to_owned(),
+        };
+        let wrapping = self.asking(
+            &command,
+            Asked::Wrapped { speaker },
+            self.runtime_environment.clone(),
+            Some(wrapper.into()),
+        );
+        effects.push(wrapping);
+    }
+
+    /// The runtime said whether a turn's wrapper was written in.
+    pub fn wrapped(&mut self, speaker: Speaker, finished: &Finished, effects: &mut Vec<Effect>) {
+        if self.stopped_before(&speaker, effects) {
+            return;
+        }
+        if complaint(finished).is_some() {
+            let why = container_failure("writing the wrapper into the container", finished);
+            self.ended(&speaker, Err(why), effects);
+            return;
+        }
+        self.fill(speaker, effects);
+    }
+
+    /// Fills a job's workspace before its agent is run for the first time,
+    /// and runs the agent when there is nothing to fill.
+    ///
+    /// Inside the container it will run in: a coding agent reads a
+    /// project's instructions when its session starts, so a checkout made
+    /// during the first turn is one the agent's own machinery never loads —
+    /// see
+    /// `docs/decisions/0050-the-repository-is-checked-out-before-the-first-turn.md`.
+    fn fill(&mut self, speaker: Speaker, effects: &mut Vec<Effect>) {
         let Some(turn) = self.turns.get_mut(&speaker) else {
             return;
         };
@@ -721,6 +795,7 @@ impl Running {
             container,
             repository: Some(repository),
             platform,
+            actor,
             ..
         } = &turn.run
         else {
@@ -732,6 +807,7 @@ impl Running {
             name: container.clone(),
             repository: repository.clone(),
             platform: *platform,
+            actor: actor.clone(),
         };
         let checking_out = self.ask(&command, Asked::CheckedOut { speaker });
         effects.push(checking_out);
@@ -1320,6 +1396,7 @@ mod tests {
         let project = ProjectId::from_uuid(Uuid::from_u128(11));
         let job = JobId::from_uuid(Uuid::from_u128(12));
         let mut state = State {
+            apps: std::collections::BTreeMap::new(),
             agents: BTreeMap::from([(
                 Agent::Claude,
                 AgentConfig {
@@ -1332,13 +1409,14 @@ mod tests {
             project,
             Project {
                 name: "example".to_owned(),
-                repository: "https://example.invalid/repo".to_owned(),
+                repository: stageman_core::RepositoryAddress::new("example", "repo")
+                    .expect("an address"),
                 foreman_kit: Kit::defaults(Agent::Claude),
                 kits: BTreeMap::from([(
                     KitName::new("Claude").expect("a name"),
                     KitConfig::defaults(Agent::Claude),
                 )]),
-                credentials: BTreeMap::new(),
+                access: BTreeMap::new(),
                 channels: BTreeMap::new(),
                 jobs: BTreeMap::from([(
                     job.clone(),
@@ -1347,6 +1425,7 @@ mod tests {
                         "started by hand".to_owned(),
                         "do the thing".to_owned(),
                         Timestamp::UNIX_EPOCH,
+                        stageman_core::Secret::new("warrant-of-a-test-job".to_owned()),
                     ),
                 )]),
                 variables: BTreeMap::new(),
@@ -1454,9 +1533,11 @@ mod tests {
             environment: BTreeMap::new(),
             repository: None,
             platform: None,
+            actor: None,
             kit: Kit::defaults(Agent::Claude),
             warrant: "w".to_owned(),
             tools: "http://host.docker.internal:47113/mcp".to_owned(),
+            fetching: None,
             kickoff: "hello".to_owned(),
         });
         assert!(matches!(begin.stage, super::Stage::Looking));
@@ -1466,6 +1547,7 @@ mod tests {
             kit: Kit::defaults(Agent::Claude),
             warrant: "w".to_owned(),
             tools: "http://host.docker.internal:47113/mcp".to_owned(),
+            fetching: None,
             text: "carry on".to_owned(),
         });
         assert!(matches!(resume.stage, super::Stage::Starting));

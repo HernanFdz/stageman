@@ -38,6 +38,7 @@ pub(crate) mod agents_view;
 mod env_file;
 mod error;
 mod home_view;
+mod instance_view;
 mod job_view;
 mod jobs_view;
 mod live;
@@ -52,12 +53,51 @@ use crate::ui::{THEME_SCRIPT, ThemeToggle};
 pub use agents_view::{Agent, AgentsView};
 pub use error::{DashboardError, DashboardResult};
 pub use home_view::{Home, HomeView, ProjectJob};
+pub use instance_view::{Apps, InstanceView, PlatformAppView, Registration};
 pub use job_view::{JobPage, ProjectJobView};
 pub use jobs_view::{Job, ProjectJobsView, Standing, Working};
 pub use live::{Live, LiveMark};
 pub use project_settings_view::{ProjectNewView, ProjectSettingsView};
 pub use projects_view::{Choice, Fitted, KitDraft, ModelChoice, Project, ProjectsView, Shape};
 pub use status_view::{Instance, Status};
+
+/// Opens a tab of this page's own, blank, in the press that asked for it:
+/// a browser opens a tab for a press and refuses one for what comes
+/// later, and the address is minted by the instance after the press, so
+/// the tab is opened first and sent on by [`send_the_tab`] once the
+/// address is known. By script rather than by a link, because a tab
+/// opened by script may be closed by script, which is what lets the page
+/// the platform brings it back to close it and return the person to where
+/// they were — see
+/// `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
+///
+/// Nothing is returned from the script, per `docs/conventions.md` §3.
+// Skipped by mutation testing, as are the two below: each is one script
+// line evaluated in a browser, which nothing on this side can observe. The
+// probe drives them in a real browser.
+#[mutants::skip]
+pub(crate) fn open_a_tab() {
+    let _opened = document::eval("window.stagemanTab = window.open(\"about:blank\", \"_blank\");");
+}
+
+/// Sends the tab [`open_a_tab`] opened to an address composed on the
+/// server, quoted here for the one script line.
+#[mutants::skip]
+pub(crate) fn send_the_tab(link: &str) {
+    let quoted = link.replace('\\', "\\\\").replace('"', "\\\"");
+    let _sent = document::eval(&format!(
+        "if (window.stagemanTab) {{ window.stagemanTab.location = \"{quoted}\"; }}"
+    ));
+}
+
+/// Closes the tab [`open_a_tab`] opened, when there turned out to be
+/// nowhere to send it.
+#[mutants::skip]
+pub(crate) fn close_the_tab() {
+    let _closed = document::eval(
+        "if (window.stagemanTab) { window.stagemanTab.close(); window.stagemanTab = null; }",
+    );
+}
 
 /// The dashboard's stylesheet.
 ///
@@ -109,6 +149,12 @@ pub enum Route {
 
         #[route("/agents")]
         AgentsView {},
+
+        // What the instance configures about itself, after Agents in the
+        // order a new instance is set up — see
+        // `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
+        #[route("/instance")]
+        InstanceView {},
 
         #[route("/projects")]
         ProjectsView {},
@@ -186,6 +232,7 @@ pub fn Shell() -> Element {
                         NavLink { to: Route::HomeView {}, "Home" }
                         NavLink { to: Route::ProjectsView {}, "Projects" }
                         NavLink { to: Route::AgentsView {}, "Agents" }
+                        NavLink { to: Route::InstanceView {}, "Instance" }
                     }
                     div { class: "ml-auto flex items-center gap-4 self-center",
                         LiveMark { live }

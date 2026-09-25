@@ -3940,7 +3940,10 @@ dependencies = [
 name = "stageman-platform"
 version = "0.0.0"
 dependencies = [
+ "base64 0.23.1",
  "percent-encoding",
+ "ring",
+ "serde",
  "serde_json",
  "stageman-core",
  "thiserror 2.0.20",

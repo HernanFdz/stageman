@@ -317,13 +317,23 @@ impl crate::Running {
     pub fn visited(&mut self, id: RequestId, request: &Arrival, effects: &mut Vec<Effect>) {
         let host = request.headers.get("host").map_or("", String::as_str);
         match decode(host, &self.domain) {
-            Routed::Dashboard => effects.push(Effect::Answer {
-                id,
-                answer: Answer::Proxy {
-                    port: self.presenting,
-                    refused: Bytes::new(DASHBOARD_SILENT.as_bytes().to_vec()),
-                },
-            }),
+            // Two paths under the dashboard's host are the instance's own:
+            // where the platform sends the browser back after a
+            // registration, answered here before the proxy — see
+            // `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
+            Routed::Dashboard => {
+                if !self.came_back(id, request, effects)
+                    && !self.came_back_installed(id, request, effects)
+                {
+                    effects.push(Effect::Answer {
+                        id,
+                        answer: Answer::Proxy {
+                            port: self.presenting,
+                            refused: Bytes::new(DASHBOARD_SILENT.as_bytes().to_vec()),
+                        },
+                    });
+                }
+            }
             Routed::Stranger => {
                 tracing::warn!(
                     %host,

@@ -164,8 +164,8 @@ pub fn ProjectJobsView(project: String) -> Element {
                             Badge { "{working.jobs.len()}" }
                             Reference {
                                 mark: "github",
-                                says: working.repository.clone(),
-                                link: working.repository_link.clone(),
+                                says: working.repository.to_string(),
+                                link: Some(working.repository_link.clone()),
                             }
                         },
                         aside: rsx! {

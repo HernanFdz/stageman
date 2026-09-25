@@ -22,7 +22,9 @@ use crate::ui::{
     Badge, BadgeTone, ButtonVariant, Card, EmptyState, Icon, KitChip, Reference, Skeleton, Tooltip,
 };
 
-pub use stageman_wire::{Choice, Draft, Fitted, KitDraft, ModelChoice, Project, Shape, Watching};
+pub use stageman_wire::{
+    Choice, Draft, Fitted, KitDraft, ModelChoice, Project, Reached, Shape, Through, Watching,
+};
 
 /// Everything the projects screen shows.
 ///
@@ -70,6 +72,22 @@ pub async fn amend(project: String, draft: Draft) -> DashboardResult<Watching> {
     }
 }
 
+/// What an access reaches: the repositories the form chooses from, listed
+/// from the platform and kept nowhere — see
+/// `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
+///
+/// # Errors
+///
+/// Fails if the platform does not accept the token, could not be asked, or
+/// if no App is registered where the App was asked about.
+#[post("/api/projects/reaches")]
+pub async fn reaches(through: Through) -> DashboardResult<Reached> {
+    match super::ask(Request::Reaches { through }).await? {
+        Response::Reached(reached) => Ok(reached),
+        other => Err(super::unexpected(&other)),
+    }
+}
+
 /// Stops watching a repository, and reclaims everything it was holding.
 ///
 /// # Errors
@@ -91,8 +109,8 @@ pub async fn forget(project: String) -> DashboardResult<Watching> {
 /// component, so that each condition is tested once.
 fn noted(project: &Project) -> String {
     let mut notes = Vec::new();
-    if project.platforms.is_empty() {
-        notes.push("no token for the repository".to_owned());
+    if project.access.is_none() {
+        notes.push("no access to the repository".to_owned());
     }
     if project.channels.is_empty() {
         notes.push("no Slack app".to_owned());
@@ -144,8 +162,8 @@ pub fn ProjectsView() -> Element {
                                     "A project names one agent to think with and at least one its \
                                      jobs run on, so configuring an agent comes first."
                                 } else {
-                                    "Add one. It needs a repository, the agents that work on it, \
-                                     and a token to reach it with."
+                                    "Add one. It needs the agents that work on it, a way to reach \
+                                     GitHub, and the repository chosen from what that reaches."
                                 },
                             }
                         } else {
@@ -272,8 +290,8 @@ fn WatchedProject(project: Project, available: Vec<Agent>, shapes: Vec<Shape>) -
                 // `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
                 Reference {
                     mark: "github",
-                    says: project.repository.clone(),
-                    link: project.repository_link.clone(),
+                    says: project.repository.to_string(),
+                    link: Some(project.repository_link.clone()),
                 }
                 if let Some(room) = project.foreman_room.clone() {
                     Reference {
@@ -368,11 +386,18 @@ mod tests {
         super::Project {
             id: "p".to_owned(),
             name: "aviary".to_owned(),
-            repository: "https://github.com/owner/aviary".to_owned(),
-            repository_link: None,
+            repository: stageman_wire::Repository {
+                owner: "owner".to_owned(),
+                name: "aviary".to_owned(),
+            },
+            repository_link: "https://github.com/owner/aviary".to_owned(),
             foreman: stageman_wire::Fitted::default(),
             kits: Vec::new(),
-            platforms: vec!["github".to_owned()],
+            access: Some(stageman_wire::AccessView::Token {
+                owner: None,
+                expires: None,
+                expired: false,
+            }),
             channels: vec!["Slack".to_owned()],
             variables: Vec::new(),
             brief: String::new(),
@@ -392,12 +417,12 @@ mod tests {
     fn a_row_notes_absences_and_watched_rooms() {
         assert_eq!(super::noted(&a_project_with_everything()), "");
         let mut bare = a_project_with_everything();
-        bare.platforms.clear();
+        bare.access = None;
         bare.channels.clear();
         bare.watched = vec!["C1".to_owned(), "C2".to_owned()];
         assert_eq!(
             super::noted(&bare),
-            "no token for the repository · no Slack app · watching C1, C2"
+            "no access to the repository · no Slack app · watching C1, C2"
         );
         let mut watching = a_project_with_everything();
         watching.watched = vec!["C1".to_owned()];
