@@ -970,6 +970,7 @@ impl Running {
         };
         match outcome {
             Ok(minted) => {
+                tracing::debug!(%project, "minted a token for the project's jobs, kept for most of its hour");
                 let token = minted.token.expose().to_owned();
                 self.minted.insert(project, minted);
                 self.token_waiting_answered(project, &Ok(token), effects);

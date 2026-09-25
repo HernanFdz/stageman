@@ -865,7 +865,7 @@ impl Running {
             // its hour, per
             // `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
             Some(stageman_core::Access::Installation { id: installation }) => {
-                tracing::debug!(%job, "handed a token minted from its project's installation");
+                tracing::debug!(%job, "answering its wrapper from its project's installation");
                 self.credential_from_installation(id, project, installation, effects);
             }
             None => {
