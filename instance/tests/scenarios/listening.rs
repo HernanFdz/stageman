@@ -4,7 +4,6 @@
 
 use stageman_core::ProjectId;
 use stageman_instance::{Instance, Request};
-use stageman_wire::ChannelDraft;
 
 use crate::dashboard::a_draft;
 use crate::simulation::{Simulation, project, request, seed, watching, watching_a_channel};
@@ -283,11 +282,7 @@ fn a_channel_bound_under_a_failed_write_is_listened_to_after_the_wait() {
     let mut instance = world.wake(seed(1));
     world.next_write_fails("the disk is full");
 
-    let mut draft = a_draft("burrow");
-    draft.channel = ChannelDraft {
-        credential: "xoxb-not-a-real-token".to_owned(),
-        listen_credential: "xapp-not-a-real-token".to_owned(),
-    };
+    let draft = a_draft("burrow");
     for effect in instance.step(world.now(), request(1, Request::Create { draft })) {
         world.perform(effect);
     }

@@ -23,7 +23,8 @@ use crate::ui::{
 };
 
 pub use stageman_wire::{
-    Choice, Draft, Fitted, KitDraft, ModelChoice, Project, Reached, Shape, Through, Watching,
+    Bound, ChannelDraft, Choice, Draft, Fitted, KitDraft, ModelChoice, Project, Reached, Shape,
+    Through, Watching, WorkspaceArrival,
 };
 
 /// Everything the projects screen shows.
@@ -88,6 +89,41 @@ pub async fn reaches(through: Through) -> DashboardResult<Reached> {
     }
 }
 
+/// Checks a pair of tokens for an app of a project's own, for the form's
+/// panel, and keeps nothing: where the app speaks, once Slack has accepted
+/// both — see `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+///
+/// # Errors
+///
+/// Fails if either token is blank, if Slack does not accept one, if Slack
+/// could not be asked, or if the pair is an app another project already
+/// speaks through.
+#[post("/api/projects/binds")]
+pub async fn binds(project: Option<String>, binding: ChannelDraft) -> DashboardResult<Bound> {
+    match super::ask(Request::Binds { project, binding }).await? {
+        Response::Bound(bound) => Ok(bound),
+        other => Err(super::unexpected(&other)),
+    }
+}
+
+/// Whether the workspace a form's tab went out to install on has come
+/// back under the state the tab carried, and which it is.
+///
+/// # Errors
+///
+/// Fails if no install was begun under that state, or if the workspace
+/// that came back is no longer held.
+#[post("/api/projects/workspace-arrival")]
+pub async fn workspace_arrival(
+    channel: String,
+    state: String,
+) -> DashboardResult<WorkspaceArrival> {
+    match super::ask(Request::WorkspaceArrived { channel, state }).await? {
+        Response::WorkspaceArrival(arrival) => Ok(arrival),
+        other => Err(super::unexpected(&other)),
+    }
+}
+
 /// Stops watching a repository, and reclaims everything it was holding.
 ///
 /// # Errors
@@ -112,8 +148,8 @@ fn noted(project: &Project) -> String {
     if project.access.is_none() {
         notes.push("no access to the repository".to_owned());
     }
-    if project.channels.is_empty() {
-        notes.push("no Slack app".to_owned());
+    if project.binding.is_none() {
+        notes.push("no Slack binding".to_owned());
     }
     if !project.watched.is_empty() {
         notes.push(format!("watching {}", project.watched.join(", ")));
@@ -398,7 +434,7 @@ mod tests {
                 expires: None,
                 expired: false,
             }),
-            channels: vec!["Slack".to_owned()],
+            binding: Some(stageman_wire::BindingView::Own { url: None }),
             variables: Vec::new(),
             brief: String::new(),
             watched: Vec::new(),
@@ -418,11 +454,11 @@ mod tests {
         assert_eq!(super::noted(&a_project_with_everything()), "");
         let mut bare = a_project_with_everything();
         bare.access = None;
-        bare.channels.clear();
+        bare.binding = None;
         bare.watched = vec!["C1".to_owned(), "C2".to_owned()];
         assert_eq!(
             super::noted(&bare),
-            "no access to the repository · no Slack app · watching C1, C2"
+            "no access to the repository · no Slack binding · watching C1, C2"
         );
         let mut watching = a_project_with_everything();
         watching.watched = vec!["C1".to_owned()];

@@ -12,6 +12,7 @@
 )]
 
 mod apps;
+mod bindings;
 mod booting;
 mod channel;
 mod channel_apps;

@@ -13,18 +13,22 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use stageman_channel::Identity;
 use stageman_core::{
     Access, AgentConfig, Binding, Channel, ChannelConfig, JobId, Kit, KitConfig, KitName, Outcome,
     Platform, Progress, Project, ProjectId, RepositoryAddress, Secret, State, Variable,
     VariableName,
 };
 use stageman_wire::{
-    AccessDraft, ChannelDraft, Draft, Ending, KitDraft, Refusal, Through, VariableDraft,
+    AccessDraft, BindingDraft, Bound, ChannelDraft, Draft, Ending, KitDraft, Refusal, Through,
+    VariableDraft,
 };
 
 use crate::Effect;
 use crate::Running;
 use crate::installations::{Begun, arrived};
+use crate::listening::Listening;
+use crate::workspaces::workspace_arrived;
 
 use crate::views;
 use crate::vocabulary::{AppEffect, RequestId, Speaker};
@@ -182,6 +186,26 @@ pub enum Request {
         /// The workspace, by its identifier on the platform.
         id: String,
     },
+    /// Whether the workspace a project form's tab went out to install on
+    /// has come back under the state the tab carried: asked on every tick
+    /// while the tab is out — see
+    /// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+    WorkspaceArrived {
+        /// Which channel, by its wire identifier.
+        channel: String,
+        /// The state the install link carried.
+        state: String,
+    },
+    /// Checks a pair of tokens for an app of a project's own, for the
+    /// form's panel, and keeps nothing: what the form moves onto once the
+    /// channel has accepted them.
+    Binds {
+        /// The project the pair is for, by identifier, where there is one:
+        /// its own app heard again is not another's.
+        project: Option<String>,
+        /// The two boxes.
+        binding: ChannelDraft,
+    },
     /// What an access reaches, for the project form: held while the
     /// platform lists it, and never kept — see `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
     Reaches {
@@ -192,34 +216,29 @@ pub enum Request {
 
 impl fmt::Debug for Request {
     /// Names what was asked and never a credential. A draft redacts itself;
-    /// the one bare credential here is an agent's.
+    /// the one bare credential here is an agent's, and the one bare state
+    /// is a workspace install's, which buys the workspace for whoever holds
+    /// it.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Instance => f.write_str("Instance"),
             Self::Home => f.write_str("Home"),
             Self::Agents => f.write_str("Agents"),
-            Self::Configure { agent, .. } => f
-                .debug_struct("Configure")
-                .field("agent", agent)
-                .field("credential", &"<redacted>")
-                .finish(),
-            Self::ForgetAgent { agent } => {
-                f.debug_struct("ForgetAgent").field("agent", agent).finish()
-            }
+            Self::Configure { agent, .. } => two(
+                f,
+                "Configure",
+                ("agent", agent),
+                ("credential", &"<redacted>"),
+            ),
+            Self::ForgetAgent { agent } => one(f, "ForgetAgent", ("agent", agent)),
             Self::Projects => f.write_str("Projects"),
-            Self::Create { draft } => f.debug_struct("Create").field("draft", draft).finish(),
-            Self::Amend { project, draft } => f
-                .debug_struct("Amend")
-                .field("project", project)
-                .field("draft", draft)
-                .finish(),
-            Self::Forget { project } => f.debug_struct("Forget").field("project", project).finish(),
-            Self::Jobs { project } => f.debug_struct("Jobs").field("project", project).finish(),
-            Self::Job { project, job } => f
-                .debug_struct("Job")
-                .field("project", project)
-                .field("job", job)
-                .finish(),
+            Self::Create { draft } => one(f, "Create", ("draft", draft)),
+            Self::Amend { project, draft } => {
+                two(f, "Amend", ("project", project), ("draft", draft))
+            }
+            Self::Forget { project } => one(f, "Forget", ("project", project)),
+            Self::Jobs { project } => one(f, "Jobs", ("project", project)),
+            Self::Job { project, job } => two(f, "Job", ("project", project), ("job", job)),
             Self::Start {
                 project,
                 kit,
@@ -232,11 +251,7 @@ impl fmt::Debug for Request {
                 .field("work", work)
                 .field("title", title)
                 .finish(),
-            Self::Stop { project, job } => f
-                .debug_struct("Stop")
-                .field("project", project)
-                .field("job", job)
-                .finish(),
+            Self::Stop { project, job } => two(f, "Stop", ("project", project), ("job", job)),
             Self::Retire {
                 project,
                 job,
@@ -248,24 +263,17 @@ impl fmt::Debug for Request {
                 .field("ending", ending)
                 .finish(),
             Self::Apps => f.write_str("Apps"),
-            Self::Registration { platform, anywhere } => f
-                .debug_struct("Registration")
-                .field("platform", platform)
-                .field("anywhere", anywhere)
-                .finish(),
-            Self::ForgetApp { platform } => f
-                .debug_struct("ForgetApp")
-                .field("platform", platform)
-                .finish(),
-            Self::InstallLink { platform } => f
-                .debug_struct("InstallLink")
-                .field("platform", platform)
-                .finish(),
-            Self::ForgetInstallation { platform, id } => f
-                .debug_struct("ForgetInstallation")
-                .field("platform", platform)
-                .field("id", id)
-                .finish(),
+            Self::Registration { platform, anywhere } => two(
+                f,
+                "Registration",
+                ("platform", platform),
+                ("anywhere", anywhere),
+            ),
+            Self::ForgetApp { platform } => one(f, "ForgetApp", ("platform", platform)),
+            Self::InstallLink { platform } => one(f, "InstallLink", ("platform", platform)),
+            Self::ForgetInstallation { platform, id } => {
+                two(f, "ForgetInstallation", ("platform", platform), ("id", id))
+            }
             Self::RegisterChannelApp {
                 channel, client_id, ..
             } => f
@@ -275,24 +283,41 @@ impl fmt::Debug for Request {
                 .field("client_secret", &"<redacted>")
                 .field("app_token", &"<redacted>")
                 .finish(),
-            Self::ForgetChannelApp { channel } => f
-                .debug_struct("ForgetChannelApp")
-                .field("channel", channel)
-                .finish(),
-            Self::WorkspaceLink { channel } => f
-                .debug_struct("WorkspaceLink")
-                .field("channel", channel)
-                .finish(),
-            Self::ForgetWorkspace { channel, id } => f
-                .debug_struct("ForgetWorkspace")
-                .field("channel", channel)
-                .field("id", id)
-                .finish(),
-            Self::Reaches { through } => {
-                f.debug_struct("Reaches").field("through", through).finish()
+            Self::ForgetChannelApp { channel } => one(f, "ForgetChannelApp", ("channel", channel)),
+            Self::WorkspaceLink { channel } => one(f, "WorkspaceLink", ("channel", channel)),
+            Self::ForgetWorkspace { channel, id } => {
+                two(f, "ForgetWorkspace", ("channel", channel), ("id", id))
             }
+            Self::WorkspaceArrived { channel, .. } => two(
+                f,
+                "WorkspaceArrived",
+                ("channel", channel),
+                ("state", &"<redacted>"),
+            ),
+            Self::Binds { project, binding } => {
+                two(f, "Binds", ("project", project), ("binding", binding))
+            }
+            Self::Reaches { through } => one(f, "Reaches", ("through", through)),
         }
     }
+}
+
+/// A request by its name and the one field worth saying.
+fn one(f: &mut fmt::Formatter<'_>, name: &str, field: (&str, &dyn fmt::Debug)) -> fmt::Result {
+    f.debug_struct(name).field(field.0, field.1).finish()
+}
+
+/// A request by its name and the two fields worth saying.
+fn two(
+    f: &mut fmt::Formatter<'_>,
+    name: &str,
+    first: (&str, &dyn fmt::Debug),
+    second: (&str, &dyn fmt::Debug),
+) -> fmt::Result {
+    f.debug_struct(name)
+        .field(first.0, first.1)
+        .field(second.0, second.1)
+        .finish()
 }
 
 /// What a person is answered.
@@ -317,6 +342,10 @@ pub enum Response {
     Registration(stageman_wire::Registration),
     /// Where to install the App, minted for one press.
     InstallLink(stageman_wire::InstallLink),
+    /// Whether a workspace has come back under a form's state.
+    WorkspaceArrival(stageman_wire::WorkspaceArrival),
+    /// A pair of tokens for an app of a project's own, accepted.
+    Bound(Bound),
     /// What an access reaches, for the project form.
     Reached(stageman_wire::Reached),
     /// It was not done, and why.
@@ -337,7 +366,7 @@ impl Running {
         }
         match self.hold_for_checks(id, &request, effects) {
             Ok(true) => {}
-            Ok(false) => self.respond(id, request, None, effects),
+            Ok(false) => self.respond(id, request, None, None, effects),
             Err(refusal) => self.defer(AppEffect::Respond {
                 id,
                 response: Response::Refused(refusal),
@@ -352,6 +381,7 @@ impl Running {
         id: RequestId,
         request: Request,
         learned: Option<stageman_platform::Owned>,
+        spoken: Option<Identity>,
         effects: &mut Vec<Effect>,
     ) {
         let answered =
@@ -415,6 +445,18 @@ impl Running {
                 }
                 Request::ForgetWorkspace { channel, id } => views::channel_named(&channel)
                     .and_then(|channel| self.forget_workspace(channel, &id)),
+                Request::WorkspaceArrived { channel, state } => views::channel_named(&channel)
+                    .and_then(|channel| self.workspace_arrival(channel, &state))
+                    .map(Response::WorkspaceArrival),
+                // Checked before this is reached, and kept nowhere: what is
+                // answered is where the channel said the app speaks.
+                Request::Binds { .. } => spoken.map_or_else(
+                    || {
+                        tracing::error!("a pair was answered as bound with nothing learned of it");
+                        Err(Refusal::Failed)
+                    },
+                    |us| Ok(Response::Bound(Bound { url: us.url })),
+                ),
                 // Routed before anything is held, above; a listing that reaches
                 // here was carried by a check it cannot have had.
                 Request::Reaches { .. } => {
@@ -481,7 +523,7 @@ impl Running {
             variables,
             brief,
             ..
-        } = drafted(draft, None, &self.begun)?;
+        } = drafted(draft, None, &self.begun, &self.workspaces_begun)?;
         let access = told_of(access, learned);
 
         let mut candidate = self.state.clone();
@@ -494,12 +536,7 @@ impl Running {
                 foreman_kit,
                 kits,
                 access: BTreeMap::from([(Platform::GitHub, access)]),
-                // A draft's bindings are apps of the project's own; a
-                // workspace of the instance's app comes to a form later.
-                channels: channels
-                    .into_iter()
-                    .map(|(channel, config)| (channel, Binding::Own(config)))
-                    .collect(),
+                channels,
                 variables,
                 jobs: BTreeMap::new(),
                 attending: stageman_core::Attending::default(),
@@ -514,14 +551,27 @@ impl Running {
         self.state = candidate;
         self.dirty = true;
         self.arrival_spent(draft);
+        self.workspace_arrival_spent(draft);
 
         // Listened to from now, not from the next restart: binding a channel
         // used to do nothing until the daemon was restarted, and nothing said
-        // so.
-        for question in self.listen(crate::listening::Listening::Own(created)) {
+        // so. Nothing for a workspace of the instance's app, which is
+        // listened to already.
+        for question in self.listen(Listening::Own(created)) {
             self.defer(question);
         }
         Ok(Response::Projects(self.projects_screen()))
+    }
+
+    /// A draft kept named a workspace by its state: spent, since what came
+    /// back under it is a project's now.
+    fn workspace_arrival_spent(&mut self, draft: &Draft) {
+        if let BindingDraft::Workspace {
+            arrival: Some(state),
+        } = &draft.binding
+        {
+            self.spend_workspace_arrival(state);
+        }
     }
 
     /// A draft kept named an install by its state: spent, since what came
@@ -562,12 +612,16 @@ impl Running {
             foreman_kit,
             access,
             kits,
+            channels,
+            channels_changed,
             variables,
             brief,
-            ..
-        } = drafted(draft, Some(watched), &self.begun)?;
+        } = drafted(draft, Some(watched), &self.begun, &self.workspaces_begun)?;
         let access = told_of(access, learned);
         watched.variables = variables;
+        if channels_changed {
+            watched.channels = channels;
+        }
         amended(watched, name, repository, foreman_kit, kits, access, brief);
         candidate
             .check()
@@ -575,10 +629,23 @@ impl Running {
         self.state = candidate;
         self.dirty = true;
         self.arrival_spent(draft);
+        self.workspace_arrival_spent(draft);
         // A token minted for what the project reached before is not for
         // what it reaches now, whether the access changed or the repository.
         if reach_changed {
             self.access_amended(identifier);
+        }
+        // A binding moved between the two shapes, or onto another app of
+        // its own, is listened to as it is now: the connection of the app
+        // it left closed, and one for an app of its own opened. Nothing to
+        // open for a workspace, whose app is listened to already.
+        if channels_changed {
+            for disconnect in self.stop_listening(Listening::Own(identifier)) {
+                self.defer(disconnect);
+            }
+            for question in self.listen(Listening::Own(identifier)) {
+                self.defer(question);
+            }
         }
         Ok(Response::Projects(self.projects_screen()))
     }
@@ -845,9 +912,13 @@ pub struct Drafted {
     pub access: Access,
     /// The kits its jobs may run on.
     pub kits: BTreeMap<KitName, KitConfig>,
-    /// Its channel bindings, whole. Empty for an amendment, which never
-    /// offers them.
-    pub channels: BTreeMap<Channel, ChannelConfig>,
+    /// Its channel bindings, whole: what the draft set, or what the project
+    /// holds where the draft kept it.
+    pub channels: BTreeMap<Channel, Binding>,
+    /// Whether the bindings are not what the project already holds: what
+    /// decides whether an app of its own is checked before anything is
+    /// kept, and whether what listens for it is opened again.
+    pub channels_changed: bool,
     /// Its variables, with a blank value resolved against what it holds.
     pub variables: BTreeMap<VariableName, Variable>,
     /// What its foreman is told every turn.
@@ -868,7 +939,12 @@ pub struct Drafted {
 /// address on the platform, if a kit describes settings this build does
 /// not know, if a new project's binding is half given, or if a variable's
 /// row is refused.
-pub fn drafted(draft: &Draft, held: Option<&Project>, begun: &Begun) -> Result<Drafted, Refusal> {
+pub fn drafted(
+    draft: &Draft,
+    held: Option<&Project>,
+    begun: &Begun,
+    workspaces: &crate::workspaces::Begun,
+) -> Result<Drafted, Refusal> {
     let platform = Platform::GitHub;
     let name = required("name", &draft.name)?;
     let unsaid = || Refusal::Incomplete {
@@ -912,10 +988,7 @@ pub fn drafted(draft: &Draft, held: Option<&Project>, begun: &Begun) -> Result<D
     });
     let foreman_kit = views::kit_of(&draft.foreman)?;
     let kits = kits_of(&draft.kits)?;
-    let channels = match held {
-        None => binding(&draft.channel)?,
-        Some(_) => BTreeMap::new(),
-    };
+    let (channels, channels_changed) = bound(&draft.binding, held, workspaces)?;
     let nothing = BTreeMap::new();
     let variables = resolved(
         held.map_or(&nothing, |project| &project.variables),
@@ -929,9 +1002,60 @@ pub fn drafted(draft: &Draft, held: Option<&Project>, begun: &Begun) -> Result<D
         access,
         kits,
         channels,
+        channels_changed,
         variables,
         brief: draft.brief.trim().to_owned(),
     })
+}
+
+/// The bindings a draft says, in either shape, and whether they differ
+/// from what the project holds — see
+/// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+///
+/// What the project holds is kept as it is, and so is the workspace it
+/// holds; a workspace named by a state is the one whose install came back
+/// under it, which is the only way a form names one. A project that does
+/// not exist yet holds nothing to keep.
+///
+/// # Errors
+///
+/// Fails if nothing is said for a project that does not exist yet, if an
+/// app of its own is half given, or if the state names no workspace that
+/// has come back.
+pub fn bound(
+    binding: &BindingDraft,
+    held: Option<&Project>,
+    workspaces: &crate::workspaces::Begun,
+) -> Result<(BTreeMap<Channel, Binding>, bool), Refusal> {
+    let holding = held.map(|watched| &watched.channels);
+    let bound = match binding {
+        BindingDraft::Kept => {
+            return Ok((holding.ok_or(Refusal::ChannelIncomplete)?.clone(), false));
+        }
+        BindingDraft::Own(pair) => self::binding(pair)?
+            .into_iter()
+            .map(|(channel, config)| (channel, Binding::Own(config)))
+            .collect(),
+        BindingDraft::Workspace { arrival: None } => {
+            let kept = holding
+                .filter(|channels| {
+                    channels
+                        .values()
+                        .any(|binding| binding.workspace().is_some())
+                })
+                .ok_or(Refusal::ChannelIncomplete)?;
+            return Ok((kept.clone(), false));
+        }
+        BindingDraft::Workspace {
+            arrival: Some(state),
+        } => {
+            let team =
+                workspace_arrived(workspaces, state).ok_or(Refusal::WorkspaceArrivalUnknown)?;
+            BTreeMap::from([(Channel::Slack, Binding::Workspace(team))])
+        }
+    };
+    let changed = holding != Some(&bound);
+    Ok((bound, changed))
 }
 
 /// What a project's variables become, from the rows the form came back with.
@@ -1130,14 +1254,18 @@ pub fn required(field: &str, given: &str) -> Result<String, Refusal> {
 
 #[cfg(test)]
 mod tests {
-    use super::{addressed, amended, binding, busy, identify_job, kits_of, offered, resolved};
+    use super::{
+        addressed, amended, binding, bound, busy, identify_job, kits_of, offered, resolved,
+    };
     use stageman_core::{
-        Access, Agent, AgentConfig, Channel, ChannelConfig, ClaudeEffort, ClaudeModel, Job, JobId,
-        Kit, KitConfig, KitName, Platform, Progress, Project, ProjectId, RepositoryAddress, Secret,
-        State, Timestamp, Uuid, Variable, VariableName, Waiting,
+        Access, Agent, AgentConfig, Binding, Channel, ChannelConfig, ClaudeEffort, ClaudeModel,
+        Job, JobId, Kit, KitConfig, KitName, Platform, Progress, Project, ProjectId,
+        RepositoryAddress, Secret, State, Timestamp, Uuid, Variable, VariableName, Waiting,
     };
     use stageman_wire::Draft;
-    use stageman_wire::{AccessDraft, ChannelDraft, Fitted, KitDraft, Refusal, VariableDraft};
+    use stageman_wire::{
+        AccessDraft, BindingDraft, ChannelDraft, Fitted, KitDraft, Refusal, VariableDraft,
+    };
     use std::collections::BTreeMap;
 
     /// A token as a project holds one, with nothing said of it yet.
@@ -1417,23 +1545,23 @@ mod tests {
                 token: None,
                 repository: Some(repo("example", "aviary")),
             },
-            channel: ChannelDraft {
+            binding: BindingDraft::Own(ChannelDraft {
                 credential: "xoxb-not-a-real-token".to_owned(),
                 listen_credential: "xapp-not-a-real-token".to_owned(),
-            },
+            }),
             variables: vec![row("HELD", "")],
             brief: " be brief ".to_owned(),
         };
         assert!(
             matches!(
-                super::drafted(&draft, None, &came_back(77)),
+                resolving(&draft, None, &came_back(77)),
                 Err(Refusal::Incomplete { ref field }) if field == "access"
             ),
             "a new project needs its token said: there is none to hold"
         );
         draft.access = AccessDraft::None;
         assert!(matches!(
-            super::drafted(&draft, None, &came_back(77)),
+            resolving(&draft, None, &came_back(77)),
             Err(Refusal::Incomplete { ref field }) if field == "access"
         ));
         draft.access = AccessDraft::App {
@@ -1441,7 +1569,7 @@ mod tests {
             repository: None,
         };
         assert!(matches!(
-            super::drafted(&draft, None, &came_back(77)),
+            resolving(&draft, None, &came_back(77)),
             Err(Refusal::Incomplete { ref field }) if field == "repository"
         ));
         draft.access = AccessDraft::Token {
@@ -1454,8 +1582,8 @@ mod tests {
         held.access
             .insert(Platform::GitHub, token("ghp-the-held-one"));
         held.variables = holding_variables(&[("HELD", "kept")]);
-        let amending = super::drafted(&draft, Some(&held), &came_back(77))
-            .expect("resolved against the project");
+        let amending =
+            resolving(&draft, Some(&held), &came_back(77)).expect("resolved against the project");
         assert_eq!(amending.name, "aviary");
         assert_eq!(
             amending.repository.https(),
@@ -1469,7 +1597,15 @@ mod tests {
             !amending.reach_changed,
             "the same token on the same address, however it was pasted"
         );
-        assert!(amending.channels.is_empty(), "never offered when amending");
+        assert!(
+            amending.channels_changed
+                && amending
+                    .channels
+                    .get(&Channel::Slack)
+                    .and_then(Binding::own)
+                    .is_some(),
+            "an app of its own set while amending replaces what the project holds, which was none"
+        );
         assert_eq!(
             settled(&amending.variables),
             vec![("HELD".to_owned(), "kept".to_owned())]
@@ -1480,7 +1616,7 @@ mod tests {
             repository: Some(repo("example", "other")),
         };
         assert!(
-            super::drafted(&draft, Some(&held), &came_back(77))
+            resolving(&draft, Some(&held), &came_back(77))
                 .expect("resolved")
                 .reach_changed,
             "the repository moved under the token held"
@@ -1504,10 +1640,10 @@ mod tests {
                 token: Some(" github_pat_not_a_real_token ".to_owned()),
                 repository: Some(repo("example", "aviary")),
             },
-            channel: ChannelDraft {
+            binding: BindingDraft::Own(ChannelDraft {
                 credential: "xoxb-not-a-real-token".to_owned(),
                 listen_credential: "xapp-not-a-real-token".to_owned(),
-            },
+            }),
             variables: vec![row("HELD", "")],
             brief: " be brief ".to_owned(),
         };
@@ -1516,11 +1652,11 @@ mod tests {
         held.access
             .insert(Platform::GitHub, token("ghp-the-held-one"));
         held.variables = holding_variables(&[("HELD", "kept")]);
-        let creating = super::drafted(&draft, None, &came_back(77))
+        let creating = resolving(&draft, None, &came_back(77))
             .expect_err("a new project holds no HELD to keep");
         assert_eq!(creating, Refusal::VariableValueMissing);
         draft.variables.clear();
-        let creating = super::drafted(&draft, None, &came_back(77)).expect("a whole draft");
+        let creating = resolving(&draft, None, &came_back(77)).expect("a whole draft");
         assert!(
             matches!(
                 creating.access,
@@ -1531,7 +1667,7 @@ mod tests {
         assert!(creating.reach_changed, "everything is new");
         assert!(creating.channels.contains_key(&Channel::Slack));
         assert!(
-            super::drafted(&draft, Some(&held), &came_back(77))
+            resolving(&draft, Some(&held), &came_back(77))
                 .expect("a token set replaces")
                 .reach_changed
         );
@@ -1540,14 +1676,14 @@ mod tests {
             repository: Some(repo("example", "aviary")),
         };
         assert!(matches!(
-            super::drafted(&draft, Some(&held), &came_back(77)),
+            resolving(&draft, Some(&held), &came_back(77)),
             Err(Refusal::Incomplete { ref field }) if field == "access"
         ));
         draft.access = AccessDraft::App {
             arrival: Some("f00d".to_owned()),
             repository: Some(repo("example", "aviary")),
         };
-        let on_the_app = super::drafted(&draft, None, &came_back(77)).expect("a whole draft");
+        let on_the_app = resolving(&draft, None, &came_back(77)).expect("a whole draft");
         assert_eq!(on_the_app.access, Access::Installation { id: 77 });
         assert_eq!(
             on_the_app.repository.https(),
@@ -1556,7 +1692,7 @@ mod tests {
         held.access
             .insert(Platform::GitHub, Access::Installation { id: 77 });
         assert!(
-            !super::drafted(&draft, Some(&held), &came_back(77))
+            !resolving(&draft, Some(&held), &came_back(77))
                 .expect("resolved")
                 .reach_changed,
             "the same installation on the same address, whether named by its state or held"
@@ -1566,13 +1702,13 @@ mod tests {
             repository: Some(repo("example", "aviary")),
         };
         assert!(
-            !super::drafted(&draft, Some(&held), &nothing_came_back())
+            !resolving(&draft, Some(&held), &nothing_came_back())
                 .expect("the installation held")
                 .reach_changed
         );
         assert!(
             matches!(
-                super::drafted(&draft, None, &nothing_came_back()),
+                resolving(&draft, None, &nothing_came_back()),
                 Err(Refusal::Incomplete { ref field }) if field == "access"
             ),
             "a new project holds no installation to leave unsaid"
@@ -1582,13 +1718,41 @@ mod tests {
             repository: Some(repo("example", "aviary")),
         };
         assert_eq!(
-            super::drafted(&draft, None, &nothing_came_back()).expect_err("no such state"),
+            resolving(&draft, None, &nothing_came_back()).expect_err("no such state"),
             Refusal::ArrivalUnknown
         );
         assert_eq!(
-            super::drafted(&draft, None, &minted_but_not_back()).expect_err("nothing back yet"),
+            resolving(&draft, None, &minted_but_not_back()).expect_err("nothing back yet"),
             Refusal::ArrivalUnknown
         );
+    }
+
+    /// No workspace install begun, which is most forms.
+    fn no_workspaces() -> crate::workspaces::Begun {
+        crate::workspaces::Begun::new()
+    }
+
+    /// A workspace install come back under the state `f00d`, for the
+    /// workspace named.
+    fn workspace_came_back(team: &str) -> crate::workspaces::Begun {
+        [(
+            "f00d".to_owned(),
+            crate::workspaces::Install {
+                channel: Channel::Slack,
+                workspace: Some(team.to_owned()),
+            },
+        )]
+        .into()
+    }
+
+    /// A draft resolved as the instance resolves one, with no workspace
+    /// install begun.
+    fn resolving(
+        draft: &Draft,
+        held: Option<&Project>,
+        begun: &crate::installations::Begun,
+    ) -> Result<super::Drafted, Refusal> {
+        super::drafted(draft, held, begun, &no_workspaces())
     }
 
     /// Installs begun, with an installation come back under the one state
@@ -1730,6 +1894,112 @@ mod tests {
             Err(Refusal::VariableRepeated { position: 2 })
         );
         assert!(resolved(&BTreeMap::new(), &[row("  ", "anything")]).is_err());
+    }
+
+    /// A draft's binding in each shape, per
+    /// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`:
+    /// what the project holds, kept and unchanged; an app of its own, set,
+    /// and unchanged when it is the pair held; the workspace the project
+    /// holds, kept; the one whose install came back under the state, set;
+    /// and a refusal for what a project that does not exist cannot keep, a
+    /// half-given pair, a workspace kept where none is held, and a state
+    /// nothing has come back under.
+    #[test]
+    fn a_binding_is_resolved_in_either_shape_or_kept() {
+        let pair = |credential: &str, listening: &str| {
+            BindingDraft::Own(ChannelDraft {
+                credential: credential.to_owned(),
+                listen_credential: listening.to_owned(),
+            })
+        };
+        let mut own = holding(&[]);
+        own.channels.insert(
+            Channel::Slack,
+            Binding::Own(ChannelConfig {
+                credential: Secret::new("xoxb-held".to_owned()),
+                listen_credential: Secret::new("xapp-held".to_owned()),
+            }),
+        );
+        let mut on_workspace = holding(&[]);
+        on_workspace
+            .channels
+            .insert(Channel::Slack, Binding::Workspace("T0HELD".to_owned()));
+        let nothing = no_workspaces();
+
+        let (kept, changed) = bound(&BindingDraft::Kept, Some(&own), &nothing).expect("kept");
+        assert_eq!(kept, own.channels);
+        assert!(!changed);
+        assert!(matches!(
+            bound(&BindingDraft::Kept, None, &nothing),
+            Err(Refusal::ChannelIncomplete)
+        ));
+
+        let (set, changed) =
+            bound(&pair(" xoxb-new ", " xapp-new "), Some(&own), &nothing).expect("set");
+        assert!(changed);
+        let config = set
+            .get(&Channel::Slack)
+            .and_then(Binding::own)
+            .expect("an app of its own");
+        assert_eq!(config.credential.expose(), "xoxb-new", "trimmed");
+        assert_eq!(config.listen_credential.expose(), "xapp-new", "trimmed");
+        let (_, changed) =
+            bound(&pair("xoxb-held", "xapp-held"), Some(&own), &nothing).expect("the pair held");
+        assert!(!changed, "the pair held, pasted again, is no change");
+        assert!(matches!(
+            bound(&pair("xoxb-new", " "), Some(&own), &nothing),
+            Err(Refusal::ChannelIncomplete)
+        ));
+
+        let keep_workspace = BindingDraft::Workspace { arrival: None };
+        let (kept, changed) = bound(&keep_workspace, Some(&on_workspace), &nothing).expect("kept");
+        assert_eq!(kept, on_workspace.channels);
+        assert!(!changed);
+        assert!(
+            matches!(
+                bound(&keep_workspace, Some(&own), &nothing),
+                Err(Refusal::ChannelIncomplete)
+            ),
+            "an app of its own is no workspace to keep"
+        );
+        assert!(matches!(
+            bound(&keep_workspace, None, &nothing),
+            Err(Refusal::ChannelIncomplete)
+        ));
+
+        let arrived = BindingDraft::Workspace {
+            arrival: Some("f00d".to_owned()),
+        };
+        let back = workspace_came_back("T0HELD");
+        let (set, changed) = bound(&arrived, Some(&own), &back).expect("came back");
+        assert_eq!(
+            set.get(&Channel::Slack),
+            Some(&Binding::Workspace("T0HELD".to_owned()))
+        );
+        assert!(changed, "moved from an app of its own");
+        let (_, changed) = bound(&arrived, Some(&on_workspace), &back).expect("came back");
+        assert!(!changed, "the workspace it holds, come back again");
+        let (_, changed) = bound(&arrived, None, &back).expect("a new project on it");
+        assert!(changed);
+        assert!(matches!(
+            bound(&arrived, None, &nothing),
+            Err(Refusal::WorkspaceArrivalUnknown)
+        ));
+        let not_back: crate::workspaces::Begun = [(
+            "f00d".to_owned(),
+            crate::workspaces::Install {
+                channel: Channel::Slack,
+                workspace: None,
+            },
+        )]
+        .into();
+        assert!(
+            matches!(
+                bound(&arrived, None, &not_back),
+                Err(Refusal::WorkspaceArrivalUnknown)
+            ),
+            "minted, and not back yet"
+        );
     }
 
     /// Both credentials bind, trimmed, and anything less is refused.
@@ -1908,6 +2178,38 @@ mod tests {
             let shown = format!("{request:?}");
             assert!(shown.contains(name), "{shown}");
         }
+    }
+
+    /// The requests a binding's form asks name what was asked and never
+    /// what buys something: a pair checked for the panel shows neither
+    /// token, and an arrival asked about does not show its state.
+    #[test]
+    fn a_binding_request_names_what_was_asked_and_never_what_buys_something() {
+        use super::Request;
+
+        let shown = format!(
+            "{:?}",
+            Request::WorkspaceArrived {
+                channel: "slack".to_owned(),
+                state: "f00df00df00d".to_owned(),
+            }
+        );
+        assert!(shown.contains("WorkspaceArrived"), "{shown}");
+        assert!(shown.contains("slack"), "{shown}");
+        assert!(!shown.contains("f00df00df00d"), "{shown}");
+        let shown = format!(
+            "{:?}",
+            Request::Binds {
+                project: Some("p".to_owned()),
+                binding: ChannelDraft {
+                    credential: "xoxb-not-a-real-token".to_owned(),
+                    listen_credential: "xapp-not-a-real-token".to_owned(),
+                },
+            }
+        );
+        assert!(shown.contains("Binds"), "{shown}");
+        assert!(!shown.contains("xoxb-not-a-real-token"), "{shown}");
+        assert!(!shown.contains("xapp-not-a-real-token"), "{shown}");
     }
 
     /// A job is found on its own project and on no other.

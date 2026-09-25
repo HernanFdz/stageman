@@ -23,13 +23,13 @@ use stageman_core::{
 use stageman_instance::{Instance, Request, Response};
 use stageman_wire::Refusal;
 
-use crate::dashboard::{a_draft, ask, count};
+use crate::dashboard::{a_draft, a_draft_on_its_own_app, ask, count};
 use crate::signals::{call, text_of};
 use crate::simulation::{Simulation, job, project, seed, watching, watching_a_channel};
 
 /// The identifier the simulated platform answers an install's exchange
 /// with, and the workspace every fixture here is on.
-const TEAM: &str = "T0TEAM";
+pub const TEAM: &str = "T0TEAM";
 /// The second project's identifier.
 const SECOND: u128 = 2;
 /// The third project's identifier, on the other workspace.
@@ -37,7 +37,7 @@ const THIRD: u128 = 3;
 
 /// The instance's app, installed on the fixture's workspace and, where
 /// asked, on a second.
-fn the_app(second_workspace: bool) -> ChannelApp {
+pub fn the_app(second_workspace: bool) -> ChannelApp {
     let mut workspaces = BTreeMap::from([(
         TEAM.to_owned(),
         Workspace {
@@ -68,7 +68,7 @@ fn the_app(second_workspace: bool) -> ChannelApp {
 /// of its own, with a foreman room and its one job in a room, on the
 /// instance's app; and, where asked, a second project on the same
 /// workspace and a third on another.
-fn on_the_shared_app(second: bool, third: bool) -> State {
+pub fn on_the_shared_app(second: bool, third: bool) -> State {
     let mut state = watching(&[(job(1), Progress::Idle(Waiting::Silent))]);
     state.channel_apps.insert(Channel::Slack, the_app(third));
     let first = state.projects.get_mut(&project()).expect("the project");
@@ -134,7 +134,7 @@ fn foremen_working(instance: &Instance) -> Vec<String> {
 
 /// A press on Install on a workspace and the tab back with a code: the
 /// workspace kept, and whatever listening follows.
-fn installs(sim: &mut Simulation, instance: &mut Instance, id: u64, code: &str) {
+pub fn installs(sim: &mut Simulation, instance: &mut Instance, id: u64, code: &str) {
     let Response::InstallLink(minted) = ask(
         sim,
         instance,
@@ -731,8 +731,7 @@ fn an_app_of_a_projects_own_already_heard_with_is_refused_when_checked() {
     sim.holding(&on_the_shared_app(false, false));
     let mut instance = sim.wake(seed(1));
     sim.run_until(&mut instance, 5_000);
-    let mut draft = a_draft("burrow");
-    draft.channel.credential = "xoxb-acme".to_owned();
+    let draft = a_draft_on_its_own_app("burrow", "xoxb-acme");
     assert_eq!(
         ask(&mut sim, &mut instance, 1, Request::Create { draft }),
         Response::Refused(Refusal::ChannelRefused {
@@ -740,8 +739,7 @@ fn an_app_of_a_projects_own_already_heard_with_is_refused_when_checked() {
             why: "it is already the instance's own app, installed on Acme".to_owned(),
         })
     );
-    let mut draft = a_draft("burrow");
-    draft.channel.credential = "xoxb-burrow".to_owned();
+    let draft = a_draft_on_its_own_app("burrow", "xoxb-burrow");
     let Response::Projects(shown) = ask(&mut sim, &mut instance, 2, Request::Create { draft })
     else {
         panic!("an app of its own is kept");

@@ -1027,6 +1027,10 @@ fn a_project_has_a_settings_page_and_a_new_one_is_that_page_empty() {
     assert!(fresh.contains("200 OK"), "{fresh}");
     assert!(fresh.contains("New project"), "{fresh}");
     assert!(
+        fresh.contains("Not chosen yet."),
+        "the Slack sentence says nothing is chosen yet, on the server too: {fresh}"
+    );
+    assert!(
         !fresh.contains("no project has the identifier"),
         "the static address was taken for an identifier: {fresh}"
     );
@@ -1046,6 +1050,10 @@ fn a_project_has_a_settings_page_and_a_new_one_is_that_page_empty() {
     assert!(
         settings.contains("asking GitHub…"),
         "the box waits on the listing, which only the browser asks for: {settings}"
+    );
+    assert!(
+        settings.contains("Through an app of its own."),
+        "the Slack sentence says the shape the project holds, on the server too: {settings}"
     );
     // A text area's value is its text and not an attribute, so a box the
     // server rendered from an attribute alone arrives empty. The kit's

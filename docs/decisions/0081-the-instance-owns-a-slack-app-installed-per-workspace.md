@@ -155,7 +155,13 @@ workspace and then by the room it was said in.**
   its own is set in a panel of two boxes, checked there, and never shown
   back. Creating and amending are one form, so a project written before
   this record can be moved onto the instance's app from its settings, and
-  back. Every project still needs a binding, per 0059, in either shape. A
+  back. A move moves nothing on the platform: the rooms the old app made
+  or was invited to — the foreman's, a live job's, a watched one — keep
+  their names and their members, so the new app is invited into them by a
+  person, as into any room. A foreman's room is named once per project, so
+  a fresh one for the new app would collide with the old one's name, which
+  an archived room keeps for ever. Every project still needs a binding,
+  per 0059, in either shape. A
   job's handout carries the workspace's bot token exactly as it carries a
   binding's own today, and the app-level token never enters a container,
   whichever app it belongs to.

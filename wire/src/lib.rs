@@ -248,9 +248,11 @@ pub struct Project {
     /// and `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`. None only for a project the last release wrote without a
     /// token.
     pub access: Option<AccessView>,
-    /// The channels bound to it. Empty is valid: a project with nowhere to
-    /// escalate can still run work that never needs to ask.
-    pub channels: Vec<String>,
+    /// How it talks on Slack, in one of two shapes — see
+    /// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+    /// None only for a project the last release wrote without a binding,
+    /// which can start no job until one is set.
+    pub binding: Option<BindingView>,
     /// The variables its jobs are given: names and notes, and never values.
     pub variables: Vec<Variable>,
     /// What its operator wrote for its foreman, as the form edits it.
@@ -315,6 +317,59 @@ pub enum AccessView {
         /// The account it is on.
         account: String,
     },
+}
+
+/// How a project talks on Slack, as a page may know it.
+///
+/// Through a workspace of the app the instance owns, or through an app of
+/// its own — see
+/// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+/// Never a credential: an app of its own is named by where it speaks, once
+/// the channel has said.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "shape", rename_all = "snake_case")]
+pub enum BindingView {
+    /// An app of the project's own.
+    Own {
+        /// Where it speaks, as the channel said its workspace is: an
+        /// address a person can open, once the connection has been told.
+        url: Option<String>,
+    },
+    /// A workspace of the app the instance owns.
+    Workspace {
+        /// Its identifier on the platform.
+        id: String,
+        /// Its name, for a person.
+        name: String,
+    },
+}
+
+/// Whether the workspace a form's tab went out to install on has come back.
+///
+/// Under the state the tab carried: what the form asks on every tick while
+/// its tab is out, and moves onto once it has — see
+/// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "arrived", rename_all = "snake_case")]
+pub enum WorkspaceArrival {
+    /// The tab has not come back yet.
+    NotYet,
+    /// It has, and the workspace is kept beside the app.
+    Installed {
+        /// Its identifier on the platform.
+        id: String,
+        /// Its name, for a person.
+        name: String,
+    },
+}
+
+/// What a pair of tokens for an app of a project's own was found to be
+/// when the form's panel checked it: accepted, and where it speaks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Bound {
+    /// Where the app speaks, as the channel said its workspace is: an
+    /// address a person can open.
+    pub url: String,
 }
 
 /// Where a person installs the App, minted for one press — see
@@ -554,6 +609,10 @@ pub struct Watching {
     /// installation through the tab it opened — see
     /// `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
     pub app_registered: bool,
+    /// Whether a Slack app is registered on this instance, which is what
+    /// makes installing it on a workspace possible from the form — see
+    /// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+    pub slack_app_registered: bool,
 }
 
 /// Where the platforms' own forms are, filled in as this project would
@@ -651,11 +710,13 @@ pub struct Choice {
     pub name: String,
 }
 
-/// The boxes that bind a channel, travelling together.
+/// The two boxes an app of a project's own is set in, travelling together.
 ///
-/// Both filled binds a channel, and creating a project needs one: anything
-/// less is refused, and that rule is written in one place, on the instance.
-/// Amending never offers them.
+/// Both filled binds a channel, and anything less is refused, a rule
+/// written in one place, on the instance. Since
+/// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`
+/// one of [`BindingDraft`]'s two shapes, checked in the form's panel before
+/// the form moves onto it and checked again when the form is saved.
 #[derive(Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ChannelDraft {
     /// What speaks on that channel.
@@ -673,6 +734,65 @@ impl fmt::Debug for ChannelDraft {
             .field("credential", &"<redacted>")
             .field("listen_credential", &"<redacted>")
             .finish()
+    }
+}
+
+/// How a project talks on Slack, as the form says it: one of two shapes,
+/// or what the project already holds — see
+/// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+///
+/// The shape is what the form's Slack card is: a sentence saying which
+/// the project is in, with the actions inline, on the pattern the GitHub
+/// card set. A workspace is named by the state its install came back
+/// under, never by its identifier, so a form can name only what its own
+/// tab brought back, as an installation of the App is named.
+#[derive(Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "shape", rename_all = "snake_case")]
+pub enum BindingDraft {
+    /// Whatever the project holds, unchanged. Refused for a project that
+    /// does not exist yet, which holds nothing.
+    #[default]
+    Kept,
+    /// An app of the project's own, both tokens pasted.
+    Own(ChannelDraft),
+    /// A workspace of the app the instance owns.
+    Workspace {
+        /// The state the install came back under, or none for the
+        /// workspace the project holds.
+        arrival: Option<String>,
+    },
+}
+
+impl fmt::Debug for BindingDraft {
+    /// Names the shape, and neither the tokens, which redact themselves,
+    /// nor the state, which buys a workspace for whoever holds it.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Kept => f.write_str("Kept"),
+            Self::Own(pair) => f.debug_tuple("Own").field(pair).finish(),
+            Self::Workspace { arrival } => f
+                .debug_struct("Workspace")
+                .field("arrival", &arrival.as_ref().map(|_| "<redacted>"))
+                .finish(),
+        }
+    }
+}
+
+impl BindingDraft {
+    /// Whether this says how the project talks: something new in either
+    /// shape, or what the project holds where there is a project to hold
+    /// it.
+    #[must_use]
+    pub fn is_settled(&self, filling: &Filling) -> bool {
+        match self {
+            Self::Kept | Self::Workspace { arrival: None } => !filling.creating(),
+            Self::Own(pair) => {
+                !pair.credential.trim().is_empty() && !pair.listen_credential.trim().is_empty()
+            }
+            Self::Workspace {
+                arrival: Some(state),
+            } => !state.trim().is_empty(),
+        }
     }
 }
 
@@ -743,8 +863,8 @@ pub struct Draft {
     /// How its repository is reached, in one of two shapes, with the
     /// repository inside the shape.
     pub access: AccessDraft,
-    /// Where this project's conversation happens, if anywhere.
-    pub channel: ChannelDraft,
+    /// How it talks on Slack: one of two shapes, or what it holds.
+    pub binding: BindingDraft,
     /// What its jobs are given that this project never reads.
     pub variables: Vec<VariableDraft>,
     /// What its foreman is told every turn, in the operator's words. Empty
@@ -761,7 +881,7 @@ impl fmt::Debug for Draft {
             .field("foreman", &self.foreman)
             .field("kits", &self.kits)
             .field("access", &self.access)
-            .field("channel", &self.channel)
+            .field("binding", &self.binding)
             .field("variables", &self.variables)
             .field("brief", &self.brief)
             .finish()
@@ -865,11 +985,15 @@ impl Draft {
                 "Two kits share a name, and a name has to pick one out.",
             );
         }
-        if filling.creating()
-            && (self.channel.credential.trim().is_empty()
-                || self.channel.listen_credential.trim().is_empty())
-        {
-            problem(Part::Channel, "It needs both Slack tokens.");
+        if !self.binding.is_settled(filling) {
+            problem(
+                Part::Channel,
+                if matches!(self.binding, BindingDraft::Own(_)) {
+                    "It needs both Slack tokens."
+                } else {
+                    "Choose how it talks on Slack."
+                },
+            );
         }
         for (position, row) in self.variables.iter().enumerate() {
             if row.name.trim().is_empty() {
@@ -1191,8 +1315,19 @@ pub enum Refusal {
     #[error("a project needs at least one kit its jobs can run on")]
     KitsMissing,
     /// A project was drafted without a whole channel binding.
-    #[error("a project needs a Slack bot token and an app-level token")]
+    #[error(
+        "a project needs a Slack binding: a workspace of the app this instance owns, or a bot \
+         token and an app-level token of its own"
+    )]
     ChannelIncomplete,
+    /// A project names a workspace by a state no install has come back
+    /// under: the tab has not come back, or the instance has started since
+    /// — see `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+    #[error(
+        "no workspace has come back for this form, or it came back before the instance last \
+         started: press Install on a workspace again"
+    )]
+    WorkspaceArrivalUnknown,
     /// The platform would not have the token, or could not see the
     /// repository with it — see
     /// `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`.
@@ -1446,6 +1581,7 @@ impl Refusal {
             | Self::VariableRepeated { .. }
             | Self::VariableValueMissing
             | Self::ChannelIncomplete
+            | Self::WorkspaceArrivalUnknown
             | Self::ChannelAppIncomplete
             | Self::NoSuchWorkspace { .. }
             | Self::TokenRefused { .. }
@@ -1486,7 +1622,7 @@ impl Refusal {
             },
             Self::RepositoryRefused { .. } | Self::NotReached { .. } => Some(Part::Repository),
             Self::KitsMissing | Self::KitNameTaken { .. } => Some(Part::Kits),
-            Self::ChannelIncomplete => Some(Part::Channel),
+            Self::ChannelIncomplete | Self::WorkspaceArrivalUnknown => Some(Part::Channel),
             Self::TokenRefused { .. }
             | Self::TokenUnchecked { .. }
             | Self::NoSuchInstallation { .. }
@@ -1532,9 +1668,17 @@ impl Refusal {
 #[cfg(test)]
 mod tests {
     use super::{
-        AccessDraft, ChannelDraft, Draft, Filling, Fitted, InstallLink, KitDraft, Reached, Refusal,
-        Repository, Standing, Through, VariableDraft, distinct, titled,
+        AccessDraft, BindingDraft, ChannelDraft, Draft, Filling, Fitted, InstallLink, KitDraft,
+        Reached, Refusal, Repository, Standing, Through, VariableDraft, distinct, titled,
     };
+
+    /// A binding of the project's own, with its two boxes as given.
+    fn own(credential: &str, listening: &str) -> BindingDraft {
+        BindingDraft::Own(ChannelDraft {
+            credential: credential.to_owned(),
+            listen_credential: listening.to_owned(),
+        })
+    }
 
     /// A job started by hand with no title is titled by the first words of
     /// its work, and the form shows the same words as the default.
@@ -1575,10 +1719,7 @@ mod tests {
                 token: Some("ghp-not-a-real-token".to_owned()),
                 repository: Some(aviary()),
             },
-            channel: ChannelDraft {
-                credential: "xoxb-not-a-real-token".to_owned(),
-                listen_credential: "xapp-not-a-real-token".to_owned(),
-            },
+            binding: own("xoxb-not-a-real-token", "xapp-not-a-real-token"),
             brief: String::new(),
             variables: vec![VariableDraft {
                 name: "STRIPE_API_KEY".to_owned(),
@@ -1724,7 +1865,7 @@ mod tests {
         );
 
         assert!(
-            !without(|draft| draft.channel.credential.clear())
+            !without(|draft| draft.binding = own("", "xapp-not-a-real-token"))
                 .is_complete(&Filling::Creating, NOTHING_HELD),
             "the Slack binding is still required"
         );
@@ -1783,36 +1924,66 @@ mod tests {
         assert!(!renamed.is_complete(&amending(), &["STRIPE_API_KEY".to_owned()],));
     }
 
-    /// Amending never offers a channel, so whatever is left in those boxes
-    /// must not make the control unavailable.
+    /// Amending keeps the binding the project holds, and the workspace it
+    /// holds, without either being said again; an app of its own set
+    /// while amending still needs both boxes.
     #[test]
-    fn amending_ignores_the_channel_boxes_entirely() {
+    fn amending_keeps_the_binding_the_project_holds() {
         assert!(
-            without(|draft| draft.channel.listen_credential.clear())
+            without(|draft| draft.binding = BindingDraft::Kept)
                 .is_complete(&amending(), NOTHING_HELD,)
         );
         assert!(
-            without(|draft| draft.channel.credential.clear())
+            without(|draft| draft.binding = BindingDraft::Workspace { arrival: None })
+                .is_complete(&amending(), NOTHING_HELD,)
+        );
+        assert!(
+            !without(|draft| draft.binding = own("xoxb-not-a-real-token", ""))
                 .is_complete(&amending(), NOTHING_HELD,)
         );
     }
 
-    /// A project is created with a whole channel binding, and any part of
-    /// one missing is the mistake worth catching on the screen — see
-    /// `docs/decisions/0059-a-project-speaks-and-listens-on-slack-always.md`.
+    /// A project is created with a whole binding, in either shape: an app
+    /// of its own with both tokens, or a workspace its tab brought back;
+    /// nothing chosen, or what a project that does not exist holds, is the
+    /// mistake worth catching on the screen — see
+    /// `docs/decisions/0059-a-project-speaks-and-listens-on-slack-always.md`
+    /// and `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
     #[test]
-    fn a_channel_is_required_whole() {
+    fn a_binding_is_required_whole_in_either_shape() {
+        for unsettled in [
+            BindingDraft::Kept,
+            own("", ""),
+            own("", "xapp-not-a-real-token"),
+            own("xoxb-not-a-real-token", " "),
+            BindingDraft::Workspace { arrival: None },
+            BindingDraft::Workspace {
+                arrival: Some(" ".to_owned()),
+            },
+        ] {
+            let mut drafted = filled();
+            drafted.binding = unsettled.clone();
+            assert!(
+                !drafted.is_complete(&Filling::Creating, NOTHING_HELD),
+                "{unsettled:?}"
+            );
+            let said = drafted
+                .problems(&Filling::Creating, NOTHING_HELD)
+                .into_iter()
+                .find(|problem| problem.part == super::Part::Channel)
+                .map(|problem| problem.why);
+            let expected = if matches!(unsettled, BindingDraft::Own(_)) {
+                "It needs both Slack tokens."
+            } else {
+                "Choose how it talks on Slack."
+            };
+            assert_eq!(said.as_deref(), Some(expected), "{unsettled:?}");
+        }
         assert!(
-            !without(|draft| draft.channel = ChannelDraft::default())
-                .is_complete(&Filling::Creating, NOTHING_HELD,)
-        );
-        assert!(
-            !without(|draft| draft.channel.credential.clear())
-                .is_complete(&Filling::Creating, NOTHING_HELD,)
-        );
-        assert!(
-            !without(|draft| draft.channel.listen_credential.clear())
-                .is_complete(&Filling::Creating, NOTHING_HELD,)
+            without(|draft| draft.binding = BindingDraft::Workspace {
+                arrival: Some("f00d".to_owned())
+            })
+            .is_complete(&Filling::Creating, NOTHING_HELD)
         );
     }
 
@@ -1831,7 +2002,7 @@ mod tests {
             fitted: as_it_comes(),
         });
         draft.variables.push(VariableDraft::default());
-        draft.channel.listen_credential.clear();
+        draft.binding = own("xoxb-not-a-real-token", "");
 
         let problems = draft.problems(&Filling::Creating, NOTHING_HELD);
         let parts: Vec<Part> = problems.iter().map(|problem| problem.part).collect();
@@ -2006,7 +2177,7 @@ mod tests {
         assert!(!draft.is_complete(&Filling::Creating, NOTHING_HELD));
 
         let mut draft = filled();
-        draft.channel.listen_credential = "  ".to_owned();
+        draft.binding = own("xoxb-not-a-real-token", "  ");
         assert!(!draft.is_complete(&Filling::Creating, NOTHING_HELD,));
     }
 
@@ -2085,6 +2256,21 @@ mod tests {
             shown.contains("ChannelDraft") && shown.contains("<redacted>"),
             "the binding is named, with its credentials redacted rather than dropped: {shown}"
         );
+    }
+
+    /// A draft on a workspace names its shape and never the state its
+    /// install came back under, which buys the workspace for whoever holds
+    /// it, as an installation's does.
+    #[test]
+    fn a_workspace_drafts_state_does_not_render() {
+        let mut draft = filled();
+        draft.binding = BindingDraft::Workspace {
+            arrival: Some("f00df00df00d".to_owned()),
+        };
+        let shown = format!("{draft:?}");
+        assert!(shown.contains("Workspace"), "{shown}");
+        assert!(!shown.contains("f00df00df00d"), "{shown}");
+        assert_eq!(format!("{:?}", BindingDraft::Kept), "Kept");
     }
 
     /// A kit row needs a name and a description, and two rows cannot share
@@ -2324,7 +2510,7 @@ mod tests {
             foreman: as_it_comes(),
             kits: vec![default_kit()],
             access: None,
-            channels: Vec::new(),
+            binding: None,
             variables: Vec::new(),
             brief: String::new(),
             watched: Vec::new(),

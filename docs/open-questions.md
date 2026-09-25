@@ -345,6 +345,20 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   own is what a domain-hosted instance holding several people's projects
   does, and that instance has the address the checklist wants.
 
+- **Should a project moved to another Slack app bring its rooms along?**
+  `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`
+  lets a project move between an app of its own and the instance's app,
+  and a move moves nothing on the platform: the new app's bot is in none
+  of the rooms the old one made or was invited to, so until a person
+  invites it, the foreman's transcript fails to post, a live job's room
+  hears nothing, and a watched room sends no signal. The old app is still
+  installed and still in those rooms at the moment of the move, and its
+  token has the scope that invites, so it could invite the new bot into
+  each of them itself, within one workspace. Settled by measuring whether
+  the platform lets one app's bot invite another app's bot user; if it
+  does, the move invites, and the README's sentence about inviting by hand
+  goes.
+
 - **Should an agent's credential be checked before it is kept?**
   `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`
   checks a project's three credentials against their platforms at the form

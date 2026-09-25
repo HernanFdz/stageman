@@ -709,12 +709,21 @@ impl Running {
     /// project's own that would make a second connection on one app, per
     /// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`:
     /// the platform hands each event to one connection, so the second
-    /// would hear half of what is said.
+    /// would hear half of what is said. A project's own app heard again for
+    /// that project is not another's, which is what `except` says.
     #[must_use]
-    pub fn already_heard_as(&self, channel: Channel, us: &Identity) -> Option<String> {
+    pub fn already_heard_as(
+        &self,
+        channel: Channel,
+        us: &Identity,
+        except: Option<ProjectId>,
+    ) -> Option<String> {
         self.listeners
             .iter()
             .filter(|(_, listener)| listener.channel == channel)
+            .filter(
+                |(listening, _)| !matches!(listening, Listening::Own(own) if Some(*own) == except),
+            )
             .find_map(|(listening, listener)| {
                 let (team, _) = listener
                     .voices

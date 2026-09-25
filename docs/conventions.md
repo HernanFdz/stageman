@@ -1023,7 +1023,11 @@ justify is usually obsolete.
   the project is in, or that none is chosen, and offers what can be done
   about it as links in the sentence — install the App, use a token,
   replace it — rather than a row of buttons for the shapes and another
-  for the actions. A row of buttons is right where choosing is the whole
+  for the actions. The Slack card's binding is another since
+  `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`,
+  on the same pattern: install the instance's app on a workspace, use an
+  app of its own, go back; an app of its own is set in a panel of two
+  boxes, checked there, and never shown back. A row of buttons is right where choosing is the whole
   of it, as it is for a model or an effort; a shape here is never chosen
   by itself, since each is entered by an action of its own, and a
   sentence carries the shape and the action together. The line under the

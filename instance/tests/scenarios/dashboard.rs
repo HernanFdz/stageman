@@ -7,8 +7,8 @@ use stageman_core::{Agent, JobId, Outcome, Progress, ProjectId, Timestamp, Uuid,
 use stageman_instance::{Instance, Request, Response};
 use stageman_platform::Call as PlatformCall;
 use stageman_wire::{
-    AccessDraft, AccessView, ChannelDraft, Draft, Ending, Fitted, KitDraft, Refusal, Repository,
-    Standing,
+    AccessDraft, AccessView, BindingDraft, BindingView, ChannelDraft, Draft, Ending, Fitted,
+    KitDraft, Refusal, Repository, Standing,
 };
 
 /// A repository on the fixture's account, as a form names it.
@@ -60,13 +60,25 @@ pub fn a_draft(name: &str) -> Draft {
             token: Some("ghp-not-a-real-token".to_owned()),
             repository: Some(repo("example", name)),
         },
-        channel: ChannelDraft {
+        binding: BindingDraft::Own(ChannelDraft {
             credential: "xoxb-not-a-real-token".to_owned(),
             listen_credential: "xapp-not-a-real-token".to_owned(),
-        },
+        }),
         brief: String::new(),
         variables: Vec::new(),
     }
+}
+
+/// A draft bound to an app of its own with the bot token given: what a
+/// second project on an app of its own needs, since one already listened
+/// to is refused.
+pub fn a_draft_on_its_own_app(name: &str, credential: &str) -> Draft {
+    let mut draft = a_draft(name);
+    draft.binding = BindingDraft::Own(ChannelDraft {
+        credential: credential.to_owned(),
+        listen_credential: "xapp-not-a-real-token".to_owned(),
+    });
+    draft
 }
 
 /// Where in the trace a line first mentions something.
@@ -263,11 +275,7 @@ fn creating_a_project_listens_on_its_channel_once_the_record_has_landed() {
     let mut instance = sim.wake(seed(1));
     assert_eq!(sim.listening(), 0, "the one project has no channel");
 
-    let mut draft = a_draft("burrow");
-    draft.channel = ChannelDraft {
-        credential: "xoxb-not-a-real-token".to_owned(),
-        listen_credential: "xapp-not-a-real-token".to_owned(),
-    };
+    let draft = a_draft_on_its_own_app("burrow", "xoxb-not-a-real-token");
     let writes_before = count(&sim, "-> Write");
     let Response::Projects(shown) = ask(&mut sim, &mut instance, 1, Request::Create { draft })
     else {
@@ -279,7 +287,11 @@ fn creating_a_project_listens_on_its_channel_once_the_record_has_landed() {
         .iter()
         .find(|project| project.name == "burrow")
         .expect("the new project");
-    assert_eq!(burrow.channels, vec!["Slack".to_owned()]);
+    assert!(
+        matches!(burrow.binding, Some(BindingView::Own { .. })),
+        "{:?}",
+        burrow.binding
+    );
     assert_eq!(
         burrow.access,
         Some(AccessView::Token {
@@ -880,8 +892,7 @@ fn the_same_requests_leave_the_same_trace() {
         sim.holding(&watching_a_channel(&[]));
         let mut instance = sim.wake(seed(9));
         // An app of its own, since one already listened to is refused.
-        let mut draft = a_draft("burrow");
-        draft.channel.credential = "xoxb-burrow".to_owned();
+        let draft = a_draft_on_its_own_app("burrow", "xoxb-burrow");
         ask(&mut sim, &mut instance, 1, Request::Create { draft });
         ask(
             &mut sim,

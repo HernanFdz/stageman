@@ -20,7 +20,7 @@ use stageman_core::{Channel, Workspace};
 use stageman_vocabulary::{
     Answer, Arrival, Bytes, Effect as Generic, EffectId, RequestId, Responded,
 };
-use stageman_wire::{InstallLink, Refusal};
+use stageman_wire::{InstallLink, Refusal, WorkspaceArrival};
 
 use crate::apps::parameter;
 use crate::checks::CHECKED_WITHIN;
@@ -113,6 +113,18 @@ pub struct Install {
 /// Installs begun, by the state their link carried, oldest first: what a
 /// page asks by once its tab has come back.
 pub type Begun = VecDeque<(String, Install)>;
+
+/// The workspace that came back under a state, if one has: what a draft
+/// names a workspace by, since a form can name only what its own tab
+/// brought back — see
+/// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+#[must_use]
+pub fn workspace_arrived(begun: &Begun, state: &str) -> Option<String> {
+    begun
+        .iter()
+        .find(|(minted, _)| minted == state)
+        .and_then(|(_, install)| install.workspace.clone())
+}
 
 /// One exchange being answered: the browser's request held, which
 /// channel, and the state the tab came back under, if any.
@@ -404,6 +416,46 @@ impl Running {
         }
         self.dirty = true;
         Ok(Response::Apps(self.apps()))
+    }
+
+    /// Whether the workspace a form's tab went out to install on has come
+    /// back under the state the tab carried, and which it is: what the
+    /// form asks on every tick while its tab is out.
+    ///
+    /// # Errors
+    ///
+    /// Fails if no install was begun under that state on that channel, or
+    /// if the workspace that came back is no longer held.
+    pub fn workspace_arrival(
+        &self,
+        channel: Channel,
+        state: &str,
+    ) -> Result<WorkspaceArrival, Refusal> {
+        let install = self
+            .workspaces_begun
+            .iter()
+            .find(|(minted, install)| minted == state && install.channel == channel)
+            .map(|(_, install)| install)
+            .ok_or(Refusal::WorkspaceArrivalUnknown)?;
+        let Some(team) = &install.workspace else {
+            return Ok(WorkspaceArrival::NotYet);
+        };
+        let workspace = self
+            .state
+            .channel_apps
+            .get(&channel)
+            .and_then(|app| app.workspaces.get(team))
+            .ok_or_else(|| Refusal::NoSuchWorkspace { id: team.clone() })?;
+        Ok(WorkspaceArrival::Installed {
+            id: team.clone(),
+            name: workspace.name.clone(),
+        })
+    }
+
+    /// A draft named a workspace by its state and was kept: the state is
+    /// spent, so that no second form can name the same arrival.
+    pub fn spend_workspace_arrival(&mut self, state: &str) {
+        self.workspaces_begun.retain(|(minted, _)| minted != state);
     }
 
     /// Forgets everything held for the app's workspaces: what a forget of

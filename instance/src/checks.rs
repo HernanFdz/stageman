@@ -24,12 +24,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use stageman_channel::{ChannelError, Identity};
-use stageman_core::{Access, Channel, Platform, RepositoryAddress, Secret};
+use stageman_core::{Access, Channel, ChannelConfig, Platform, RepositoryAddress, Secret};
 use stageman_platform::{Owned, PlatformError};
 use stageman_vocabulary::{Bytes, Effect as Generic, EffectId, Responded};
 use stageman_wire::Refusal;
 
-use crate::requests::{Drafted, Request, Response, drafted};
+use crate::requests::{Drafted, Request, Response, binding, drafted};
 use crate::views;
 use crate::vocabulary::{AppEffect, RequestId};
 use crate::{Effect, Running};
@@ -55,6 +55,11 @@ pub struct Held {
     /// token when the request is answered — see
     /// `docs/decisions/0080-a-tokens-owner-and-expiry-are-kept-beside-it.md`.
     learned: Option<Owned>,
+    /// Who the channel said this instance is with a speaking credential,
+    /// once it has: what a pair checked for the form's panel is answered
+    /// with — see
+    /// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+    spoken: Option<Identity>,
 }
 
 /// What one check is of.
@@ -184,6 +189,7 @@ impl Running {
                 outstanding,
                 refused: None,
                 learned: None,
+                spoken: None,
             },
         );
         Ok(true)
@@ -192,7 +198,7 @@ impl Running {
     /// The checks a request needs, each with the request that makes it.
     fn checks_for(&self, request: &Request) -> Result<Vec<(Check, Asking)>, Refusal> {
         let resolved = match request {
-            Request::Create { draft } => drafted(draft, None, &self.begun)?,
+            Request::Create { draft } => drafted(draft, None, &self.begun, &self.workspaces_begun)?,
             Request::Amend { project, draft } => {
                 let identifier = views::identify(&self.state, project)?;
                 let watched = self.state.projects.get(&identifier).ok_or_else(|| {
@@ -200,7 +206,15 @@ impl Running {
                         id: project.clone(),
                     }
                 })?;
-                drafted(draft, Some(watched), &self.begun)?
+                drafted(draft, Some(watched), &self.begun, &self.workspaces_begun)?
+            }
+            // A pair for an app of a project's own, checked for the form's
+            // panel and kept nowhere: both credentials, as a draft's are.
+            Request::Binds { binding: pair, .. } => {
+                let bound = binding(pair)?;
+                return Ok(own_checks(
+                    bound.iter().map(|(channel, config)| (*channel, config)),
+                ));
             }
             // The app-level token of an app the instance owns, asked where
             // to connect, as a binding's is; the client pair cannot be
@@ -289,26 +303,37 @@ impl Running {
         let Some((request, check)) = self.checks.remove(&id) else {
             return false;
         };
+        // Whose own app is not another's: the project being amended, or
+        // the one a panel checks a pair for.
+        let except = self
+            .checking
+            .get(&request)
+            .and_then(|held| match &held.request {
+                Request::Amend { project, .. }
+                | Request::Binds {
+                    project: Some(project),
+                    ..
+                } => views::identify(&self.state, project).ok(),
+                _ => None,
+            });
         let outcome = match verdict(&check, responded) {
-            Ok(Learned::Nothing) => Ok(None),
-            Ok(Learned::Owner(learned)) => Ok(Some(learned)),
             // A binding of a project's own whose bot another listener
             // already hears with is refused on the speaking box, naming
             // whose it is: a second connection on one app hears half of
             // what is said.
             Ok(Learned::Identity(us)) => match &check {
-                Check::Speaking { channel } => {
-                    self.already_heard_as(*channel, &us)
-                        .map_or(Ok(None), |whose| {
-                            Err(Refusal::ChannelRefused {
-                                listening: false,
-                                why: format!("it is already {whose}"),
-                            })
+                Check::Speaking { channel } => self.already_heard_as(*channel, &us, except).map_or(
+                    Ok(Learned::Identity(us)),
+                    |whose| {
+                        Err(Refusal::ChannelRefused {
+                            listening: false,
+                            why: format!("it is already {whose}"),
                         })
-                }
-                _ => Ok(None),
+                    },
+                ),
+                _ => Ok(Learned::Nothing),
             },
-            Err(refusal) => Err(refusal),
+            other => other,
         };
         let Some(held) = self.checking.get_mut(&request) else {
             tracing::warn!("a credential was checked for a request no longer held; ignored");
@@ -316,8 +341,9 @@ impl Running {
         };
         held.outstanding.remove(&id);
         match outcome {
-            Ok(Some(learned)) => held.learned = Some(learned),
-            Ok(None) => {}
+            Ok(Learned::Owner(learned)) => held.learned = Some(learned),
+            Ok(Learned::Identity(us)) => held.spoken = Some(us),
+            Ok(Learned::Nothing) => {}
             Err(refusal) => {
                 if held.refused.is_none() {
                     held.refused = Some(refusal);
@@ -335,24 +361,41 @@ impl Running {
                 id: request,
                 response: Response::Refused(refusal),
             }),
-            None => self.respond(request, held.request, held.learned, effects),
+            None => self.respond(request, held.request, held.learned, held.spoken, effects),
         }
         true
     }
 }
 
 /// The checks a resolved draft's bindings need: both credentials of every
-/// binding it gives.
+/// app of its own the draft sets. Nothing for what the project already
+/// holds, which was checked when it was kept, and nothing for a workspace
+/// of the instance's app, whose tokens the instance holds.
 fn channel_checks(resolved: &Drafted) -> Vec<(Check, Asking)> {
+    if !resolved.channels_changed {
+        return Vec::new();
+    }
+    own_checks(
+        resolved
+            .channels
+            .iter()
+            .filter_map(|(channel, binding)| Some((*channel, binding.own()?))),
+    )
+}
+
+/// The checks apps of a project's own need: both credentials of each.
+fn own_checks<'a>(
+    bound: impl Iterator<Item = (Channel, &'a ChannelConfig)>,
+) -> Vec<(Check, Asking)> {
     let mut checks = Vec::new();
-    for (channel, bound) in &resolved.channels {
+    for (channel, config) in bound {
         checks.push((
-            Check::Speaking { channel: *channel },
-            stageman_channel::who_am_i(*channel, &bound.speaking()).into(),
+            Check::Speaking { channel },
+            stageman_channel::who_am_i(channel, &config.speaking()).into(),
         ));
         checks.push((
-            Check::Listening { channel: *channel },
-            stageman_channel::open_socket(*channel, &bound.listen_credential).into(),
+            Check::Listening { channel },
+            stageman_channel::open_socket(channel, &config.listen_credential).into(),
         ));
     }
     checks

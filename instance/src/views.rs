@@ -10,11 +10,13 @@ use std::collections::BTreeMap;
 
 use stageman_channel::Identity;
 use stageman_core::{
-    Access, Agent, Attending, Channel, ClaudeEffort, ClaudeModel, Inconsistent, Installation, Job,
-    JobId, Kit, Outcome, Platform, Progress, Project, ProjectId, RepositoryAddress, Room, State,
-    Timestamp, Waiting,
+    Access, Agent, Attending, Binding, Channel, ClaudeEffort, ClaudeModel, Inconsistent,
+    Installation, Job, JobId, Kit, Outcome, Platform, Progress, Project, ProjectId,
+    RepositoryAddress, Room, State, Timestamp, Waiting, Workspace,
 };
-use stageman_wire::{AccessView, Choice, Fitted, KitDraft, ModelChoice, Refusal, Shape, Standing};
+use stageman_wire::{
+    AccessView, BindingView, Choice, Fitted, KitDraft, ModelChoice, Refusal, Shape, Standing,
+};
 
 use crate::tunnel::{Domain, address};
 
@@ -314,6 +316,7 @@ pub fn projected(
     project: &Project,
     us: Option<&Identity>,
     installations: Option<&BTreeMap<u64, Installation>>,
+    workspaces: Option<&BTreeMap<String, Workspace>>,
     now: Timestamp,
 ) -> stageman_wire::Project {
     stageman_wire::Project {
@@ -345,11 +348,23 @@ pub fn projected(
             }),
             None => None,
         },
-        channels: project
+        // In either shape, never a credential: an app of its own by where
+        // it speaks once the channel has said, a workspace by its name —
+        // see `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+        binding: project
             .channels
-            .keys()
-            .map(|channel| wire_channel(*channel).to_owned())
-            .collect(),
+            .get(&Channel::Slack)
+            .map(|binding| match binding {
+                Binding::Own(_) => BindingView::Own {
+                    url: us.map(|us| us.url.clone()),
+                },
+                Binding::Workspace(team) => BindingView::Workspace {
+                    id: team.clone(),
+                    name: workspaces
+                        .and_then(|known| known.get(team))
+                        .map_or_else(|| team.clone(), |workspace| workspace.name.clone()),
+                },
+            }),
         // Names and notes, never values — see
         // `docs/decisions/0075-a-variable-says-what-it-is-for.md`.
         variables: project
@@ -392,10 +407,23 @@ pub fn watching(
         .apps
         .get(&Platform::GitHub)
         .map(|app| &app.installations);
+    let workspaces = state
+        .channel_apps
+        .get(&Channel::Slack)
+        .map(|app| &app.workspaces);
     state
         .projects
         .iter()
-        .map(|(id, project)| projected(*id, project, identities.get(id), installations, now))
+        .map(|(id, project)| {
+            projected(
+                *id,
+                project,
+                identities.get(id),
+                installations,
+                workspaces,
+                now,
+            )
+        })
         .collect()
 }
 
@@ -678,6 +706,7 @@ pub fn watching_now(
     state: &State,
     identities: &Identities,
     app_registered: bool,
+    slack_app_registered: bool,
     instance: &str,
     now: Timestamp,
 ) -> stageman_wire::Watching {
@@ -697,6 +726,7 @@ pub fn watching_now(
             app_form: stageman_channel::app_form(Channel::Slack, instance),
         },
         app_registered,
+        slack_app_registered,
     }
 }
 
@@ -970,6 +1000,7 @@ mod tests {
             watched,
             None,
             None,
+            None,
             Timestamp::UNIX_EPOCH,
         );
         assert_eq!(shown.working, 1);
@@ -1001,6 +1032,7 @@ mod tests {
         let shown = super::projected(
             ProjectId::from_uuid(Uuid::nil()),
             watched,
+            None,
             None,
             None,
             Timestamp::UNIX_EPOCH,
@@ -1109,6 +1141,7 @@ mod tests {
         let shown = super::projected(
             ProjectId::from_uuid(Uuid::nil()),
             watched,
+            None,
             None,
             None,
             Timestamp::UNIX_EPOCH,

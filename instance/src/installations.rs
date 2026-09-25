@@ -395,12 +395,16 @@ impl Running {
             .collect()
     }
 
-    /// The projects screen, saying whether an App is registered.
+    /// The projects screen, saying whether an App is registered, and
+    /// whether a Slack app is.
     pub(crate) fn projects_screen(&self) -> stageman_wire::Watching {
         views::watching_now(
             &self.state,
             &self.identities(),
             self.state.apps.contains_key(&Platform::GitHub),
+            self.state
+                .channel_apps
+                .contains_key(&stageman_core::Channel::Slack),
             &crate::tunnel::dashboard(&self.domain, self.reached),
             self.stamp(),
         )
