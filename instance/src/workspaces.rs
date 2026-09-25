@@ -370,18 +370,34 @@ impl Running {
 
     /// Forgets a workspace the app is installed on.
     ///
+    /// Refused while a project speaks through it, as an installation is
+    /// refused while a project reaches its repository through it: the
+    /// project's binding would name a workspace the app no longer holds,
+    /// which is the shape opening a file refuses.
+    ///
     /// # Errors
     ///
-    /// Fails if no app is registered on the channel, or if it is not
-    /// installed on that workspace.
+    /// Fails if no app is registered on the channel, if it is not
+    /// installed on that workspace, or if a project speaks through it.
     pub fn forget_workspace(&mut self, channel: Channel, id: &str) -> Result<Response, Refusal> {
-        let Some(app) = self.state.channel_apps.get_mut(&channel) else {
+        let Some(app) = self.state.channel_apps.get(&channel) else {
             return Err(Refusal::ChannelAppMissing {
                 channel: wire_channel(channel).to_owned(),
             });
         };
-        if app.workspaces.remove(id).is_none() {
+        if !app.workspaces.contains_key(id) {
             return Err(Refusal::NoSuchWorkspace { id: id.to_owned() });
+        }
+        let using: Vec<String> = self
+            .state
+            .bound_to(channel, id)
+            .filter_map(|project| Some(self.state.projects.get(&project)?.name.clone()))
+            .collect();
+        if !using.is_empty() {
+            return Err(Refusal::WorkspaceInUse { projects: using });
+        }
+        if let Some(app) = self.state.channel_apps.get_mut(&channel) {
+            app.workspaces.remove(id);
         }
         for disconnect in self.workspace_dropped(channel, id) {
             self.defer(disconnect);

@@ -23,7 +23,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use stageman_channel::ChannelError;
+use stageman_channel::{ChannelError, Identity};
 use stageman_core::{Access, Channel, Platform, RepositoryAddress, Secret};
 use stageman_platform::{Owned, PlatformError};
 use stageman_vocabulary::{Bytes, Effect as Generic, EffectId, Responded};
@@ -95,6 +95,18 @@ pub enum Check {
         /// Which channel.
         channel: Channel,
     },
+}
+
+/// What one check learned beyond its verdict: nothing, what the platform
+/// said of a token, or who the channel says a speaking credential is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Learned {
+    /// The credential was accepted, and that is all.
+    Nothing,
+    /// The platform said whose the token is and when it expires.
+    Owner(Owned),
+    /// The channel said who this instance is with the credential.
+    Identity(Identity),
 }
 
 /// One request to check a credential with, whichever crate rendered it.
@@ -277,7 +289,27 @@ impl Running {
         let Some((request, check)) = self.checks.remove(&id) else {
             return false;
         };
-        let outcome = verdict(&check, responded);
+        let outcome = match verdict(&check, responded) {
+            Ok(Learned::Nothing) => Ok(None),
+            Ok(Learned::Owner(learned)) => Ok(Some(learned)),
+            // A binding of a project's own whose bot another listener
+            // already hears with is refused on the speaking box, naming
+            // whose it is: a second connection on one app hears half of
+            // what is said.
+            Ok(Learned::Identity(us)) => match &check {
+                Check::Speaking { channel } => {
+                    self.already_heard_as(*channel, &us)
+                        .map_or(Ok(None), |whose| {
+                            Err(Refusal::ChannelRefused {
+                                listening: false,
+                                why: format!("it is already {whose}"),
+                            })
+                        })
+                }
+                _ => Ok(None),
+            },
+            Err(refusal) => Err(refusal),
+        };
         let Some(held) = self.checking.get_mut(&request) else {
             tracing::warn!("a credential was checked for a request no longer held; ignored");
             return true;
@@ -327,8 +359,8 @@ fn channel_checks(resolved: &Drafted) -> Vec<(Check, Asking)> {
 }
 
 /// What a platform's answer to one check means for the box the credential
-/// was typed in, and what the one check that learns something learned.
-fn verdict(check: &Check, responded: &Responded) -> Result<Option<Owned>, Refusal> {
+/// was typed in, and what the checks that learn something learned.
+fn verdict(check: &Check, responded: &Responded) -> Result<Learned, Refusal> {
     match check {
         Check::Owner { platform } => match responded {
             Responded::Answered {
@@ -336,7 +368,7 @@ fn verdict(check: &Check, responded: &Responded) -> Result<Option<Owned>, Refusa
                 headers,
                 body,
             } => stageman_platform::owned(*platform, *status, headers, body.as_slice())
-                .map(Some)
+                .map(Learned::Owner)
                 .map_err(|why| owner_refusal(&why)),
             Responded::Failed(why) => Err(Refusal::TokenUnchecked {
                 why: format!(
@@ -351,7 +383,7 @@ fn verdict(check: &Check, responded: &Responded) -> Result<Option<Owned>, Refusa
         } => match responded {
             Responded::Answered { status, body, .. } => {
                 stageman_platform::reached(*platform, repository, *status, body.as_slice())
-                    .map(|()| None)
+                    .map(|()| Learned::Nothing)
                     .map_err(|why| token_refusal(&why, repository))
             }
             Responded::Failed(why) => Err(Refusal::TokenUnchecked {
@@ -368,7 +400,7 @@ fn verdict(check: &Check, responded: &Responded) -> Result<Option<Owned>, Refusa
         } => match responded {
             Responded::Answered { status, body, .. } => {
                 stageman_platform::minted(*platform, *status, body.as_slice())
-                    .map(|_| None)
+                    .map(|_| Learned::Nothing)
                     .map_err(|why| covered_refusal(&why, repository))
             }
             Responded::Failed(why) => Err(Refusal::InstallationUnchecked {
@@ -378,14 +410,18 @@ fn verdict(check: &Check, responded: &Responded) -> Result<Option<Owned>, Refusa
                 ),
             }),
         },
-        Check::Speaking { channel } => spoken(*channel, false, responded, |status, body| {
-            stageman_channel::identity(*channel, status, body).map(|_| ())
-        })
-        .map(|()| None),
+        Check::Speaking { channel } => {
+            let mut us = None;
+            spoken(*channel, false, responded, |status, body| {
+                us = Some(stageman_channel::identity(*channel, status, body)?);
+                Ok(())
+            })
+            .map(|()| us.map_or(Learned::Nothing, Learned::Identity))
+        }
         Check::Listening { channel } => spoken(*channel, true, responded, |status, body| {
             stageman_channel::socket_url(*channel, status, body).map(|_| ())
         })
-        .map(|()| None),
+        .map(|()| Learned::Nothing),
     }
 }
 
@@ -450,7 +486,7 @@ fn spoken(
     channel: Channel,
     listening: bool,
     responded: &Responded,
-    read: impl Fn(u16, &[u8]) -> Result<(), ChannelError>,
+    mut read: impl FnMut(u16, &[u8]) -> Result<(), ChannelError>,
 ) -> Result<(), Refusal> {
     let name = views::wire_channel(channel);
     match responded {
@@ -487,7 +523,7 @@ fn spoken(
 
 #[cfg(test)]
 mod tests {
-    use super::{Check, verdict};
+    use super::{Check, Learned, verdict};
     use stageman_core::{Channel, Platform, RepositoryAddress};
     use stageman_vocabulary::{Bytes, Responded};
     use stageman_wire::Refusal;
@@ -515,7 +551,7 @@ mod tests {
     fn a_tokens_verdict_is_the_platforms_clause_on_its_box() {
         assert_eq!(
             verdict(&token(), &answered(200, r#"{"full_name":"owner/name"}"#)),
-            Ok(None)
+            Ok(Learned::Nothing)
         );
         assert_eq!(
             verdict(&token(), &answered(401, r#"{"message":"Bad credentials"}"#)),
@@ -570,7 +606,7 @@ mod tests {
                     r#"{"token":"ghs_not_a_real_token","expires_at":"2026-09-24T08:00:00Z"}"#
                 )
             ),
-            Ok(None)
+            Ok(Learned::Nothing)
         );
         assert_eq!(
             verdict(
@@ -623,7 +659,11 @@ mod tests {
                     r#"{"ok":true,"user_id":"U1","bot_id":"B1","url":"https://x.slack.com/"}"#
                 )
             ),
-            Ok(None)
+            Ok(Learned::Identity(stageman_channel::Identity {
+                user: "U1".to_owned(),
+                bot: "B1".to_owned(),
+                url: "https://x.slack.com/".to_owned(),
+            }))
         );
         assert_eq!(
             verdict(
@@ -653,7 +693,7 @@ mod tests {
                 &listening,
                 &answered(200, r#"{"ok":true,"url":"wss://wss.slack.com/link/1"}"#)
             ),
-            Ok(None)
+            Ok(Learned::Nothing)
         );
         assert_eq!(
             verdict(

@@ -113,7 +113,7 @@ impl Running {
                         .map(|(id, workspace)| WorkspaceView {
                             id: id.clone(),
                             name: workspace.name.clone(),
-                            used_by: Vec::new(),
+                            used_by: self.speaking_through(channel, id),
                         })
                         .collect(),
                     install_failure: self.workspace_failure.clone(),
@@ -165,22 +165,59 @@ impl Running {
     /// Forgets the app on a channel.
     ///
     /// Left on the platform for the operator to delete, as the App is.
+    /// Refused while a project speaks through one of its workspaces, as the
+    /// App is refused while a project is installed on through it: a
+    /// binding with nothing behind it is a project nothing hears.
     ///
     /// # Errors
     ///
-    /// Fails if no app is registered on that channel.
+    /// Fails if no app is registered on that channel, or if a project
+    /// speaks through one of its workspaces.
     pub fn forget_channel_app(&mut self, channel: Channel) -> Result<Response, Refusal> {
-        if self.state.channel_apps.remove(&channel).is_none() {
+        if !self.state.channel_apps.contains_key(&channel) {
             return Err(Refusal::ChannelAppMissing {
                 channel: crate::views::wire_channel(channel).to_owned(),
             });
         }
+        let using = self.speaking_through_any(channel);
+        if !using.is_empty() {
+            return Err(Refusal::ChannelAppInUse {
+                channel: crate::views::wire_channel(channel).to_owned(),
+                projects: using,
+            });
+        }
+        self.state.channel_apps.remove(&channel);
         self.forget_workspaces();
         for disconnect in self.stop_listening(crate::listening::Listening::App(channel)) {
             self.defer(disconnect);
         }
         self.dirty = true;
         Ok(Response::Apps(self.apps()))
+    }
+
+    /// The projects speaking through a workspace of the instance's app on a
+    /// channel, by name.
+    fn speaking_through(&self, channel: Channel, team: &str) -> Vec<String> {
+        self.state
+            .bound_to(channel, team)
+            .filter_map(|project| Some(self.state.projects.get(&project)?.name.clone()))
+            .collect()
+    }
+
+    /// The projects speaking through any workspace of the instance's app on
+    /// a channel, by name.
+    fn speaking_through_any(&self, channel: Channel) -> Vec<String> {
+        self.state
+            .projects
+            .values()
+            .filter(|watched| {
+                watched
+                    .channels
+                    .get(&channel)
+                    .is_some_and(|binding| binding.workspace().is_some())
+            })
+            .map(|watched| watched.name.clone())
+            .collect()
     }
 
     /// Forgets the App on a platform.

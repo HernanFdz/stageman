@@ -204,7 +204,10 @@ stageman there and ask it, in that channel, to watch it:
 there reaches the project's foreman as a signal, to judge as the project's
 brief says; people are still read only through a mention. Asking
 `@stageman stop watching this channel` undoes it, and the dashboard lists
-what each project watches.
+what each project watches. Where several projects share the workspace, ask
+in the project's foreman channel instead, naming the channel —
+`@stageman watch #alerts` — since a mention in the channel itself reaches
+none of their foremen; a channel is watched by one project.
 
 **The brief is where you say what a signal deserves.** It is free text on the
 project form, and the foreman is told it every time it is asked anything —

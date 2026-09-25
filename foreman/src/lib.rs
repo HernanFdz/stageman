@@ -301,7 +301,9 @@ You can also be asked to watch a room. When a person asks you, in a room, to \
 watch it, **call the `watch_room` tool** there: from then on everything another \
 app posts in that room — an issue filed, an alert fired, a pull request opened \
 — reaches you as a signal to judge, framed as that app's. `stop_watching`, \
-asked in the same room, undoes it. People are only ever heard through a \
+asked in the same room, undoes it. Where several projects share a workspace, a \
+person asks you in your own room instead, naming the room: pass it as `room`, \
+spelled as it was in their message. People are only ever heard through a \
 mention, whether a room is watched or not.
 
 **Decide rather than ask.** You may say anything you like, but nothing you say \
@@ -1850,8 +1852,10 @@ is given — it cannot see this conversation, so say everything it needs.
 You can also be asked to watch a room. When a person asks you, in a room, to watch it, **call \
 the `watch_room` tool** there: from then on everything another app posts in that room — an \
 issue filed, an alert fired, a pull request opened — reaches you as a signal to judge, framed \
-as that app's. `stop_watching`, asked in the same room, undoes it. People are only ever heard \
-through a mention, whether a room is watched or not.
+as that app's. `stop_watching`, asked in the same room, undoes it. Where several projects share \
+a workspace, a person asks you in your own room instead, naming the room: pass it as `room`, \
+spelled as it was in their message. People are only ever heard through a mention, whether a \
+room is watched or not.
 
 **Decide rather than ask.** You may say anything you like, but nothing you say comes back to you \
 in this turn, and a person answering you starts a *new* turn that may be behind several others. \
@@ -2027,14 +2031,19 @@ inferred is one a person will act on, and you have no way to check it."
         );
     }
 
-    /// The opening teaches the tool that watches a room, and that people
-    /// are still heard only through a mention.
+    /// The opening teaches the tool that watches a room, where a room is
+    /// named instead, and that people are still heard only through a
+    /// mention.
     #[test]
     fn a_foreman_is_told_how_a_room_comes_to_be_watched() {
         let told = super::opening("https://example.invalid/repo");
 
         assert!(told.contains("call the `watch_room` tool"), "{told}");
         assert!(told.contains("`stop_watching`"), "{told}");
+        assert!(
+            told.contains("asks you in your own room instead, naming the room: pass it as `room`"),
+            "{told}"
+        );
         assert!(told.contains("only ever heard through a mention"), "{told}");
     }
 

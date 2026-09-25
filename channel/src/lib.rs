@@ -415,6 +415,18 @@ pub fn room_link(channel: Channel, room: &str) -> String {
     }
 }
 
+/// What a room an agent named means: its identifier, if it is spelled.
+///
+/// Spelled as the channel spells a room in a message, or as the identifier
+/// alone — what the tools that watch take a room as, per
+/// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+#[must_use]
+pub fn room_referenced(channel: Channel, named: &str) -> Option<String> {
+    match channel {
+        Channel::Slack => slack::room_referenced(named),
+    }
+}
+
 /// The identifier a message is shown to an agent with, and the one it names
 /// a message by.
 ///
@@ -768,7 +780,8 @@ mod tests {
         archive, create_room, decode, done, exchange, foreman_room_name, identity, install_link,
         installed, installed_path, invite, manifest, mention, open_socket, permalink, pieces, post,
         posted, react, reference, referenced, replies, room_address, room_created, room_link,
-        room_name, set_purpose, set_topic, socket_url, thread_read, update, who_am_i, workspace_of,
+        room_name, room_referenced, set_purpose, set_topic, socket_url, thread_read, update,
+        who_am_i, workspace_of,
     };
     use stageman_core::{Channel, JobId, ProjectId, Secret, Speaking, Uuid};
 
@@ -1258,6 +1271,32 @@ mod tests {
             "closed-loop--foreman--3fa85f64"
         );
         assert_eq!(room_link(Channel::Slack, "C0C1VNX9AA2"), "<#C0C1VNX9AA2>");
+        for spelled in [
+            "<#C0C1VNX9AA2|alerts>",
+            "<#C0C1VNX9AA2>",
+            "C0C1VNX9AA2",
+            "  <#C0C1VNX9AA2|alerts>  ",
+        ] {
+            assert_eq!(
+                room_referenced(Channel::Slack, spelled).as_deref(),
+                Some("C0C1VNX9AA2"),
+                "{spelled}"
+            );
+        }
+        for unspelled in [
+            "#alerts",
+            "alerts",
+            "",
+            "<#>",
+            "<#C0C1VNX9AA2|alerts",
+            "c0c1",
+        ] {
+            assert_eq!(
+                room_referenced(Channel::Slack, unspelled),
+                None,
+                "{unspelled}"
+            );
+        }
         assert_eq!(mention(Channel::Slack, "U0HUMAN"), "<@U0HUMAN>");
     }
 

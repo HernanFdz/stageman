@@ -5,9 +5,13 @@
 //! to a job, to a project's foreman, or to nobody; a person's mention in a
 //! room none of several projects owns answered with the notice that says
 //! where to ask, and costing no turn; an app's message a watching project's
-//! or nobody's; and the connection following the workspaces: opened by the
+//! or nobody's; the connection following the workspaces: opened by the
 //! first install, kept through a second, closed by the last forget and by
-//! forgetting the app.
+//! forgetting the app; a room watched from the foreman's own room naming
+//! it, refused from anywhere else and refused for a second project; the
+//! app and a workspace refused forgetting while a project speaks through
+//! them; and an app of a project's own refused while another already
+//! hears with it.
 
 use std::collections::BTreeMap;
 
@@ -17,8 +21,10 @@ use stageman_core::{
     Workspace,
 };
 use stageman_instance::{Instance, Request, Response};
+use stageman_wire::Refusal;
 
-use crate::dashboard::{ask, count};
+use crate::dashboard::{a_draft, ask, count};
+use crate::signals::{call, text_of};
 use crate::simulation::{Simulation, job, project, seed, watching, watching_a_channel};
 
 /// The identifier the simulated platform answers an install's exchange
@@ -395,4 +401,350 @@ fn the_connection_follows_the_workspaces() {
         disconnects_before + 1,
         "forgetting the app closes its connection"
     );
+}
+
+/// The rooms the fixture's project watches, as the instance holds them.
+fn watched(instance: &Instance) -> Vec<String> {
+    instance
+        .state()
+        .projects
+        .get(&project())
+        .expect("the project")
+        .watched
+        .iter()
+        .map(|room| room.id.clone())
+        .collect()
+}
+
+/// The text a tool refused with, asserting that it refused.
+fn refused_with(sim: &Simulation, asked: stageman_vocabulary::RequestId) -> String {
+    let answer = sim.tool_answer(asked).expect("answered");
+    assert!(
+        answer
+            .1
+            .as_ref()
+            .expect("a body")
+            .pointer("/result/isError")
+            .is_some_and(|flag| *flag == serde_json::json!(true)),
+        "not refused: {answer:?}"
+    );
+    text_of(answer)
+}
+
+/// The warrant of the turn most recently started.
+fn latest_warrant(sim: &Simulation) -> String {
+    sim.warrants().last().expect("a turn's warrant").clone()
+}
+
+/// In a workspace two projects share, a person asks the first project's
+/// foreman in its own room to watch a room, naming it as the platform
+/// spelled it: watched from then on, so that an app's message there is a
+/// signal for that foreman; named by its identifier alone, the same room;
+/// and stopped the same way.
+#[test]
+fn a_room_in_a_shared_workspace_is_watched_from_the_foremans_room_naming_it() {
+    let mut sim = Simulation::new();
+    sim.holding(&on_the_shared_app(true, false));
+    sim.on_workspace(TEAM);
+    let mut instance = sim.wake(seed(1));
+    sim.run_until(&mut instance, 5_000);
+
+    sim.says_in_room_id(
+        6_000,
+        "C0FOREMAN1",
+        "1788000000.000600",
+        "watch <#C0NEWS|news>",
+    );
+    sim.run_until(&mut instance, 6_100);
+    assert_eq!(foremen_working(&instance), vec!["example"]);
+    let warrant = latest_warrant(&sim);
+    let watch = sim.calls(
+        6_200,
+        &warrant,
+        &call("watch_room", serde_json::json!({"room": "<#C0NEWS|news>"})),
+    );
+    let again = sim.calls(
+        6_201,
+        &warrant,
+        &call("watch_room", serde_json::json!({"room": "C0NEWS"})),
+    );
+    sim.run_until(&mut instance, 9_000);
+    assert_eq!(
+        text_of(sim.tool_answer(watch).expect("answered")),
+        "watching <#C0NEWS>: from now on everything another app posts there reaches you as a \
+         signal"
+    );
+    assert_eq!(
+        text_of(sim.tool_answer(again).expect("answered")),
+        "already watching <#C0NEWS>"
+    );
+    assert_eq!(watched(&instance), vec!["C0NEWS".to_owned()]);
+
+    sim.app_posts(
+        10_000,
+        "C0NEWS",
+        "1788000000.001000",
+        "Issue created by somebody",
+        "The parser fails one run in ten.",
+    );
+    sim.run_until(&mut instance, 13_000);
+    assert!(
+        sim.talks_in(&stageman_foreman::container(project()))
+            .iter()
+            .any(|run| run.was_told("GitHub posted this in a room you watch:")),
+        "the signal reached the project that watches the room"
+    );
+
+    sim.says_in_room_id(
+        14_000,
+        "C0FOREMAN1",
+        "1788000000.001400",
+        "stop watching <#C0NEWS|news>",
+    );
+    sim.run_until(&mut instance, 14_100);
+    let warrant = latest_warrant(&sim);
+    let stop = sim.calls(
+        14_200,
+        &warrant,
+        &call(
+            "stop_watching",
+            serde_json::json!({"room": "<#C0NEWS|news>"}),
+        ),
+    );
+    let twice = sim.calls(
+        14_201,
+        &warrant,
+        &call(
+            "stop_watching",
+            serde_json::json!({"room": "<#C0NEWS|news>"}),
+        ),
+    );
+    sim.run_until(&mut instance, 17_000);
+    assert_eq!(
+        text_of(sim.tool_answer(stop).expect("answered")),
+        "no longer watching <#C0NEWS>"
+    );
+    assert_eq!(
+        text_of(sim.tool_answer(twice).expect("answered")),
+        "<#C0NEWS> was not being watched"
+    );
+    assert!(watched(&instance).is_empty());
+}
+
+/// A room named from anywhere but the foreman's own room is refused, so
+/// that a foreman cannot be talked into watching a room from one it was
+/// not asked in; naming the room the turn was asked in is naming nothing;
+/// and a name the platform does not spell is refused as such.
+#[test]
+fn a_room_named_from_anywhere_but_the_foremans_room_is_refused() {
+    let mut sim = Simulation::new();
+    sim.holding(&on_the_shared_app(false, false));
+    sim.on_workspace(TEAM);
+    let mut instance = sim.wake(seed(1));
+    sim.run_until(&mut instance, 5_000);
+
+    // The workspace's one project hears a mention in a room it does not
+    // own, as 0081 keeps.
+    sim.says_in_room_id(
+        6_000,
+        "C0OTHER",
+        "1788000000.000600",
+        "watch <#C0NEWS|news>",
+    );
+    sim.run_until(&mut instance, 6_100);
+    assert_eq!(foremen_working(&instance), vec!["example"]);
+    let warrant = latest_warrant(&sim);
+    let elsewhere = sim.calls(
+        6_200,
+        &warrant,
+        &call("watch_room", serde_json::json!({"room": "<#C0NEWS|news>"})),
+    );
+    let unspelled = sim.calls(
+        6_201,
+        &warrant,
+        &call("watch_room", serde_json::json!({"room": "#news"})),
+    );
+    let here = sim.calls(
+        6_202,
+        &warrant,
+        &call("watch_room", serde_json::json!({"room": "<#C0OTHER>"})),
+    );
+    sim.run_until(&mut instance, 9_000);
+    assert_eq!(
+        refused_with(&sim, elsewhere),
+        "a room is named only from your own room: ask there, or ask in the room itself"
+    );
+    assert_eq!(
+        refused_with(&sim, unspelled),
+        "\"#news\" is not a room as the platform spells one in a message, which reads \
+         <#C0123ABCD|name>, nor a room's identifier"
+    );
+    assert_eq!(
+        text_of(sim.tool_answer(here).expect("answered")),
+        "watching this room: from now on everything another app posts here reaches you as a \
+         signal"
+    );
+    assert_eq!(watched(&instance), vec!["C0OTHER".to_owned()]);
+}
+
+/// A room is watched by one project: asked to watch one another project
+/// already watches, a foreman is refused naming that project, and asked
+/// to stop watching it, told it was not watching it.
+#[test]
+fn a_room_another_project_watches_is_refused_naming_it() {
+    let mut sim = Simulation::new();
+    sim.holding(&on_the_shared_app(true, false));
+    sim.on_workspace(TEAM);
+    let mut instance = sim.wake(seed(1));
+    sim.run_until(&mut instance, 5_000);
+
+    sim.says_in_room_id(
+        6_000,
+        "C0FOREMAN1",
+        "1788000000.000600",
+        "watch <#C0ALERTS|alerts>",
+    );
+    sim.run_until(&mut instance, 6_100);
+    let warrant = latest_warrant(&sim);
+    let watch = sim.calls(
+        6_200,
+        &warrant,
+        &call(
+            "watch_room",
+            serde_json::json!({"room": "<#C0ALERTS|alerts>"}),
+        ),
+    );
+    let stop = sim.calls(
+        6_201,
+        &warrant,
+        &call(
+            "stop_watching",
+            serde_json::json!({"room": "<#C0ALERTS|alerts>"}),
+        ),
+    );
+    sim.run_until(&mut instance, 9_000);
+    assert_eq!(
+        refused_with(&sim, watch),
+        "<#C0ALERTS> is already watched by second, and a room is watched by one project"
+    );
+    assert_eq!(
+        text_of(sim.tool_answer(stop).expect("answered")),
+        "<#C0ALERTS> was not being watched"
+    );
+    assert!(watched(&instance).is_empty());
+    let second = instance
+        .state()
+        .projects
+        .get(&ProjectId::from_uuid(Uuid::from_u128(SECOND)))
+        .expect("the second project");
+    assert_eq!(
+        second.watched.len(),
+        1,
+        "the second project still watches it"
+    );
+}
+
+/// The app and a workspace are refused forgetting while a project speaks
+/// through them, naming the project, and the Instance page says who uses
+/// each workspace; nothing is disconnected by a refusal.
+#[test]
+fn the_app_and_a_workspace_are_refused_forgetting_while_a_project_speaks_through_them() {
+    let mut sim = Simulation::new();
+    sim.holding(&on_the_shared_app(false, false));
+    let mut instance = sim.wake(seed(1));
+    sim.run_until(&mut instance, 5_000);
+    assert_eq!(sim.listening(), 1);
+
+    assert_eq!(
+        ask(
+            &mut sim,
+            &mut instance,
+            1,
+            Request::ForgetWorkspace {
+                channel: "slack".to_owned(),
+                id: TEAM.to_owned(),
+            },
+        ),
+        Response::Refused(Refusal::WorkspaceInUse {
+            projects: vec!["example".to_owned()],
+        })
+    );
+    assert_eq!(
+        ask(
+            &mut sim,
+            &mut instance,
+            2,
+            Request::ForgetChannelApp {
+                channel: "slack".to_owned(),
+            },
+        ),
+        Response::Refused(Refusal::ChannelAppInUse {
+            channel: "Slack".to_owned(),
+            projects: vec!["example".to_owned()],
+        })
+    );
+    let Response::Apps(apps) = ask(&mut sim, &mut instance, 3, Request::Apps) else {
+        panic!("the Instance page");
+    };
+    let slack = apps.slack.expect("the app is still registered");
+    assert_eq!(slack.workspaces.len(), 1);
+    assert_eq!(slack.workspaces[0].used_by, vec!["example".to_owned()]);
+    assert_eq!(count(&sim, "-> Disconnect"), 0, "nothing was disconnected");
+    assert!(
+        instance
+            .state()
+            .channel_apps
+            .get(&Channel::Slack)
+            .is_some_and(|app| app.workspaces.contains_key(TEAM)),
+        "the workspace is still held"
+    );
+}
+
+/// A binding of a project's own whose bot another listener already hears
+/// with is refused when it is checked, naming whose app it is — a
+/// project's, or the instance's own on the workspace it is installed on —
+/// because a second connection on one app hears half of what is said; a
+/// token of another app is kept.
+#[test]
+fn an_app_of_a_projects_own_already_heard_with_is_refused_when_checked() {
+    let mut sim = Simulation::new();
+    sim.holding(&watching_a_channel(&[]));
+    let mut instance = sim.wake(seed(1));
+    sim.run_until(&mut instance, 5_000);
+    assert_eq!(
+        ask(
+            &mut sim,
+            &mut instance,
+            1,
+            Request::Create {
+                draft: a_draft("burrow"),
+            },
+        ),
+        Response::Refused(Refusal::ChannelRefused {
+            listening: false,
+            why: "it is already example's app".to_owned(),
+        })
+    );
+    assert_eq!(instance.state().projects.len(), 1, "nothing was kept");
+
+    let mut sim = Simulation::new();
+    sim.holding(&on_the_shared_app(false, false));
+    let mut instance = sim.wake(seed(1));
+    sim.run_until(&mut instance, 5_000);
+    let mut draft = a_draft("burrow");
+    draft.channel.credential = "xoxb-acme".to_owned();
+    assert_eq!(
+        ask(&mut sim, &mut instance, 1, Request::Create { draft }),
+        Response::Refused(Refusal::ChannelRefused {
+            listening: false,
+            why: "it is already the instance's own app, installed on Acme".to_owned(),
+        })
+    );
+    let mut draft = a_draft("burrow");
+    draft.channel.credential = "xoxb-burrow".to_owned();
+    let Response::Projects(shown) = ask(&mut sim, &mut instance, 2, Request::Create { draft })
+    else {
+        panic!("an app of its own is kept");
+    };
+    assert_eq!(shown.projects.len(), 2);
 }

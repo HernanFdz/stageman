@@ -876,8 +876,9 @@ justify is usually obsolete.
   app-level token each hear half of what is said, with nothing anywhere
   saying so, which is why the instance's own app is listened to on exactly
   one connection however many workspaces and projects it serves, since
-  `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`, and why a binding of a project's own whose bot is already another
-  project's is refused; and since
+  `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`, and why a binding of a project's own whose bot a listener already
+  hears with — another project's own app, or the instance's on a
+  workspace — is refused when it is checked, naming whose it is; and since
   `docs/decisions/0060-a-binding-is-a-workspace.md` a person is read from the
   platform's own mention event and from nothing else, so an app whose
   manifest lacks that subscription connects, greets, and hears nobody. The

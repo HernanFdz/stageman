@@ -879,14 +879,10 @@ fn the_same_requests_leave_the_same_trace() {
         let mut sim = Simulation::new();
         sim.holding(&watching_a_channel(&[]));
         let mut instance = sim.wake(seed(9));
-        ask(
-            &mut sim,
-            &mut instance,
-            1,
-            Request::Create {
-                draft: a_draft("burrow"),
-            },
-        );
+        // An app of its own, since one already listened to is refused.
+        let mut draft = a_draft("burrow");
+        draft.channel.credential = "xoxb-burrow".to_owned();
+        ask(&mut sim, &mut instance, 1, Request::Create { draft });
         ask(
             &mut sim,
             &mut instance,

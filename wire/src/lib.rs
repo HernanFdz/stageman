@@ -1366,8 +1366,6 @@ pub enum Refusal {
         /// What went wrong on the way there.
         why: String,
     },
-    /// An installation cannot be forgotten while a project reaches its
-    /// repository through it.
     /// A Slack app was registered without one of its three values — see
     /// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
     #[error("the app needs its client ID, its client secret and an app-level token")]
@@ -1378,12 +1376,29 @@ pub enum Refusal {
         /// The channel, as the screen names it.
         channel: String,
     },
+    /// The app on a channel cannot be forgotten while a project speaks
+    /// through one of its workspaces.
+    #[error("the {channel} app is still used by {}", projects.join(", "))]
+    ChannelAppInUse {
+        /// The channel, as the screen names it.
+        channel: String,
+        /// The projects that would be left without a binding, by name.
+        projects: Vec<String>,
+    },
     /// The app is not installed on the workspace named.
     #[error("the app is not installed on {id}")]
     NoSuchWorkspace {
         /// The workspace's identifier on the platform.
         id: String,
     },
+    /// A workspace cannot be forgotten while a project speaks through it.
+    #[error("that workspace is still used by {}", projects.join(", "))]
+    WorkspaceInUse {
+        /// The projects that would be left without a binding, by name.
+        projects: Vec<String>,
+    },
+    /// An installation cannot be forgotten while a project reaches its
+    /// repository through it.
     #[error("that installation is still used by {}", projects.join(", "))]
     InstallationInUse {
         /// The projects that would be left without access, by name.
@@ -1449,6 +1464,8 @@ impl Refusal {
             // forbids it, which is what a conflict means.
             Self::AgentInUse { .. }
             | Self::AppInUse { .. }
+            | Self::ChannelAppInUse { .. }
+            | Self::WorkspaceInUse { .. }
             | Self::InstallationInUse { .. }
             | Self::ProjectBusy { .. }
             | Self::JobWorking
@@ -1504,6 +1521,8 @@ impl Refusal {
             | Self::JobWorking
             | Self::AppMissing { .. }
             | Self::AppInUse { .. }
+            | Self::ChannelAppInUse { .. }
+            | Self::WorkspaceInUse { .. }
             | Self::InstallationInUse { .. }
             | Self::Failed => None,
         }
@@ -2156,6 +2175,37 @@ mod tests {
     }
 
     /// A refusal an operator can fix must not read as a server fault.
+    /// What is used is refused forgetting as a conflict, naming who uses
+    /// it, and points at no box: the page it is on has none.
+    #[test]
+    fn what_is_used_is_refused_forgetting_as_a_conflict() {
+        for (refused, said) in [
+            (
+                Refusal::ChannelAppInUse {
+                    channel: "Slack".to_owned(),
+                    projects: vec!["aviary".to_owned(), "burrow".to_owned()],
+                },
+                "the Slack app is still used by aviary, burrow",
+            ),
+            (
+                Refusal::WorkspaceInUse {
+                    projects: vec!["aviary".to_owned()],
+                },
+                "that workspace is still used by aviary",
+            ),
+            (
+                Refusal::InstallationInUse {
+                    projects: vec!["aviary".to_owned()],
+                },
+                "that installation is still used by aviary",
+            ),
+        ] {
+            assert_eq!(refused.status(), 409, "{said}");
+            assert_eq!(refused.part(), None, "{said}");
+            assert_eq!(refused.to_string(), said);
+        }
+    }
+
     #[test]
     fn a_refusal_is_not_reported_as_a_fault() {
         let refused = Refusal::AgentInUse {

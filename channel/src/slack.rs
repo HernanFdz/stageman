@@ -395,6 +395,23 @@ pub fn room_link(room: &str) -> String {
     format!("<#{room}>")
 }
 
+/// What a room an agent named means, if it is one the platform spells: as
+/// a message carries it, `<#C0123ABCD|name>` or `<#C0123ABCD>`, or the
+/// identifier alone. Nothing for a name without its identifier, which the
+/// platform never sends and this crate cannot look up.
+pub fn room_referenced(named: &str) -> Option<String> {
+    let named = named.trim();
+    let id = named
+        .strip_prefix("<#")
+        .and_then(|rest| rest.strip_suffix('>'))
+        .map_or(named, |inner| {
+            inner.split_once('|').map_or(inner, |(id, _)| id)
+        });
+    let spelled = id.chars().all(|c| c.is_ascii_alphanumeric())
+        && id.chars().next().is_some_and(|c| c.is_ascii_uppercase());
+    spelled.then(|| id.to_owned())
+}
+
 /// A mention of somebody, which the platform renders as their name and
 /// notifies them of.
 pub fn mention(user: &str) -> String {

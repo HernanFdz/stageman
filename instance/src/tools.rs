@@ -44,9 +44,14 @@ const STOPPING: &str = "stopping";
 
 /// What the tools that watch and stop watching a room are called.
 ///
-/// Neither takes an argument: the room is the one the turn was asked in,
-/// which comes from the credential and never from the caller — see
-/// `docs/decisions/0063-another-app-is-heard-in-a-watched-room.md`.
+/// The room is the one the turn was asked in, which comes from the
+/// credential and never from the caller — see
+/// `docs/decisions/0063-another-app-is-heard-in-a-watched-room.md` — unless
+/// the turn was asked in the foreman's own room, where a person names the
+/// room instead, since
+/// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`:
+/// in a workspace several projects share, a mention in the room itself
+/// reaches nobody's foreman.
 const WATCH_ROOM: &str = "watch_room";
 const STOP_WATCHING: &str = "stop_watching";
 
@@ -120,26 +125,35 @@ pub fn tools(warranted: &Warranted, kits: &[(String, String)]) -> Vec<Tool> {
         fields.insert("enum".to_owned(), serde_json::json!(names));
     }
 
-    // Both act on the room the turn was asked in, so neither takes a room:
-    // a foreman that could name one could be talked into watching a room it
-    // was never asked in.
+    // Both act on the room the turn was asked in, and take another only
+    // from the foreman's own room: a foreman that could name one from
+    // anywhere could be talked into watching a room it was never asked in.
+    let room = serde_json::json!({
+        "type": "string",
+        "description": "Another room than the one this message was said in, spelled as the \
+                        person spelled it in their message or by its identifier. Honoured \
+                        only when this message was said in your own room; leave it out \
+                        otherwise.",
+    });
     let watch = Tool {
         name: WATCH_ROOM,
-        description: "Watch the room this message was said in. From then on everything \
+        description: "Watch the room this message was said in, or, when this message was \
+                      said in your own room, the room named. From then on everything \
                       another app posts there — an issue filed, an alert fired, a pull \
                       request opened — reaches you as a signal to judge; people are still \
-                      heard only through a mention. Call it when a person asks you, in a \
-                      room, to watch that room."
+                      heard only through a mention. Call it when a person asks you to \
+                      watch a room."
             .to_owned(),
-        schema: serde_json::json!({"type": "object", "properties": {}}),
+        schema: serde_json::json!({"type": "object", "properties": {"room": room}}),
     };
     let stop_watching = Tool {
         name: STOP_WATCHING,
-        description: "Stop watching the room this message was said in: nothing another app \
-                      posts there reaches you afterwards. Call it when a person asks you, \
-                      in a room, to stop watching that room."
+        description: "Stop watching the room this message was said in, or, when this \
+                      message was said in your own room, the room named: nothing another \
+                      app posts there reaches you afterwards. Call it when a person asks \
+                      you to stop watching a room."
             .to_owned(),
-        schema: serde_json::json!({"type": "object", "properties": {}}),
+        schema: serde_json::json!({"type": "object", "properties": {"room": room}}),
     };
 
     vec![
@@ -278,8 +292,14 @@ pub enum Call {
     /// Saying why this turn is about to end, and which pull requests it
     /// opened.
     Stopping(Stopping),
-    /// Asking to watch, or to stop watching, the room this turn was asked in.
-    Watching(Watching),
+    /// Asking to watch, or to stop watching, the room this turn was asked
+    /// in, or the room named where the turn was asked in the foreman's own.
+    Watching {
+        /// Which way.
+        which: Watching,
+        /// The room named, as the agent spelled it, if one was.
+        room: Option<String>,
+    },
     /// A tool this instance does not serve, by name.
     NoSuchTool(String),
     /// Something needing no answer at all.
@@ -451,11 +471,19 @@ fn calling(params: &serde_json::Value) -> Call {
             pull_requests,
         });
     }
-    if name == WATCH_ROOM {
-        return Call::Watching(Watching::Start);
-    }
-    if name == STOP_WATCHING {
-        return Call::Watching(Watching::Stop);
+    if name == WATCH_ROOM || name == STOP_WATCHING {
+        let room = arguments
+            .and_then(|given| given.get("room"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|named| !named.is_empty())
+            .map(str::to_owned);
+        let which = if name == WATCH_ROOM {
+            Watching::Start
+        } else {
+            Watching::Stop
+        };
+        return Call::Watching { which, room };
     }
     if name != "start_job" {
         return Call::NoSuchTool(name.to_owned());
@@ -669,14 +697,14 @@ impl Running {
                     )),
                 );
             }
-            Call::Watching(which) => {
-                let result = self.watching(&warranted, which);
+            Call::Watching { which, room } => {
+                let result = self.watching(&warranted, which, room.as_deref());
                 self.answer(
                     id,
                     OK,
                     Some(result.map_or_else(
                         |why| failed(incoming.id.clone(), &why),
-                        |said| succeeded(incoming.id.clone(), said),
+                        |said| succeeded(incoming.id.clone(), &said),
                     )),
                 );
             }
@@ -1010,20 +1038,35 @@ impl Running {
         Ok(())
     }
 
-    /// Watches, or stops watching, the room the caller's turn was asked in.
+    /// Watches, or stops watching, the room the caller's turn was asked in,
+    /// or the room named where the turn was asked in the foreman's own.
     ///
     /// **The room comes from the credential, never from the caller**, for
-    /// the reason a post's place does. Recorded on the project, so it is on
-    /// the disk with the next write and survives a restart. Idempotent in
-    /// both directions and said so, because an interrupted foreman is told
-    /// to check how things stand rather than to assume, and "already
-    /// watching" is that answer.
+    /// the reason a post's place does — with one opening, since
+    /// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`:
+    /// a turn asked in the foreman's own room may name another, because in
+    /// a workspace several projects share a mention in the room itself
+    /// reaches nobody's foreman, and the foreman's own room is where only a
+    /// person talking to this project asks. Named from anywhere else, a
+    /// room is refused. A room is watched by one project, so a room another
+    /// already watches is refused naming it. Recorded on the project, so it
+    /// is on the disk with the next write and survives a restart.
+    /// Idempotent in both directions and said so, because an interrupted
+    /// foreman is told to check how things stand rather than to assume,
+    /// and "already watching" is that answer.
     ///
     /// # Errors
     ///
     /// Fails for a job, which is offered neither tool and may not watch
-    /// anything; and for a turn with no place, which has no room to watch.
-    fn watching(&mut self, warranted: &Warranted, which: Watching) -> Result<&'static str, String> {
+    /// anything; for a turn with no place, which has no room to watch; for
+    /// a room named as nothing the platform spells, or from a room that is
+    /// not the foreman's own; and for a room another project watches.
+    fn watching(
+        &mut self,
+        warranted: &Warranted,
+        which: Watching,
+        named: Option<&str>,
+    ) -> Result<String, String> {
         let Speaker::Foreman(project) = warranted.speaker else {
             tracing::warn!("a job asked to watch a room");
             return Err(format!(
@@ -1037,26 +1080,67 @@ impl Running {
                 "this turn was not asked in a room, so there is nothing to watch".to_owned(),
             );
         };
+        let Some(watched) = self.state.projects.get(&project) else {
+            return Err(format!("no project {project} in this instance"));
+        };
+        let channel = place.room.channel;
+        let room = match named {
+            None => place.room.clone(),
+            Some(named) => {
+                let Some(id) = stageman_channel::room_referenced(channel, named) else {
+                    return Err(format!(
+                        "{named:?} is not a room as the platform spells one in a message, \
+                         which reads <#C0123ABCD|name>, nor a room's identifier"
+                    ));
+                };
+                // Naming the room the turn was asked in is naming nothing.
+                if id != place.room.id && watched.foreman_room.as_ref() != Some(&place.room) {
+                    return Err(
+                        "a room is named only from your own room: ask there, or ask in the \
+                         room itself"
+                            .to_owned(),
+                    );
+                }
+                Room { channel, id }
+            }
+        };
+        let elsewhere =
+            (room.id != place.room.id).then(|| stageman_channel::room_link(channel, &room.id));
+        let it = elsewhere.as_deref().unwrap_or("this room");
+        let there = if elsewhere.is_some() { "there" } else { "here" };
+        if which == Watching::Start
+            && let Some(other) = self
+                .state
+                .projects
+                .iter()
+                .find(|(id, other)| **id != project && other.watched.contains(&room))
+        {
+            return Err(format!(
+                "{it} is already watched by {}, and a room is watched by one project",
+                other.1.name
+            ));
+        }
         let Some(watched) = self.state.projects.get_mut(&project) else {
             return Err(format!("no project {project} in this instance"));
         };
-        let room = place.room.clone();
         let said = match which {
             Watching::Start => {
                 if watched.watched.insert(room) {
                     self.dirty = true;
-                    "watching this room: from now on everything another app posts here reaches \
-                     you as a signal"
+                    format!(
+                        "watching {it}: from now on everything another app posts {there} \
+                         reaches you as a signal"
+                    )
                 } else {
-                    "already watching this room"
+                    format!("already watching {it}")
                 }
             }
             Watching::Stop => {
                 if watched.watched.remove(&room) {
                     self.dirty = true;
-                    "no longer watching this room"
+                    format!("no longer watching {it}")
                 } else {
-                    "this room was not being watched"
+                    format!("{it} was not being watched")
                 }
             }
         };
@@ -1390,11 +1474,34 @@ mod tests {
         );
         assert_eq!(
             calling(&serde_json::json!({"name": "watch_room"})),
-            Call::Watching(Watching::Start)
+            Call::Watching {
+                which: Watching::Start,
+                room: None
+            }
         );
         assert_eq!(
             calling(&serde_json::json!({"name": "stop_watching", "arguments": {}})),
-            Call::Watching(Watching::Stop)
+            Call::Watching {
+                which: Watching::Stop,
+                room: None
+            }
+        );
+        assert_eq!(
+            calling(
+                &serde_json::json!({"name": "watch_room", "arguments": {"room": " <#C0ALERTS|alerts> "}})
+            ),
+            Call::Watching {
+                which: Watching::Start,
+                room: Some("<#C0ALERTS|alerts>".to_owned())
+            }
+        );
+        assert_eq!(
+            calling(&serde_json::json!({"name": "stop_watching", "arguments": {"room": "  "}})),
+            Call::Watching {
+                which: Watching::Stop,
+                room: None
+            },
+            "a blank room is no room"
         );
         assert_eq!(
             calling(&serde_json::json!({"name": "delete_everything"})),
@@ -1463,17 +1570,24 @@ mod tests {
         assert_eq!(names(&tools(&a_job(), &one_kit())), ["say", "stopping"]);
     }
 
-    /// Neither tool that watches takes a room, because the room is the
-    /// credential's to say.
+    /// Each tool that watches takes a room only by name and never requires
+    /// one, because the room is the credential's to say unless the turn
+    /// was asked in the foreman's own room.
     #[test]
-    fn the_tools_that_watch_take_no_room() {
+    fn the_tools_that_watch_take_a_room_only_by_name() {
         for tool in tools(&a_foreman(), &one_kit()) {
             if tool.name == "watch_room" || tool.name == "stop_watching" {
                 assert_eq!(
-                    tool.schema["properties"],
-                    serde_json::json!({}),
+                    tool.schema["properties"]["room"]["type"],
+                    serde_json::json!("string"),
                     "{}",
                     tool.name
+                );
+                assert!(tool.schema.get("required").is_none(), "{}", tool.name);
+                assert!(
+                    tool.description.contains("said in your own room"),
+                    "{}",
+                    tool.description
                 );
             }
         }

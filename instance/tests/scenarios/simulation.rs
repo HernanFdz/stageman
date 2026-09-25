@@ -2453,7 +2453,7 @@ impl Simulation {
                 answered(r#"{"ok":true}"#.to_owned())
             }
             Some(question @ (Call::WhoAmI { .. } | Call::OpenSocket { .. })) => {
-                answered(self.listener_answered(&question))
+                answered(self.listener_answered(&question, &request))
             }
             // An install's code exchanged, as the platform answers it: the
             // workspace, its bot user, and a bot token minted for it —
@@ -2482,8 +2482,16 @@ impl Simulation {
     /// Answers one of the two questions a listener asks — and a check of a
     /// binding's credentials asks the same two — as the platform does,
     /// unless the next was scripted to be refused. A wrong app-level token
-    /// refuses only the request for where to connect, as measured.
-    fn listener_answered(&mut self, question: &Call) -> String {
+    /// refuses only the request for where to connect, as measured. Who
+    /// this instance is follows the credential, as it does on the platform,
+    /// where a bot token names one app in one workspace: the fixture's
+    /// token is `B0SELF`, and any other is named after itself, so that two
+    /// bindings on one token read as one app and two tokens as two.
+    fn listener_answered(&mut self, question: &Call, asked: &stageman_channel::Request) -> String {
+        let bearer = asked
+            .headers
+            .get("authorization")
+            .map_or("", |header| header.trim_start_matches("Bearer "));
         let refused = match question {
             Call::OpenSocket { .. } => self
                 .locate_failures
@@ -2494,8 +2502,22 @@ impl Simulation {
         if let Some(error) = refused {
             format!(r#"{{"ok":false,"error":"{error}"}}"#)
         } else if matches!(question, Call::WhoAmI { .. }) {
-            r#"{"ok":true,"user_id":"U0BOT","bot_id":"B0SELF","url":"https://example.slack.com/"}"#
-                .to_owned()
+            let bot = if bearer == "xoxb-not-a-real-token" {
+                "B0SELF".to_owned()
+            } else {
+                format!(
+                    "B0{}",
+                    bearer
+                        .trim_start_matches("xoxb-")
+                        .chars()
+                        .filter(char::is_ascii_alphanumeric)
+                        .collect::<String>()
+                        .to_ascii_uppercase()
+                )
+            };
+            format!(
+                r#"{{"ok":true,"user_id":"U0BOT","bot_id":"{bot}","url":"https://example.slack.com/"}}"#
+            )
         } else {
             self.streams_opened += 1;
             format!(

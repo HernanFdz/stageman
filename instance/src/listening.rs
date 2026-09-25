@@ -136,6 +136,18 @@ impl Voices {
         }
     }
 
+    /// Who this instance is with each voice that has been told, by the
+    /// workspace the voice is for.
+    fn identities(&self) -> Vec<(Option<&str>, &Identity)> {
+        match self {
+            Self::Own(voice) => voice.us.iter().map(|us| (None, us)).collect(),
+            Self::Workspaces(voices) => voices
+                .iter()
+                .filter_map(|(team, voice)| Some((Some(team.as_str()), voice.us.as_ref()?)))
+                .collect(),
+        }
+    }
+
     /// Whether there is nothing left to hear with.
     fn is_empty(&self) -> bool {
         matches!(self, Self::Workspaces(voices) if voices.is_empty())
@@ -689,6 +701,45 @@ impl Running {
             .voice(team)?
             .us
             .as_ref()
+    }
+
+    /// Whose app a bot identity already is, where a listener hears with
+    /// it: a project's own, by the project's name, or the instance's, by
+    /// the workspace it is installed on. What refuses a binding of a
+    /// project's own that would make a second connection on one app, per
+    /// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`:
+    /// the platform hands each event to one connection, so the second
+    /// would hear half of what is said.
+    #[must_use]
+    pub fn already_heard_as(&self, channel: Channel, us: &Identity) -> Option<String> {
+        self.listeners
+            .iter()
+            .filter(|(_, listener)| listener.channel == channel)
+            .find_map(|(listening, listener)| {
+                let (team, _) = listener
+                    .voices
+                    .identities()
+                    .into_iter()
+                    .find(|(_, known)| known.bot == us.bot)?;
+                Some(match listening {
+                    Listening::Own(project) => {
+                        let name = self
+                            .state
+                            .projects
+                            .get(project)
+                            .map_or_else(|| project.to_string(), |watched| watched.name.clone());
+                        format!("{name}'s app")
+                    }
+                    Listening::App(_) => {
+                        let workspace = team
+                            .and_then(|team| {
+                                self.state.channel_apps.get(&channel)?.workspaces.get(team)
+                            })
+                            .map_or("a workspace", |workspace| workspace.name.as_str());
+                        format!("the instance's own app, installed on {workspace}")
+                    }
+                })
+            })
     }
 
     /// A workspace was installed on the instance's app: heard from now,

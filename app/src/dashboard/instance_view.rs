@@ -615,7 +615,8 @@ fn SlackApp(
                             },
                             p { class: "text-sm text-muted-foreground",
                                 "Its secrets are removed from this instance. The app itself stays on \
-                                 Slack until you delete it there."
+                                 Slack until you delete it there. Refused while a project speaks \
+                                 through one of its workspaces."
                             }
                         }
                     }
