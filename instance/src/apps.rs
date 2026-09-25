@@ -116,6 +116,7 @@ impl Running {
                             used_by: Vec::new(),
                         })
                         .collect(),
+                    install_failure: self.workspace_failure.clone(),
                 }),
             slack_form: stageman_channel::app_form(channel, &instance),
         }
@@ -174,6 +175,7 @@ impl Running {
                 channel: crate::views::wire_channel(channel).to_owned(),
             });
         }
+        self.forget_workspaces();
         self.dirty = true;
         Ok(Response::Apps(self.apps()))
     }

@@ -41,6 +41,7 @@ use crate::ui::{
 
 pub use stageman_wire::{
     Apps, ChannelAppView, InstallLink, InstallationView, PlatformAppView, Registration,
+    WorkspaceView,
 };
 
 /// The Apps this instance owns, and what the last registration said.
@@ -147,6 +148,35 @@ pub async fn register_channel_app(
 #[post("/api/instance/apps/forget-channel-app")]
 pub async fn forget_channel_app(channel: String) -> DashboardResult<Apps> {
     match super::ask(Request::ForgetChannelApp { channel }).await? {
+        Response::Apps(shown) => Ok(shown),
+        other => Err(super::unexpected(&other)),
+    }
+}
+
+/// Where to install the app the instance owns on a workspace, minted for
+/// one press: the state in the link is what the page asks by once the tab
+/// has come back — see `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+///
+/// # Errors
+///
+/// Fails if no app is registered on the channel.
+#[post("/api/instance/apps/workspace-link")]
+pub async fn workspace_link(channel: String) -> DashboardResult<InstallLink> {
+    match super::ask(Request::WorkspaceLink { channel }).await? {
+        Response::InstallLink(minted) => Ok(minted),
+        other => Err(super::unexpected(&other)),
+    }
+}
+
+/// Forgets a workspace the app the instance owns is installed on.
+///
+/// # Errors
+///
+/// Fails if no app is registered there, or if it is not installed on that
+/// workspace.
+#[post("/api/instance/apps/forget-workspace")]
+pub async fn forget_workspace(channel: String, id: String) -> DashboardResult<Apps> {
+    match super::ask(Request::ForgetWorkspace { channel, id }).await? {
         Response::Apps(shown) => Ok(shown),
         other => Err(super::unexpected(&other)),
     }
@@ -467,6 +497,9 @@ fn SlackApp(
     onchanged: EventHandler<DashboardResult<Apps>>,
 ) -> Element {
     let mut forgetting = use_signal(|| false);
+    // Why the last press of Install could not open the platform, if the
+    // last one could not: a link the instance would not mint.
+    let mut not_opened = use_signal(|| None::<String>);
 
     rsx! {
         Card {
@@ -494,9 +527,60 @@ fn SlackApp(
                                 }
                             }
                         }
+                        if let Some(why) = app.install_failure.clone() {
+                            p { role: "alert", class: "text-sm text-failed",
+                                "The app was not installed: {why}"
+                            }
+                        }
+                        if let Some(why) = not_opened() {
+                            p { role: "alert", class: "text-sm text-failed", "{why}" }
+                        }
+                        // Where it is installed, as the platform has told
+                        // this instance; the way onto the platform to
+                        // install it sits at the end of the label's line.
                         Field {
                             label: "Installed on",
                             note: "The workspaces the app is installed in, as Slack brought you back to say.",
+                            info: "Installing opens Slack in a new tab: choose the workspace and allow, \
+                                   and Slack brings you back here. The app installs on the workspace \
+                                   that created it with nothing more; any other workspace needs Public \
+                                   Distribution activated once on the app's page on Slack, under \
+                                   Manage Distribution, or an app of its own on the project instead. \
+                                   A workspace nothing uses can be forgotten here.",
+                            aside: rsx! {
+                                // By script rather than a link, so that the tab
+                                // can close itself when Slack brings it back —
+                                // see `docs/conventions.md` §3.
+                                Tooltip {
+                                    text: "Opens Slack in a tab of its own to install this instance's app \
+                                           on a workspace. The tab closes itself when Slack brings it back, \
+                                           and this list fills in.",
+                                    wrap: true,
+                                    at_end: true,
+                                    Button {
+                                        variant: ButtonVariant::Secondary,
+                                        class: "h-8.5 gap-1.5 px-2 text-xs",
+                                        aria_label: "Install on a workspace",
+                                        onclick: move |_| {
+                                            super::open_a_tab();
+                                            spawn(async move {
+                                                match workspace_link("slack".to_owned()).await {
+                                                    Ok(minted) => {
+                                                        super::send_the_tab(&minted.link);
+                                                        not_opened.set(None);
+                                                    }
+                                                    Err(why) => {
+                                                        super::close_the_tab();
+                                                        not_opened.set(Some(why.to_string()));
+                                                    }
+                                                }
+                                            });
+                                        },
+                                        Mark { agent: "slack".to_owned(), size: 14 }
+                                        "Install on a workspace"
+                                    }
+                                }
+                            },
                             if app.workspaces.is_empty() {
                                 p { class: "py-2 text-sm text-muted-foreground",
                                     "Nowhere yet."
@@ -505,11 +589,7 @@ fn SlackApp(
                                 ul { class: "divide-y divide-border",
                                     for workspace in app.workspaces.iter().cloned() {
                                         li { key: "{workspace.id}",
-                                            div { class: "flex items-center gap-3 py-2 first:pt-0 last:pb-0",
-                                                Mark { agent: "slack".to_owned(), size: 16 }
-                                                span { class: "text-sm font-medium", "{workspace.name}" }
-                                                span { class: "font-mono text-xs text-muted-foreground", "{workspace.id}" }
-                                            }
+                                            InstalledOn { workspace, onchanged }
                                         }
                                     }
                                 }
@@ -541,6 +621,51 @@ fn SlackApp(
                     }
                 },
                 None => rsx! { RegisteringSlack { form, onchanged } },
+            }
+        }
+    }
+}
+
+/// One workspace the app is installed on: its name, its identifier, which
+/// projects speak through it, and the way to forget it where nothing does.
+#[component]
+fn InstalledOn(
+    workspace: WorkspaceView,
+    onchanged: EventHandler<DashboardResult<Apps>>,
+) -> Element {
+    let id = workspace.id.clone();
+    let in_use = !workspace.used_by.is_empty();
+    let used_by = workspace.used_by.join(", ");
+    let forgetting_says = if in_use {
+        format!("Used by {used_by}, so it cannot be forgotten")
+    } else {
+        format!("Forget the workspace {}", workspace.name)
+    };
+
+    rsx! {
+        div { class: "flex items-center gap-3 py-2 first:pt-0 last:pb-0",
+            Mark { agent: "slack".to_owned(), size: 16 }
+            span { class: "text-sm font-medium", "{workspace.name}" }
+            span { class: "font-mono text-xs text-muted-foreground", "{workspace.id}" }
+            if in_use {
+                span { class: "text-xs text-muted-foreground", "used by {used_by}" }
+            }
+            span { class: "ml-auto flex items-center",
+                Tooltip { text: forgetting_says.clone(), wrap: in_use, at_end: true,
+                    Button {
+                        variant: ButtonVariant::Secondary,
+                        class: BESIDE,
+                        disabled: in_use,
+                        aria_label: "{forgetting_says}",
+                        onclick: move |_| {
+                            let id = id.clone();
+                            spawn(async move {
+                                onchanged.call(forget_workspace("slack".to_owned(), id).await);
+                            });
+                        },
+                        {Icon::Remove.draw(16)}
+                    }
+                }
             }
         }
     }

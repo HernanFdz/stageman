@@ -292,8 +292,11 @@ project this record removes, paid once more.
 
 **Revisit if** the platform adds an API for app-level tokens, which is when
 registration becomes a redirect as the App's is; if activating distribution
-is found to refuse a redirect address on localhost, which is when a second
-workspace needs a domain-hosted instance and the page has to say so; if a
+is found to refuse a redirect address on localhost, which costs little,
+since installing on a workspace other than the app's own is what a
+domain-hosted instance holding several people's projects does, and a
+laptop's second workspace has an app of its own as the shape kept for it,
+which the page then has to say; if a
 configuration token stops expiring, which reopens the manifest API; if a
 workspace is found holding so many projects that the notice reads as noise,
 which is when a room wants a claim after all; or when a second person

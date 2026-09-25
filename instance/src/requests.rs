@@ -166,6 +166,21 @@ pub enum Request {
         /// Which channel, by its wire identifier.
         channel: String,
     },
+    /// Where to install the app the instance owns on a workspace, minted
+    /// for one press: the state in the link is what the page asks by once
+    /// the tab has come back — see
+    /// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+    WorkspaceLink {
+        /// Which channel, by its wire identifier.
+        channel: String,
+    },
+    /// Forgets a workspace the app the instance owns is installed on.
+    ForgetWorkspace {
+        /// Which channel, by its wire identifier.
+        channel: String,
+        /// The workspace, by its identifier on the platform.
+        id: String,
+    },
     /// What an access reaches, for the project form: held while the
     /// platform lists it, and never kept — see `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
     Reaches {
@@ -262,6 +277,15 @@ impl fmt::Debug for Request {
             Self::ForgetChannelApp { channel } => f
                 .debug_struct("ForgetChannelApp")
                 .field("channel", channel)
+                .finish(),
+            Self::WorkspaceLink { channel } => f
+                .debug_struct("WorkspaceLink")
+                .field("channel", channel)
+                .finish(),
+            Self::ForgetWorkspace { channel, id } => f
+                .debug_struct("ForgetWorkspace")
+                .field("channel", channel)
+                .field("id", id)
                 .finish(),
             Self::Reaches { through } => {
                 f.debug_struct("Reaches").field("through", through).finish()
@@ -385,6 +409,11 @@ impl Running {
                 }),
                 Request::ForgetChannelApp { channel } => views::channel_named(&channel)
                     .and_then(|channel| self.forget_channel_app(channel)),
+                Request::WorkspaceLink { channel } => {
+                    views::channel_named(&channel).and_then(|channel| self.workspace_link(channel))
+                }
+                Request::ForgetWorkspace { channel, id } => views::channel_named(&channel)
+                    .and_then(|channel| self.forget_workspace(channel, &id)),
                 // Routed before anything is held, above; a listing that reaches
                 // here was carried by a check it cannot have had.
                 Request::Reaches { .. } => {

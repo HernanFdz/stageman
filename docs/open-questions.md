@@ -340,7 +340,10 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   addresses must be SSL. The authorisation step honoured a plain address on
   localhost, measured on 2026-09-25, and the checklist was not tried. Settled
   by pressing it on a laptop instance; if it refuses, the Instance page has
-  to say that a second workspace needs a domain-hosted instance.
+  to say that a second workspace on a laptop instance takes an app of its
+  own on the project, since installing on workspaces other than the app's
+  own is what a domain-hosted instance holding several people's projects
+  does, and that instance has the address the checklist wants.
 
 - **Should an agent's credential be checked before it is kept?**
   `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`

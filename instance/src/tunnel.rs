@@ -317,13 +317,16 @@ impl crate::Running {
     pub fn visited(&mut self, id: RequestId, request: &Arrival, effects: &mut Vec<Effect>) {
         let host = request.headers.get("host").map_or("", String::as_str);
         match decode(host, &self.domain) {
-            // Two paths under the dashboard's host are the instance's own:
-            // where the platform sends the browser back after a
-            // registration, answered here before the proxy — see
-            // `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
+            // Three paths under the dashboard's host are the instance's own:
+            // where a platform sends the browser back after a registration
+            // or an install, answered here before the proxy — see
+            // `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`
+            // and
+            // `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
             Routed::Dashboard => {
                 if !self.came_back(id, request, effects)
                     && !self.came_back_installed(id, request, effects)
+                    && !self.came_back_workspace(id, request, effects)
                 {
                     effects.push(Effect::Answer {
                         id,

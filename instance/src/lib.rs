@@ -45,6 +45,7 @@ mod tunnel;
 mod turns;
 mod views;
 mod vocabulary;
+mod workspaces;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
@@ -588,6 +589,17 @@ pub struct Running {
     installs: installations::Installs,
     /// Why the last installation was not kept, until the next one is.
     install_failure: Option<String>,
+    /// Installs of the instance's own channel app begun from a page, by
+    /// the state their link carried, oldest first: which workspace came
+    /// back under each, once one has — see
+    /// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+    workspaces_begun: workspaces::Begun,
+    /// Install codes being exchanged for a workspace's bot token, by the
+    /// identifier the platform's answer carries: the browser's request
+    /// held for it.
+    workspace_exchanges: workspaces::Exchanges,
+    /// Why the last workspace was not kept, until the next one is.
+    workspace_failure: Option<String>,
     /// Listings being assembled for forms, by the request each holds.
     reaching: installations::Reachings,
     /// Which listing each platform answer is for, by the identifier the
@@ -715,6 +727,9 @@ impl Running {
             begun: installations::Begun::new(),
             installs: installations::Installs::new(),
             install_failure: None,
+            workspaces_begun: workspaces::Begun::new(),
+            workspace_exchanges: workspaces::Exchanges::new(),
+            workspace_failure: None,
             reaching: installations::Reachings::new(),
             reaches: installations::Reaches::new(),
             listing_tokens: installations::ListingTokens::new(),
@@ -1044,6 +1059,7 @@ impl Running {
                 // since each is answered to a held request rather than to a
                 // channel; everything else was sent for a channel's sake.
                 if !self.exchanged(id, &responded, &mut effects)
+                    && !self.workspace_exchanged(id, &responded, &mut effects)
                     && !self.installed_answered(id, &responded, &mut effects)
                     && !self.reached_answered(id, &responded, &mut effects)
                     && !self.minted_answered(id, &responded, &mut effects)

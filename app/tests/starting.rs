@@ -1637,3 +1637,51 @@ fn the_instance_page_shows_the_slack_app_or_the_form_to_register_one() {
         "nothing of its secrets is on the page: {page}"
     );
 }
+
+/// The Instance page lists where the Slack app is installed, by the
+/// workspace's name and identifier, offers the way onto Slack to install it
+/// elsewhere, and offers forgetting a workspace nothing uses, with nothing
+/// of the workspace's bot token on the page — rendered on the server
+/// before the page is awake.
+#[test]
+fn the_instance_page_lists_where_the_slack_app_is_installed() {
+    let (_kept, snapshot) = scratch();
+    let mut watched = watching("aviary", "https://github.com/example/aviary");
+    watched.channel_apps.insert(
+        Channel::Slack,
+        stageman_core::ChannelApp {
+            client_id: "1234567890.1234567890123".to_owned(),
+            client_secret: Secret::new("not-a-real-secret".to_owned()),
+            app_token: Secret::new("xapp-not-a-real-token".to_owned()),
+            workspaces: BTreeMap::from([(
+                "T0TEAM".to_owned(),
+                stageman_core::Workspace {
+                    name: "Acme".to_owned(),
+                    bot_user: "U0BOT".to_owned(),
+                    bot_token: Secret::new("xoxb-not-a-real-token".to_owned()),
+                },
+            )]),
+        },
+    );
+    written(&snapshot, &watched);
+    let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
+    let page = running.get("/instance");
+    assert!(page.contains("200 OK"), "{page}");
+    assert!(
+        page.contains("Acme") && page.contains("T0TEAM"),
+        "the workspace is listed by name and identifier: {page}"
+    );
+    assert!(
+        page.contains("Install on a workspace"),
+        "the way onto Slack is offered: {page}"
+    );
+    assert!(
+        page.contains("Forget the workspace Acme"),
+        "a workspace nothing uses can be forgotten: {page}"
+    );
+    assert!(!page.contains("Nowhere yet."), "{page}");
+    assert!(
+        !page.contains("xoxb-not-a-real-token"),
+        "nothing of the bot token is on the page: {page}"
+    );
+}

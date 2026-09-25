@@ -97,6 +97,9 @@ fn installing(running: &Running) -> Value {
         "begun": value(&running.begun),
         "installs": value(&running.installs.iter().collect::<Vec<_>>()),
         "install_failure": value(&running.install_failure),
+        "workspaces_begun": value(&running.workspaces_begun),
+        "workspace_exchanges": value(&running.workspace_exchanges.iter().collect::<Vec<_>>()),
+        "workspace_failure": value(&running.workspace_failure),
         "reaching": value(&running.reaching.iter().collect::<Vec<_>>()),
         "reaches": value(&running.reaches.iter().collect::<Vec<_>>()),
         "listing_tokens": keyed(running.listing_tokens.iter().map(|(installation, minted)| {

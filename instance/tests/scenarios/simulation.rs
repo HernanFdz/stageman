@@ -421,6 +421,8 @@ pub struct Simulation {
     /// particular, front first, read before the queue above: what tells a
     /// wrong app-level token from a wrong bot token.
     locate_failures: VecDeque<String>,
+    /// Why the next exchange of an install's code is refused, if scripted.
+    exchange_failures: VecDeque<String>,
     /// Why the next sockets cannot be opened, front first.
     socket_failures: VecDeque<String>,
     /// Every image this project has built, as the runtime holds them.
@@ -822,6 +824,7 @@ impl Simulation {
             acked: Vec::new(),
             listen_failures: VecDeque::new(),
             locate_failures: VecDeque::new(),
+            exchange_failures: VecDeque::new(),
             socket_failures: VecDeque::new(),
             images: vec!["stageman:unneeded".to_owned()],
             listeners: BTreeMap::new(),
@@ -2448,6 +2451,19 @@ impl Simulation {
             Some(question @ (Call::WhoAmI { .. } | Call::OpenSocket { .. })) => {
                 answered(self.listener_answered(&question))
             }
+            // An install's code exchanged, as the platform answers it: the
+            // workspace, its bot user, and a bot token minted for it —
+            // unless the next was scripted to be refused.
+            Some(Call::Exchange { code, .. }) => {
+                answered(self.exchange_failures.pop_front().map_or_else(
+                    || {
+                        format!(
+                            r#"{{"ok":true,"access_token":"xoxb-sim-{code}","token_type":"bot","scope":"chat:write","bot_user_id":"U0BOT","app_id":"A0APP","team":{{"id":"T0TEAM","name":"Acme"}},"enterprise":null,"is_enterprise_install":false}}"#
+                        )
+                    },
+                    |error| format!(r#"{{"ok":false,"error":"{error}"}}"#),
+                ))
+            }
             None => Responded::Failed("the simulation does not know this request".to_owned()),
         };
         // An edit is answered a tick later, as a line, a write and a probe
@@ -3009,6 +3025,13 @@ impl Simulation {
     /// connect, and that one alone: a wrong app-level token, as measured.
     pub fn next_locate_fails(&mut self, why: &str) {
         self.locate_failures.push_back(why.to_owned());
+    }
+
+    /// Scripts the platform to refuse the next exchange of an install's
+    /// code with its word: `invalid_code` for one it does not know, as
+    /// measured.
+    pub fn next_exchange_fails(&mut self, why: &str) {
+        self.exchange_failures.push_back(why.to_owned());
     }
 
     /// Scripts the platform's answer to the next read of a repository: a

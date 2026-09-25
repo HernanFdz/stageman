@@ -81,6 +81,8 @@ pub struct ChannelAppView {
     pub client_id: String,
     /// The workspaces it is installed in, as the instance has learned.
     pub workspaces: Vec<WorkspaceView>,
+    /// Why the last install was not kept, if the last one was not.
+    pub install_failure: Option<String>,
 }
 
 /// One workspace the instance's app is installed in, as a page shows it.
@@ -1376,6 +1378,12 @@ pub enum Refusal {
         /// The channel, as the screen names it.
         channel: String,
     },
+    /// The app is not installed on the workspace named.
+    #[error("the app is not installed on {id}")]
+    NoSuchWorkspace {
+        /// The workspace's identifier on the platform.
+        id: String,
+    },
     #[error("that installation is still used by {}", projects.join(", "))]
     InstallationInUse {
         /// The projects that would be left without access, by name.
@@ -1424,6 +1432,7 @@ impl Refusal {
             | Self::VariableValueMissing
             | Self::ChannelIncomplete
             | Self::ChannelAppIncomplete
+            | Self::NoSuchWorkspace { .. }
             | Self::TokenRefused { .. }
             | Self::NoSuchInstallation { .. }
             | Self::ArrivalUnknown
@@ -1485,6 +1494,7 @@ impl Refusal {
             | Self::ChannelMissing { .. }
             | Self::ChannelAppIncomplete
             | Self::ChannelAppMissing { .. }
+            | Self::NoSuchWorkspace { .. }
             | Self::AgentNotConfigured { .. }
             | Self::KitNotOnProject { .. }
             | Self::UnknownSetting { .. }

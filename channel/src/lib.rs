@@ -53,6 +53,23 @@ pub struct Identity {
     pub url: String,
 }
 
+/// The workspace an app was installed on, as the exchange of an install's
+/// code answers it — see `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+///
+/// Deriving `Debug` is safe and deliberate: the one credential in it
+/// redacts itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Installed {
+    /// The workspace's identifier on the platform.
+    pub team: String,
+    /// Its name, for a person.
+    pub name: String,
+    /// The bot user the install made, which a mention there names.
+    pub bot_user: String,
+    /// The bot token minted for the install: what speaks in that workspace.
+    pub bot_token: Secret,
+}
+
 /// One message heard on a channel, as decoded.
 ///
 /// What routing needs and nothing else: the room it was said in, what
@@ -482,6 +499,50 @@ pub fn app_form(channel: Channel, instance: &str) -> String {
     }
 }
 
+/// The path under this instance's address a channel brings the browser
+/// back to after an install of the instance's own app.
+#[must_use]
+pub const fn installed_path(channel: Channel) -> &'static str {
+    match channel {
+        Channel::Slack => slack::INSTALLED_PATH,
+    }
+}
+
+/// Where a person installs the instance's app on a workspace, carrying a
+/// state minted for the press — see `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+#[must_use]
+pub fn install_link(channel: Channel, client_id: &str, state: &str, instance: &str) -> String {
+    match channel {
+        Channel::Slack => slack::install_link(client_id, state, instance),
+    }
+}
+
+/// Renders exchanging an install's code for the workspace's bot token.
+#[must_use]
+pub fn exchange(
+    channel: Channel,
+    client_id: &str,
+    client_secret: &Secret,
+    code: &str,
+    instance: &str,
+) -> Request {
+    match channel {
+        Channel::Slack => slack::exchange(client_id, client_secret, code, instance),
+    }
+}
+
+/// What the platform's answer to [`exchange`] means: the workspace.
+///
+/// # Errors
+///
+/// Fails if the status was not a success, if the body cannot be read, if
+/// the channel refused, or if it accepted and named no workspace.
+pub fn installed(channel: Channel, status: u16, body: &[u8]) -> Result<Installed, ChannelError> {
+    match channel {
+        Channel::Slack => slack::installed(status, body),
+    }
+}
+
 /// Renders asking a channel who this instance is on it.
 ///
 /// Once per connection rather than once per message, and with the
@@ -561,6 +622,13 @@ pub enum Call {
     OpenSocket {
         /// Which channel.
         channel: Channel,
+    },
+    /// An install's code exchanged for a workspace's bot token.
+    Exchange {
+        /// Which channel.
+        channel: Channel,
+        /// The code the browser came back with.
+        code: String,
     },
     /// One message posted.
     Post {
@@ -689,10 +757,10 @@ pub enum ChannelError {
 mod tests {
     use super::{
         Call, ChannelError, Identity, Incoming, Reaction, ThreadRead, acknowledgement, app_form,
-        archive, create_room, decode, done, foreman_room_name, identity, invite, manifest, mention,
-        open_socket, permalink, pieces, post, posted, react, reference, referenced, replies,
-        room_address, room_created, room_link, room_name, set_purpose, set_topic, socket_url,
-        thread_read, update, who_am_i,
+        archive, create_room, decode, done, exchange, foreman_room_name, identity, install_link,
+        installed, invite, manifest, mention, open_socket, permalink, pieces, post, posted, react,
+        reference, referenced, replies, room_address, room_created, room_link, room_name,
+        set_purpose, set_topic, socket_url, thread_read, update, who_am_i,
     };
     use stageman_core::{Channel, JobId, ProjectId, Secret, Speaking, Uuid};
 
@@ -730,6 +798,99 @@ mod tests {
             "{decoded}"
         );
         assert!(!decoded.contains("localhost:8080"), "{decoded}");
+    }
+
+    /// The authorisation address carries the client identifier, every bot
+    /// scope the manifest asks for, the state, and the redirect the
+    /// manifest spelled for this instance, encoded; and the exchange sends
+    /// the client pair, the code and the same redirect as a form, which
+    /// the parser reads back by its code.
+    #[test]
+    fn an_install_is_a_link_onto_the_platform_and_an_exchange_of_its_code() {
+        let link = install_link(
+            Channel::Slack,
+            "1234.5678",
+            "5ta7e",
+            "https://stageman.example",
+        );
+        assert_eq!(
+            link,
+            "https://slack.com/oauth/v2/authorize?client_id=1234.5678&scope=chat:write,\
+             channels:history,groups:history,app_mentions:read,channels:manage,reactions:write\
+             &state=5ta7e&redirect_uri=https%3A%2F%2Fstageman.example%2Finstance%2Fapps%2Fslack%2Finstalled"
+        );
+        // Every scope the link asks for is one the manifest asks for, and
+        // the manifest asks for no other.
+        let manifest = manifest(Channel::Slack);
+        let (_, bot) = manifest.split_once("    bot:\n").expect("the bot scopes");
+        let (bot, _) = bot.split_once("settings:").expect("the settings follow");
+        let asked: Vec<&str> = bot
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("- "))
+            .map(|scope| scope.split_whitespace().next().unwrap_or_default())
+            .collect();
+        for scope in &asked {
+            assert!(link.contains(scope), "{scope} is in the link");
+        }
+        assert_eq!(asked.len(), 6, "{asked:?}");
+
+        let request = exchange(
+            Channel::Slack,
+            "1234.5678",
+            &Secret::new("s3cret&more".to_owned()),
+            "11.22.c0de",
+            "https://stageman.example",
+        );
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.url, "https://slack.com/api/oauth.v2.access");
+        assert_eq!(
+            request.headers.get("content-type").map(String::as_str),
+            Some("application/x-www-form-urlencoded")
+        );
+        assert_eq!(
+            String::from_utf8(request.body.clone().expect("a body")).expect("text"),
+            "client_id=1234%2E5678&client_secret=s3cret%26more&code=11%2E22%2Ec0de\
+             &redirect_uri=https%3A%2F%2Fstageman%2Eexample%2Finstance%2Fapps%2Fslack%2Finstalled"
+        );
+        assert_eq!(
+            Call::parse(&request),
+            Some(Call::Exchange {
+                channel: Channel::Slack,
+                code: "11.22.c0de".to_owned()
+            })
+        );
+    }
+
+    /// The exchange's answer names the workspace, its bot user and the bot
+    /// token minted, in the shape the platform documents, with a token that
+    /// is plainly not one, since a token-shaped example is what a push is
+    /// refused for; a refusal comes back as the platform's word, and an
+    /// answer naming no workspace is refused.
+    #[test]
+    fn the_exchange_answers_the_workspace_or_the_platforms_word() {
+        let answered = installed(
+            Channel::Slack,
+            200,
+            br#"{"ok":true,"access_token":"xoxb-not-a-real-bot-token","token_type":"bot","scope":"chat:write","bot_user_id":"U0KRQLJ9H","app_id":"A0KRD7HC3","team":{"name":"Slack Softball Team","id":"T9TK3CUKW"},"enterprise":null,"is_enterprise_install":false}"#,
+        )
+        .expect("the workspace");
+        assert_eq!(answered.team, "T9TK3CUKW");
+        assert_eq!(answered.name, "Slack Softball Team");
+        assert_eq!(answered.bot_user, "U0KRQLJ9H");
+        assert_eq!(answered.bot_token.expose(), "xoxb-not-a-real-bot-token");
+        assert!(!format!("{answered:?}").contains("xoxb-"), "{answered:?}");
+        assert!(matches!(
+            installed(Channel::Slack, 200, br#"{"ok":false,"error":"invalid_code"}"#),
+            Err(ChannelError::Refused(word)) if word == "invalid_code"
+        ));
+        assert!(matches!(
+            installed(
+                Channel::Slack,
+                200,
+                br#"{"ok":true,"access_token":"xoxb-1"}"#
+            ),
+            Err(ChannelError::NoAnswer)
+        ));
     }
 
     /// The manifest `README.md` shows a reader is this crate's, word for

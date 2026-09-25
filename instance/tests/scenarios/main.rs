@@ -33,3 +33,4 @@ mod transcript;
 mod tunnel;
 mod turns;
 mod waking;
+mod workspaces;
