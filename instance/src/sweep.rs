@@ -422,6 +422,11 @@ impl Running {
     /// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
     fn listen_to_everything(&mut self) -> Vec<Effect> {
         let mut effects = Vec::new();
+        // Projects' own apps first, and the order is load-bearing: where one
+        // shares its app-level token with the instance's app, only one
+        // connection opens, and it has to be the project's, which hears the
+        // project — the instance's routes by workspace and would find no
+        // project bound to one until this project moves onto it.
         let watched: Vec<ProjectId> = self.state.projects.keys().copied().collect();
         for project in watched {
             effects.extend(self.listen(crate::listening::Listening::Own(project)));

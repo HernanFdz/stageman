@@ -119,9 +119,9 @@ Create the app, generate an app-level token under its Basic Information with
 the `connections:write` scope, and paste the client ID, the client secret and
 that token; the token is checked against Slack before it is kept, and the
 client pair is checked by the first install. **Once per workspace:** *Install
-on a workspace*, on the Instance page or on a project's form, opens Slack in
-a tab of its own, which closes itself when Slack brings you back; the form is
-then on that workspace. Slack lets the app install on the workspace that
+on a workspace* on the Instance page, or *Install the instance's app* on a
+project's form, opens Slack in a tab of its own, which closes itself when
+Slack brings you back; the form is then on that workspace. Slack lets the app install on the workspace that
 created it with nothing more; a second workspace needs *Public Distribution*
 activated once on the app's page, under Manage Distribution.
 

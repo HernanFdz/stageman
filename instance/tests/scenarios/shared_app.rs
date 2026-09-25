@@ -746,3 +746,54 @@ fn an_app_of_a_projects_own_already_heard_with_is_refused_when_checked() {
     };
     assert_eq!(shown.projects.len(), 2);
 }
+
+/// Forgetting one of two workspaces takes its voice and keeps the
+/// connection, which the other workspace still needs; forgetting the
+/// other closes it.
+#[test]
+fn forgetting_one_of_two_workspaces_keeps_the_connection_for_the_other() {
+    let mut sim = Simulation::new();
+    let mut state = watching(&[]);
+    state.channel_apps.insert(Channel::Slack, the_app(true));
+    sim.holding(&state);
+    let mut instance = sim.wake(seed(1));
+    sim.run_until(&mut instance, 5_000);
+    assert_eq!(sim.listening(), 1, "the instance's app, once");
+
+    let forget = |sim: &mut Simulation, instance: &mut Instance, id: u64, team: &str| {
+        let Response::Apps(apps) = ask(
+            sim,
+            instance,
+            id,
+            Request::ForgetWorkspace {
+                channel: "slack".to_owned(),
+                id: team.to_owned(),
+            },
+        ) else {
+            panic!("the Instance page");
+        };
+        let until = sim.now() + 2_000;
+        sim.run_until(instance, until);
+        apps
+    };
+    let disconnects_before = count(&sim, "-> Disconnect");
+    let apps = forget(&mut sim, &mut instance, 1, TEAM);
+    assert_eq!(
+        apps.slack.expect("the app").workspaces.len(),
+        1,
+        "the other workspace is still held"
+    );
+    assert_eq!(
+        count(&sim, "-> Disconnect"),
+        disconnects_before,
+        "the connection stays for the other workspace"
+    );
+    assert_eq!(sim.listening(), 1);
+
+    forget(&mut sim, &mut instance, 2, "T0BETA");
+    assert_eq!(
+        count(&sim, "-> Disconnect"),
+        disconnects_before + 1,
+        "the last workspace forgotten closes it"
+    );
+}

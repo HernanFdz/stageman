@@ -605,6 +605,11 @@ impl Binding {
 }
 
 /// Changes the Slack card and hands the draft what the wire is sent.
+// Skipped by mutation testing for the reason `apply` is: it writes two
+// signals of the page, which only a running page has, and what it composes
+// — `Binding::draft` — is tested on its own. The probe drives it in a real
+// browser.
+#[mutants::skip]
 fn apply_binding(
     mut binding: Signal<Binding>,
     mut draft: Signal<Draft>,
