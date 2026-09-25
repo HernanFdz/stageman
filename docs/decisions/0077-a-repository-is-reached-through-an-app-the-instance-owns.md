@@ -27,6 +27,9 @@ repositories offered on the card and creation without a token are that
 record's now — where the App is installed is kept beside the App, and a
 repository is chosen from what the access reaches.
 
+The Slack app the decision below says the Instance page will hold is
+`docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`'s.
+
 ## Context
 
 Route 1 asks an operator to mint a token on the platform, scope it by

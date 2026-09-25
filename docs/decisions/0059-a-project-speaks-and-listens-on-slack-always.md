@@ -9,6 +9,10 @@ go without the credential that listens. Neither is reversed: a channel is
 still not a platform, and a binding is still two credentials of which one
 never reaches a job.
 
+Since `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md` a binding may be a workspace of the instance's app, its two
+credentials held by the app and by the workspace rather than both by the
+project; a project is still created with one, in either shape.
+
 ## Context
 
 `docs/decisions/0005-conversation-happens-on-channels.md` made Slack the

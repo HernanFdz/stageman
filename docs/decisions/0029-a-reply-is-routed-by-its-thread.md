@@ -14,6 +14,11 @@ room instead of the thread this record chose; the transport stands. Since
 reaches a job while it works, by steering, and the refusal a busy job gave
 goes.
 
+Since `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md` the rejection below of one app for the whole instance stands for
+an app a project owns and is reversed for an app the instance owns: a project
+may speak through a workspace of the instance's app, and one connection per
+app-level token hears every workspace.
+
 ## Context
 
 `docs/decisions/0005-conversation-happens-on-channels.md` makes a channel the

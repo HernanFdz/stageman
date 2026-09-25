@@ -57,7 +57,10 @@ first.
 - **channel** — the contract every channel is spoken on, and the adapters
   that implement it: what is sent to a platform, what its answers mean, what
   a frame carries and what has to be acknowledged, as pure functions the
-  **instance** renders and reads and the world carries. Beside **agent**
+  **instance** renders and reads and the world carries; and, since
+  `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`, the app the instance owns on a channel: where a workspace installs
+  it, how a code is exchanged, and which workspace a frame is from. Beside
+  **agent**
   for the reason that crate exists — `Channel` and `Agent` are the domain's
   two closed sets, each closed because reaching one needs code — and
   dispatching on the channel at its surface so that nothing outside names a
