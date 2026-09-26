@@ -33,7 +33,7 @@ use stageman_instance::{Request, Response};
 use stageman_wire::Part;
 
 use super::error::{DashboardError, DashboardResult};
-use super::live::Live;
+use super::live::{Live, Reading, use_reading};
 use crate::ui::{
     BESIDE, Button, ButtonVariant, Card, EmptyState, FIELD, Field, Guide, Icon, Mark, Modal,
     Reference, Segmented, Skeleton, Tooltip,
@@ -186,10 +186,7 @@ pub async fn forget_workspace(channel: String, id: String) -> DashboardResult<Ap
 #[component]
 pub fn InstanceView() -> Element {
     let live = use_context::<Live>();
-    let mut reading = use_server_future(move || {
-        let _ = live.follow();
-        apps()
-    })?;
+    let reading = use_reading(live, apps)?;
     let mut failure = use_signal(|| None::<DashboardError>);
 
     rsx! {
@@ -199,37 +196,40 @@ pub fn InstanceView() -> Element {
                     p { class: "text-sm text-failed", "{reason}" }
                 }
             }
-            match reading.cloned() {
-                Some(Ok(shown)) => rsx! {
-                    GitHubApp {
-                        app: shown.github,
-                        failed: shown.failed,
-                        onchanged: move |outcome: DashboardResult<Apps>| match outcome {
-                            Ok(fresh) => {
-                                failure.set(None);
-                                reading.set(Some(Ok(fresh)));
-                            }
-                            Err(reason) => failure.set(Some(reason)),
-                        },
+            match reading {
+                Reading::Read(mut read) => {
+                    let shown = read();
+                    rsx! {
+                        GitHubApp {
+                            app: shown.github,
+                            failed: shown.failed,
+                            onchanged: move |outcome: DashboardResult<Apps>| match outcome {
+                                Ok(fresh) => {
+                                    failure.set(None);
+                                    read.set(fresh);
+                                }
+                                Err(reason) => failure.set(Some(reason)),
+                            },
+                        }
+                        SlackApp {
+                            app: shown.slack,
+                            form: shown.slack_form,
+                            onchanged: move |outcome: DashboardResult<Apps>| match outcome {
+                                Ok(fresh) => {
+                                    failure.set(None);
+                                    read.set(fresh);
+                                }
+                                Err(reason) => failure.set(Some(reason)),
+                            },
+                        }
                     }
-                    SlackApp {
-                        app: shown.slack,
-                        form: shown.slack_form,
-                        onchanged: move |outcome: DashboardResult<Apps>| match outcome {
-                            Ok(fresh) => {
-                                failure.set(None);
-                                reading.set(Some(Ok(fresh)));
-                            }
-                            Err(reason) => failure.set(Some(reason)),
-                        },
-                    }
-                },
-                Some(Err(reason)) => rsx! {
+                }
+                Reading::Failed(reason) => rsx! {
                     Card { title: "The instance could not be read",
                         p { class: "text-sm text-failed", "{reason}" }
                     }
                 },
-                None => rsx! { Skeleton {} },
+                Reading::NotYet => rsx! { Skeleton {} },
             }
         }
     }

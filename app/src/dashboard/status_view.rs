@@ -11,7 +11,7 @@ use dioxus::prelude::*;
 use stageman_instance::{Request, Response};
 
 use super::error::DashboardResult;
-use super::live::Live;
+use super::live::{Live, Reading, use_reading};
 
 pub use stageman_wire::Instance;
 
@@ -37,13 +37,10 @@ pub async fn instance() -> DashboardResult<Instance> {
 #[component]
 pub fn Status() -> Element {
     let live = use_context::<Live>();
-    let reading = use_server_future(move || {
-        let _ = live.follow();
-        instance()
-    })?;
-    let Some(Ok(shown)) = reading.cloned() else {
+    let Reading::Read(read) = use_reading(live, instance)? else {
         return VNode::empty();
     };
+    let shown = read();
 
     rsx! {
         // In view at the foot of the window, under the same rule as the

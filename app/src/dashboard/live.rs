@@ -7,8 +7,10 @@
 //! tells whoever follows it each time a write of the instance's file has
 //! landed; the route below hands each of those to an open page as a tick
 //! carrying nothing; the shell opens that stream once, and every page's read
-//! follows the ticks, so it re-runs on each. Ticks that land while a page is
-//! busy collapse into one, which the channel guarantees rather than anybody.
+//! follows the ticks, so it re-runs on each — in the background, keeping
+//! the last reading until the next has landed, which is what [`use_reading`]
+//! is for. Ticks that land while a page is busy collapse into one, which
+//! the channel guarantees rather than anybody.
 
 // The route below is a server function, which the framework requires to be
 // `async` whether or not its body awaits — and this one hands a stream back
@@ -24,9 +26,12 @@
     )
 )]
 
-use dioxus::fullstack::TextStream;
+use dioxus::fullstack::{Loader, LoaderHandle, Loading, TextStream};
 use dioxus::prelude::*;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
+use super::error::DashboardResult;
 use crate::ui::Tooltip;
 
 /// What a tick says on the wire. Nothing, in a word: a page that reads it
@@ -108,6 +113,103 @@ impl Live {
     pub fn follow(self) -> bool {
         (self.ticked)()
     }
+}
+
+/// What a page has of its read.
+// The reading is the one variant a page holds, and it is a handle that
+// copies; boxing it would save bytes on a value that lives for one render
+// and put a pointer between every page and its reading.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the reading is a handle that copies, and the one variant a page holds"
+)]
+pub enum Reading<T: 'static> {
+    /// Nothing yet: a page reached within the browser is being read for the
+    /// first time, and shows its skeleton until the reading lands. The
+    /// server never answers this, because it waits for the reading instead.
+    // Built by the browser's half alone, and matched by both.
+    #[cfg_attr(
+        feature = "server",
+        expect(
+            dead_code,
+            reason = "built by the browser's half, which the daemon's half never is"
+        )
+    )]
+    NotYet,
+    /// The read failed, and this is why.
+    Failed(String),
+    /// The reading, kept while the next one is in flight, so that a tick
+    /// changes what a page shows only once there is something newer to
+    /// show. Writable, for a page that already holds something newer: a
+    /// route that changes something answers with the listing it changed,
+    /// which is shown at once rather than at the tick that follows.
+    Read(Loader<T>),
+}
+
+/// A page's read: made on the server while the page renders and shipped
+/// with it, so that a page arrives complete and the browser agrees with
+/// what it hydrates; then made again on every tick, in the background, so
+/// that the page keeps its last reading until the next has landed.
+///
+/// Built on the framework's loader rather than its server future, and the
+/// difference is the whole reason this exists — see
+/// `docs/decisions/0082-a-page-keeps-its-reading-while-it-re-reads.md`.
+/// The server future suspends the page on every re-run, and the framework
+/// answers a page suspended in the browser by taking the whole document
+/// down until every suspended read has landed: measured, the page was torn
+/// down and rebuilt on every tick, with focus lost and every disclosure
+/// closed, and the ids of whatever a re-read had changed were freed twice,
+/// which was the *cannot reclaim* line the framework logged on every tick
+/// that changed anything. The loader suspends once, on the first read, and
+/// reloads in the background after.
+///
+/// # Errors
+///
+/// On the server, a first read that has not landed suspends the page until
+/// it has, which is how the reading gets into the page. The browser is
+/// never suspended: a page with nothing yet is told so instead.
+pub fn use_reading<T, F>(
+    live: Live,
+    mut read: impl FnMut() -> F + 'static,
+) -> Result<Reading<T>, RenderError>
+where
+    F: Future<Output = DashboardResult<T>> + 'static,
+    T: PartialEq + Serialize + DeserializeOwned + 'static,
+{
+    let loaded = use_loader(move || {
+        let _ = live.follow();
+        read()
+    });
+    match loaded {
+        Ok(reading) => Ok(Reading::Read(reading)),
+        Err(Loading::Failed(handle)) => Ok(Reading::Failed(handle.error().map_or_else(
+            || Loading::Failed(handle).to_string(),
+            |why| why.to_string(),
+        ))),
+        Err(Loading::Pending(handle)) => not_yet(handle),
+    }
+}
+
+/// A first read that has not landed, on the server: the page waits for it,
+/// which is how the reading reaches the page, so this suspends the page.
+#[cfg(feature = "server")]
+fn not_yet<T: 'static>(handle: LoaderHandle) -> Result<Reading<T>, RenderError> {
+    Err(Loading::Pending(handle).into())
+}
+
+/// The same in the browser, where nothing is ever suspended: the page shows
+/// its skeleton and is rendered again once the reading lands.
+// Skipped by mutation testing for the reason `use_live` is: compiled for
+// the browser's half only. The probe drives it in a real browser.
+#[cfg(not(feature = "server"))]
+#[mutants::skip]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the daemon's half of the same function fails, and a page treats the two alike"
+)]
+const fn not_yet<T: 'static>(handle: LoaderHandle) -> Result<Reading<T>, RenderError> {
+    let _ = handle;
+    Ok(Reading::NotYet)
 }
 
 /// Opens the stream once the page is awake, and keeps it open.

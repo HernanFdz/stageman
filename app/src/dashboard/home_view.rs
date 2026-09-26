@@ -15,7 +15,7 @@ use stageman_instance::{Request, Response};
 
 use super::error::DashboardResult;
 use super::jobs_view::{JobRow, ROW, ROWS};
-use super::live::Live;
+use super::live::{Live, Reading, use_reading};
 use crate::ui::{
     Badge, BadgeTone, Card, EmptyState, Icon, Mark, Reference, Skeleton, Tooltip, When,
 };
@@ -42,30 +42,27 @@ pub async fn home() -> DashboardResult<Home> {
 
 /// The first page.
 ///
-/// [`use_server_future`] rather than `use_resource`, and the difference is the
-/// whole reason this exists: it runs on the server during the render, ships
-/// the answer with the page, and hands the client the same value rather than a
-/// second request. So a page arrives with everything already on it, and the
-/// hydrated client agrees with the HTML it hydrated.
+/// Read through the shell's `use_reading`, as every page is: made on the
+/// server while the page renders and shipped with it, so a page arrives with
+/// everything already on it and the hydrated client agrees with the HTML it
+/// hydrated; then made again on every tick, in the background, so the page
+/// changes only once there is something newer to show.
 #[component]
 pub fn HomeView() -> Element {
     let live = use_context::<Live>();
-    let reading = use_server_future(move || {
-        let _ = live.follow();
-        home()
-    })?;
+    let reading = use_reading(live, home)?;
 
     rsx! {
-        match reading.cloned() {
-            Some(Ok(home)) => rsx! { Overview { home } },
+        match reading {
+            Reading::Read(read) => rsx! { Overview { home: read() } },
             // Shown rather than logged. A blank page would send whoever hit it
             // to read the source.
-            Some(Err(reason)) => rsx! {
+            Reading::Failed(reason) => rsx! {
                 Card { title: "This instance could not be read",
                     p { class: "text-sm text-failed", "{reason}" }
                 }
             },
-            None => rsx! { Skeleton {} },
+            Reading::NotYet => rsx! { Skeleton {} },
         }
     }
 }

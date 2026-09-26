@@ -28,7 +28,7 @@ use super::agents_view::Agent;
 use super::error::DashboardError;
 use super::instance_view::install_link;
 use super::instance_view::workspace_link;
-use super::live::Live;
+use super::live::{Live, Reading, use_reading};
 use super::projects_view::{amend, binds, create, forget, projects, reaches, workspace_arrival};
 use crate::ui::{
     BESIDE, Button, ButtonVariant, Card, Combobox, ComboboxItem, FIELD, Field, Guide, Icon, Modal,
@@ -874,37 +874,43 @@ fn starting(watching: &Watching, filling: &Filling) -> Draft {
 #[component]
 pub fn ProjectNewView() -> Element {
     let live = use_context::<Live>();
-    let reading = use_server_future(move || {
-        let _ = live.follow();
-        projects()
-    })?;
+    let reading = use_reading(live, projects)?;
 
     rsx! {
-        match reading.cloned() {
-            Some(Ok(watching)) => rsx! { Editing { watching, filling: Filling::Creating } },
-            Some(Err(reason)) => rsx! {
+        match reading {
+            Reading::Read(read) => rsx! { Editing { watching: read(), filling: Filling::Creating } },
+            Reading::Failed(reason) => rsx! {
                 Card { title: "The projects could not be read",
                     p { class: "text-sm text-failed", "{reason}" }
                 }
             },
-            None => rsx! { Skeleton {} },
+            Reading::NotYet => rsx! { Skeleton {} },
         }
     }
 }
 
 /// The page for a project that exists.
+///
+/// Keyed by the project, for the reason the project's own screen is:
+/// another project's address is another page, with a draft of its own,
+/// rather than this one re-read around the draft it holds.
 #[component]
 pub fn ProjectSettingsView(project: String) -> Element {
+    rsx! {
+        SettingsOf { key: "{project}", project }
+    }
+}
+
+/// The page itself, for one project for as long as it is shown.
+#[component]
+fn SettingsOf(project: String) -> Element {
     let live = use_context::<Live>();
-    let reading = use_server_future(use_reactive!(|project| {
-        let _ = live.follow();
-        let _ = project;
-        projects()
-    }))?;
+    let reading = use_reading(live, projects)?;
 
     rsx! {
-        match reading.cloned() {
-            Some(Ok(watching)) => {
+        match reading {
+            Reading::Read(read) => {
+                let watching = read();
                 if watching.projects.iter().any(|known| known.id == project) {
                     rsx! { Editing { watching, filling: Filling::Amending(project) } }
                 } else {
@@ -917,12 +923,12 @@ pub fn ProjectSettingsView(project: String) -> Element {
                     }
                 }
             }
-            Some(Err(reason)) => rsx! {
+            Reading::Failed(reason) => rsx! {
                 Card { title: "The project could not be read",
                     p { class: "text-sm text-failed", "{reason}" }
                 }
             },
-            None => rsx! { Skeleton {} },
+            Reading::NotYet => rsx! { Skeleton {} },
         }
     }
 }

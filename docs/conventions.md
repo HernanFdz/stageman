@@ -1064,6 +1064,22 @@ justify is usually obsolete.
   reads. The mark in the shell says whether the page is live, and a page
   without it behind a proxy is a proxy that buffers.
 
+  **And a page keeps its last reading while it re-reads, and is never
+  suspended in the browser** — see
+  `docs/decisions/0082-a-page-keeps-its-reading-while-it-re-reads.md`.
+  Every page reads through the one hook in the shell's module, built on
+  the framework's loader rather than its server future, because the server
+  future suspends the page on every re-run, and the framework answers a
+  page suspended in the browser by taking the whole document down until
+  every suspended read has landed: measured, the page was torn down and
+  rebuilt on every tick, with focus lost and every disclosure closed, and
+  the framework freed the element ids of whatever a re-read had changed a
+  second time, logging *cannot reclaim ElementId* once per id on every
+  tick that changed anything. A page reached within the browser shows its
+  skeleton until its first reading lands, and a page whose address carries
+  a parameter is keyed by it, so that another address is another page
+  rather than the last one re-read.
+
 - **A time is shown relative, exact on hover, and drawn after the page
   wakes.** The server renders the page and the browser hydrates it, and a
   relative time computed twice from two clocks is two different strings,
@@ -1380,6 +1396,15 @@ it lands.
   an agent's own words are posted as they come, and they are not this
   project's to assert; what is asserted whole is every text composed around
   them — the notices, the framing, the lines a burst is built from.
+
+- **A browser check reads every console call, because the framework logs
+  through `console.log`.** The browser's half logs through the framework's
+  wasm layer, which writes every level, errors included, as a styled
+  `console.log` line whose text starts with the level. A check that counts
+  the console's own error entries or `console.error` calls counts none of
+  them, and reported no errors on pages that were logging one per element
+  on every tick; what a probe reads is every console call, looking for the
+  level word the line starts with.
 
 - **Sequencing is tested by scenarios and seeds, and their snapshots are
   reviewed as behaviour.** Every flow that crosses an await today — a turn

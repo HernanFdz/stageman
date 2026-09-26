@@ -16,7 +16,7 @@ use dioxus::prelude::*;
 use stageman_instance::{Request, Response};
 
 use super::error::{DashboardError, DashboardResult};
-use super::live::Live;
+use super::live::{Live, Reading, use_reading};
 use crate::ui::{Badge, BadgeTone, Button, ButtonVariant, Card, EmptyState, Skeleton};
 
 pub use stageman_wire::Agent;
@@ -73,10 +73,7 @@ pub async fn forget(agent: String) -> DashboardResult<Vec<Agent>> {
 #[component]
 pub fn AgentsView() -> Element {
     let live = use_context::<Live>();
-    let mut listing = use_server_future(move || {
-        let _ = live.follow();
-        agents()
-    })?;
+    let reading = use_reading(live, agents)?;
     let mut failure = use_signal(|| None::<DashboardError>);
 
     rsx! {
@@ -86,48 +83,51 @@ pub fn AgentsView() -> Element {
                     p { class: "text-sm text-failed", "{reason}" }
                 }
             }
-            match listing.cloned() {
-                Some(Ok(agents)) => rsx! {
-                    Card {
-                        title: "Agents",
-                        note: "An agent needs a credential before a project can name it.",
-                        badge: rsx! {
-                            Badge { "{agents.iter().filter(|agent| agent.configured).count()} of {agents.len()}" }
-                        },
-                        if agents.is_empty() {
-                            EmptyState {
-                                title: "This build can run no agents at all.",
-                                note: "The set is compiled in, so this is a build problem rather \
-                                       than something to configure.",
-                            }
-                        } else {
-                            ul { class: "divide-y divide-border",
-                                for agent in agents {
-                                    li { key: "{agent.id}",
-                                        AgentRow {
-                                            agent,
-                                            onchanged: move |outcome: DashboardResult<Vec<Agent>>| {
-                                                match outcome {
-                                                    Ok(fresh) => {
-                                                        failure.set(None);
-                                                        listing.set(Some(Ok(fresh)));
+            match reading {
+                Reading::Read(mut listing) => {
+                    let agents = listing();
+                    rsx! {
+                        Card {
+                            title: "Agents",
+                            note: "An agent needs a credential before a project can name it.",
+                            badge: rsx! {
+                                Badge { "{agents.iter().filter(|agent| agent.configured).count()} of {agents.len()}" }
+                            },
+                            if agents.is_empty() {
+                                EmptyState {
+                                    title: "This build can run no agents at all.",
+                                    note: "The set is compiled in, so this is a build problem rather \
+                                           than something to configure.",
+                                }
+                            } else {
+                                ul { class: "divide-y divide-border",
+                                    for agent in agents {
+                                        li { key: "{agent.id}",
+                                            AgentRow {
+                                                agent,
+                                                onchanged: move |outcome: DashboardResult<Vec<Agent>>| {
+                                                    match outcome {
+                                                        Ok(fresh) => {
+                                                            failure.set(None);
+                                                            listing.set(fresh);
+                                                        }
+                                                        Err(reason) => failure.set(Some(reason)),
                                                     }
-                                                    Err(reason) => failure.set(Some(reason)),
-                                                }
-                                            },
+                                                },
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
                     }
-                },
-                Some(Err(reason)) => rsx! {
+                }
+                Reading::Failed(reason) => rsx! {
                     Card { title: "The agents could not be read",
                         p { class: "text-sm text-failed", "{reason}" }
                     }
                 },
-                None => rsx! { Skeleton {} },
+                Reading::NotYet => rsx! { Skeleton {} },
             }
         }
     }
