@@ -27,16 +27,18 @@ use dioxus::prelude::*;
 use super::agents_view::Agent;
 use super::error::DashboardError;
 use super::instance_view::install_link;
+use super::instance_view::workspace_link;
 use super::live::Live;
-use super::projects_view::{amend, create, forget, projects, reaches};
+use super::projects_view::{amend, binds, create, forget, projects, reaches, workspace_arrival};
 use crate::ui::{
     BESIDE, Button, ButtonVariant, Card, Combobox, ComboboxItem, FIELD, Field, Guide, Icon, Modal,
     PageHeader, Segmented, Skeleton, TextArea, Tooltip, When,
 };
 
 pub use stageman_wire::{
-    AccessDraft, AccessView, ChannelDraft, Draft, Filling, Fitted, KitDraft, Part, Problem,
-    Reachable, Reached, Repository, Shape, Through, VariableDraft, Watching,
+    AccessDraft, AccessView, BindingDraft, BindingView, ChannelDraft, Draft, Filling, Fitted,
+    KitDraft, Part, Problem, Reachable, Reached, Repository, Shape, Through, VariableDraft,
+    Watching, WorkspaceArrival,
 };
 
 /// The project a page is for, where it is for one that exists.
@@ -477,6 +479,255 @@ fn apply(
     not_reached.set(said);
 }
 
+/// Which shape the Slack card is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum BindingShape {
+    /// Nothing chosen yet.
+    #[default]
+    None,
+    /// An app of the project's own.
+    Own,
+    /// A workspace of the app the instance owns.
+    Workspace,
+}
+
+/// What can be done about the binding, from the sentence that says where
+/// it stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BindingAction {
+    /// Open Slack to install the instance's app on a workspace; the form
+    /// moves onto it when the tab comes back.
+    Install,
+    /// Open the panel an app of its own is set in.
+    UseOwn,
+    /// Put the form back on the app of its own it remembers: the
+    /// project's, or one set here before.
+    BackToOwn,
+    /// Put the form back on the workspace it remembers: the project's, or
+    /// one its tab brought back before.
+    BackToWorkspace,
+}
+
+/// One piece of the Slack sentence: words, or words that do something.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Said {
+    /// Words.
+    Text(String),
+    /// Words that do something when pressed.
+    Act(BindingAction, String),
+}
+
+/// What the form holds for an app of its own: the pair set here, or none
+/// for the project's, which never reaches a browser; and where it speaks,
+/// once the channel has said.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OwnSlot {
+    /// The two tokens, set in the panel and checked there.
+    pair: Option<ChannelDraft>,
+    /// Where the app speaks, as an address a person can open.
+    url: Option<String>,
+}
+
+/// What the form holds for the workspace shape: the state its install
+/// came back under, or none for the project's, and the workspace's name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceSlot {
+    /// The state the install came back under; none for the workspace the
+    /// project holds.
+    arrival: Option<String>,
+    /// The workspace's name, for the sentence.
+    name: String,
+}
+
+/// The Slack card, as the form holds it — see
+/// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`:
+/// which shape it is on, and what it remembers of each, so that going
+/// back is going back to something.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct Binding {
+    /// The shape the form is in.
+    shape: BindingShape,
+    /// The app of its own, where the form has been on one.
+    own: Option<OwnSlot>,
+    /// The workspace, where the form has been on one.
+    workspace: Option<WorkspaceSlot>,
+}
+
+impl Binding {
+    /// What the form starts on: the shape the project holds, and nothing
+    /// for a project that does not exist yet.
+    fn starting(project: Option<&stageman_wire::Project>) -> Self {
+        match project.and_then(|project| project.binding.as_ref()) {
+            Some(BindingView::Own { url }) => Self {
+                shape: BindingShape::Own,
+                own: Some(OwnSlot {
+                    pair: None,
+                    url: url.clone(),
+                }),
+                workspace: None,
+            },
+            Some(BindingView::Workspace { name, .. }) => Self {
+                shape: BindingShape::Workspace,
+                own: None,
+                workspace: Some(WorkspaceSlot {
+                    arrival: None,
+                    name: name.clone(),
+                }),
+            },
+            None => Self::default(),
+        }
+    }
+
+    /// What the wire is sent: the shape, and what names it — the pair set
+    /// here, the state a workspace came back under, or what the project
+    /// holds.
+    fn draft(&self) -> BindingDraft {
+        match self.shape {
+            BindingShape::None => BindingDraft::Kept,
+            BindingShape::Own => self
+                .own
+                .as_ref()
+                .and_then(|slot| slot.pair.clone())
+                .map_or(BindingDraft::Kept, BindingDraft::Own),
+            BindingShape::Workspace => BindingDraft::Workspace {
+                arrival: self
+                    .workspace
+                    .as_ref()
+                    .and_then(|slot| slot.arrival.clone()),
+            },
+        }
+    }
+
+    /// The form moved onto a shape.
+    const fn moved(&mut self, shape: BindingShape) {
+        self.shape = shape;
+    }
+}
+
+/// Changes the Slack card and hands the draft what the wire is sent.
+// Skipped by mutation testing for the reason `apply` is: it writes two
+// signals of the page, which only a running page has, and what it composes
+// — `Binding::draft` — is tested on its own. The probe drives it in a real
+// browser.
+#[mutants::skip]
+fn apply_binding(
+    mut binding: Signal<Binding>,
+    mut draft: Signal<Draft>,
+    change: impl FnOnce(&mut Binding),
+) {
+    change(&mut binding.write());
+    draft.write().binding = binding.peek().draft();
+}
+
+/// The workspace an address is on, as a person reads it: the address
+/// without its scheme and its trailing slash.
+fn host_of(url: &str) -> String {
+    url.trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_owned()
+}
+
+/// The sentence the Slack card's control is, by where the form stands:
+/// which shape the project is in, or that none is chosen, and what can be
+/// done about it, inline — on the pattern the GitHub card set.
+fn slack_sentence(binding: &Binding, app_registered: bool) -> Vec<Said> {
+    let text = |words: &str| Said::Text(words.to_owned());
+    let act = |action: BindingAction, words: &str| Said::Act(action, words.to_owned());
+    let mut said = Vec::new();
+    match binding.shape {
+        BindingShape::None => {
+            said.push(text("Not chosen yet. "));
+            if app_registered {
+                said.push(act(BindingAction::Install, "Install the instance's app"));
+                said.push(text(" on a workspace, or "));
+                said.push(act(BindingAction::UseOwn, "use an app of its own"));
+                said.push(text("."));
+            } else {
+                said.push(act(BindingAction::UseOwn, "Use an app of its own"));
+                said.push(text(
+                    "; the instance's app can be installed on a workspace once one is \
+                     registered on the Instance page.",
+                ));
+            }
+        }
+        BindingShape::Workspace => {
+            let name = binding
+                .workspace
+                .as_ref()
+                .map(|slot| slot.name.as_str())
+                .filter(|name| !name.is_empty());
+            said.push(text(&name.map_or_else(
+                || "Through the instance's app. ".to_owned(),
+                |name| format!("Through the instance's app, on {name}. "),
+            )));
+            said.push(act(
+                BindingAction::Install,
+                "Install it on another workspace",
+            ));
+            said.push(text(", or "));
+            if binding.own.is_some() {
+                said.push(act(
+                    BindingAction::BackToOwn,
+                    "go back to the app of its own",
+                ));
+            } else {
+                said.push(act(BindingAction::UseOwn, "use an app of its own"));
+            }
+            said.push(text(" instead."));
+        }
+        BindingShape::Own => {
+            let host = binding
+                .own
+                .as_ref()
+                .and_then(|slot| slot.url.as_deref())
+                .map(host_of)
+                .filter(|host| !host.is_empty());
+            said.push(text(&host.map_or_else(
+                || "Through an app of its own. ".to_owned(),
+                |host| format!("Through an app of its own, on {host}. "),
+            )));
+            said.push(act(BindingAction::UseOwn, "Replace it"));
+            if app_registered {
+                said.push(text(", or "));
+                if binding.workspace.is_some() {
+                    said.push(act(
+                        BindingAction::BackToWorkspace,
+                        "go back to the workspace",
+                    ));
+                } else {
+                    said.push(act(BindingAction::Install, "install the instance's app"));
+                    said.push(text(" on a workspace"));
+                }
+                said.push(text(" instead."));
+            } else {
+                said.push(text("."));
+            }
+        }
+    }
+    said
+}
+
+/// Where a refusal of the panel's pair is said: beside the bot token's
+/// box, beside the app-level token's, or over both when it points at
+/// neither.
+fn placed_own(
+    refused: Option<&DashboardError>,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let Some(why) = refused else {
+        return (None, None, None);
+    };
+    let said = why.to_string();
+    match why {
+        DashboardError::Refused(refusal) => match refusal.part() {
+            Some(Part::Channel) => (Some(said), None, None),
+            Some(Part::Listening) => (None, Some(said), None),
+            _ => (None, None, Some(said)),
+        },
+        DashboardError::NoInstance | DashboardError::Failed => (None, None, Some(said)),
+    }
+}
+
 /// Whether a save stops before asking the instance: the page refuses to
 /// ask badly, and says so beside each box instead.
 fn refused_before_asking(draft: &Draft, filling: &Filling, held: &[String]) -> bool {
@@ -603,7 +854,7 @@ fn starting(watching: &Watching, filling: &Filling) -> Draft {
                 foreman: project.foreman.clone(),
                 kits: project.kits.clone(),
                 access: Access::starting(Some(project)).draft(),
-                channel: ChannelDraft::default(),
+                binding: Binding::starting(Some(project)).draft(),
                 variables: project
                     .variables
                     .iter()
@@ -715,6 +966,17 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
     // possible; nothing more of it reaches a form.
     let app_registered = watching.app_registered;
     let project_id = project.map(|project| project.id.clone());
+    // The same, for the panel that checks a pair for this project.
+    let bound_for = project_id.clone();
+    // Whether a Slack app is registered, which is what makes installing it
+    // on a workspace possible.
+    let slack_app_registered = watching.slack_app_registered;
+    // The Slack card, as the form holds it — see `Binding`.
+    let starting_binding = Binding::starting(project);
+    let binding = use_signal(move || starting_binding);
+    // What the Binding field says over its line: an install that could not
+    // begin, or a tab that came back to nothing.
+    let mut binding_problem = use_signal(|| None::<String>);
     let holds_something = project.is_some_and(|project| project.access.is_some());
     // The GitHub card, as the form holds it — see `Access`. Every change
     // goes through `apply`, which settles the repository and hands the
@@ -799,6 +1061,45 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
             }
         }
     });
+    // The state an install of the instance's app was pressed under, while
+    // its tab is out, asked about on every tick as the App's is — see
+    // `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+    let live_for_slack = use_context::<Live>();
+    let mut pending_workspace = use_signal(|| None::<String>);
+    let _workspace_arriving = use_resource(move || {
+        let _ = live_for_slack.follow();
+        let state = pending_workspace();
+        async move {
+            let Some(state) = state else {
+                return;
+            };
+            match workspace_arrival("slack".to_owned(), state.clone()).await {
+                Ok(WorkspaceArrival::NotYet) => {}
+                Ok(WorkspaceArrival::Installed { name, .. }) => {
+                    pending_workspace.set(None);
+                    binding_problem.set(None);
+                    apply_binding(binding, draft, |binding| {
+                        binding.workspace = Some(WorkspaceSlot {
+                            arrival: Some(state),
+                            name,
+                        });
+                        binding.moved(BindingShape::Workspace);
+                    });
+                }
+                Err(why) => {
+                    pending_workspace.set(None);
+                    binding_problem.set(Some(why.to_string()));
+                }
+            }
+        }
+    });
+    // The panel an app of its own is set in, and what it holds while it is
+    // open.
+    let mut own_panel = use_signal(|| false);
+    let mut own_credential = use_signal(String::new);
+    let mut own_listening = use_signal(String::new);
+    let mut own_refused = use_signal(|| None::<DashboardError>);
+    let mut checking_own = use_signal(|| false);
     // The panel a token is set in, and what it holds while it is open.
     let mut token_panel = use_signal(|| false);
     let mut token_text = use_signal(String::new);
@@ -1169,6 +1470,107 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
             // platform does not accept never reaches the draft. The token
             // lives in the form until the save checks it once more and
             // keeps it.
+            // An app of its own is set in a panel of two boxes, checked there
+            // before the form moves onto it, and never shown back.
+            if own_panel() {
+                {
+                    let check = Callback::new(move |()| {
+                        let pair = ChannelDraft {
+                            credential: own_credential().trim().to_owned(),
+                            listen_credential: own_listening().trim().to_owned(),
+                        };
+                        if pair.credential.is_empty() || pair.listen_credential.is_empty() || checking_own() {
+                            return;
+                        }
+                        checking_own.set(true);
+                        own_refused.set(None);
+                        let project = bound_for.clone();
+                        spawn(async move {
+                            let answered = binds(project, pair.clone()).await;
+                            checking_own.set(false);
+                            match answered {
+                                Ok(bound) => {
+                                    apply_binding(binding, draft, |binding| {
+                                        binding.own = Some(OwnSlot {
+                                            pair: Some(pair),
+                                            url: Some(bound.url),
+                                        });
+                                        binding.moved(BindingShape::Own);
+                                    });
+                                    own_credential.set(String::new());
+                                    own_listening.set(String::new());
+                                    own_panel.set(false);
+                                }
+                                Err(why) => own_refused.set(Some(why)),
+                            }
+                        });
+                    });
+                    let (beside_credential, beside_listening, unplaced_own) = placed_own(own_refused().as_ref());
+                    let complete_own = !own_credential().trim().is_empty() && !own_listening().trim().is_empty();
+                    rsx! {
+                        Modal {
+                            title: "Use an app of its own",
+                            onclose: move |()| {
+                                own_panel.set(false);
+                                own_refused.set(None);
+                            },
+                            actions: rsx! {
+                                Button {
+                                    disabled: !complete_own,
+                                    onclick: move |_| check.call(()),
+                                    if checking_own() { "Checking…" } else { "Use it" }
+                                }
+                            },
+                            div { class: "flex flex-col gap-3",
+                                if let Some(why) = unplaced_own {
+                                    p { role: "alert", class: "text-sm text-failed", "{why}" }
+                                }
+                                Field {
+                                    label: "Bot token",
+                                    note: "What speaks. Starts with xoxb; on OAuth & Permissions once the app is installed.",
+                                    problem: beside_credential,
+                                    aside: rsx! {
+                                        Guide {
+                                            mark: "slack",
+                                            label: "New app",
+                                            says: "Opens Slack's form with the app's manifest filled in. Install \
+                                                   the app to the workspace and copy its bot token; then generate \
+                                                   an app-level token under Basic Information, with the \
+                                                   connections:write scope, and copy that.",
+                                            link: app_form,
+                                        }
+                                    },
+                                    input {
+                                        r#type: "password",
+                                        class: "{FIELD} font-mono",
+                                        placeholder: "xoxb-…",
+                                        value: "{own_credential}",
+                                        oninput: move |event| own_credential.set(event.value()),
+                                    }
+                                }
+                                Field {
+                                    label: "App-level token",
+                                    note: "What listens. Starts with xapp, with the connections:write scope.",
+                                    info: "Generated by hand on the app's Basic Information page, under \
+                                           App-Level Tokens, with the connections:write scope: the manifest \
+                                           cannot mint one, and neither can anything but a person. Both tokens \
+                                           are checked against Slack before the form moves onto them, and an \
+                                           app another project already speaks through is refused, since Slack \
+                                           hands each event to one connection.",
+                                    problem: beside_listening,
+                                    input {
+                                        r#type: "password",
+                                        class: "{FIELD} font-mono",
+                                        placeholder: "xapp-…",
+                                        value: "{own_listening}",
+                                        oninput: move |event| own_listening.set(event.value()),
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             if token_panel() {
                 {
                     // Pressed on the button and on Enter in the box alike.
@@ -1282,58 +1684,69 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
                 }
             }
 
-            // Only when creating. A binding's credentials never reach the
-            // browser, so there is nothing to show for a project that has
-            // one — and an empty box that meant *unbind* would disconnect a
-            // project every time somebody corrected its name.
-            if creating {
-                Card {
-                    title: "Slack",
-                    note: "Every project talks on Slack, through an app of its own.",
-                    aside: rsx! {
-                        Guide {
-                            mark: "slack",
-                            label: "New app",
-                            says: "Opens Slack's form with the app's manifest filled in. Install \
-                                   the app to the workspace and copy its bot token; then generate \
-                                   an app-level token under Basic Information, with the \
-                                   connections:write scope, and copy that.",
-                            link: app_form,
-                        }
-                    },
-                    div { class: "flex flex-col gap-3",
-                        Field {
-                            label: "Bot token",
-                            note: "What speaks. Starts with xoxb; on OAuth & Permissions once the app is installed.",
-                            problem: saying(Part::Channel),
-                            input {
-                                r#type: "password",
-                                class: "{FIELD} font-mono",
-                                placeholder: "xoxb-…",
-                                value: "{draft().channel.credential}",
-                                oninput: move |event| {
-                                    draft.with_mut(|draft| draft.channel.credential = event.value());
-                                },
-                            }
-                        }
-                        Field {
-                            label: "App-level token",
-                            note: "What listens. Starts with xapp, with the connections:write scope.",
-                            info: "Generated by hand on the app's Basic Information page, under \
-                                   App-Level Tokens, with the connections:write scope: the manifest \
-                                   cannot mint one, and neither can anything but a person. The app \
-                                   hears every channel it is invited to, and every job gets a \
-                                   channel of its own. Both tokens are required, because a job that \
-                                   asks needs somebody able to answer, and both are checked against \
-                                   Slack before they are kept.",
-                            problem: saying(Part::Listening),
-                            input {
-                                r#type: "password",
-                                class: "{FIELD} font-mono",
-                                placeholder: "xapp-…",
-                                value: "{draft().channel.listen_credential}",
-                                oninput: move |event| {
-                                    draft.with_mut(|draft| draft.channel.listen_credential = event.value());
+            // The sentence, in either shape, whether creating or amending: a
+            // binding's credentials never reach the browser, so an app of
+            // its own is named by where it speaks, and set again only
+            // through the panel — see
+            // `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+            Card {
+                title: "Slack",
+                note: "How it talks on Slack: through the app this instance owns, on a workspace, or through an app of its own.",
+                Field {
+                    label: "Binding",
+                    note: "Where its foreman listens and its jobs speak.",
+                    info: "A workspace of the instance's app hears every channel the app is \
+                           invited to there, and nothing is pasted. An app of its own is set \
+                           with its bot token and an app-level token, checked against Slack \
+                           in the panel and again when you save, and never shown back. \
+                           Whatever the sentence below says replaces what the project holds \
+                           when you save, and never before.",
+                    problem: saying(Part::Channel)
+                        .or_else(|| saying(Part::Listening))
+                        .or_else(|| binding_problem.read().clone()),
+                    p { class: "text-sm text-foreground",
+                        for (position, segment) in slack_sentence(&binding.read(), slack_app_registered).into_iter().enumerate() {
+                            match segment {
+                                Said::Text(words) => rsx! { span { key: "{position}", "{words}" } },
+                                Said::Act(action, words) => rsx! {
+                                    button {
+                                        key: "{position}",
+                                        r#type: "button",
+                                        class: "rounded underline decoration-border-strong underline-offset-2 \
+                                                hover:decoration-foreground focus-visible:outline-none \
+                                                focus-visible:ring-2 focus-visible:ring-primary",
+                                        onclick: move |_| match action {
+                                            BindingAction::Install => {
+                                                // The tab in the press, the address after it,
+                                                // as the App's install does.
+                                                super::open_a_tab();
+                                                spawn(async move {
+                                                    match workspace_link("slack".to_owned()).await {
+                                                        Ok(minted) => {
+                                                            super::send_the_tab(&minted.link);
+                                                            binding_problem.set(None);
+                                                            pending_workspace.set(Some(minted.state));
+                                                        }
+                                                        Err(why) => {
+                                                            super::close_the_tab();
+                                                            binding_problem.set(Some(why.to_string()));
+                                                        }
+                                                    }
+                                                });
+                                            }
+                                            BindingAction::UseOwn => {
+                                                own_refused.set(None);
+                                                own_panel.set(true);
+                                            }
+                                            BindingAction::BackToOwn => {
+                                                apply_binding(binding, draft, |binding| binding.moved(BindingShape::Own));
+                                            }
+                                            BindingAction::BackToWorkspace => {
+                                                apply_binding(binding, draft, |binding| binding.moved(BindingShape::Workspace));
+                                            }
+                                        },
+                                        "{words}"
+                                    }
                                 },
                             }
                         }
@@ -1706,11 +2119,14 @@ fn FittedEditor(
 #[cfg(test)]
 mod tests {
     use super::super::agents_view::Agent;
+    use super::super::error::DashboardError;
     use super::{
-        Access, AccessDraft, AccessShape, AccessView, Action, AppSlot, Draft, Filling, Fitted,
-        Icon, KitDraft, Part, Problem, Reachable, Reached, Repository, Segment, Shape, TokenSlot,
-        Watching, beside, items_of, not_reached_words, placeholder, refused_before_asking, seeded,
-        sentence, shape_for, starting, takes_effort, watched, with_agent, with_model,
+        Access, AccessDraft, AccessShape, AccessView, Action, AppSlot, Binding, BindingDraft,
+        BindingShape, BindingView, Draft, Filling, Fitted, Icon, KitDraft, OwnSlot, Part, Problem,
+        Reachable, Reached, Repository, Said, Segment, Shape, TokenSlot, Watching, WorkspaceSlot,
+        beside, host_of, items_of, not_reached_words, placed_own, placeholder,
+        refused_before_asking, seeded, sentence, shape_for, slack_sentence, starting, takes_effort,
+        watched, with_agent, with_model,
     };
     use stageman_wire::{Choice, ModelChoice};
 
@@ -1756,14 +2172,147 @@ mod tests {
                 token: Some("github_pat_not_a_real_token".to_owned()),
                 repository: Some(named("owner/aviary")),
             },
-            channel: stageman_wire::ChannelDraft {
+            binding: BindingDraft::Own(stageman_wire::ChannelDraft {
                 credential: "xoxb-not-a-real-token".to_owned(),
                 listen_credential: "xapp-not-a-real-token".to_owned(),
-            },
+            }),
             variables: Vec::new(),
             brief: String::new(),
         };
         assert!(!refused_before_asking(&whole, &Filling::Creating, &[]));
+    }
+
+    /// The Slack sentence, as words.
+    fn slack_words(said: &[Said]) -> String {
+        said.iter()
+            .map(|segment| match segment {
+                Said::Text(words) | Said::Act(_, words) => words.clone(),
+            })
+            .collect()
+    }
+
+    /// The Slack card's sentence says which shape the project is in, or
+    /// that none is chosen, with what can be done about it inline; and
+    /// what can be done depends on whether a Slack app is registered and
+    /// on what the form remembers.
+    #[test]
+    fn the_slack_sentence_says_the_shape_and_what_can_be_done_about_it() {
+        let nothing = Binding::default();
+        assert_eq!(
+            slack_words(&slack_sentence(&nothing, true)),
+            "Not chosen yet. Install the instance's app on a workspace, or use an app of its own."
+        );
+        assert_eq!(
+            slack_words(&slack_sentence(&nothing, false)),
+            "Not chosen yet. Use an app of its own; the instance's app can be installed on a \
+             workspace once one is registered on the Instance page."
+        );
+
+        let project = stageman_wire::Project {
+            binding: Some(BindingView::Workspace {
+                id: "T0TEAM".to_owned(),
+                name: "Acme".to_owned(),
+            }),
+            ..a_project()
+        };
+        let on_workspace = Binding::starting(Some(&project));
+        assert_eq!(
+            on_workspace.draft(),
+            BindingDraft::Workspace { arrival: None }
+        );
+        assert_eq!(
+            slack_words(&slack_sentence(&on_workspace, true)),
+            "Through the instance's app, on Acme. Install it on another workspace, or use an app \
+             of its own instead."
+        );
+
+        let project = stageman_wire::Project {
+            binding: Some(BindingView::Own {
+                url: Some("https://acme.slack.com/".to_owned()),
+            }),
+            ..a_project()
+        };
+        let mut own = Binding::starting(Some(&project));
+        assert_eq!(
+            own.draft(),
+            BindingDraft::Kept,
+            "the project's own app, kept"
+        );
+        assert_eq!(
+            slack_words(&slack_sentence(&own, true)),
+            "Through an app of its own, on acme.slack.com. Replace it, or install the instance's \
+             app on a workspace instead."
+        );
+        assert_eq!(
+            slack_words(&slack_sentence(&own, false)),
+            "Through an app of its own, on acme.slack.com. Replace it."
+        );
+
+        // Moved onto a workspace its tab brought back, and back again.
+        own.workspace = Some(WorkspaceSlot {
+            arrival: Some("f00d".to_owned()),
+            name: "Acme".to_owned(),
+        });
+        own.moved(BindingShape::Workspace);
+        assert_eq!(
+            own.draft(),
+            BindingDraft::Workspace {
+                arrival: Some("f00d".to_owned())
+            }
+        );
+        assert_eq!(
+            slack_words(&slack_sentence(&own, true)),
+            "Through the instance's app, on Acme. Install it on another workspace, or go back to \
+             the app of its own instead."
+        );
+        own.moved(BindingShape::Own);
+        assert_eq!(
+            slack_words(&slack_sentence(&own, true)),
+            "Through an app of its own, on acme.slack.com. Replace it, or go back to the \
+             workspace instead."
+        );
+        // A pair set in the panel is what the wire is sent.
+        own.own = Some(OwnSlot {
+            pair: Some(stageman_wire::ChannelDraft {
+                credential: "xoxb-not-a-real-token".to_owned(),
+                listen_credential: "xapp-not-a-real-token".to_owned(),
+            }),
+            url: None,
+        });
+        assert!(matches!(own.draft(), BindingDraft::Own(_)));
+        assert_eq!(
+            slack_words(&slack_sentence(&own, true)),
+            "Through an app of its own. Replace it, or go back to the workspace instead."
+        );
+    }
+
+    /// A refusal of the panel's pair lands beside the box it points at,
+    /// and over both otherwise.
+    #[test]
+    fn a_refusal_of_the_pair_is_placed_beside_its_box() {
+        assert_eq!(placed_own(None), (None, None, None));
+        let speaking = DashboardError::Refused(stageman_wire::Refusal::ChannelRefused {
+            listening: false,
+            why: "it is already aviary's app".to_owned(),
+        });
+        let (credential, listening, unplaced) = placed_own(Some(&speaking));
+        assert!(credential.is_some_and(|said| said.contains("already aviary's app")));
+        assert_eq!(listening, None);
+        assert_eq!(unplaced, None);
+        let listening_refused = DashboardError::Refused(stageman_wire::Refusal::ChannelUnchecked {
+            listening: true,
+            why: "Slack could not be reached: dns".to_owned(),
+        });
+        let (credential, listening, unplaced) = placed_own(Some(&listening_refused));
+        assert_eq!(credential, None);
+        assert!(listening.is_some());
+        assert_eq!(unplaced, None);
+        let (credential, listening, unplaced) = placed_own(Some(&DashboardError::Failed));
+        assert_eq!((credential, listening), (None, None));
+        assert!(unplaced.is_some());
+        assert_eq!(host_of("https://acme.slack.com/"), "acme.slack.com");
+        assert_eq!(host_of("http://x.example/"), "x.example");
+        assert_eq!(host_of(""), "");
     }
 
     fn words(said: &[Segment]) -> String {
@@ -1978,9 +2527,10 @@ mod tests {
     /// on nothing for a project that does not exist yet; and what the wire
     /// is sent names the access the way the instance resolves it — the
     /// state for an installation come back, none for the one held.
-    #[test]
-    fn the_card_starts_on_what_the_project_holds_and_drafts_what_the_wire_needs() {
-        let mut project = stageman_wire::Project {
+    /// A project on an installation of the App, with no binding: what the
+    /// cards' tests start from.
+    fn a_project() -> stageman_wire::Project {
+        stageman_wire::Project {
             id: "p".to_owned(),
             name: "aviary".to_owned(),
             repository: named("acme/aviary"),
@@ -1990,7 +2540,7 @@ mod tests {
             access: Some(AccessView::Installation {
                 account: "acme".to_owned(),
             }),
-            channels: Vec::new(),
+            binding: None,
             variables: Vec::new(),
             brief: String::new(),
             watched: Vec::new(),
@@ -2000,7 +2550,12 @@ mod tests {
             working: 0,
             jobs: 0,
             token_form: String::new(),
-        };
+        }
+    }
+
+    #[test]
+    fn the_card_starts_on_what_the_project_holds_and_drafts_what_the_wire_needs() {
+        let mut project = a_project();
         let starting = Access::starting(Some(&project));
         assert_eq!(starting.shape, AccessShape::App);
         assert_eq!(starting.app, Some(on_the_app("acme", None)));
@@ -2362,7 +2917,7 @@ mod tests {
                     expires: None,
                     expired: false,
                 }),
-                channels: vec!["Slack".to_owned()],
+                binding: Some(BindingView::Own { url: None }),
                 variables: vec![stageman_wire::Variable {
                     name: "STRIPE_API_KEY".to_owned(),
                     note: "the payment provider, in test mode".to_owned(),
@@ -2386,6 +2941,7 @@ mod tests {
             shapes: vec![claude()],
             guides: stageman_wire::Guides::default(),
             app_registered: false,
+            slack_app_registered: false,
         };
 
         let fresh = starting(&watching, &Filling::Creating);

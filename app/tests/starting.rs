@@ -377,6 +377,7 @@ const VARIABLE_VALUE: &str = "not-a-real-third-party-key";
 fn watching(name: &str, repository: &str) -> State {
     State {
         apps: std::collections::BTreeMap::new(),
+        channel_apps: std::collections::BTreeMap::new(),
         agents: BTreeMap::from([(
             Agent::Claude,
             AgentConfig {
@@ -397,10 +398,10 @@ fn watching(name: &str, repository: &str) -> State {
                 access: BTreeMap::new(),
                 channels: BTreeMap::from([(
                     Channel::Slack,
-                    ChannelConfig {
+                    stageman_core::Binding::Own(ChannelConfig {
                         credential: Secret::new(CHANNEL_CREDENTIAL.to_owned()),
                         listen_credential: Secret::new(LISTEN_CREDENTIAL.to_owned()),
-                    },
+                    }),
                 )]),
                 variables: BTreeMap::from([(
                     stageman_core::VariableName::new("STRIPE_API_KEY").expect("a deliverable name"),
@@ -1026,6 +1027,10 @@ fn a_project_has_a_settings_page_and_a_new_one_is_that_page_empty() {
     assert!(fresh.contains("200 OK"), "{fresh}");
     assert!(fresh.contains("New project"), "{fresh}");
     assert!(
+        fresh.contains("Not chosen yet."),
+        "the Slack sentence says nothing is chosen yet, on the server too: {fresh}"
+    );
+    assert!(
         !fresh.contains("no project has the identifier"),
         "the static address was taken for an identifier: {fresh}"
     );
@@ -1045,6 +1050,10 @@ fn a_project_has_a_settings_page_and_a_new_one_is_that_page_empty() {
     assert!(
         settings.contains("asking GitHub…"),
         "the box waits on the listing, which only the browser asks for: {settings}"
+    );
+    assert!(
+        settings.contains("Through an app of its own."),
+        "the Slack sentence says the shape the project holds, on the server too: {settings}"
     );
     // A text area's value is its text and not an attribute, so a box the
     // server rendered from an attribute alone arrives empty. The kit's
@@ -1262,6 +1271,7 @@ const WRAPPER_TOOLS_PORT: &str = "47116";
 fn two_projects_each_with_a_job() -> (State, Vec<(JobId, &'static str, &'static str)>) {
     let mut state = State {
         apps: BTreeMap::new(),
+        channel_apps: BTreeMap::new(),
         agents: BTreeMap::from([(
             Agent::Claude,
             AgentConfig {
@@ -1577,5 +1587,109 @@ fn the_instance_page_says_which_project_uses_an_installation() {
     assert!(
         !page.contains("Forget the installation on acme"),
         "the way to forget it is not offered: {page}"
+    );
+}
+
+/// The Instance page offers the form to register a Slack app while none is,
+/// with the guide onto Slack's form carrying the manifest, and once one is
+/// kept shows it by its client identifier and where it is installed, with
+/// nothing of its secrets on the page — rendered on the server before the
+/// page is awake.
+#[test]
+fn the_instance_page_shows_the_slack_app_or_the_form_to_register_one() {
+    let (_kept, snapshot) = scratch();
+    let mut watched = watching("aviary", "https://github.com/example/aviary");
+    written(&snapshot, &watched);
+    let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
+    let page = running.get("/instance");
+    assert!(page.contains("200 OK"), "{page}");
+    assert!(page.contains("Slack app"), "the card is there: {page}");
+    assert!(
+        page.contains("Register the app"),
+        "the form is offered while none is registered: {page}"
+    );
+    assert!(
+        page.contains("manifest_yaml=") && page.contains("redirect_urls"),
+        "the guide carries the manifest with the redirect in it: {page}"
+    );
+    assert!(!page.contains("Nowhere yet."), "{page}");
+    drop(running);
+
+    watched.channel_apps.insert(
+        Channel::Slack,
+        stageman_core::ChannelApp {
+            client_id: "1234567890.1234567890123".to_owned(),
+            client_secret: Secret::new("not-a-real-secret".to_owned()),
+            app_token: Secret::new("xapp-not-a-real-token".to_owned()),
+            workspaces: BTreeMap::new(),
+        },
+    );
+    written(&snapshot, &watched);
+    let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
+    let page = running.get("/instance");
+    assert!(page.contains("200 OK"), "{page}");
+    assert!(
+        page.contains("1234567890.1234567890123"),
+        "the app is shown by its client identifier: {page}"
+    );
+    assert!(
+        page.contains("Nowhere yet."),
+        "and installed nowhere: {page}"
+    );
+    assert!(
+        !page.contains("Register the app"),
+        "the form is not offered once one is registered: {page}"
+    );
+    assert!(
+        !page.contains("not-a-real-secret") && !page.contains("xapp-not-a-real-token"),
+        "nothing of its secrets is on the page: {page}"
+    );
+}
+
+/// The Instance page lists where the Slack app is installed, by the
+/// workspace's name and identifier, offers the way onto Slack to install it
+/// elsewhere, and offers forgetting a workspace nothing uses, with nothing
+/// of the workspace's bot token on the page — rendered on the server
+/// before the page is awake.
+#[test]
+fn the_instance_page_lists_where_the_slack_app_is_installed() {
+    let (_kept, snapshot) = scratch();
+    let mut watched = watching("aviary", "https://github.com/example/aviary");
+    watched.channel_apps.insert(
+        Channel::Slack,
+        stageman_core::ChannelApp {
+            client_id: "1234567890.1234567890123".to_owned(),
+            client_secret: Secret::new("not-a-real-secret".to_owned()),
+            app_token: Secret::new("xapp-not-a-real-token".to_owned()),
+            workspaces: BTreeMap::from([(
+                "T0TEAM".to_owned(),
+                stageman_core::Workspace {
+                    name: "Acme".to_owned(),
+                    bot_user: "U0BOT".to_owned(),
+                    bot_token: Secret::new("xoxb-not-a-real-token".to_owned()),
+                },
+            )]),
+        },
+    );
+    written(&snapshot, &watched);
+    let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
+    let page = running.get("/instance");
+    assert!(page.contains("200 OK"), "{page}");
+    assert!(
+        page.contains("Acme") && page.contains("T0TEAM"),
+        "the workspace is listed by name and identifier: {page}"
+    );
+    assert!(
+        page.contains("Install on a workspace"),
+        "the way onto Slack is offered: {page}"
+    );
+    assert!(
+        page.contains("Forget the workspace Acme"),
+        "a workspace nothing uses can be forgotten: {page}"
+    );
+    assert!(!page.contains("Nowhere yet."), "{page}");
+    assert!(
+        !page.contains("xoxb-not-a-real-token"),
+        "nothing of the bot token is on the page: {page}"
     );
 }

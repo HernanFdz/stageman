@@ -60,7 +60,7 @@ const REMEMBERED: usize = 16;
 /// The page the tab the platform brings back is answered with, around one
 /// of the two sentences below: outside the dashboard, since the instance
 /// answers it before the proxy, and as small as the sentence it carries.
-const LANDING: (&str, &str) = (
+pub const LANDING: (&str, &str) = (
     "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" \
      content=\"width=device-width, initial-scale=1\">\n<meta name=\"color-scheme\" content=\"light \
      dark\">\n<title>stageman</title>\n<style>body{font:15px/1.5 system-ui,sans-serif;margin:3rem \
@@ -121,7 +121,7 @@ enum Landing {
 
 /// Text as a page can carry it: the three characters that would read as
 /// markup, escaped.
-fn escaped(text: &str) -> String {
+pub fn escaped(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
@@ -395,12 +395,17 @@ impl Running {
             .collect()
     }
 
-    /// The projects screen, saying whether an App is registered.
+    /// The projects screen, saying whether an App is registered, and
+    /// whether a Slack app is.
     pub(crate) fn projects_screen(&self) -> stageman_wire::Watching {
         views::watching_now(
             &self.state,
             &self.identities(),
             self.state.apps.contains_key(&Platform::GitHub),
+            self.state
+                .channel_apps
+                .contains_key(&stageman_core::Channel::Slack),
+            &crate::tunnel::dashboard(&self.domain, self.reached),
             self.stamp(),
         )
     }
@@ -969,6 +974,7 @@ impl Running {
         };
         match outcome {
             Ok(minted) => {
+                tracing::debug!(%project, "minted a token for the project's jobs, kept for most of its hour");
                 let token = minted.token.expose().to_owned();
                 self.minted.insert(project, minted);
                 self.token_waiting_answered(project, &Ok(token), effects);

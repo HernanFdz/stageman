@@ -208,6 +208,30 @@ pub fn handled_elsewhere_notice(room: Option<&str>) -> String {
     )
 }
 
+/// What a person is told when they mention this instance in a room no
+/// project owns, on a workspace several projects share.
+///
+/// Where to ask instead, by each project's foreman room where it has one —
+/// see
+/// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+/// The one notice a mention can earn without waking anybody.
+#[must_use]
+pub fn unowned_notice(projects: &[(&str, Option<&str>)]) -> String {
+    let where_to: Vec<String> = projects
+        .iter()
+        .map(|(project, room)| {
+            room.map_or_else(
+                || format!("for {project} from its page on the dashboard, since its foreman has no room yet"),
+                |room| format!("in {room} for {project}"),
+            )
+        })
+        .collect();
+    format!(
+        "🔀 This room is nobody's here, since several projects talk on this workspace. Ask {}.",
+        where_to.join(", or ")
+    )
+}
+
 /// What a foreman's room is for, as the sidebar shows it beside the name.
 #[must_use]
 pub fn foreman_room_purpose(project: &str) -> String {
@@ -277,7 +301,9 @@ You can also be asked to watch a room. When a person asks you, in a room, to \
 watch it, **call the `watch_room` tool** there: from then on everything another \
 app posts in that room — an issue filed, an alert fired, a pull request opened \
 — reaches you as a signal to judge, framed as that app's. `stop_watching`, \
-asked in the same room, undoes it. People are only ever heard through a \
+asked in the same room, undoes it. Where several projects share a workspace, a \
+person asks you in your own room instead, naming the room: pass it as `room`, \
+spelled as it was in their message. People are only ever heard through a \
 mention, whether a room is watched or not.
 
 **Decide rather than ask.** You may say anything you like, but nothing you say \
@@ -1267,6 +1293,20 @@ here is between people._"
             "Where aviary's foreman thinks: what it is handling, what it decided, and why."
         );
         assert_eq!(
+            super::unowned_notice(&[
+                ("Closed Loop", Some("<#C0FOREMAN1>")),
+                ("loquent", Some("<#C0FOREMAN2>")),
+            ]),
+            "🔀 This room is nobody's here, since several projects talk on this workspace. Ask \
+             in <#C0FOREMAN1> for Closed Loop, or in <#C0FOREMAN2> for loquent."
+        );
+        assert_eq!(
+            super::unowned_notice(&[("Closed Loop", Some("<#C0FOREMAN1>")), ("loquent", None)]),
+            "🔀 This room is nobody's here, since several projects talk on this workspace. Ask \
+             in <#C0FOREMAN1> for Closed Loop, or for loquent from its page on the dashboard, \
+             since its foreman has no room yet."
+        );
+        assert_eq!(
             super::foreman_room_opening("aviary", "<@U0BOT>"),
             "**aviary's foreman.**
 
@@ -1812,8 +1852,10 @@ is given — it cannot see this conversation, so say everything it needs.
 You can also be asked to watch a room. When a person asks you, in a room, to watch it, **call \
 the `watch_room` tool** there: from then on everything another app posts in that room — an \
 issue filed, an alert fired, a pull request opened — reaches you as a signal to judge, framed \
-as that app's. `stop_watching`, asked in the same room, undoes it. People are only ever heard \
-through a mention, whether a room is watched or not.
+as that app's. `stop_watching`, asked in the same room, undoes it. Where several projects share \
+a workspace, a person asks you in your own room instead, naming the room: pass it as `room`, \
+spelled as it was in their message. People are only ever heard through a mention, whether a \
+room is watched or not.
 
 **Decide rather than ask.** You may say anything you like, but nothing you say comes back to you \
 in this turn, and a person answering you starts a *new* turn that may be behind several others. \
@@ -1989,14 +2031,19 @@ inferred is one a person will act on, and you have no way to check it."
         );
     }
 
-    /// The opening teaches the tool that watches a room, and that people
-    /// are still heard only through a mention.
+    /// The opening teaches the tool that watches a room, where a room is
+    /// named instead, and that people are still heard only through a
+    /// mention.
     #[test]
     fn a_foreman_is_told_how_a_room_comes_to_be_watched() {
         let told = super::opening("https://example.invalid/repo");
 
         assert!(told.contains("call the `watch_room` tool"), "{told}");
         assert!(told.contains("`stop_watching`"), "{told}");
+        assert!(
+            told.contains("asks you in your own room instead, naming the room: pass it as `room`"),
+            "{told}"
+        );
         assert!(told.contains("only ever heard through a mention"), "{told}");
     }
 

@@ -122,7 +122,9 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   people and not for apps: since
   `docs/decisions/0063-another-app-is-heard-in-a-watched-room.md` another
   app's message in a watched room is read with no mention at all, because an
-  app mentions nobody.
+  app mentions nobody. Since `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md` a mention in a room no project owns, in a
+  workspace several projects share, is answered with a notice naming their
+  foreman rooms and wakes nobody.
 
 - **channel** — somewhere the foreman watches and a job can speak into.
   Two-directional by definition, which is why it is not called a *source* or a
@@ -131,9 +133,9 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   interesting part is that somebody is on the other end. Every project is
   bound to one, with the credential that speaks and the one that listens
   both given, per
-  `docs/decisions/0059-a-project-speaks-and-listens-on-slack-always.md`; for
-  Slack the binding is one app installed in one workspace, and the app hears
-  every room it has been invited to.
+  `docs/decisions/0059-a-project-speaks-and-listens-on-slack-always.md`; for Slack the binding is one app installed in one workspace, the project's own
+  or, since `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`, the instance's, and the app hears every room it has been
+  invited to.
 - **room** — one Slack channel, as a person sees it in the sidebar. The word
   this project uses because *channel* is taken: `Channel::Slack` names the
   platform, and Slack's own word would make "a job's channel" mean two
@@ -150,7 +152,8 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   and which nothing carries now; and not *channel* for a job's room, for
   the reason above.
 - **watched room** — a room a person has told the foreman to watch, by
-  asking it there. In one, every message another app posts is a signal for
+  asking it there, or, in a workspace several projects share, from the
+  project's foreman room naming it, since `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`. In one, every message another app posts is a signal for
   the foreman; a person's message is read exactly as anywhere else, through
   a mention. Recorded on the project, so a restart watches what it watched,
   and shown on the dashboard by the platform's identifier, because a name
@@ -162,6 +165,17 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   Not a *source*, refused under **channel** for describing plumbing. Not an
   *allowlist*, which names the finer design that record rejects and would
   make a room sound like a list of apps.
+- **workspace** — one Slack team the instance's app is installed in: learned
+  from the platform's redirect when somebody installs the app there, and
+  kept beside the app with its name, the bot user the install made, and the
+  bot token minted for it, sealed. What a project binds to when it speaks
+  through the instance's app, per `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`, and what a frame names so that
+  a message finds its projects. Not a *team*, which is the platform's wire
+  word and reads as people rather than a place; not an *installation*,
+  which is the GitHub App's word for the same idea and is per account
+  rather than per workspace, so that the two are told apart by their
+  words; and not a *tenant*, which would claim a boundary this instance
+  does not draw, per `docs/vision.md` §3.
 - **signal** — one observation on a channel: an issue opened, an alert fired, a
   message posted. Signals are read and judged, not stored or addressed. They
   are deliberately not entities; see **reason** below. Since
@@ -618,6 +632,9 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
   Capitalised as the platform capitalises it, so that a sentence can hold
   it beside the **app** crate and a Slack *app* without a second word. The
+  Slack app the instance owns since `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md` is spelled lowercase for the same
+  reason, as its platform spells it, and is *the instance's app* where a
+  sentence has to tell it from a project's own. The
   instance's, never a project's: a project installs and does not own. Not
   *integration*, refused under **channel**; not *platform-wide*, which
   names the platform where the instance is meant.
@@ -732,6 +749,19 @@ justify is usually obsolete.
   the app crate is still an Axum server and is no longer *the* listener, and
   a server function is the one thing that still asks the instance directly —
   everything else arrives as a request the instance answers itself.
+
+  **Under the framework's own tooling there are two ports, and a platform is
+  told the person's.** `dx serve` binds its own port, the one a person types,
+  and hands this process a door on a port it chooses anew each start and
+  proxies to; host routing and the instance's own paths answer on the door,
+  and the tooling forwards the rest. So an address a platform keeps and
+  brings a browser back to — an App's manifest, the Slack app's manifest and
+  its install link — is composed from the port the person reaches, which the
+  tooling names in its own variable, and from the door's otherwise; a
+  tunnel's address stays the door's. Measured on 2026-09-25: an install link
+  composed from the door's port sent the operator's browser back to a port
+  Slack's app did not know, and the same link works from the tooling's
+  port, which is also the one that is the same tomorrow.
 - **The app's `server` feature is a contract with the framework, not a name.**
   The server-function macro emits `#[cfg(feature = "server")]` literally, so a
   feature spelled anything else silently moves every server function's body to
@@ -840,10 +870,16 @@ justify is usually obsolete.
   review and renders wrong, which is why it is worth a rule: a text that
   needs a link or a mention gets it from the channel crate, which is the
   one place that spells the platform's references.
-- **One Slack app per project is a must, and its manifest must subscribe to
-  `app_mention`.** Measured, both: Socket Mode hands each event to *one* of an
-  app's open connections, so two projects sharing an app-level token each
-  hear half of what is said, with nothing anywhere saying so; and since
+- **A Slack app a project owns is one project's, and every manifest must
+  subscribe to `app_mention`.** Measured, both: Socket Mode hands each event
+  to *one* of an app's open connections, so two projects sharing an
+  app-level token each hear half of what is said, with nothing anywhere
+  saying so, which is why no app-level token is ever opened twice and the
+  instance's own app is listened to on exactly one connection however many
+  workspaces and projects it serves, since
+  `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`, and why a binding of a project's own whose bot a listener already
+  hears with — another project's own app, or the instance's on a
+  workspace — is refused when it is checked, naming whose it is; and since
   `docs/decisions/0060-a-binding-is-a-workspace.md` a person is read from the
   platform's own mention event and from nothing else, so an app whose
   manifest lacks that subscription connects, greets, and hears nobody. The
@@ -988,7 +1024,11 @@ justify is usually obsolete.
   the project is in, or that none is chosen, and offers what can be done
   about it as links in the sentence — install the App, use a token,
   replace it — rather than a row of buttons for the shapes and another
-  for the actions. A row of buttons is right where choosing is the whole
+  for the actions. The Slack card's binding is another since
+  `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`,
+  on the same pattern: install the instance's app on a workspace, use an
+  app of its own, go back; an app of its own is set in a panel of two
+  boxes, checked there, and never shown back. A row of buttons is right where choosing is the whole
   of it, as it is for a model or an effort; a shape here is never chosen
   by itself, since each is entered by an action of its own, and a
   sentence carries the shape and the action together. The line under the

@@ -12,8 +12,10 @@
 )]
 
 mod apps;
+mod bindings;
 mod booting;
 mod channel;
+mod channel_apps;
 mod checks;
 mod credentials;
 mod dashboard;
@@ -24,6 +26,7 @@ mod installations;
 mod listening;
 mod notices;
 mod replies;
+mod shared_app;
 mod signals;
 mod simulation;
 mod threads;
@@ -32,3 +35,4 @@ mod transcript;
 mod tunnel;
 mod turns;
 mod waking;
+mod workspaces;

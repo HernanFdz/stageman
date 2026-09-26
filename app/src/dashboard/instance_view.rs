@@ -19,19 +19,30 @@
 //! `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
 //! Where the App is installed is listed here, each installation
 //! forgettable while no project reaches its repository through it.
+//!
+//! **The Slack app is registered by pasting three values**, since the
+//! platform's own flow stops short of what a redirect could carry: the
+//! app-level token is checked against Slack before anything is kept, the
+//! client pair is kept as pasted and checked by the first install — see
+//! `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
 
 use dioxus::prelude::*;
 #[cfg(feature = "server")]
 use stageman_instance::{Request, Response};
 
+use stageman_wire::Part;
+
 use super::error::{DashboardError, DashboardResult};
 use super::live::Live;
 use crate::ui::{
-    BESIDE, Button, ButtonVariant, Card, EmptyState, Field, Icon, Mark, Modal, Reference,
-    Segmented, Skeleton, Tooltip,
+    BESIDE, Button, ButtonVariant, Card, EmptyState, FIELD, Field, Guide, Icon, Mark, Modal,
+    Reference, Segmented, Skeleton, Tooltip,
 };
 
-pub use stageman_wire::{Apps, InstallLink, InstallationView, PlatformAppView, Registration};
+pub use stageman_wire::{
+    Apps, ChannelAppView, InstallLink, InstallationView, PlatformAppView, Registration,
+    WorkspaceView,
+};
 
 /// The Apps this instance owns, and what the last registration said.
 ///
@@ -102,6 +113,75 @@ pub async fn forget_installation(platform: String, id: u64) -> DashboardResult<A
     }
 }
 
+/// Registers the app this instance owns on a channel, from three values
+/// pasted — see `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+///
+/// # Errors
+///
+/// Fails if a value is blank, if the channel refuses the app-level token,
+/// or if the channel could not be asked.
+#[post("/api/instance/apps/register-channel-app")]
+pub async fn register_channel_app(
+    channel: String,
+    client_id: String,
+    client_secret: String,
+    app_token: String,
+) -> DashboardResult<Apps> {
+    match super::ask(Request::RegisterChannelApp {
+        channel,
+        client_id,
+        client_secret,
+        app_token,
+    })
+    .await?
+    {
+        Response::Apps(shown) => Ok(shown),
+        other => Err(super::unexpected(&other)),
+    }
+}
+
+/// Forgets the app this instance owns on a channel.
+///
+/// # Errors
+///
+/// Fails if no app is registered there.
+#[post("/api/instance/apps/forget-channel-app")]
+pub async fn forget_channel_app(channel: String) -> DashboardResult<Apps> {
+    match super::ask(Request::ForgetChannelApp { channel }).await? {
+        Response::Apps(shown) => Ok(shown),
+        other => Err(super::unexpected(&other)),
+    }
+}
+
+/// Where to install the app the instance owns on a workspace, minted for
+/// one press: the state in the link is what the page asks by once the tab
+/// has come back — see `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+///
+/// # Errors
+///
+/// Fails if no app is registered on the channel.
+#[post("/api/instance/apps/workspace-link")]
+pub async fn workspace_link(channel: String) -> DashboardResult<InstallLink> {
+    match super::ask(Request::WorkspaceLink { channel }).await? {
+        Response::InstallLink(minted) => Ok(minted),
+        other => Err(super::unexpected(&other)),
+    }
+}
+
+/// Forgets a workspace the app the instance owns is installed on.
+///
+/// # Errors
+///
+/// Fails if no app is registered there, or if it is not installed on that
+/// workspace.
+#[post("/api/instance/apps/forget-workspace")]
+pub async fn forget_workspace(channel: String, id: String) -> DashboardResult<Apps> {
+    match super::ask(Request::ForgetWorkspace { channel, id }).await? {
+        Response::Apps(shown) => Ok(shown),
+        other => Err(super::unexpected(&other)),
+    }
+}
+
 /// The Instance page.
 #[component]
 pub fn InstanceView() -> Element {
@@ -124,6 +204,17 @@ pub fn InstanceView() -> Element {
                     GitHubApp {
                         app: shown.github,
                         failed: shown.failed,
+                        onchanged: move |outcome: DashboardResult<Apps>| match outcome {
+                            Ok(fresh) => {
+                                failure.set(None);
+                                reading.set(Some(Ok(fresh)));
+                            }
+                            Err(reason) => failure.set(Some(reason)),
+                        },
+                    }
+                    SlackApp {
+                        app: shown.slack,
+                        form: shown.slack_form,
                         onchanged: move |outcome: DashboardResult<Apps>| match outcome {
                             Ok(fresh) => {
                                 failure.set(None);
@@ -393,5 +484,353 @@ fn Registering() -> Element {
                 },
             }
         }
+    }
+}
+
+/// The Slack app: registered, with where it is installed and the way to
+/// forget it; or the form to register one — see
+/// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+#[component]
+fn SlackApp(
+    app: Option<ChannelAppView>,
+    form: String,
+    onchanged: EventHandler<DashboardResult<Apps>>,
+) -> Element {
+    let mut forgetting = use_signal(|| false);
+    // Why the last press of Install could not open the platform, if the
+    // last one could not: a link the instance would not mint.
+    let mut not_opened = use_signal(|| None::<String>);
+
+    rsx! {
+        Card {
+            title: "Slack app",
+            note: "One app this instance owns, which a workspace installs so that a project can \
+                   talk there without an app of its own.",
+            info: "Created from Slack's form with the manifest filled in, then registered here by \
+                   pasting its client ID, its client secret and an app-level token. The \
+                   app-level token opens the one event stream every workspace's messages arrive \
+                   on and never leaves this instance; both secrets stay sealed in the instance's \
+                   file. A project speaks through a workspace of it, or through an app of its \
+                   own, as before.",
+            match app {
+                Some(app) => rsx! {
+                    div { class: "flex flex-col gap-4",
+                        div { class: "flex items-center gap-3",
+                            Mark { agent: "slack".to_owned(), size: 16 }
+                            span { class: "text-sm text-muted-foreground", "Client ID" }
+                            span { class: "font-mono text-sm", "{app.client_id}" }
+                            span { class: "ml-auto flex items-center gap-2",
+                                Button {
+                                    variant: ButtonVariant::Danger,
+                                    onclick: move |_| forgetting.set(true),
+                                    "Forget…"
+                                }
+                            }
+                        }
+                        if let Some(why) = app.install_failure.clone() {
+                            p { role: "alert", class: "text-sm text-failed",
+                                "The app was not installed: {why}"
+                            }
+                        }
+                        if let Some(why) = not_opened() {
+                            p { role: "alert", class: "text-sm text-failed", "{why}" }
+                        }
+                        // Where it is installed, as the platform has told
+                        // this instance; the way onto the platform to
+                        // install it sits at the end of the label's line.
+                        Field {
+                            label: "Installed on",
+                            note: "The workspaces the app is installed in, as Slack brought you back to say.",
+                            info: "Installing opens Slack in a new tab: choose the workspace and allow, \
+                                   and Slack brings you back here. The app installs on the workspace \
+                                   that created it with nothing more; any other workspace needs Public \
+                                   Distribution activated once on the app's page on Slack, under \
+                                   Manage Distribution, or an app of its own on the project instead. \
+                                   A workspace nothing uses can be forgotten here.",
+                            aside: rsx! {
+                                // By script rather than a link, so that the tab
+                                // can close itself when Slack brings it back —
+                                // see `docs/conventions.md` §3.
+                                Tooltip {
+                                    text: "Opens Slack in a tab of its own to install this instance's app \
+                                           on a workspace. The tab closes itself when Slack brings it back, \
+                                           and this list fills in.",
+                                    wrap: true,
+                                    at_end: true,
+                                    Button {
+                                        variant: ButtonVariant::Secondary,
+                                        class: "h-8.5 gap-1.5 px-2 text-xs",
+                                        aria_label: "Install on a workspace",
+                                        onclick: move |_| {
+                                            super::open_a_tab();
+                                            spawn(async move {
+                                                match workspace_link("slack".to_owned()).await {
+                                                    Ok(minted) => {
+                                                        super::send_the_tab(&minted.link);
+                                                        not_opened.set(None);
+                                                    }
+                                                    Err(why) => {
+                                                        super::close_the_tab();
+                                                        not_opened.set(Some(why.to_string()));
+                                                    }
+                                                }
+                                            });
+                                        },
+                                        Mark { agent: "slack".to_owned(), size: 14 }
+                                        "Install on a workspace"
+                                    }
+                                }
+                            },
+                            if app.workspaces.is_empty() {
+                                p { class: "py-2 text-sm text-muted-foreground",
+                                    "Nowhere yet."
+                                }
+                            } else {
+                                ul { class: "divide-y divide-border",
+                                    for workspace in app.workspaces.iter().cloned() {
+                                        li { key: "{workspace.id}",
+                                            InstalledOn { workspace, onchanged }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if forgetting() {
+                        Modal {
+                            title: "Forget the Slack app?",
+                            onclose: move |()| forgetting.set(false),
+                            actions: rsx! {
+                                Button {
+                                    variant: ButtonVariant::Danger,
+                                    onclick: move |_| {
+                                        spawn(async move {
+                                            let outcome = forget_channel_app("slack".to_owned()).await;
+                                            forgetting.set(false);
+                                            onchanged.call(outcome);
+                                        });
+                                    },
+                                    "Forget"
+                                }
+                            },
+                            p { class: "text-sm text-muted-foreground",
+                                "Its secrets are removed from this instance. The app itself stays on \
+                                 Slack until you delete it there. Refused while a project speaks \
+                                 through one of its workspaces."
+                            }
+                        }
+                    }
+                },
+                None => rsx! { RegisteringSlack { form, onchanged } },
+            }
+        }
+    }
+}
+
+/// One workspace the app is installed on: its name, its identifier, which
+/// projects speak through it, and the way to forget it where nothing does.
+#[component]
+fn InstalledOn(
+    workspace: WorkspaceView,
+    onchanged: EventHandler<DashboardResult<Apps>>,
+) -> Element {
+    let id = workspace.id.clone();
+    let in_use = !workspace.used_by.is_empty();
+    let used_by = workspace.used_by.join(", ");
+    let forgetting_says = if in_use {
+        format!("Used by {used_by}, so it cannot be forgotten")
+    } else {
+        format!("Forget the workspace {}", workspace.name)
+    };
+
+    rsx! {
+        div { class: "flex items-center gap-3 py-2 first:pt-0 last:pb-0",
+            Mark { agent: "slack".to_owned(), size: 16 }
+            span { class: "text-sm font-medium", "{workspace.name}" }
+            span { class: "font-mono text-xs text-muted-foreground", "{workspace.id}" }
+            if in_use {
+                span { class: "text-xs text-muted-foreground", "used by {used_by}" }
+            }
+            span { class: "ml-auto flex items-center",
+                Tooltip { text: forgetting_says.clone(), wrap: in_use, at_end: true,
+                    Button {
+                        variant: ButtonVariant::Secondary,
+                        class: BESIDE,
+                        disabled: in_use,
+                        aria_label: "{forgetting_says}",
+                        onclick: move |_| {
+                            let id = id.clone();
+                            spawn(async move {
+                                onchanged.call(forget_workspace("slack".to_owned(), id).await);
+                            });
+                        },
+                        {Icon::Remove.draw(16)}
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The form that registers the Slack app: the guide onto the platform's
+/// form, three boxes, and a press that asks the instance to check the
+/// app-level token and keep the three.
+#[component]
+fn RegisteringSlack(form: String, onchanged: EventHandler<DashboardResult<Apps>>) -> Element {
+    let mut client_id = use_signal(String::new);
+    let mut client_secret = use_signal(String::new);
+    let mut app_token = use_signal(String::new);
+    let mut refused = use_signal(|| None::<DashboardError>);
+    let complete = complete(&client_id(), &client_secret(), &app_token());
+    let (beside_token, unplaced) = placed(refused().as_ref());
+
+    rsx! {
+        div { class: "flex flex-col gap-3",
+            if let Some(why) = unplaced {
+                p { role: "alert", class: "text-sm text-failed", "{why}" }
+            }
+            Field {
+                label: "Client ID",
+                note: "On the app's Basic Information page, under App Credentials.",
+                aside: rsx! {
+                    Guide {
+                        mark: "slack",
+                        label: "New app",
+                        says: "Opens Slack's form with the app's manifest filled in, the address it \
+                               brings you back to included. Create the app there, generate an \
+                               app-level token under Basic Information with the connections:write \
+                               scope, and paste the three values here.",
+                        link: form,
+                    }
+                },
+                input {
+                    class: "{FIELD} font-mono",
+                    placeholder: "1234567890.1234567890123",
+                    value: "{client_id}",
+                    oninput: move |event| client_id.set(event.value()),
+                }
+            }
+            Field {
+                label: "Client secret",
+                note: "Beside the client ID. Kept sealed, and checked by the first install.",
+                input {
+                    r#type: "password",
+                    class: "{FIELD} font-mono",
+                    placeholder: "…",
+                    value: "{client_secret}",
+                    oninput: move |event| client_secret.set(event.value()),
+                }
+            }
+            Field {
+                label: "App-level token",
+                note: "What listens. Starts with xapp, with the connections:write scope; checked \
+                       against Slack before it is kept.",
+                problem: beside_token,
+                input {
+                    r#type: "password",
+                    class: "{FIELD} font-mono",
+                    placeholder: "xapp-…",
+                    value: "{app_token}",
+                    oninput: move |event| app_token.set(event.value()),
+                }
+            }
+            div {
+                Button {
+                    disabled: !complete,
+                    onclick: move |_| {
+                        spawn(async move {
+                            match register_channel_app(
+                                "slack".to_owned(),
+                                client_id(),
+                                client_secret(),
+                                app_token(),
+                            )
+                            .await
+                            {
+                                Ok(fresh) => {
+                                    refused.set(None);
+                                    onchanged.call(Ok(fresh));
+                                }
+                                Err(why) => refused.set(Some(why)),
+                            }
+                        });
+                    },
+                    "Register the app"
+                }
+            }
+        }
+    }
+}
+
+/// Whether the three boxes of the registration form hold something to
+/// send: what enables the press.
+fn complete(client_id: &str, client_secret: &str, app_token: &str) -> bool {
+    !client_id.trim().is_empty() && !client_secret.trim().is_empty() && !app_token.trim().is_empty()
+}
+
+/// Where a refusal is said on the registration form: beside the token's
+/// box where it names the token, and above the form otherwise. Of the
+/// three values, only the token has a check of its own, so only a refusal
+/// of the token has a box to be said beside.
+fn placed(refused: Option<&DashboardError>) -> (Option<String>, Option<String>) {
+    let Some(why) = refused else {
+        return (None, None);
+    };
+    let pointed = match why {
+        DashboardError::Refused(refusal) => refusal.part(),
+        DashboardError::NoInstance | DashboardError::Failed => None,
+    };
+    let said = Some(why.to_string());
+    if pointed == Some(Part::Listening) {
+        (said, None)
+    } else {
+        (None, said)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DashboardError, complete, placed};
+    use stageman_wire::Refusal;
+
+    /// The press waits for all three values, whichever is missing.
+    #[test]
+    fn the_press_waits_for_all_three_values() {
+        assert!(complete("1234.5678", "s3cret", "xapp-1"));
+        assert!(!complete(" ", "s3cret", "xapp-1"));
+        assert!(!complete("1234.5678", "", "xapp-1"));
+        assert!(!complete("1234.5678", "s3cret", "\t"));
+    }
+
+    /// A refusal of the app-level token is said beside its box; a refusal
+    /// of anything else, and a failure that is nobody's box, above the
+    /// form; and nothing is said of nothing.
+    #[test]
+    fn a_refusal_is_said_beside_the_token_where_it_names_it_and_above_otherwise() {
+        let listening = DashboardError::from(Refusal::ChannelRefused {
+            listening: true,
+            why: "Slack refused it (invalid_auth)".to_owned(),
+        });
+        assert_eq!(
+            placed(Some(&listening)),
+            (
+                Some(
+                    "the app-level token was not kept: Slack refused it (invalid_auth)".to_owned()
+                ),
+                None
+            )
+        );
+        let speaking = DashboardError::from(Refusal::ChannelRefused {
+            listening: false,
+            why: "Slack refused it (invalid_auth)".to_owned(),
+        });
+        assert_eq!(placed(Some(&speaking)), (None, Some(speaking.to_string())));
+        let blank = DashboardError::from(Refusal::ChannelAppIncomplete);
+        assert_eq!(placed(Some(&blank)), (None, Some(blank.to_string())));
+        assert_eq!(
+            placed(Some(&DashboardError::Failed)),
+            (None, Some(DashboardError::Failed.to_string()))
+        );
+        assert_eq!(placed(None), (None, None));
     }
 }

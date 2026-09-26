@@ -23,13 +23,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use stageman_channel::ChannelError;
-use stageman_core::{Access, Channel, Platform, RepositoryAddress};
+use stageman_channel::{ChannelError, Identity};
+use stageman_core::{Access, Channel, ChannelConfig, Platform, RepositoryAddress, Secret};
 use stageman_platform::{Owned, PlatformError};
 use stageman_vocabulary::{Bytes, Effect as Generic, EffectId, Responded};
 use stageman_wire::Refusal;
 
-use crate::requests::{Drafted, Request, Response, drafted};
+use crate::requests::{Drafted, Request, Response, binding, drafted};
 use crate::views;
 use crate::vocabulary::{AppEffect, RequestId};
 use crate::{Effect, Running};
@@ -55,6 +55,11 @@ pub struct Held {
     /// token when the request is answered — see
     /// `docs/decisions/0080-a-tokens-owner-and-expiry-are-kept-beside-it.md`.
     learned: Option<Owned>,
+    /// Who the channel said this instance is with a speaking credential,
+    /// once it has: what a pair checked for the form's panel is answered
+    /// with — see
+    /// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+    spoken: Option<Identity>,
 }
 
 /// What one check is of.
@@ -95,6 +100,18 @@ pub enum Check {
         /// Which channel.
         channel: Channel,
     },
+}
+
+/// What one check learned beyond its verdict: nothing, what the platform
+/// said of a token, or who the channel says a speaking credential is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Learned {
+    /// The credential was accepted, and that is all.
+    Nothing,
+    /// The platform said whose the token is and when it expires.
+    Owner(Owned),
+    /// The channel said who this instance is with the credential.
+    Identity(Identity),
 }
 
 /// One request to check a credential with, whichever crate rendered it.
@@ -172,6 +189,7 @@ impl Running {
                 outstanding,
                 refused: None,
                 learned: None,
+                spoken: None,
             },
         );
         Ok(true)
@@ -180,7 +198,7 @@ impl Running {
     /// The checks a request needs, each with the request that makes it.
     fn checks_for(&self, request: &Request) -> Result<Vec<(Check, Asking)>, Refusal> {
         let resolved = match request {
-            Request::Create { draft } => drafted(draft, None, &self.begun)?,
+            Request::Create { draft } => drafted(draft, None, &self.begun, &self.workspaces_begun)?,
             Request::Amend { project, draft } => {
                 let identifier = views::identify(&self.state, project)?;
                 let watched = self.state.projects.get(&identifier).ok_or_else(|| {
@@ -188,7 +206,38 @@ impl Running {
                         id: project.clone(),
                     }
                 })?;
-                drafted(draft, Some(watched), &self.begun)?
+                drafted(draft, Some(watched), &self.begun, &self.workspaces_begun)?
+            }
+            // A pair for an app of a project's own, checked for the form's
+            // panel and kept nowhere: both credentials, as a draft's are.
+            Request::Binds { binding: pair, .. } => {
+                let bound = binding(pair)?;
+                self.not_the_instances_app(
+                    bound.iter().map(|(channel, config)| (*channel, config)),
+                )?;
+                return Ok(own_checks(
+                    bound.iter().map(|(channel, config)| (*channel, config)),
+                ));
+            }
+            // The app-level token of an app the instance owns, asked where
+            // to connect, as a binding's is; the client pair cannot be
+            // checked — the exchange refuses a bogus code before it looks at
+            // the pair, measured — and is kept unchecked, per
+            // `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+            Request::RegisterChannelApp {
+                channel,
+                client_id,
+                client_secret,
+                app_token,
+            } => {
+                let channel = views::channel_named(channel)?;
+                let (_, _, app_token) =
+                    crate::apps::three_values(client_id, client_secret, app_token)?;
+                let opening = Secret::new(app_token.to_owned());
+                return Ok(vec![(
+                    Check::Listening { channel },
+                    stageman_channel::open_socket(channel, &opening).into(),
+                )]);
             }
             _ => return Ok(Vec::new()),
         };
@@ -242,8 +291,42 @@ impl Running {
                 ));
             }
         }
+        if resolved.channels_changed {
+            self.not_the_instances_app(
+                resolved
+                    .channels
+                    .iter()
+                    .filter_map(|(channel, binding)| Some((*channel, binding.own()?))),
+            )?;
+        }
         checks.extend(channel_checks(&resolved));
         Ok(checks)
+    }
+
+    /// Refuses an app of a project's own that carries the instance's own
+    /// app's app-level token, before the platform is asked anything: that
+    /// app's stream is opened once, as the instance's, so a project reaches
+    /// it through a workspace — see
+    /// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+    fn not_the_instances_app<'a>(
+        &self,
+        mut bound: impl Iterator<Item = (Channel, &'a ChannelConfig)>,
+    ) -> Result<(), Refusal> {
+        let theirs = bound.any(|(channel, config)| {
+            self.state
+                .channel_apps
+                .get(&channel)
+                .is_some_and(|app| app.app_token == config.listen_credential)
+        });
+        if theirs {
+            return Err(Refusal::ChannelRefused {
+                listening: true,
+                why: "it belongs to the instance's own app, which a project speaks through by a \
+                      workspace instead"
+                    .to_owned(),
+            });
+        }
+        Ok(())
     }
 
     /// A platform answered about a credential. False when the answer was to
@@ -257,15 +340,47 @@ impl Running {
         let Some((request, check)) = self.checks.remove(&id) else {
             return false;
         };
-        let outcome = verdict(&check, responded);
+        // Whose own app is not another's: the project being amended, or
+        // the one a panel checks a pair for.
+        let except = self
+            .checking
+            .get(&request)
+            .and_then(|held| match &held.request {
+                Request::Amend { project, .. }
+                | Request::Binds {
+                    project: Some(project),
+                    ..
+                } => views::identify(&self.state, project).ok(),
+                _ => None,
+            });
+        let outcome = match verdict(&check, responded) {
+            // A binding of a project's own whose bot another listener
+            // already hears with is refused on the speaking box, naming
+            // whose it is: a second connection on one app hears half of
+            // what is said.
+            Ok(Learned::Identity(us)) => match &check {
+                Check::Speaking { channel } => self.already_heard_as(*channel, &us, except).map_or(
+                    Ok(Learned::Identity(us)),
+                    |whose| {
+                        Err(Refusal::ChannelRefused {
+                            listening: false,
+                            why: format!("it is already {whose}"),
+                        })
+                    },
+                ),
+                _ => Ok(Learned::Nothing),
+            },
+            other => other,
+        };
         let Some(held) = self.checking.get_mut(&request) else {
             tracing::warn!("a credential was checked for a request no longer held; ignored");
             return true;
         };
         held.outstanding.remove(&id);
         match outcome {
-            Ok(Some(learned)) => held.learned = Some(learned),
-            Ok(None) => {}
+            Ok(Learned::Owner(learned)) => held.learned = Some(learned),
+            Ok(Learned::Identity(us)) => held.spoken = Some(us),
+            Ok(Learned::Nothing) => {}
             Err(refusal) => {
                 if held.refused.is_none() {
                     held.refused = Some(refusal);
@@ -283,32 +398,49 @@ impl Running {
                 id: request,
                 response: Response::Refused(refusal),
             }),
-            None => self.respond(request, held.request, held.learned, effects),
+            None => self.respond(request, held.request, held.learned, held.spoken, effects),
         }
         true
     }
 }
 
 /// The checks a resolved draft's bindings need: both credentials of every
-/// binding it gives.
+/// app of its own the draft sets. Nothing for what the project already
+/// holds, which was checked when it was kept, and nothing for a workspace
+/// of the instance's app, whose tokens the instance holds.
 fn channel_checks(resolved: &Drafted) -> Vec<(Check, Asking)> {
+    if !resolved.channels_changed {
+        return Vec::new();
+    }
+    own_checks(
+        resolved
+            .channels
+            .iter()
+            .filter_map(|(channel, binding)| Some((*channel, binding.own()?))),
+    )
+}
+
+/// The checks apps of a project's own need: both credentials of each.
+fn own_checks<'a>(
+    bound: impl Iterator<Item = (Channel, &'a ChannelConfig)>,
+) -> Vec<(Check, Asking)> {
     let mut checks = Vec::new();
-    for (channel, bound) in &resolved.channels {
+    for (channel, config) in bound {
         checks.push((
-            Check::Speaking { channel: *channel },
-            stageman_channel::who_am_i(*channel, &bound.speaking()).into(),
+            Check::Speaking { channel },
+            stageman_channel::who_am_i(channel, &config.speaking()).into(),
         ));
         checks.push((
-            Check::Listening { channel: *channel },
-            stageman_channel::open_socket(*channel, &bound.listen_credential).into(),
+            Check::Listening { channel },
+            stageman_channel::open_socket(channel, &config.listen_credential).into(),
         ));
     }
     checks
 }
 
 /// What a platform's answer to one check means for the box the credential
-/// was typed in, and what the one check that learns something learned.
-fn verdict(check: &Check, responded: &Responded) -> Result<Option<Owned>, Refusal> {
+/// was typed in, and what the checks that learn something learned.
+fn verdict(check: &Check, responded: &Responded) -> Result<Learned, Refusal> {
     match check {
         Check::Owner { platform } => match responded {
             Responded::Answered {
@@ -316,7 +448,7 @@ fn verdict(check: &Check, responded: &Responded) -> Result<Option<Owned>, Refusa
                 headers,
                 body,
             } => stageman_platform::owned(*platform, *status, headers, body.as_slice())
-                .map(Some)
+                .map(Learned::Owner)
                 .map_err(|why| owner_refusal(&why)),
             Responded::Failed(why) => Err(Refusal::TokenUnchecked {
                 why: format!(
@@ -331,7 +463,7 @@ fn verdict(check: &Check, responded: &Responded) -> Result<Option<Owned>, Refusa
         } => match responded {
             Responded::Answered { status, body, .. } => {
                 stageman_platform::reached(*platform, repository, *status, body.as_slice())
-                    .map(|()| None)
+                    .map(|()| Learned::Nothing)
                     .map_err(|why| token_refusal(&why, repository))
             }
             Responded::Failed(why) => Err(Refusal::TokenUnchecked {
@@ -348,7 +480,7 @@ fn verdict(check: &Check, responded: &Responded) -> Result<Option<Owned>, Refusa
         } => match responded {
             Responded::Answered { status, body, .. } => {
                 stageman_platform::minted(*platform, *status, body.as_slice())
-                    .map(|_| None)
+                    .map(|_| Learned::Nothing)
                     .map_err(|why| covered_refusal(&why, repository))
             }
             Responded::Failed(why) => Err(Refusal::InstallationUnchecked {
@@ -358,14 +490,18 @@ fn verdict(check: &Check, responded: &Responded) -> Result<Option<Owned>, Refusa
                 ),
             }),
         },
-        Check::Speaking { channel } => spoken(*channel, false, responded, |status, body| {
-            stageman_channel::identity(*channel, status, body).map(|_| ())
-        })
-        .map(|()| None),
+        Check::Speaking { channel } => {
+            let mut us = None;
+            spoken(*channel, false, responded, |status, body| {
+                us = Some(stageman_channel::identity(*channel, status, body)?);
+                Ok(())
+            })
+            .map(|()| us.map_or(Learned::Nothing, Learned::Identity))
+        }
         Check::Listening { channel } => spoken(*channel, true, responded, |status, body| {
             stageman_channel::socket_url(*channel, status, body).map(|_| ())
         })
-        .map(|()| None),
+        .map(|()| Learned::Nothing),
     }
 }
 
@@ -430,7 +566,7 @@ fn spoken(
     channel: Channel,
     listening: bool,
     responded: &Responded,
-    read: impl Fn(u16, &[u8]) -> Result<(), ChannelError>,
+    mut read: impl FnMut(u16, &[u8]) -> Result<(), ChannelError>,
 ) -> Result<(), Refusal> {
     let name = views::wire_channel(channel);
     match responded {
@@ -467,7 +603,7 @@ fn spoken(
 
 #[cfg(test)]
 mod tests {
-    use super::{Check, verdict};
+    use super::{Check, Learned, verdict};
     use stageman_core::{Channel, Platform, RepositoryAddress};
     use stageman_vocabulary::{Bytes, Responded};
     use stageman_wire::Refusal;
@@ -495,7 +631,7 @@ mod tests {
     fn a_tokens_verdict_is_the_platforms_clause_on_its_box() {
         assert_eq!(
             verdict(&token(), &answered(200, r#"{"full_name":"owner/name"}"#)),
-            Ok(None)
+            Ok(Learned::Nothing)
         );
         assert_eq!(
             verdict(&token(), &answered(401, r#"{"message":"Bad credentials"}"#)),
@@ -550,7 +686,7 @@ mod tests {
                     r#"{"token":"ghs_not_a_real_token","expires_at":"2026-09-24T08:00:00Z"}"#
                 )
             ),
-            Ok(None)
+            Ok(Learned::Nothing)
         );
         assert_eq!(
             verdict(
@@ -603,7 +739,11 @@ mod tests {
                     r#"{"ok":true,"user_id":"U1","bot_id":"B1","url":"https://x.slack.com/"}"#
                 )
             ),
-            Ok(None)
+            Ok(Learned::Identity(stageman_channel::Identity {
+                user: "U1".to_owned(),
+                bot: "B1".to_owned(),
+                url: "https://x.slack.com/".to_owned(),
+            }))
         );
         assert_eq!(
             verdict(
@@ -633,7 +773,7 @@ mod tests {
                 &listening,
                 &answered(200, r#"{"ok":true,"url":"wss://wss.slack.com/link/1"}"#)
             ),
-            Ok(None)
+            Ok(Learned::Nothing)
         );
         assert_eq!(
             verdict(

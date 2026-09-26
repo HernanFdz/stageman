@@ -18,11 +18,13 @@
 
 use std::collections::VecDeque;
 
-use stageman_core::{Platform, PlatformApp};
+use std::collections::BTreeMap;
+
+use stageman_core::{Channel, ChannelApp, Platform, PlatformApp, Secret};
 use stageman_vocabulary::{
     Answer, Arrival, Bytes, Effect as Generic, EffectId, RequestId, Responded,
 };
-use stageman_wire::{Apps, PlatformAppView, Refusal, Registration};
+use stageman_wire::{Apps, ChannelAppView, PlatformAppView, Refusal, Registration, WorkspaceView};
 
 use crate::checks::CHECKED_WITHIN;
 use crate::requests::Response;
@@ -62,7 +64,7 @@ impl Running {
         platform: Platform,
         anywhere: bool,
     ) -> Result<Registration, Refusal> {
-        let instance = crate::tunnel::dashboard(&self.domain, self.serving);
+        let instance = crate::tunnel::dashboard(&self.domain, self.reached);
         let manifest =
             stageman_platform::manifest(platform, &instance, anywhere).map_err(|why| {
                 tracing::error!(%why, "the App's manifest could not be composed");
@@ -89,6 +91,8 @@ impl Running {
     #[must_use]
     pub fn apps(&self) -> Apps {
         let platform = Platform::GitHub;
+        let channel = Channel::Slack;
+        let instance = crate::tunnel::dashboard(&self.domain, self.reached);
         Apps {
             github: self.state.apps.get(&platform).map(|app| PlatformAppView {
                 slug: app.slug.clone(),
@@ -97,7 +101,123 @@ impl Running {
                 install_failure: self.install_failure.clone(),
             }),
             failed: self.app_failure.clone(),
+            slack: self
+                .state
+                .channel_apps
+                .get(&channel)
+                .map(|app| ChannelAppView {
+                    client_id: app.client_id.clone(),
+                    workspaces: app
+                        .workspaces
+                        .iter()
+                        .map(|(id, workspace)| WorkspaceView {
+                            id: id.clone(),
+                            name: workspace.name.clone(),
+                            used_by: self.speaking_through(channel, id),
+                        })
+                        .collect(),
+                    install_failure: self.workspace_failure.clone(),
+                }),
+            slack_form: stageman_channel::app_form(channel, &instance),
         }
+    }
+
+    /// Keeps the app this instance owns on a channel, from the three values
+    /// pasted on the Instance page — see `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+    ///
+    /// Its app-level token was checked before this is reached, as a
+    /// binding's is; the client pair cannot be, and is kept as pasted.
+    /// Registering over an app already kept replaces its values, since
+    /// rotating a credential is the ordinary reason to come back to the
+    /// page; the workspaces stay when the app is the same one, by its
+    /// client identifier, and go when it is another's, since an install of
+    /// one app is not an install of another.
+    ///
+    /// # Errors
+    ///
+    /// Fails if any of the three values is blank.
+    pub fn register_channel_app(
+        &mut self,
+        channel: Channel,
+        client_id: &str,
+        client_secret: &str,
+        app_token: &str,
+    ) -> Result<Response, Refusal> {
+        let (client_id, client_secret, app_token) =
+            three_values(client_id, client_secret, app_token)?;
+        let workspaces = match self.state.channel_apps.remove(&channel) {
+            Some(had) if had.client_id == client_id => had.workspaces,
+            _ => BTreeMap::new(),
+        };
+        self.state.channel_apps.insert(
+            channel,
+            ChannelApp {
+                client_id: client_id.to_owned(),
+                client_secret: Secret::new(client_secret.to_owned()),
+                app_token: Secret::new(app_token.to_owned()),
+                workspaces,
+            },
+        );
+        self.dirty = true;
+        Ok(Response::Apps(self.apps()))
+    }
+
+    /// Forgets the app on a channel.
+    ///
+    /// Left on the platform for the operator to delete, as the App is.
+    /// Refused while a project speaks through one of its workspaces, as the
+    /// App is refused while a project is installed on through it: a
+    /// binding with nothing behind it is a project nothing hears.
+    ///
+    /// # Errors
+    ///
+    /// Fails if no app is registered on that channel, or if a project
+    /// speaks through one of its workspaces.
+    pub fn forget_channel_app(&mut self, channel: Channel) -> Result<Response, Refusal> {
+        if !self.state.channel_apps.contains_key(&channel) {
+            return Err(Refusal::ChannelAppMissing {
+                channel: crate::views::wire_channel(channel).to_owned(),
+            });
+        }
+        let using = self.speaking_through_any(channel);
+        if !using.is_empty() {
+            return Err(Refusal::ChannelAppInUse {
+                channel: crate::views::wire_channel(channel).to_owned(),
+                projects: using,
+            });
+        }
+        self.state.channel_apps.remove(&channel);
+        self.forget_workspaces();
+        for disconnect in self.stop_listening(crate::listening::Listening::App(channel)) {
+            self.defer(disconnect);
+        }
+        self.dirty = true;
+        Ok(Response::Apps(self.apps()))
+    }
+
+    /// The projects speaking through a workspace of the instance's app on a
+    /// channel, by name.
+    fn speaking_through(&self, channel: Channel, team: &str) -> Vec<String> {
+        self.state
+            .bound_to(channel, team)
+            .filter_map(|project| Some(self.state.projects.get(&project)?.name.clone()))
+            .collect()
+    }
+
+    /// The projects speaking through any workspace of the instance's app on
+    /// a channel, by name.
+    fn speaking_through_any(&self, channel: Channel) -> Vec<String> {
+        self.state
+            .projects
+            .values()
+            .filter(|watched| {
+                watched
+                    .channels
+                    .get(&channel)
+                    .is_some_and(|binding| binding.workspace().is_some())
+            })
+            .map(|watched| watched.name.clone())
+            .collect()
     }
 
     /// Forgets the App on a platform.
@@ -245,6 +365,29 @@ impl Running {
     }
 }
 
+/// The three values a channel app is registered from, trimmed, or the
+/// refusal for one left blank.
+///
+/// One function for the two places that need it — the check that asks the
+/// platform about the app-level token, which must refuse before asking,
+/// and the keeper, which must refuse if reached any other way — so that
+/// neither can drift from the other.
+///
+/// # Errors
+///
+/// Fails if any of the three is blank.
+pub fn three_values<'a>(
+    client_id: &'a str,
+    client_secret: &'a str,
+    app_token: &'a str,
+) -> Result<(&'a str, &'a str, &'a str), Refusal> {
+    let trimmed = (client_id.trim(), client_secret.trim(), app_token.trim());
+    if trimmed.0.is_empty() || trimmed.1.is_empty() || trimmed.2.is_empty() {
+        return Err(Refusal::ChannelAppIncomplete);
+    }
+    Ok(trimmed)
+}
+
 /// One parameter of a query string, where it is made of the characters a
 /// code or a state token is made of: letters, digits and the three marks
 /// the platform uses. Anything else is not the parameter.
@@ -276,6 +419,27 @@ mod tests {
 
     /// A parameter is read by name from wherever it is in the query, and
     /// refused when it carries anything a code or a state could not.
+    /// Each value blank on its own is refused, whichever it is, and all
+    /// three given are handed back trimmed.
+    #[test]
+    fn a_registration_needs_each_of_its_three_values() {
+        for (client_id, client_secret, app_token) in [
+            ("", "s3cret", "xapp-1"),
+            ("1234.5678", "  ", "xapp-1"),
+            ("1234.5678", "s3cret", "\t"),
+        ] {
+            assert_eq!(
+                super::three_values(client_id, client_secret, app_token),
+                Err(stageman_wire::Refusal::ChannelAppIncomplete),
+                "{client_id:?} {client_secret:?} {app_token:?}"
+            );
+        }
+        assert_eq!(
+            super::three_values(" 1234.5678 ", "s3cret\n", " xapp-1"),
+            Ok(("1234.5678", "s3cret", "xapp-1"))
+        );
+    }
+
     #[test]
     fn a_query_parameter_is_read_by_name_and_only_when_well_formed() {
         assert_eq!(

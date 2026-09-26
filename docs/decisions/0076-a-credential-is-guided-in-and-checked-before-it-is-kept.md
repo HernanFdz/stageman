@@ -20,6 +20,10 @@ typed. Extended by
 check reads whose the token is as well, and keeps that and the token's
 expiry beside it.
 
+The Slack app the context looks ahead to is `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`, which found the redirect
+half of the flow reaching a laptop and the two pastes the context names
+still in it.
+
 ## Context
 
 A project is created with three credentials — a token for its repository,

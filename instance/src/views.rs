@@ -10,11 +10,13 @@ use std::collections::BTreeMap;
 
 use stageman_channel::Identity;
 use stageman_core::{
-    Access, Agent, Attending, Channel, ClaudeEffort, ClaudeModel, Inconsistent, Installation, Job,
-    JobId, Kit, Outcome, Platform, Progress, Project, ProjectId, RepositoryAddress, Room, State,
-    Timestamp, Waiting,
+    Access, Agent, Attending, Binding, Channel, ClaudeEffort, ClaudeModel, Inconsistent,
+    Installation, Job, JobId, Kit, Outcome, Platform, Progress, Project, ProjectId,
+    RepositoryAddress, Room, State, Timestamp, Waiting, Workspace,
 };
-use stageman_wire::{AccessView, Choice, Fitted, KitDraft, ModelChoice, Refusal, Shape, Standing};
+use stageman_wire::{
+    AccessView, BindingView, Choice, Fitted, KitDraft, ModelChoice, Refusal, Shape, Standing,
+};
 
 use crate::tunnel::{Domain, address};
 
@@ -275,6 +277,29 @@ pub fn platform_named(identifier: &str) -> Result<Platform, Refusal> {
     }
 }
 
+/// What the wire calls a channel when a request names one: the platform's
+/// own lowercase spelling, as a platform's is.
+pub const fn channel_identifier(channel: Channel) -> &'static str {
+    match channel {
+        Channel::Slack => "slack",
+    }
+}
+
+/// The channel named by a wire identifier.
+///
+/// # Errors
+///
+/// Fails if nothing is called that.
+pub fn channel_named(identifier: &str) -> Result<Channel, Refusal> {
+    if identifier == channel_identifier(Channel::Slack) {
+        Ok(Channel::Slack)
+    } else {
+        Err(Refusal::ChannelAppMissing {
+            channel: identifier.to_owned(),
+        })
+    }
+}
+
 /// What a screen calls a channel.
 pub const fn wire_channel(channel: Channel) -> &'static str {
     match channel {
@@ -291,6 +316,7 @@ pub fn projected(
     project: &Project,
     us: Option<&Identity>,
     installations: Option<&BTreeMap<u64, Installation>>,
+    workspaces: Option<&BTreeMap<String, Workspace>>,
     now: Timestamp,
 ) -> stageman_wire::Project {
     stageman_wire::Project {
@@ -322,11 +348,23 @@ pub fn projected(
             }),
             None => None,
         },
-        channels: project
+        // In either shape, never a credential: an app of its own by where
+        // it speaks once the channel has said, a workspace by its name —
+        // see `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+        binding: project
             .channels
-            .keys()
-            .map(|channel| wire_channel(*channel).to_owned())
-            .collect(),
+            .get(&Channel::Slack)
+            .map(|binding| match binding {
+                Binding::Own(_) => BindingView::Own {
+                    url: us.map(|us| us.url.clone()),
+                },
+                Binding::Workspace(team) => BindingView::Workspace {
+                    id: team.clone(),
+                    name: workspaces
+                        .and_then(|known| known.get(team))
+                        .map_or_else(|| team.clone(), |workspace| workspace.name.clone()),
+                },
+            }),
         // Names and notes, never values — see
         // `docs/decisions/0075-a-variable-says-what-it-is-for.md`.
         variables: project
@@ -369,10 +407,23 @@ pub fn watching(
         .apps
         .get(&Platform::GitHub)
         .map(|app| &app.installations);
+    let workspaces = state
+        .channel_apps
+        .get(&Channel::Slack)
+        .map(|app| &app.workspaces);
     state
         .projects
         .iter()
-        .map(|(id, project)| projected(*id, project, identities.get(id), installations, now))
+        .map(|(id, project)| {
+            projected(
+                *id,
+                project,
+                identities.get(id),
+                installations,
+                workspaces,
+                now,
+            )
+        })
         .collect()
 }
 
@@ -655,6 +706,8 @@ pub fn watching_now(
     state: &State,
     identities: &Identities,
     app_registered: bool,
+    slack_app_registered: bool,
+    instance: &str,
     now: Timestamp,
 ) -> stageman_wire::Watching {
     stageman_wire::Watching {
@@ -670,9 +723,10 @@ pub fn watching_now(
             .collect(),
         guides: stageman_wire::Guides {
             token_form: stageman_platform::token_form(Platform::GitHub, None),
-            app_form: stageman_channel::app_form(Channel::Slack),
+            app_form: stageman_channel::app_form(Channel::Slack, instance),
         },
         app_registered,
+        slack_app_registered,
     }
 }
 
@@ -686,6 +740,9 @@ pub fn from_inconsistent(reason: &Inconsistent) -> Refusal {
         Inconsistent::UnknownInstallation { installation, .. } => {
             Refusal::NoSuchInstallation { id: *installation }
         }
+        Inconsistent::UnknownWorkspace { workspace, .. } => Refusal::NoSuchWorkspace {
+            id: workspace.clone(),
+        },
     }
 }
 
@@ -835,6 +892,7 @@ mod tests {
     fn watching(name: &str) -> State {
         State {
             apps: std::collections::BTreeMap::new(),
+            channel_apps: std::collections::BTreeMap::new(),
             agents: BTreeMap::from([(
                 Agent::Claude,
                 AgentConfig {
@@ -942,6 +1000,7 @@ mod tests {
             watched,
             None,
             None,
+            None,
             Timestamp::UNIX_EPOCH,
         );
         assert_eq!(shown.working, 1);
@@ -973,6 +1032,7 @@ mod tests {
         let shown = super::projected(
             ProjectId::from_uuid(Uuid::nil()),
             watched,
+            None,
             None,
             None,
             Timestamp::UNIX_EPOCH,
@@ -1081,6 +1141,7 @@ mod tests {
         let shown = super::projected(
             ProjectId::from_uuid(Uuid::nil()),
             watched,
+            None,
             None,
             None,
             Timestamp::UNIX_EPOCH,

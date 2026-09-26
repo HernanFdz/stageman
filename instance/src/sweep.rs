@@ -390,14 +390,7 @@ impl Running {
 
         let reclaiming = self.ask(&Command::Images, Asked::Images);
         effects.push(reclaiming);
-        // Every bound channel is listened to from now: a project that
-        // listens is one whose people can reach its jobs.
-        let watched: Vec<ProjectId> = self.state.projects.keys().copied().collect();
-        for project in watched {
-            if let Some(question) = self.listen(project) {
-                effects.push(question);
-            }
-        }
+        effects.extend(self.listen_to_everything());
         let settling = self.settle_later();
         effects.push(settling);
 
@@ -420,6 +413,28 @@ impl Running {
                 &disowned,
             ),
         )
+    }
+
+    /// Everything there is to listen to, from now: every project's own
+    /// app, since a project that listens is one whose people can reach its
+    /// jobs, and the instance's own app once, for every workspace it is
+    /// installed on — see
+    /// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+    fn listen_to_everything(&mut self) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        // Projects' own apps first, and the order is load-bearing: where one
+        // shares its app-level token with the instance's app, only one
+        // connection opens, and it has to be the project's, which hears the
+        // project — the instance's routes by workspace and would find no
+        // project bound to one until this project moves onto it.
+        let watched: Vec<ProjectId> = self.state.projects.keys().copied().collect();
+        for project in watched {
+            effects.extend(self.listen(crate::listening::Listening::Own(project)));
+        }
+        effects.extend(self.listen(crate::listening::Listening::App(
+            stageman_core::Channel::Slack,
+        )));
+        effects
     }
 
     /// Deals with every container the instance cannot account for.
@@ -542,6 +557,7 @@ mod tests {
         let job = JobId::from_uuid(Uuid::from_u128(2));
         let mut state = State {
             apps: std::collections::BTreeMap::new(),
+            channel_apps: std::collections::BTreeMap::new(),
             agents: BTreeMap::from([(
                 Agent::Claude,
                 AgentConfig {

@@ -37,11 +37,12 @@
 //! and the identifier it comes back with is what a reply names — see
 //! `docs/decisions/0029-a-reply-is-routed-by-its-thread.md`.
 
-use percent_encoding::utf8_percent_encode;
+use percent_encoding::{percent_decode_str, utf8_percent_encode};
 use stageman_core::{Channel, JobId, ProjectId, Secret, Speaking, Uuid, slug};
 
 use crate::{
-    Call, ChannelError, Identity, Incoming, Message, QUERY, Reaction, Request, ThreadRead,
+    Call, ChannelError, Identity, Incoming, Installed, Message, QUERY, Reaction, Request,
+    ThreadRead,
 };
 
 /// The manifest the app a project speaks through is created from: the
@@ -55,6 +56,41 @@ pub const MANIFEST: &str = include_str!("slack/manifest.yaml");
 /// Where the platform creates an app from a manifest carried in the
 /// address, URL-encoded, per its documentation.
 const NEW_APP: &str = "https://api.slack.com/apps?new_app=1&manifest_yaml=";
+
+/// The path under this instance's address the platform brings the browser
+/// back to after an install of the instance's own app, with a code and the
+/// state: the instance's own, answered before the proxy — see
+/// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+pub const INSTALLED_PATH: &str = "/instance/apps/slack/installed";
+
+/// The redirect address as the manifest file spells it: an example
+/// instance's, replaced with the address the page is served from when the
+/// link is composed. Spelled in the file rather than composed whole so that
+/// `README.md` can show a reader the same block, and the platform's form a
+/// complete one.
+const REDIRECT_IN_MANIFEST: &str = "http://localhost:8080/instance/apps/slack/installed";
+
+/// Where a person authorises the app on a workspace: the platform's own
+/// page, given the app's client identifier, the bot scopes, a state and
+/// where to bring the browser back — see `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+const AUTHORIZE: &str = "https://slack.com/oauth/v2/authorize";
+
+/// Where the code the browser came back with is exchanged for the
+/// workspace's bot token.
+const EXCHANGE: &str = "https://slack.com/api/oauth.v2.access";
+
+/// The bot scopes the manifest asks for, as the authorisation address
+/// spells them. One list here and one in the manifest, pinned equal by a
+/// test below, because the platform reads the manifest's at creation and
+/// this one at every install.
+const BOT_SCOPES: &[&str] = &[
+    "chat:write",
+    "channels:history",
+    "groups:history",
+    "app_mentions:read",
+    "channels:manage",
+    "reactions:write",
+];
 
 /// Where Slack takes a message.
 const POST_MESSAGE: &str = "https://slack.com/api/chat.postMessage";
@@ -359,6 +395,23 @@ pub fn room_link(room: &str) -> String {
     format!("<#{room}>")
 }
 
+/// What a room an agent named means, if it is one the platform spells: as
+/// a message carries it, `<#C0123ABCD|name>` or `<#C0123ABCD>`, or the
+/// identifier alone. Nothing for a name without its identifier, which the
+/// platform never sends and this crate cannot look up.
+pub fn room_referenced(named: &str) -> Option<String> {
+    let named = named.trim();
+    let id = named
+        .strip_prefix("<#")
+        .and_then(|rest| rest.strip_suffix('>'))
+        .map_or(named, |inner| {
+            inner.split_once('|').map_or(inner, |(id, _)| id)
+        });
+    let spelled = id.chars().all(|c| c.is_ascii_alphanumeric())
+        && id.chars().next().is_some_and(|c| c.is_ascii_uppercase());
+    spelled.then(|| id.to_owned())
+}
+
 /// A mention of somebody, which the platform renders as their name and
 /// notifies them of.
 pub fn mention(user: &str) -> String {
@@ -366,8 +419,82 @@ pub fn mention(user: &str) -> String {
 }
 
 /// Where the platform's form for a new app is, with the manifest filled in.
-pub fn app_form() -> String {
-    format!("{NEW_APP}{}", utf8_percent_encode(MANIFEST, QUERY))
+pub fn app_form(instance: &str) -> String {
+    let manifest = MANIFEST.replace(REDIRECT_IN_MANIFEST, &format!("{instance}{INSTALLED_PATH}"));
+    format!("{NEW_APP}{}", utf8_percent_encode(&manifest, QUERY))
+}
+
+/// Where a person installs the instance's app on a workspace, carrying the
+/// state the platform brings back with the code: what names the page the
+/// tab was opened from, and nothing about the workspace, which the
+/// exchange says whatever the state says. `instance` is this instance's
+/// own address, which the redirect hangs off, spelled exactly as the
+/// manifest spelled it, since the platform requires the two to match.
+pub fn install_link(client_id: &str, state: &str, instance: &str) -> String {
+    let redirect = format!("{instance}{INSTALLED_PATH}");
+    format!(
+        "{AUTHORIZE}?client_id={client_id}&scope={}&state={state}&redirect_uri={}",
+        BOT_SCOPES.join(","),
+        utf8_percent_encode(&redirect, QUERY)
+    )
+}
+
+/// Renders exchanging the code the browser came back with for the
+/// workspace's bot token: the client pair and the code as the form's
+/// fields, and the redirect address the authorisation carried, which the
+/// platform requires to be sent again — see `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+pub fn exchange(client_id: &str, client_secret: &Secret, code: &str, instance: &str) -> Request {
+    let redirect = format!("{instance}{INSTALLED_PATH}");
+    let body = format!(
+        "client_id={}&client_secret={}&code={}&redirect_uri={}",
+        form(client_id),
+        form(client_secret.expose()),
+        form(code),
+        form(&redirect)
+    );
+    Request {
+        method: "POST".to_owned(),
+        url: EXCHANGE.to_owned(),
+        headers: [(
+            "content-type".to_owned(),
+            "application/x-www-form-urlencoded".to_owned(),
+        )]
+        .into(),
+        body: Some(body.into_bytes()),
+    }
+}
+
+/// One field of a form body, with everything but letters and digits
+/// escaped: a secret or a code can hold anything.
+fn form(value: &str) -> String {
+    utf8_percent_encode(value, percent_encoding::NON_ALPHANUMERIC).to_string()
+}
+
+/// The workspace the app was installed on, from the answer to
+/// [`exchange`]: the bot token minted for it, the workspace's identifier
+/// and name, and the bot user the install made. A code the platform does
+/// not know, one spent, one whose redirect did not match, or a client pair
+/// it refuses each come back as its word, per [`accepted`].
+///
+/// # Errors
+///
+/// Fails if the status was not a success, if the body cannot be read, if
+/// the platform refused, or if it accepted and named no workspace.
+pub fn installed(status: u16, body: &[u8]) -> Result<Installed, ChannelError> {
+    let told = accepted(status, body)?;
+    let text = |value: Option<&serde_json::Value>| {
+        value
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .ok_or(ChannelError::NoAnswer)
+    };
+    let team = told.get("team");
+    Ok(Installed {
+        team: text(team.and_then(|team| team.get("id")))?,
+        name: text(team.and_then(|team| team.get("name")))?,
+        bot_user: text(told.get("bot_user_id"))?,
+        bot_token: Secret::new(text(told.get("access_token"))?),
+    })
 }
 
 /// Renders asking who this instance is, with the credential that speaks.
@@ -560,6 +687,17 @@ pub fn acknowledgement(envelope: &str) -> String {
     serde_json::json!({ "envelope_id": envelope }).to_string()
 }
 
+/// The workspace a frame's event is from, where the frame carries one: the
+/// platform says it in every event's payload, and an app-level token hears
+/// every workspace the app is installed on at once — see
+/// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`. None for a frame that is no event: a greeting, or a
+/// disconnect.
+#[must_use]
+pub fn workspace_of(frame: &str) -> Option<String> {
+    let envelope: Envelope = serde_json::from_str(frame).ok()?;
+    envelope.payload?.team_id
+}
+
 /// What a frame from the socket means.
 ///
 /// Pure, so that every shape the platform sends can be tested without one.
@@ -663,6 +801,11 @@ struct Envelope {
 
 #[derive(serde::Deserialize)]
 struct Payload {
+    /// The workspace the event is from, which every event payload carries
+    /// — measured on every envelope recorded — and which is what routes a
+    /// frame on the instance's own app to the projects bound to that
+    /// workspace.
+    team_id: Option<String>,
     event: Option<Said>,
 }
 
@@ -969,6 +1112,17 @@ pub fn call(request: &Request) -> Option<Call> {
     }
     if request.method != "POST" {
         return None;
+    }
+    if request.url == EXCHANGE {
+        let body = std::str::from_utf8(request.body.as_deref()?).ok()?;
+        let code = body
+            .split('&')
+            .find_map(|pair| pair.strip_prefix("code="))
+            .map(|code| percent_decode_str(code).decode_utf8_lossy().into_owned())?;
+        return Some(Call::Exchange {
+            channel: Channel::Slack,
+            code,
+        });
     }
     match request.url.as_str() {
         WHO_AM_I => {

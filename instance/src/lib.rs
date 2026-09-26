@@ -45,6 +45,7 @@ mod tunnel;
 mod turns;
 mod views;
 mod vocabulary;
+mod workspaces;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
@@ -134,10 +135,10 @@ fn out_of_order(asked: EffectId, id: EffectId) {
 enum Timer {
     /// The settling sweep: which containers still deserve to be up.
     Settling,
-    /// A project's channel, tried again after something went wrong.
+    /// A channel's connection, tried again after something went wrong.
     Reconnecting {
-        /// Whose.
-        project: ProjectId,
+        /// With which app.
+        listening: listening::Listening,
     },
     /// A message of a turn's transcript, grown by editing if it has grown.
     Growing {
@@ -472,6 +473,10 @@ pub struct Facts {
     pub address: String,
     /// The port it is served on.
     pub port: u16,
+    /// The port a person reaches it on: the framework's tooling's when it
+    /// stands in front, and the served one otherwise — see
+    /// `paths::reached_port`.
+    pub reached: u16,
 }
 
 /// Whether a step's time is earlier than the last step's, which the world
@@ -499,8 +504,15 @@ pub struct Running {
     path: PathBuf,
     /// The domain this instance answers on.
     domain: Domain,
-    /// The port the dashboard is served on.
+    /// The port the dashboard is served on: the door this process binds,
+    /// which is where host routing happens and what a tunnel's address
+    /// names.
     serving: u16,
+    /// The port a person reaches the dashboard on, which is what a platform
+    /// is told to bring a browser back to: the framework's tooling's when it
+    /// stands in front, and the door's otherwise — see
+    /// `paths::reached_port`.
+    reached: u16,
     /// The address the dashboard is served on, for the startup block.
     address: String,
     /// The runtime that answered.
@@ -588,6 +600,17 @@ pub struct Running {
     installs: installations::Installs,
     /// Why the last installation was not kept, until the next one is.
     install_failure: Option<String>,
+    /// Installs of the instance's own channel app begun from a page, by
+    /// the state their link carried, oldest first: which workspace came
+    /// back under each, once one has — see
+    /// `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+    workspaces_begun: workspaces::Begun,
+    /// Install codes being exchanged for a workspace's bot token, by the
+    /// identifier the platform's answer carries: the browser's request
+    /// held for it.
+    workspace_exchanges: workspaces::Exchanges,
+    /// Why the last workspace was not kept, until the next one is.
+    workspace_failure: Option<String>,
     /// Listings being assembled for forms, by the request each holds.
     reaching: installations::Reachings,
     /// Which listing each platform answer is for, by the identifier the
@@ -629,10 +652,10 @@ pub struct Running {
     timers: BTreeMap<EffectId, Timer>,
     /// Every project whose channel is being listened to, and where its
     /// connection has got to.
-    listeners: BTreeMap<ProjectId, listening::Listener>,
+    listeners: BTreeMap<listening::Listening, listening::Listener>,
     /// Every socket open, by the identifier the world knows it under: whose
     /// channel each is, for as long as it is open.
-    sockets: BTreeMap<EffectId, ProjectId>,
+    sockets: BTreeMap<EffectId, listening::Listening>,
     /// Sockets the platform said it would close, read until they do while
     /// their replacements are opened.
     draining: BTreeSet<EffectId>,
@@ -670,6 +693,7 @@ impl Running {
             presenting,
             address,
             port,
+            reached,
         } = facts;
         let id = named.unwrap_or_else(|| {
             let minted = InstanceId::from_uuid(mint(&mut rng));
@@ -685,6 +709,7 @@ impl Running {
             path,
             domain,
             serving: port,
+            reached,
             address,
             runtime,
             runtime_environment,
@@ -715,6 +740,9 @@ impl Running {
             begun: installations::Begun::new(),
             installs: installations::Installs::new(),
             install_failure: None,
+            workspaces_begun: workspaces::Begun::new(),
+            workspace_exchanges: workspaces::Exchanges::new(),
+            workspace_failure: None,
             reaching: installations::Reachings::new(),
             reaches: installations::Reaches::new(),
             listing_tokens: installations::ListingTokens::new(),
@@ -1044,6 +1072,7 @@ impl Running {
                 // since each is answered to a held request rather than to a
                 // channel; everything else was sent for a channel's sake.
                 if !self.exchanged(id, &responded, &mut effects)
+                    && !self.workspace_exchanged(id, &responded, &mut effects)
                     && !self.installed_answered(id, &responded, &mut effects)
                     && !self.reached_answered(id, &responded, &mut effects)
                     && !self.minted_answered(id, &responded, &mut effects)
@@ -1090,7 +1119,7 @@ impl Running {
                 let settling = self.settle_later();
                 effects.push(settling);
             }
-            Some(Timer::Reconnecting { project }) => self.try_again(project, effects),
+            Some(Timer::Reconnecting { listening }) => self.try_again(listening, effects),
             Some(Timer::Growing { speaker, run }) => self.grow(&speaker, run),
             Some(Timer::Cancelling { speaker }) => self.cancel_overdue(&speaker, effects),
             None => tracing::warn!("woken for a timer this instance did not set; ignored"),

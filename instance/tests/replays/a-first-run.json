@@ -240,7 +240,7 @@
             "id": 9,
             "path": "/sim/instance.json",
             "bytes": {
-              "text": "{\n  \"instance\": \"3301e8d7-e754-4b2c-b57b-0a4ca73f253c\",\n  \"agents\": {},\n  \"projects\": {},\n  \"apps\": {}\n}"
+              "text": "{\n  \"instance\": \"3301e8d7-e754-4b2c-b57b-0a4ca73f253c\",\n  \"agents\": {},\n  \"projects\": {},\n  \"apps\": {},\n  \"channel_apps\": {}\n}"
             },
             "private": false
           }
@@ -265,6 +265,7 @@
             "path": "/sim/instance.json",
             "domain": "localhost",
             "serving": 8080,
+            "reached": 8080,
             "address": "127.0.0.1:8080",
             "runtime": "/usr/bin/docker",
             "runtime_environment": {
@@ -323,6 +324,9 @@
             "begun": [],
             "installs": [],
             "install_failure": null,
+            "workspaces_begun": [],
+            "workspace_exchanges": [],
+            "workspace_failure": null,
             "reaching": [],
             "reaches": [],
             "listing_tokens": {},

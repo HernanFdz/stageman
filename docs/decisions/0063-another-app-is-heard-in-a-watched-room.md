@@ -20,6 +20,10 @@ Every claim below about what the platform does was measured on 2026-09-15
 against a real workspace, with the GitHub app subscribed to a repository and
 an issue and a pull request opened, commented on, closed and reopened.
 
+Since `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md` the two tools take a room when the turn was asked in the foreman's
+own room, for a workspace several projects share, and refuse one from
+anywhere else.
+
 ## Context
 
 The loop `docs/vision.md` §1 exists to close begins with a signal nobody

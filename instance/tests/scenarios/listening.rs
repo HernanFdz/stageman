@@ -4,7 +4,6 @@
 
 use stageman_core::ProjectId;
 use stageman_instance::{Instance, Request};
-use stageman_wire::ChannelDraft;
 
 use crate::dashboard::a_draft;
 use crate::simulation::{Simulation, project, request, seed, watching, watching_a_channel};
@@ -69,7 +68,10 @@ fn listening_begins_on_waking_and_a_message_is_acknowledged_before_it_is_acted_o
         listener(&instance, project())["phase"],
         serde_json::json!({ "Listening": { "socket": world.sockets_open()[0] } })
     );
-    assert_eq!(listener(&instance, project())["us"]["user"], "U0BOT");
+    assert_eq!(
+        listener(&instance, project())["voices"]["us"]["user"],
+        "U0BOT"
+    );
 
     world.says_at_root(100, 1, "look at the parser");
     world.run_until(&mut instance, 100);
@@ -280,11 +282,7 @@ fn a_channel_bound_under_a_failed_write_is_listened_to_after_the_wait() {
     let mut instance = world.wake(seed(1));
     world.next_write_fails("the disk is full");
 
-    let mut draft = a_draft("burrow");
-    draft.channel = ChannelDraft {
-        credential: "xoxb-not-a-real-token".to_owned(),
-        listen_credential: "xapp-not-a-real-token".to_owned(),
-    };
+    let draft = a_draft("burrow");
     for effect in instance.step(world.now(), request(1, Request::Create { draft })) {
         world.perform(effect);
     }

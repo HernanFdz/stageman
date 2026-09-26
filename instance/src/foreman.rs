@@ -18,7 +18,7 @@
 //! `docs/decisions/0066-a-foremans-container-runs-only-while-a-turn-runs-in-it.md`.
 
 use stageman_core::{
-    Agent, Channel, ChannelConfig, Errand, Handout, Place, ProjectId, Room, State, Taken, Thread,
+    Agent, Channel, Errand, Handout, Place, ProjectId, Room, State, Taken, Thread,
 };
 use stageman_foreman::Starting;
 
@@ -164,11 +164,11 @@ impl Running {
             return;
         };
         if watched.foreman_room.is_none()
-            && let Some((channel, bound)) = watched.channels.iter().next()
+            && let Some(channel) = watched.channels.keys().next().copied()
+            && let Some(speaking) = self.state.speaking(project, channel)
         {
-            let name = stageman_channel::foreman_room_name(*channel, &watched.name, project);
-            let speaking = bound.speaking();
-            self.create_foreman_room(project, *channel, &speaking, &name);
+            let name = stageman_channel::foreman_room_name(channel, &watched.name, project);
+            self.create_foreman_room(project, channel, &speaking, &name);
             return;
         }
         if self.reading_thread_first(project) {
@@ -221,10 +221,7 @@ impl Running {
                 let room = Room { channel, id };
                 let Some((speaking, name)) =
                     self.state.projects.get(&project).and_then(|watched| {
-                        Some((
-                            watched.channels.get(&channel)?.speaking(),
-                            watched.name.clone(),
-                        ))
+                        Some((self.state.speaking(project, channel)?, watched.name.clone()))
                     })
                 else {
                     return;
@@ -414,7 +411,7 @@ impl Running {
     fn notice_turn(&mut self, project: ProjectId, errand: &Errand, starting: Starting) {
         let Some((speaking, room)) = self.state.projects.get(&project).and_then(|watched| {
             let room = watched.foreman_room.clone()?;
-            Some((watched.channels.get(&room.channel)?.speaking(), room))
+            Some((self.state.speaking(project, room.channel)?, room))
         }) else {
             return;
         };
@@ -596,13 +593,7 @@ impl Running {
         message: &str,
         reaction: Reaction,
     ) {
-        let Some(speaking) = self
-            .state
-            .projects
-            .get(&project)
-            .and_then(|watched| watched.channels.get(&channel))
-            .map(ChannelConfig::speaking)
-        else {
+        let Some(speaking) = self.state.speaking(project, channel) else {
             return;
         };
         self.react(channel, &speaking, room, message, reaction);
@@ -611,13 +602,7 @@ impl Running {
     /// Says something in a thread on the instance's own behalf, once whatever
     /// this step changed is on the disk.
     pub fn notice_in(&mut self, project: ProjectId, thread: &Thread, text: &str) {
-        let Some(speaking) = self
-            .state
-            .projects
-            .get(&project)
-            .and_then(|watched| watched.channels.get(&thread.channel))
-            .map(ChannelConfig::speaking)
-        else {
+        let Some(speaking) = self.state.speaking(project, thread.channel) else {
             return;
         };
         self.say(&speaking, &Place::from(thread.clone()), text);
@@ -637,6 +622,7 @@ mod tests {
         let project = ProjectId::from_uuid(Uuid::from_u128(11));
         let mut state = State {
             apps: std::collections::BTreeMap::new(),
+            channel_apps: std::collections::BTreeMap::new(),
             agents: BTreeMap::from([(
                 Agent::Claude,
                 AgentConfig {

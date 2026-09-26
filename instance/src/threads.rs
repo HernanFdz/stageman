@@ -177,8 +177,8 @@ impl Running {
             .state
             .projects
             .get(&project)
-            .and_then(|watched| watched.channels.iter().next())
-            .map(|(channel, bound)| (*channel, bound.speaking()))
+            .and_then(|watched| watched.channels.keys().next().copied())
+            .and_then(|channel| Some((channel, self.state.speaking(project, channel)?)))
         else {
             return false;
         };

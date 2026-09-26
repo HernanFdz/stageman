@@ -210,11 +210,11 @@ impl Running {
         };
         let Some((channel, speaking, repository, reason)) =
             self.state.projects.get(&project).and_then(|watched| {
-                let (channel, bound) = watched.channels.iter().next()?;
+                let channel = watched.channels.keys().next().copied()?;
                 let recorded = watched.jobs.get(job)?;
                 Some((
-                    *channel,
-                    bound.speaking(),
+                    channel,
+                    self.state.speaking(project, channel)?,
                     watched.repository.https(),
                     recorded.reason.clone(),
                 ))

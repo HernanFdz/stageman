@@ -53,11 +53,14 @@ pub fn exposed(state: &State) -> Value {
                         stageman_core::Access::Installation { id } => json!({ "installation": id }),
                     })
                 })),
-                "channels": keyed(project.channels.iter().map(|(channel, bound)| {
-                    (format!("{channel:?}"), json!({
-                        "credential": bound.credential.expose(),
-                        "listen_credential": bound.listen_credential.expose(),
-                    }))
+                "channels": keyed(project.channels.iter().map(|(channel, binding)| {
+                    (format!("{channel:?}"), match binding {
+                        stageman_core::Binding::Own(bound) => json!({
+                            "credential": bound.credential.expose(),
+                            "listen_credential": bound.listen_credential.expose(),
+                        }),
+                        stageman_core::Binding::Workspace(team) => json!({ "workspace": team }),
+                    })
                 })),
                 "variables": keyed(project.variables.iter().map(|(name, variable)| {
                     (name, json!({ "value": variable.value.expose(), "note": variable.note }))
@@ -97,6 +100,9 @@ fn installing(running: &Running) -> Value {
         "begun": value(&running.begun),
         "installs": value(&running.installs.iter().collect::<Vec<_>>()),
         "install_failure": value(&running.install_failure),
+        "workspaces_begun": value(&running.workspaces_begun),
+        "workspace_exchanges": value(&running.workspace_exchanges.iter().collect::<Vec<_>>()),
+        "workspace_failure": value(&running.workspace_failure),
         "reaching": value(&running.reaching.iter().collect::<Vec<_>>()),
         "reaches": value(&running.reaches.iter().collect::<Vec<_>>()),
         "listing_tokens": keyed(running.listing_tokens.iter().map(|(installation, minted)| {
@@ -135,6 +141,7 @@ fn whole(running: &Running) -> Value {
             "path": running.path.display().to_string(),
             "domain": running.domain.to_string(),
             "serving": running.serving,
+            "reached": running.reached,
             "address": running.address,
             "runtime": running.runtime.display().to_string(),
             "runtime_environment": value(&running.runtime_environment),
@@ -154,12 +161,22 @@ fn whole(running: &Running) -> Value {
             "exchanging": value(&running.exchanging.iter().collect::<Vec<_>>()),
             "app_failure": value(&running.app_failure),
             "sent": value(&running.sent.iter().collect::<Vec<_>>()),
-            "listeners": keyed(running.listeners.iter().map(|(project, listener)| {
-                (project, json!({
+            "listeners": keyed(running.listeners.iter().map(|(listening, listener)| {
+                (listening, json!({
                     "channel": format!("{:?}", listener.channel),
                     "opening": listener.opening.expose(),
-                    "credential": listener.speaking.credential.expose(),
-                    "us": value(&listener.us),
+                    "voices": match &listener.voices {
+                        crate::listening::Voices::Own(voice) => json!({
+                            "credential": voice.speaking.credential.expose(),
+                            "us": value(&voice.us),
+                        }),
+                        crate::listening::Voices::Workspaces(voices) => keyed(voices.iter().map(|(team, voice)| {
+                            (team, json!({
+                                "credential": voice.speaking.credential.expose(),
+                                "us": value(&voice.us),
+                            }))
+                        })),
+                    },
                     "phase": value(&listener.phase),
                     "deaf_since": listener.deaf_since,
                 }))

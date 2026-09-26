@@ -22,7 +22,7 @@ fn runs(world: &Simulation) -> Vec<Talk> {
 }
 
 /// A tool call's body, as an agent's client would send one.
-fn call(name: &str, arguments: serde_json::Value) -> serde_json::Value {
+pub fn call(name: &str, arguments: serde_json::Value) -> serde_json::Value {
     let mut params = serde_json::Map::new();
     params.insert("name".to_owned(), name.into());
     params.insert("arguments".to_owned(), arguments);
@@ -35,7 +35,7 @@ fn call(name: &str, arguments: serde_json::Value) -> serde_json::Value {
 }
 
 /// The text a tool answered with.
-fn text_of(answer: &(u16, Option<serde_json::Value>)) -> String {
+pub fn text_of(answer: &(u16, Option<serde_json::Value>)) -> String {
     answer
         .1
         .as_ref()

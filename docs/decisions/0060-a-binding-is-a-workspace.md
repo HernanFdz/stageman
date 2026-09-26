@@ -22,6 +22,11 @@ a mention in a thread is shown that thread before it is answered.
 Every claim below about what the platform does was measured on 2026-09-15
 against a real workspace, with the app installed and a person typing.
 
+Since `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md` the socket says which app, the frame's workspace says which
+projects, and the room says which of them; the must below narrows to an app
+a project owns, since the instance's own app is listened to on one connection
+however many projects speak through it.
+
 ## Context
 
 A project was bound to one Slack channel, and that channel was the whole of

@@ -3384,6 +3384,7 @@ mod tests {
     fn instance(credential: &str) -> State {
         State {
             apps: std::collections::BTreeMap::new(),
+            channel_apps: std::collections::BTreeMap::new(),
             agents: BTreeMap::from([(
                 Agent::Claude,
                 AgentConfig {
@@ -3452,10 +3453,10 @@ mod tests {
             .channels
             .insert(
                 Channel::Slack,
-                stageman_core::ChannelConfig {
+                stageman_core::Binding::Own(stageman_core::ChannelConfig {
                     credential: Secret::new("xoxb-not-a-real-token".to_owned()),
                     listen_credential: Secret::new("xapp-not-a-real-token".to_owned()),
-                },
+                }),
             );
         (state, id)
     }
