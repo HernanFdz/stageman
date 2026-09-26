@@ -62,6 +62,10 @@ deliberate absence that is not written down is indistinguishable from a gap.
   their own machine and their own credentials. Several *projects* per instance
   is a requirement; several *customers* per instance is not, because isolating
   tenants costs more than running a second copy.
+  Since `docs/decisions/0083-hosting-is-one-instance-per-customer.md` a
+  hosted offering exists beside this and does not touch it: it runs one
+  unchanged instance per customer on a machine provisioned for them, so
+  hosting is that second copy rather than a tenant.
 - **Not a queue.** Work is never retried and never resumed. A queue's guarantees
   rest on re-executing a unit of work being safe, and an agent editing a
   repository is not that: a second attempt starts from a world the first one
@@ -104,3 +108,15 @@ an edge case.
 
 Revisit if it ever has to serve people who do not administer the machine it runs
 on. At that point the honest answer is a different product, not a flag.
+
+That revisit came, and the answer was the different product:
+`docs/decisions/0083-hosting-is-one-instance-per-customer.md` runs one
+unchanged instance per customer on a machine provisioned for them. Two
+delegations are the operator's to choose and to take back, and neither moves
+a decision out of the instance: the machine, which somebody else may
+provision, and an app's secret, which somebody else may hold and act with on
+the instance's behalf, per
+`docs/decisions/0085-the-instances-apps-may-be-held-elsewhere.md`. The
+sentence above stays true of the instance, which still holds its own
+credentials and decides everything; what is delegated is a machine and a
+key, and each record says what taking it back costs.

@@ -391,11 +391,120 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   when a ghost is met, and not before: a request on every page read is
   what the record refused.
 
+- **Should a project's containers run on a runtime reached over a network?**
+  `docs/decisions/0083-hosting-is-one-instance-per-customer.md` parked this
+  rather than deciding it, and named what it costs so that it is not
+  re-derived. The control path is free: the world spawns the runtime with
+  the daemon's own environment minus the `STAGEMAN_` names, so a host named
+  in the runtime's own variable already redirects every command the instance
+  renders, and docker's SSH transport refuses a password in the address,
+  runs its own client on the remote, and shares one connection through the
+  user's ssh configuration. Two paths are host-to-host and break: the
+  tunnel port is published on the runtime host's loopback and the probe of
+  `docs/decisions/0047-a-tunnel-answers-only-when-something-behind-it-does.md`
+  and the proxy connect to this machine's, with the probe's budget inverting
+  over a network so that a slow close reads as answering; and every
+  container reaches the tools endpoint and the credential route through the
+  host gateway name, which is the remote host. Three ways across are known.
+  An SSH connection kept open by the world, carrying a forward for the
+  probe and the proxy and a reverse forward for the tools, which on a Linux
+  runtime host needs the host's sshd to bind the reverse forward on the
+  bridge address. The tools endpoint exposed over TLS on an address of its
+  own, warrant-authenticated, which makes it a real service. Or everything
+  riding the runtime's own control channel: a relay written into the
+  container at creation and on every resume, as
+  `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`
+  writes the wrapper, driven by a second kept-open exec, so that tools and
+  the credential route reach the instance with no inbound network at all,
+  which would also retire the listener on every interface for a local
+  runtime; the adapter's translation has a branch for a stdio tool server,
+  measured to exist and not to work by
+  `docs/decisions/0034-tools-are-served-not-shipped.md`. Two smaller edges:
+  runtime commands have no timeout, so a stalled transport hangs a step
+  rather than a request; and the endpoint belongs in the environment the
+  instance hands the process, never in the arguments, since an argument
+  change costs every replay fixture. Settled by a customer asking for the
+  dashboard hosted and the compute their own, and not before.
+
+- **What are Slack's acknowledgement window and retry schedule under Socket
+  Mode?** `docs/decisions/0085-the-instances-apps-may-be-held-elsewhere.md`
+  rests its relay's floor on the rules Slack documents for its HTTP
+  delivery — three seconds, three retries at once, a minute and five, and an
+  app's subscriptions disabled above 95 percent of deliveries failing in an
+  hour — and on the Socket Mode page saying an event is acknowledged so that
+  Slack knows whether to retry, and that the rules apply to both. Whether
+  the window and the schedule are exactly those over a socket was not
+  measured. Settled by the probe tooling this repository does not track:
+  open a connection, withhold one acknowledgement, and record when and how
+  often the envelope comes back and what its retry fields say.
+
+- **How does a relay route an event that names several workspaces?** An
+  event in a channel shared between workspaces carries more than one
+  authorisation, per the envelopes 0081 recorded, so a relay forwarding by
+  workspace has to choose: the event's own team, or every bound team. Two
+  instances receiving one event is the duplication 0085 refuses for one
+  instance; one instance missing an event its bot can see is the other
+  failure. Settled when the relay is built, from recorded envelopes rather
+  than from the documentation, which does not say.
+
+- **Should an instance cap how many jobs it runs at once?** Nothing limits
+  how many jobs a foreman has working, so a small machine overcommits: the
+  runtime kills the largest process in a container and the turn fails
+  visibly, or the machine's own killer takes the daemon and
+  `docs/decisions/0065-a-panic-aborts-the-daemon.md`'s service manager
+  restarts it. A hosted plan is sized by its machine, per 0083, so a cap is
+  the first thing a plan would set, and a self-hosting convenience. What a
+  foreman is told when the cap is reached is the design: the tool that
+  starts a job refuses with a reason the foreman can say on the channel,
+  since a queue is what `docs/vision.md` §2 refuses. Settled by the first
+  hosted plan, or the first laptop that swaps.
+
+- **Should an agent's credential be a gateway's?** 0085 decides that a
+  model credential can be held elsewhere the way an app can, and defers
+  the shape: an agent's configuration would become an address and a key,
+  each agent independently held or in custody, delivered as the two
+  variables the agent documents for a gateway, and the base-address
+  variable would join the names
+  `docs/decisions/0046-a-projects-variables-are-carried-never-read.md`
+  refuses, since one overriding it redirects an agent's traffic exactly as
+  an inherited key changes who pays. Three facts read from the agent's
+  documentation on 2026-09-26: a gateway credential replaces a subscription
+  login, so what goes through a gateway is metered usage billed to the
+  upstream key's owner; a gateway must forward whatever the agent sends,
+  and the agent grows with each release, so it is maintained infrastructure;
+  and the vendor ships a self-hosted gateway of its own. What is unread is
+  the vendor's terms on resale, and what is undecided is whether the
+  credential then belongs to the agent or to a provider, which is the
+  question this file already holds on credentials moving from agents to
+  providers. Settled by reading the terms, and by the first customer who
+  brings no credential of their own.
+
 ## Next
 
 Intended next steps, in order, each with its reason. Written as intentions, not
 progress: "next X, because Y" — never "X is 60% done", which is both derivable
 and wrong within a day.
+
+- Next, the instance authenticates itself, per
+  `docs/decisions/0084-the-instance-authenticates-itself.md`, because a
+  hosted instance faces the Internet before anything else in
+  `docs/decisions/0083-hosting-is-one-instance-per-customer.md` can be tried,
+  and because the setup link is the first-run story `README.md` has wanted.
+  In chunks: the hashing effect, the sealed field and the door's login;
+  a job's host entered through the apex and the proxy's strip list; the
+  first run, from the variable and from the link; the Instance page's
+  change-password control and the README.
+
+- Then the instance's apps held elsewhere, per
+  `docs/decisions/0085-the-instances-apps-may-be-held-elsewhere.md`, Slack
+  first because that is where the setup cost is — ten minutes per project
+  under 0081 — and GitHub second. In chunks: the field and the Instance
+  page's sentence; the four calls against an address and the install link
+  from the holder; the scenarios that pin an install, a mint, an open and a
+  refused second connection; the bridge from the older file.
+
+- Then the cap on concurrent jobs, once its open question above is
+  answered, because it is the first thing a hosted plan sizes.
 
 - Next, the small things the dashboard pass of
   `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md` left:
