@@ -820,6 +820,13 @@ fn a_password_puts_the_dashboard_behind_the_login() {
     assert!(route.contains("401 Unauthorized"), "{route}");
     let up = running.get("/up");
     assert!(up.contains("200 OK"), "{up}");
+    // The browser's half and the assets reach the framework whatever it has
+    // to say about them — nothing, in a build carrying no bundle — rather
+    // than the login page, which a browser refuses as a module.
+    for framework in ["/wasm/stageman.js", "/assets/styles.css"] {
+        let served = running.get(framework);
+        assert!(!served.contains("303 See Other"), "{framework}: {served}");
+    }
 
     let login = running.get("/login?said=wrong&back=%2Fprojects");
     assert!(login.contains("200 OK"), "{login}");

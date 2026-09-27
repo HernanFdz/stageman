@@ -337,7 +337,8 @@
             "sessions": {},
             "logins": [],
             "deriving": [],
-            "failures": {}
+            "failures": {},
+            "password_source": "none — the dashboard is open until STAGEMAN_PASSWORD sets one"
           }
         },
         {
@@ -441,7 +442,7 @@
       "effects": [
         {
           "Print": {
-            "text": "\nstageman is running.\n  version    none — not a release build\n  runtime    /usr/bin/docker\n  key        STAGEMAN_KEY\n  instance   /sim/instance.json\n  domain     localhost\n\n  dashboard  http://127.0.0.1:8080\n\n"
+            "text": "\nstageman is running.\n  version    none — not a release build\n  runtime    /usr/bin/docker\n  key        STAGEMAN_KEY\n  instance   /sim/instance.json\n  domain     localhost\n  password   none — the dashboard is open until STAGEMAN_PASSWORD sets one\n\n  dashboard  http://127.0.0.1:8080\n\n"
           }
         }
       ],

@@ -53,6 +53,33 @@ impl fmt::Display for KeySource {
     }
 }
 
+/// Whether the dashboard has a password, and where it came from, for the
+/// startup block — see
+/// `docs/decisions/0084-the-instance-authenticates-itself.md`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PasswordSource {
+    /// The environment named it on this start, and it was hashed and kept.
+    Environment,
+    /// The file held one.
+    Kept,
+    /// None is set, so the dashboard is open.
+    None,
+}
+
+impl fmt::Display for PasswordSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Environment => write!(f, "set from {}", paths::PASSWORD_VARIABLE),
+            Self::Kept => f.write_str("set"),
+            Self::None => write!(
+                f,
+                "none — the dashboard is open until {} sets one",
+                paths::PASSWORD_VARIABLE
+            ),
+        }
+    }
+}
+
 /// Which question is in flight.
 enum Phase {
     /// Whether the candidate answers.
@@ -102,6 +129,8 @@ pub struct Boot {
     runtime: Option<PathBuf>,
     key: Option<(Key, KeySource)>,
     opened: Option<(State, Option<InstanceId>)>,
+    /// Whether the dashboard has a password, once the file has been read.
+    password: PasswordSource,
     /// Where the presentation server is, once the entry point says.
     presenting: Option<u16>,
     /// The address a person reaches this instance on, and the bind that
@@ -176,6 +205,7 @@ impl Boot {
                     runtime: None,
                     key: None,
                     opened: None,
+                    password: PasswordSource::None,
                     presenting: None,
                     dashboard_asked: (String::new(), None),
                     dashboard: Some(0),
@@ -208,6 +238,7 @@ impl Boot {
             runtime: None,
             key: None,
             opened: None,
+            password: PasswordSource::None,
             presenting: None,
             dashboard_asked: (dashboard_address, None),
             dashboard: None,
@@ -698,14 +729,17 @@ impl Boot {
     /// from the dashboard. Said rather than acted on in that case, because
     /// a variable that does nothing is worth one line.
     fn ask_password_or_listing(&mut self) -> Vec<Effect> {
+        let kept = self
+            .opened
+            .as_ref()
+            .is_some_and(|(state, _)| state.password.is_some());
+        if kept {
+            self.password = PasswordSource::Kept;
+        }
         let Some(password) = paths::told(&self.environment, paths::PASSWORD_VARIABLE) else {
             return self.ask_listing();
         };
-        if self
-            .opened
-            .as_ref()
-            .is_some_and(|(state, _)| state.password.is_some())
-        {
+        if kept {
             tracing::info!(
                 "a password is set already, so the one {} names is not used",
                 paths::PASSWORD_VARIABLE
@@ -729,6 +763,7 @@ impl Boot {
                         if let Some((state, _)) = &mut self.opened {
                             state.password = Some(session::spelled(&salt, hash.as_slice()));
                         }
+                        self.password = PasswordSource::Environment;
                         self.ask_listing()
                     }
                     Err(why) => self.refuse(format!(
@@ -881,6 +916,7 @@ impl Boot {
             address,
             port,
             reached: paths::reached_port(&self.environment).unwrap_or(port),
+            password: self.password.clone(),
         });
         let mut asked = effects;
         asked.extend(running.waking_up(&containers));

@@ -463,7 +463,7 @@ async fn request(
     }
     let answer = match building.send().await {
         Ok(answer) => answer,
-        Err(why) => return Responded::Failed(why.to_string()),
+        Err(why) => return Responded::Failed(chained(&why)),
     };
     let status = answer.status().as_u16();
     let headers = named(answer.headers());
@@ -473,7 +473,7 @@ async fn request(
             headers,
             body: Bytes::new(body.to_vec()),
         },
-        Err(why) => Responded::Failed(why.to_string()),
+        Err(why) => Responded::Failed(chained(&why)),
     }
 }
 
@@ -638,6 +638,21 @@ pub async fn probe(port: u16, within: Duration) -> Probed {
         Ok(Ok(_)) => Probed::Spoke,
         Err(_) => Probed::Silent,
     }
+}
+
+/// An error with every cause under it, joined, so that a transport failure
+/// says what failed — a name that did not resolve, a connection refused —
+/// rather than only that a request could not be sent. The HTTP client's
+/// own message stops one level up, which is the level nobody can act on.
+fn chained(error: &dyn std::error::Error) -> String {
+    let mut said = error.to_string();
+    let mut cause = error.source();
+    while let Some(reason) = cause {
+        said.push_str(": ");
+        said.push_str(&reason.to_string());
+        cause = reason.source();
+    }
+    said
 }
 
 /// What one derivation is asked with, carried whole to the thread that

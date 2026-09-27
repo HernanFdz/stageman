@@ -60,7 +60,7 @@ use stageman_core::{
 };
 use stageman_vocabulary::{Effect as Generic, EffectId, Environment, Finished, Now};
 
-pub use boot::KeySource;
+pub use boot::{KeySource, PasswordSource};
 pub use file::LoadError;
 pub use paths::{DOMAIN_VARIABLE, KEY_VARIABLE, PASSWORD_VARIABLE, STATE_VARIABLE};
 pub use requests::{Request, Response};
@@ -475,6 +475,8 @@ pub struct Facts {
     pub address: String,
     /// The port it is served on.
     pub port: u16,
+    /// Whether the dashboard has a password, for the startup block.
+    pub password: boot::PasswordSource,
     /// The port a person reaches it on: the framework's tooling's when it
     /// stands in front, and the served one otherwise — see
     /// `paths::reached_port`.
@@ -502,6 +504,9 @@ pub struct Running {
     key: Key,
     /// Where the key came from, for the startup block.
     source: KeySource,
+    /// Whether the dashboard has a password, and from where, for the
+    /// startup block.
+    password: boot::PasswordSource,
     /// Where the file is.
     path: PathBuf,
     /// The domain this instance answers on.
@@ -709,6 +714,7 @@ impl Running {
             address,
             port,
             reached,
+            password,
         } = facts;
         let id = named.unwrap_or_else(|| {
             let minted = InstanceId::from_uuid(mint(&mut rng));
@@ -721,6 +727,7 @@ impl Running {
             id,
             key,
             source,
+            password,
             path,
             domain,
             serving: port,
@@ -1203,12 +1210,13 @@ impl Running {
     fn announcement(&self) -> String {
         format!(
             "\nstageman is running.\n  version    {}\n  runtime    {}\n  key        {}\n  \
-             instance   {}\n  domain     {}\n\n  dashboard  http://{}\n\n",
+             instance   {}\n  domain     {}\n  password   {}\n\n  dashboard  http://{}\n\n",
             release::described(),
             self.runtime.display(),
             self.source,
             self.path.display(),
             self.domain,
+            self.password,
             self.address,
         )
     }

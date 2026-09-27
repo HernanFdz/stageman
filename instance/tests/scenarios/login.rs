@@ -74,6 +74,7 @@ fn a_password_named_at_a_first_start_gates_the_dashboard() {
     let route = sim.browses(now, "GET", "/api/home", &[], "");
     let login = sim.browses(now, "GET", LOGIN_PATH, &[], "");
     let bundle = sim.browses(now, "GET", "/assets/styles.css", &[], "");
+    let script = sim.browses(now, "GET", "/wasm/stageman.js", &[], "");
     let up = sim.browses(now, "GET", UP_PATH, &[], "");
     sim.run_until(&mut instance, now);
     assert_eq!(sim.status(page), Some(303));
@@ -88,6 +89,7 @@ fn a_password_named_at_a_first_start_gates_the_dashboard() {
         "the login page is served"
     );
     assert_eq!(sim.route(bundle), Some(Sent::To(9000)), "and what draws it");
+    assert_eq!(sim.route(script), Some(Sent::To(9000)), "and what wakes it");
     assert_eq!(sim.status(up), Some(200));
 
     // A wrong password is sent back to the login page saying so, and the

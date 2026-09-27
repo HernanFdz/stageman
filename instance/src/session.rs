@@ -53,10 +53,12 @@ pub const LOGIN_PATH: &str = "/login";
 /// up, for whatever supervises it, and nothing else.
 pub const UP_PATH: &str = "/up";
 
-/// What the framework serves that the login page needs: the bundle. Under
-/// one prefix, which is the framework's, so that a session is not needed to
-/// fetch the stylesheet the login page is drawn with.
-const ASSETS_PREFIX: &str = "/assets/";
+/// What the framework serves that the login page needs: its assets, and the
+/// browser's half. Two prefixes, both the framework's, so that a session is
+/// not needed to fetch the stylesheet the login page is drawn with or the
+/// script that wakes it — measured: a bundle asked for through the gate was
+/// answered with the login page, which a browser refuses as a module.
+const FRAMEWORK_PREFIXES: [&str; 2] = ["/assets/", "/wasm/"];
 
 /// What a page reads through, answered with a refusal rather than a
 /// redirect when there is no session: a page that outlived its session
@@ -413,7 +415,10 @@ impl crate::Running {
                 self.pages(id, effects);
                 true
             }
-            _ if path.starts_with(ASSETS_PREFIX) => {
+            _ if FRAMEWORK_PREFIXES
+                .iter()
+                .any(|prefix| path.starts_with(prefix)) =>
+            {
                 self.pages(id, effects);
                 true
             }
