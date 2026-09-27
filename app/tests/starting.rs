@@ -987,6 +987,16 @@ fn a_password_puts_the_dashboard_behind_the_login() {
         !plain.contains("That is not the password.") && !plain.contains("Too many tries"),
         "{plain}"
     );
+    // The form's button submits it: Enter would whatever the button was,
+    // since a one-field form submits implicitly, which is how a button
+    // that did nothing went unnoticed.
+    let signing_in = plain
+        .split_once(r#"action="/login""#)
+        .and_then(|(_, rest)| rest.split_once("</form>"))
+        .map(|(form, _)| form)
+        .expect("the login form");
+    assert!(signing_in.contains(r#"type="submit""#), "{signing_in}");
+    assert!(!signing_in.contains(r#"type="button""#), "{signing_in}");
 
     let wrong = running.post_form("/login", "password=battery+staple&back=%2Fprojects");
     assert!(wrong.contains("303 See Other"), "{wrong}");

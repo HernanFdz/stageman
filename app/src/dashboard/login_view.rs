@@ -15,7 +15,7 @@
 use dioxus::prelude::*;
 
 use super::Head;
-use crate::ui::{Button, FIELD, Field};
+use crate::ui::{ButtonVariant, FIELD, Field};
 
 /// Where the form posts: the path the instance answers at the door. A
 /// literal rather than the instance's constant, because this half is
@@ -74,7 +74,16 @@ pub fn LoginView(said: String, back: String) -> Element {
                     }
                 }
                 input { r#type: "hidden", name: "back", value: back }
-                Button { r#type: "submit", "Sign in" }
+                // A bare element dressed as a button rather than the
+                // component, which is `type="button"` so that a press inside
+                // a form never submits it; this one exists to. Enter submits
+                // a one-field form whatever its button is, which is how the
+                // component's went unnoticed here.
+                button {
+                    r#type: "submit",
+                    class: ButtonVariant::Primary.styled(""),
+                    "Sign in"
+                }
             }
         }
     }
