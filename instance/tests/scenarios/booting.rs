@@ -165,12 +165,19 @@ fn a_file_that_cannot_be_written_refuses_the_start() {
 /// simulation, because what is under test is exactly the answers a world
 /// would never send.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one walk through every phase in order, and splitting it would hide that each \
+              phase is reached from the one before"
+)]
 fn an_answer_to_another_question_moves_nothing() {
     let stray = EffectId(9999);
     // No key in the environment, so the key file is asked for and written:
-    // the two phases that would otherwise be skipped.
+    // the two phases that would otherwise be skipped. And a password named,
+    // so that the phase hashing it is walked through too.
     let mut environment = Simulation::environment();
     environment.remove("STAGEMAN_KEY");
+    environment.insert("STAGEMAN_PASSWORD".to_owned(), "correct horse".to_owned());
     let (mut instance, effects) = Instance::boot(seed(1), environment, TARGET);
 
     // A runtime candidate, and the address the tools are served on.
@@ -251,6 +258,21 @@ fn an_answer_to_another_question_moves_nothing() {
         Event::Read {
             id: *file,
             contents: Ok(None),
+        },
+    );
+    let [Effect::Derive { id: hashing, .. }] = asked.as_slice() else {
+        panic!("the password named is hashed before anything is listed");
+    };
+
+    let asked = walked(
+        "password",
+        Event::Derived {
+            id: stray,
+            derived: Ok(Bytes::new(vec![9; 32])),
+        },
+        Event::Derived {
+            id: *hashing,
+            derived: Ok(Bytes::new(vec![7; 32])),
         },
     );
     assert_eq!(asked.len(), 2, "both listings at once");

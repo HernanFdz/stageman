@@ -1926,6 +1926,15 @@ pub struct State {
     /// empty: a project speaks through an app of its own until one is
     /// registered, and after — see `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
     pub channel_apps: BTreeMap<Channel, ChannelApp>,
+    /// The one password the dashboard is entered with, as the instance
+    /// spells its hash, or none while no password has been set — see
+    /// `docs/decisions/0084-the-instance-authenticates-itself.md`.
+    ///
+    /// A hash rather than the password, and a [`Secret`] rather than a
+    /// string all the same: it is derived from a credential, so it is
+    /// sealed and redacted like one, which keeps the rule one rule. What
+    /// the spelling holds is the instance's business; this crate keeps it.
+    pub password: Option<Secret>,
 }
 
 // Deliberately absent: where the container runtime lives. It was a field here
@@ -2387,6 +2396,11 @@ impl State {
             .collect::<Result<BTreeMap<_, _>, SealError>>()?;
 
         let channel_apps = sealed_channel_apps(&self.channel_apps, key, nonces)?;
+        let password = self
+            .password
+            .as_ref()
+            .map(|hash| hash.seal(key, nonces()))
+            .transpose()?;
 
         Ok(Snapshot {
             // Left for whoever holds the file to fill in, for the reason the
@@ -2397,6 +2411,7 @@ impl State {
             projects,
             apps,
             channel_apps,
+            password,
         })
     }
 }
@@ -3155,6 +3170,11 @@ pub struct Snapshot {
     /// answer.
     #[serde(default)]
     pub channel_apps: BTreeMap<Channel, SealedChannelApp>,
+    /// The password's hash, sealed. Defaulted, because a file the last
+    /// release wrote has none, which is the true answer: no password had
+    /// been set.
+    #[serde(default)]
+    pub password: Option<SealedSecret>,
 }
 
 /// The Apps of a file, their keys opened.
@@ -3383,6 +3403,7 @@ impl Snapshot {
             projects,
             apps,
             channel_apps,
+            password,
         } = self;
 
         let agents = agents
@@ -3399,6 +3420,7 @@ impl Snapshot {
 
         let apps = opened_apps(apps, key)?;
         let channel_apps = opened_channel_apps(channel_apps, key)?;
+        let password = password.map(|sealed| sealed.open(key)).transpose()?;
 
         let projects = projects
             .into_iter()
@@ -3410,6 +3432,7 @@ impl Snapshot {
             projects,
             apps,
             channel_apps,
+            password,
         };
         // A file is untrusted input, so this is where believing it stops.
         state.check().map_err(OpenError::Inconsistent)?;
@@ -3960,6 +3983,7 @@ mod tests {
         State {
             apps: std::collections::BTreeMap::new(),
             channel_apps: std::collections::BTreeMap::new(),
+            password: None,
             agents: BTreeMap::from([(
                 Agent::Claude,
                 AgentConfig {
@@ -5225,6 +5249,33 @@ mod tests {
     /// A channel app's client identifier and its workspaces' names travel
     /// through the file in the clear, its secrets sealed; a file written
     /// before the instance owned one opens with none, as does an app written
+    /// The password's hash is sealed like a credential, and a file the last
+    /// release wrote, holding none, opens as an instance whose password is
+    /// not yet set — see
+    /// `docs/decisions/0084-the-instance-authenticates-itself.md`.
+    #[test]
+    fn a_password_hash_is_sealed_and_a_file_without_one_opens() {
+        let mut state = populated();
+        state.password = Some(Secret::new("argon2id$19456$2$1$c2FsdA$aGFzaA".to_owned()));
+        let json = serde_json::to_string(
+            &state
+                .seal(&key(), &mut counting_nonces())
+                .expect("sealing cannot fail"),
+        )
+        .expect("a snapshot serialises");
+        assert!(json.contains(r#""password":{"nonce":"#), "{json}");
+        assert!(!json.contains("argon2id"), "the hash is sealed: {json}");
+        let reopened: Snapshot = serde_json::from_str(&json).expect("and parses back");
+        let reopened = reopened.open(&key()).expect("and opens");
+        assert_eq!(reopened.password, state.password);
+
+        // As the last release wrote the file: no password at all.
+        let older: Snapshot =
+            serde_json::from_str(&written_by_the_last_release()).expect("the older file parses");
+        assert!(older.password.is_none());
+        assert!(older.open(&key()).expect("and opens").password.is_none());
+    }
+
     /// before workspaces were kept.
     #[test]
     fn a_channel_apps_secrets_are_sealed_and_a_file_without_one_opens() {

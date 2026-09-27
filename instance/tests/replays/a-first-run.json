@@ -240,7 +240,7 @@
             "id": 9,
             "path": "/sim/instance.json",
             "bytes": {
-              "text": "{\n  \"instance\": \"3301e8d7-e754-4b2c-b57b-0a4ca73f253c\",\n  \"agents\": {},\n  \"projects\": {},\n  \"apps\": {},\n  \"channel_apps\": {}\n}"
+              "text": "{\n  \"instance\": \"3301e8d7-e754-4b2c-b57b-0a4ca73f253c\",\n  \"agents\": {},\n  \"projects\": {},\n  \"apps\": {},\n  \"channel_apps\": {},\n  \"password\": null\n}"
             },
             "private": false
           }
@@ -252,7 +252,8 @@
           "path": "/kept",
           "value": {
             "agents": {},
-            "projects": {}
+            "projects": {},
+            "password": null
           }
         },
         {
@@ -332,7 +333,16 @@
             "listing_tokens": {},
             "minted": {},
             "minting": [],
-            "awaiting_tokens": []
+            "awaiting_tokens": [],
+            "sessions": {},
+            "logins": [],
+            "deriving": [],
+            "failures": {},
+            "entered": {},
+            "grants": {},
+            "setting": [],
+            "setup": "9bf49a6a07554953811fce125f2683d50429c3bb49e04414be0089a52eae155f",
+            "password_source": "none"
           }
         },
         {
@@ -424,6 +434,49 @@
       ]
     },
     {
+      "at": 0,
+      "event": {
+        "Arrived": {
+          "listener": 2,
+          "id": 1,
+          "request": {
+            "method": "GET",
+            "path": "/setup?t=9bf49a6a07554953811fce125f2683d50429c3bb49e04414be0089a52eae155f",
+            "headers": {
+              "host": "localhost"
+            },
+            "peer": "127.0.0.1:50000"
+          }
+        }
+      },
+      "effects": [
+        {
+          "Answer": {
+            "id": 1,
+            "answer": {
+              "Respond": {
+                "status": 303,
+                "headers": {
+                  "location": "/instance",
+                  "set-cookie": "stageman_session=7053ad2bc5394777ba039b258e59ad9dff0e2c7652184dadb95a37b6c44327c0; Path=/; HttpOnly; SameSite=Lax"
+                },
+                "body": {
+                  "text": ""
+                }
+              }
+            }
+          }
+        }
+      ],
+      "changed": [
+        {
+          "op": "add",
+          "path": "/held/sessions/7053ad2bc5394777ba039b258e59ad9dff0e2c7652184dadb95a37b6c44327c0",
+          "value": 1209600000
+        }
+      ]
+    },
+    {
       "at": 1,
       "event": {
         "Written": {
@@ -436,7 +489,7 @@
       "effects": [
         {
           "Print": {
-            "text": "\nstageman is running.\n  version    none — not a release build\n  runtime    /usr/bin/docker\n  key        STAGEMAN_KEY\n  instance   /sim/instance.json\n  domain     localhost\n\n  dashboard  http://127.0.0.1:8080\n\n"
+            "text": "\nstageman is running.\n  version    none — not a release build\n  runtime    /usr/bin/docker\n  key        STAGEMAN_KEY\n  instance   /sim/instance.json\n  domain     localhost\n  password   none — set one at http://localhost:8080/setup?t=9bf49a6a07554953811fce125f2683d50429c3bb49e04414be0089a52eae155f\n\n  dashboard  http://127.0.0.1:8080\n\n"
           }
         }
       ],

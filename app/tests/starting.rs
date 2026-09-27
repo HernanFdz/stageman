@@ -75,6 +75,11 @@ struct Serving {
     child: Child,
     /// Everything it said before it began serving.
     said: String,
+    /// The session bought through the link the startup block prints while
+    /// there is no password, once a request has needed one: sent with
+    /// every request that names no cookie of its own, so that a test about
+    /// anything but the door meets no door.
+    signed: std::cell::RefCell<Option<String>>,
     /// The address it is actually listening on, which is not the one asked for
     /// — the tests ask for port zero so that two running at once cannot
     /// collide.
@@ -102,13 +107,72 @@ impl Serving {
             .to_owned()
     }
 
+    /// The cookie line every request carries unless it names its own: the
+    /// session the printed link bought, bought on the first request that
+    /// needs one. Empty where the start printed no link, which is a start
+    /// that was given a password.
+    fn cookie_line(&self) -> String {
+        if self.signed.borrow().is_none() {
+            let link = self
+                .said
+                .lines()
+                .find_map(|line| line.split_once("set one at "))
+                .map(|(_, link)| link.trim().to_owned());
+            if let Some(link) = link {
+                let path = link
+                    .split_once("/setup")
+                    .map_or_else(|| link.clone(), |(_, rest)| format!("/setup{rest}"));
+                let answer = self.request(&format!(
+                    "GET {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+                    self.address
+                ));
+                let cookie = answer
+                    .lines()
+                    .find_map(|line| {
+                        line.split_once(": ")
+                            .filter(|(name, _)| name.eq_ignore_ascii_case("set-cookie"))
+                            .map(|(_, value)| value.to_owned())
+                    })
+                    .and_then(|set| set.split_once(';').map(|(pair, _)| pair.to_owned()))
+                    .expect("the printed link signs the harness in");
+                *self.signed.borrow_mut() = Some(cookie);
+            }
+        }
+        self.signed
+            .borrow()
+            .as_ref()
+            .map_or_else(String::new, |cookie| format!("Cookie: {cookie}\r\n"))
+    }
+
     /// The whole of the response to one `POST` of JSON, headers included.
     fn post(&self, path: &str, body: &str) -> String {
+        let cookie = self.cookie_line();
         self.request(&format!(
-            "POST {path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\n\
+            "POST {path} HTTP/1.1\r\nHost: {}\r\n{cookie}Content-Type: application/json\r\n\
              Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
             self.address,
             body.len()
+        ))
+    }
+
+    /// The whole of the response to one `POST` of a form, as a browser posts
+    /// one, headers included, and as nobody: the login form is what buys a
+    /// session, so it carries none.
+    fn post_form(&self, path: &str, body: &str) -> String {
+        self.request(&format!(
+            "POST {path} HTTP/1.1\r\nHost: {}\r\n\
+             Content-Type: application/x-www-form-urlencoded\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            self.address,
+            body.len()
+        ))
+    }
+
+    /// The whole of the response to one `GET` carrying a cookie.
+    fn get_with_cookie(&self, path: &str, cookie: &str) -> String {
+        self.request(&format!(
+            "GET {path} HTTP/1.1\r\nHost: {}\r\nCookie: {cookie}\r\nConnection: close\r\n\r\n",
+            self.address
         ))
     }
 
@@ -131,8 +195,9 @@ impl Serving {
     /// fail against the partial text, which says far more than
     /// `ConnectionReset` did.
     fn get(&self, path: &str) -> String {
+        let cookie = self.cookie_line();
         self.request(&format!(
-            "GET {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            "GET {path} HTTP/1.1\r\nHost: {}\r\n{cookie}Connection: close\r\n\r\n",
             self.address
         ))
     }
@@ -140,14 +205,23 @@ impl Serving {
     /// Opens a `GET` and hands back the socket with only the request sent,
     /// for a response that does not end: the caller reads what it waits for.
     fn opened(&self, path: &str) -> TcpStream {
+        let cookie = self.cookie_line();
         let mut connection = TcpStream::connect(&self.address).expect("the dashboard accepts");
         connection
-            .write_all(format!("GET {path} HTTP/1.1\r\nHost: {}\r\n\r\n", self.address).as_bytes())
+            .write_all(
+                format!(
+                    "GET {path} HTTP/1.1\r\nHost: {}\r\n{cookie}\r\n",
+                    self.address
+                )
+                .as_bytes(),
+            )
             .expect("the request is sent");
         connection
     }
 
-    /// Writes a request and reads everything the server says back.
+    /// Writes a request and reads everything the server says back, with
+    /// a chunked body reassembled, so that what a test matches is what a
+    /// browser reads.
     fn request(&self, request: &str) -> String {
         let mut connection = TcpStream::connect(&self.address).expect("the dashboard accepts");
         connection
@@ -166,8 +240,101 @@ impl Serving {
             }
         }
         assert!(!response.is_empty(), "the connection closed saying nothing");
-        String::from_utf8_lossy(&response).into_owned()
+        String::from_utf8_lossy(&dechunked(&response)).into_owned()
     }
+}
+
+/// The response with its chunked body reassembled, and any other as it
+/// came.
+///
+/// A page is streamed in chunks of a size the server chooses, and where
+/// a chunk ends depends on how many bytes came before it — a port with
+/// one digit more moves every boundary after it. So a test that matched
+/// the wire's text matched a sentence by luck and missed it by luck,
+/// whenever a size line fell inside it. A body that ends before its last
+/// chunk is a failure said as one, since a test reading a cut page would
+/// fail on whatever the cut took and say nothing of the cut.
+fn dechunked(response: &[u8]) -> Vec<u8> {
+    let Some((head, body)) = split_once(response, b"\r\n\r\n") else {
+        return response.to_vec();
+    };
+    let chunked = String::from_utf8_lossy(head)
+        .to_ascii_lowercase()
+        .contains("transfer-encoding: chunked");
+    if !chunked {
+        return response.to_vec();
+    }
+
+    let mut whole = head.to_vec();
+    whole.extend_from_slice(b"\r\n\r\n");
+    let mut rest = body;
+    loop {
+        let Some((size, after)) = split_once(rest, b"\r\n") else {
+            panic!(
+                "a chunked body ended without a size line after {} bytes",
+                whole.len()
+            );
+        };
+        let size = String::from_utf8_lossy(size);
+        let size = match size.split_once(';') {
+            Some((size, _extension)) => size,
+            None => &size,
+        };
+        let size = usize::from_str_radix(size.trim(), 16).expect("a chunk's size is hexadecimal");
+        if size == 0 {
+            break;
+        }
+        let Some((chunk, after)) = after.split_at_checked(size) else {
+            panic!(
+                "a chunked body was cut inside a chunk after {} bytes",
+                whole.len()
+            );
+        };
+        whole.extend_from_slice(chunk);
+        rest = after
+            .strip_prefix(b"\r\n")
+            .expect("a chunk is followed by a line end");
+    }
+    whole
+}
+
+/// The bytes before the first `separator` and the bytes after it, or
+/// nothing when it does not occur.
+fn split_once<'a>(bytes: &'a [u8], separator: &[u8]) -> Option<(&'a [u8], &'a [u8])> {
+    let at = bytes
+        .windows(separator.len())
+        .position(|window| window == separator)?;
+    let (before, rest) = bytes.split_at_checked(at)?;
+    Some((before, rest.strip_prefix(separator)?))
+}
+
+#[test]
+fn a_chunked_body_is_reassembled_before_a_test_reads_it() {
+    let wire = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
+                 5\r\nNowhe\r\n7;ext=1\r\nre yet.\r\n0\r\n\r\n";
+    assert_eq!(
+        dechunked(wire),
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nNowhere yet."
+    );
+}
+
+#[test]
+fn a_body_that_is_not_chunked_comes_as_it_was() {
+    let wire = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nNowhe";
+    assert_eq!(dechunked(wire), wire);
+    assert_eq!(dechunked(b"no head at all"), b"no head at all");
+}
+
+#[test]
+#[should_panic(expected = "cut inside a chunk")]
+fn a_body_cut_inside_a_chunk_is_a_failure() {
+    let _cut = dechunked(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n10\r\nNowhe");
+}
+
+#[test]
+#[should_panic(expected = "without a size line")]
+fn a_body_that_ends_before_its_last_chunk_is_a_failure() {
+    let _cut = dechunked(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nNowhe\r\n");
 }
 
 /// Reads from an open response until `needle` has arrived, or gives up
@@ -259,6 +426,7 @@ fn started(variables: &[(&str, String)]) -> Serving {
         child,
         said,
         address,
+        signed: std::cell::RefCell::new(None),
     }
 }
 
@@ -378,6 +546,7 @@ fn watching(name: &str, repository: &str) -> State {
     State {
         apps: std::collections::BTreeMap::new(),
         channel_apps: std::collections::BTreeMap::new(),
+        password: None,
         agents: BTreeMap::from([(
             Agent::Claude,
             AgentConfig {
@@ -762,6 +931,118 @@ fn the_route_the_page_reads_through_answers_on_its_own() {
 
     assert!(answer.contains("200 OK"), "{answer}");
     assert!(answer.contains("aviary"), "{answer}");
+}
+
+/// A password named at the first start puts the dashboard behind the login:
+/// a page is sent to it, a route is refused, the login page and the bundle
+/// are served, a wrong password is sent back saying so, the right one buys a
+/// session in a cookie, and the cookie opens what was refused — see
+/// `docs/decisions/0084-the-instance-authenticates-itself.md`.
+///
+/// Against the real binary rather than the simulation, because what is
+/// checked here is the door as a browser meets it: the framework serving
+/// the login page through the proxy, the form read at the door, and the
+/// cookie set on a real response.
+#[test]
+fn a_password_puts_the_dashboard_behind_the_login() {
+    let (_kept, snapshot) = scratch();
+    let watched = watching("aviary", "https://github.com/example/aviary");
+    written(&snapshot, &watched);
+
+    let running = serving(
+        &snapshot,
+        &[
+            ("STAGEMAN_KEY", KEY),
+            ("STAGEMAN_PASSWORD", "correct horse"),
+        ],
+    );
+
+    let page = running.get("/projects");
+    assert!(page.contains("303 See Other"), "{page}");
+    assert!(
+        page.to_ascii_lowercase()
+            .contains("location: /login?back=%2fprojects"),
+        "{page}"
+    );
+    let route = running.get("/api/home");
+    assert!(route.contains("401 Unauthorized"), "{route}");
+    let up = running.get("/up");
+    assert!(up.contains("200 OK"), "{up}");
+    // The browser's half and the assets reach the framework whatever it has
+    // to say about them — nothing, in a build carrying no bundle — rather
+    // than the login page, which a browser refuses as a module.
+    for framework in ["/wasm/stageman.js", "/assets/styles.css"] {
+        let served = running.get(framework);
+        assert!(!served.contains("303 See Other"), "{framework}: {served}");
+    }
+
+    let login = running.get("/login?said=wrong&back=%2Fprojects");
+    assert!(login.contains("200 OK"), "{login}");
+    assert!(login.contains(r#"name="password""#), "{login}");
+    assert!(login.contains("That is not the password."), "{login}");
+    let waiting = running.get("/login?said=wait");
+    assert!(waiting.contains("Too many tries in a row."), "{waiting}");
+    let plain = running.get("/login");
+    assert!(
+        !plain.contains("That is not the password.") && !plain.contains("Too many tries"),
+        "{plain}"
+    );
+    // The form's button submits it: Enter would whatever the button was,
+    // since a one-field form submits implicitly, which is how a button
+    // that did nothing went unnoticed.
+    let signing_in = plain
+        .split_once(r#"action="/login""#)
+        .and_then(|(_, rest)| rest.split_once("</form>"))
+        .map(|(form, _)| form)
+        .expect("the login form");
+    assert!(signing_in.contains(r#"type="submit""#), "{signing_in}");
+    assert!(!signing_in.contains(r#"type="button""#), "{signing_in}");
+
+    let wrong = running.post_form("/login", "password=battery+staple&back=%2Fprojects");
+    assert!(wrong.contains("303 See Other"), "{wrong}");
+    assert!(
+        wrong
+            .to_ascii_lowercase()
+            .contains("location: /login?said=wrong&back=%2fprojects"),
+        "{wrong}"
+    );
+
+    // The wait a wrong password earns is a second, which is longer than
+    // this test takes to post again, so the right password waits it out.
+    std::thread::sleep(Duration::from_millis(1_100));
+    let right = running.post_form("/login", "password=correct+horse&back=%2Fprojects");
+    assert!(right.contains("303 See Other"), "{right}");
+    assert!(
+        right.to_ascii_lowercase().contains("location: /projects"),
+        "{right}"
+    );
+    let cookie = right
+        .lines()
+        .find_map(|line| {
+            line.to_ascii_lowercase()
+                .strip_prefix("set-cookie: ")
+                .map(|_| line.split_once(": ").map_or(line, |(_, value)| value))
+        })
+        .and_then(|set| set.split_once(';').map(|(pair, _)| pair.to_owned()))
+        .expect("a session was set");
+    assert!(cookie.starts_with("stageman_session="), "{cookie}");
+
+    let opened = running.get_with_cookie("/api/home", &cookie);
+    assert!(opened.contains("200 OK"), "{opened}");
+    assert!(opened.contains("aviary"), "{opened}");
+    let page = running.get_with_cookie("/projects", &cookie);
+    assert!(page.contains("200 OK"), "{page}");
+
+    // The sign-out is a form the browser submits, so its button has to be
+    // one that submits: the component's is `type="button"` by design, and
+    // a press on one of those inside a form does nothing at all.
+    let signing_out = page
+        .split_once(r#"action="/logout""#)
+        .and_then(|(_, rest)| rest.split_once("</form>"))
+        .map(|(form, _)| form)
+        .expect("the sign-out form on a signed-in page");
+    assert!(signing_out.contains(r#"type="submit""#), "{signing_out}");
+    assert!(!signing_out.contains(r#"type="button""#), "{signing_out}");
 }
 
 /// `docs/conventions.md` §4 asks that secrets never render, and this is where
@@ -1272,6 +1553,7 @@ fn two_projects_each_with_a_job() -> (State, Vec<(JobId, &'static str, &'static 
     let mut state = State {
         apps: BTreeMap::new(),
         channel_apps: BTreeMap::new(),
+        password: None,
         agents: BTreeMap::from([(
             Agent::Claude,
             AgentConfig {

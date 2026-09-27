@@ -83,6 +83,18 @@ commits they make are the App's. Register it under your account, or under
 an organisation whose repositories it should reach; the Instance page
 lists every installation.
 
+**The dashboard is entered with one password.** A first start with none
+prints a link where the daemon started, and that link is the only way in:
+open it, and the Instance page asks you to set a password, after which the
+link is spent. A machine provisioned for somebody names the password in
+`STAGEMAN_PASSWORD` for the first start instead: it is hashed into the
+instance's file before anything is served, and the variable is never read
+again while the file holds a hash, so a line left in a service unit never
+silently replaces a password changed later. Change it from the Instance
+page, and sign out from the header. A session lasts a fortnight from its
+last use and is forgotten when the daemon restarts — see
+`docs/decisions/0084-the-instance-authenticates-itself.md`.
+
 **It needs nothing named in the environment either.** Its file is encrypted
 under a key, and a key cannot live in the file it protects — so on a first run
 stageman generates one, keeps it in the ordinary place for configuration on
@@ -243,12 +255,14 @@ wildcard forwarded here reaches both:
 curl -fsSL https://github.com/HernanFdz/stageman/releases/latest/download/install.sh | sh -s -- --domain stageman.example.com
 ```
 
-Point whatever terminates `*.<domain>` at this machine, **and have it
-authenticate every host under that domain** — stageman authenticates nothing,
-so an unprotected instance is one anybody who finds the name can operate, and a
-job's tunnel carries whatever its agent put there. Without a domain, jobs are
-shown at `<job-id>.localhost`, which works in a browser on this machine and
-nowhere else. Either way the domain in use is printed when the daemon starts.
+Point whatever terminates `*.<domain>` at this machine. Every host under
+the domain, the dashboard and each job's tunnel alike, is behind the
+instance's own login once a password is set: a job's host is entered
+through the dashboard's, which sends a browser signed in there straight
+back with a session for that host, and a page a job serves never sees
+either session. Without a domain, jobs are shown at `<job-id>.localhost`,
+which works in a browser on this machine and nowhere else. Either way the
+domain in use is printed when the daemon starts.
 
 **Re-running it is how you update.** There is no separate update command and no
 `self-update` subcommand: the address above always serves the newest script,

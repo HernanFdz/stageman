@@ -87,6 +87,7 @@ pub fn exposed(state: &State) -> Value {
                 "attending": value(&project.attending),
             }))
         })),
+        "password": state.password.as_ref().map(stageman_core::Secret::expose),
     })
 }
 
@@ -116,16 +117,34 @@ fn installing(running: &Running) -> Value {
     })
 }
 
+/// What an awake instance holds about logins and sessions — see
+/// `docs/decisions/0084-the-instance-authenticates-itself.md`. Apart for the
+/// reason [`installing`] is, and merged the same way.
+fn signing_in(running: &Running) -> Value {
+    json!({
+        "sessions": value(&running.sessions),
+        "logins": value(&running.logins.iter().collect::<Vec<_>>()),
+        "deriving": value(&running.deriving.iter().collect::<Vec<_>>()),
+        "failures": value(&running.failures),
+        "entered": value(&running.entered),
+        "grants": value(&running.grants),
+        "setting": value(&running.setting.iter().collect::<Vec<_>>()),
+        "setup": value(&running.setup),
+        "password_source": running.password.to_string(),
+    })
+}
+
 /// Everything an awake instance holds: what goes to the disk, and what only
 /// this process knows.
 #[must_use]
 pub fn of(running: &Running) -> Value {
     let mut of = whole(running);
-    if let (Some(held), Value::Object(more)) = (
-        of.get_mut("held").and_then(Value::as_object_mut),
-        installing(running),
-    ) {
-        held.extend(more);
+    for more in [installing(running), signing_in(running)] {
+        if let (Some(held), Value::Object(more)) =
+            (of.get_mut("held").and_then(Value::as_object_mut), more)
+        {
+            held.extend(more);
+        }
     }
     of
 }

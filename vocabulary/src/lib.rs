@@ -113,6 +113,11 @@ pub enum Answer {
         /// refusal. Carried rather than composed here, because what it
         /// means for nothing to answer is the deciding half's to know.
         refused: Bytes,
+        /// Cookies to remove from the request before it is forwarded, by
+        /// name. What a person presented to the deciding half is its own,
+        /// and whatever answers behind the port is somebody else's — see
+        /// `docs/decisions/0084-the-instance-authenticates-itself.md`.
+        strip: Vec<String>,
     },
     /// Read its body and hand it back, then ask again.
     ///
@@ -319,6 +324,14 @@ pub enum Event<A: App> {
         /// What it did.
         probed: Probed,
     },
+    /// Answers [`Effect::Derive`]: the bytes derived, or why they could
+    /// not be.
+    Derived {
+        /// Which derivation.
+        id: EffectId,
+        /// The bytes, or the reason the parameters were refused.
+        derived: Result<Bytes, String>,
+    },
     /// Answers [`Effect::Request`]: how the request came to an end.
     Responded {
         /// Which request.
@@ -396,6 +409,10 @@ impl<A: App> Clone for Event<A> {
                 id: *id,
                 probed: *probed,
             },
+            Self::Derived { id, derived } => Self::Derived {
+                id: *id,
+                derived: derived.clone(),
+            },
             Self::Responded { id, responded } => Self::Responded {
                 id: *id,
                 responded: responded.clone(),
@@ -435,6 +452,7 @@ impl<A: App> Named for Event<A> {
             Self::Line { .. } => "Line",
             Self::Ended { .. } => "Ended",
             Self::Probed { .. } => "Probed",
+            Self::Derived { .. } => "Derived",
             Self::Responded { .. } => "Responded",
             Self::Frame { .. } => "Frame",
             Self::Disconnected { .. } => "Disconnected",
@@ -618,6 +636,36 @@ pub enum Effect<A: App> {
         /// takes to admit to being empty are things only it knows.
         within: Duration,
     },
+    /// Derive bytes from a secret and a salt by a memory-hard function —
+    /// argon2id, with the parameters given — on a thread of its own.
+    /// Answered by [`Event::Derived`] with the bytes, or with why the
+    /// parameters were refused.
+    ///
+    /// The one family here that reaches nothing outside the process. It is
+    /// a mechanism all the same, for the reason a file or a socket is: the
+    /// deciding half's step must stay short, and a derivation is slow by
+    /// design — slow enough that one made inside a step would stall every
+    /// other decision behind it, which is what a flood of wrong passwords
+    /// would then be able to do. The parameters are the deciding half's to
+    /// set, because what they cost and what they defend are its to weigh;
+    /// the function is fixed, because which one is not a decision anybody
+    /// makes twice.
+    Derive {
+        /// Which derivation, on the answer.
+        id: EffectId,
+        /// The secret.
+        secret: Bytes,
+        /// The salt.
+        salt: Bytes,
+        /// Memory to use, in kibibytes.
+        memory: u32,
+        /// Passes over that memory.
+        iterations: u32,
+        /// Lanes.
+        parallelism: u32,
+        /// How many bytes to derive.
+        length: u32,
+    },
     /// Write to the process's standard output, which is where whoever
     /// started it is reading. Unanswered.
     Print {
@@ -636,6 +684,11 @@ pub enum Effect<A: App> {
 }
 
 impl<A: App> Clone for Effect<A> {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per variant, written out because the derive would ask the \
+                  application to be cloneable rather than its effect"
+    )]
     fn clone(&self) -> Self {
         match self {
             Self::Read { id, path } => Self::Read {
@@ -723,6 +776,23 @@ impl<A: App> Clone for Effect<A> {
                 port: *port,
                 within: *within,
             },
+            Self::Derive {
+                id,
+                secret,
+                salt,
+                memory,
+                iterations,
+                parallelism,
+                length,
+            } => Self::Derive {
+                id: *id,
+                secret: secret.clone(),
+                salt: salt.clone(),
+                memory: *memory,
+                iterations: *iterations,
+                parallelism: *parallelism,
+                length: *length,
+            },
             Self::Print { text } => Self::Print { text: text.clone() },
             Self::Exit { message } => Self::Exit {
                 message: message.clone(),
@@ -757,6 +827,7 @@ impl<A: App> Named for Effect<A> {
             Self::Transmit { .. } => "Transmit",
             Self::Disconnect { .. } => "Disconnect",
             Self::Probe { .. } => "Probe",
+            Self::Derive { .. } => "Derive",
             Self::Print { .. } => "Print",
             Self::Exit { .. } => "Exit",
             Self::App(effect) => effect.kind(),
@@ -1026,6 +1097,7 @@ pub(crate) mod doorbell {
                 | Event::Line { .. }
                 | Event::Ended { .. }
                 | Event::Probed { .. }
+                | Event::Derived { .. }
                 | Event::Responded { .. }
                 | Event::Frame { .. }
                 | Event::Disconnected { .. } => Vec::new(),
@@ -1119,6 +1191,7 @@ mod tests {
                 answer: Answer::Proxy {
                     port: 8080,
                     refused: Bytes::new(b"nothing there".to_vec()),
+                    strip: vec!["session".to_owned()],
                 },
             },
             Effect::Answer {
@@ -1129,6 +1202,15 @@ mod tests {
                 id: EffectId(6),
                 port: 64_383,
                 within: std::time::Duration::from_millis(500),
+            },
+            Effect::Derive {
+                id: EffectId(7),
+                secret: Bytes::new(b"correct horse".to_vec()),
+                salt: Bytes::new(vec![1; 16]),
+                memory: 19_456,
+                iterations: 2,
+                parallelism: 1,
+                length: 32,
             },
             Effect::Print {
                 text: "hello\n".to_owned(),
@@ -1142,7 +1224,7 @@ mod tests {
             kinds,
             [
                 "Read", "Write", "Run", "Open", "Send", "Close", "Wake", "Bind", "Answer",
-                "Answer", "Answer", "Probe", "Print", "Exit"
+                "Answer", "Answer", "Probe", "Derive", "Print", "Exit"
             ]
         );
         crosses_whole(&effects);
@@ -1295,13 +1377,17 @@ mod tests {
                 id: EffectId(6),
                 probed: Probed::Closed,
             },
+            Event::Derived {
+                id: EffectId(7),
+                derived: Ok(Bytes::new(vec![7; 32])),
+            },
         ];
         let kinds: Vec<&str> = events.iter().map(Named::kind).collect();
         assert_eq!(
             kinds,
             [
                 "Read", "Written", "Ran", "Ran", "Woke", "Line", "Ended", "Ended", "Ended",
-                "Bound", "Arrived", "Body", "Probed"
+                "Bound", "Arrived", "Body", "Probed", "Derived"
             ]
         );
         crosses_whole(&events);

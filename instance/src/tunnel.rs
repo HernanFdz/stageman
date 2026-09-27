@@ -166,7 +166,7 @@ impl Domain {
     /// it, which terminates TLS on the standard port because it is also what
     /// authenticates. The local one is the one case with nothing in front, so
     /// it is the one case that is plain and carries this process's own port.
-    fn is_local(&self) -> bool {
+    pub(crate) fn is_local(&self) -> bool {
         self.0 == DEFAULT_DOMAIN || self.0.ends_with(&format!(".{DEFAULT_DOMAIN}"))
     }
 }
@@ -328,18 +328,18 @@ impl crate::Running {
             // `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`
             // and
             // `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
+            // And every request on that host is asked for a session first,
+            // the login's own paths and the bundle's excepted — see
+            // `docs/decisions/0084-the-instance-authenticates-itself.md`.
             Routed::Dashboard => {
+                if self.gate(id, request, effects) {
+                    return;
+                }
                 if !self.came_back(id, request, effects)
                     && !self.came_back_installed(id, request, effects)
                     && !self.came_back_workspace(id, request, effects)
                 {
-                    effects.push(Effect::Answer {
-                        id,
-                        answer: Answer::Proxy {
-                            port: self.presenting,
-                            refused: Bytes::new(DASHBOARD_SILENT.as_bytes().to_vec()),
-                        },
-                    });
+                    self.pages(id, effects);
                 }
             }
             Routed::Stranger => {
@@ -350,8 +350,32 @@ impl crate::Running {
                 );
                 Self::nobody(id, effects);
             }
-            Routed::Job(job) => self.tunnel_asked(id, job, effects),
+            // A job's host is entered through the apex, per the same record:
+            // with a session for that host the request goes on to the
+            // tunnel, and without one the browser is sent to be granted one.
+            Routed::Job(job) => {
+                if self.gate_tunnel(id, &job, request, effects) {
+                    return;
+                }
+                self.tunnel_asked(id, job, effects);
+            }
         }
+    }
+
+    /// Forwards a request to the pages: the presentation server this
+    /// instance proxies to, per
+    /// `docs/decisions/0057-the-world-is-generic-and-the-instance-boots-itself.md`.
+    pub(crate) fn pages(&self, id: RequestId, effects: &mut Vec<Effect>) {
+        effects.push(Effect::Answer {
+            id,
+            answer: Answer::Proxy {
+                port: self.presenting,
+                refused: Bytes::new(DASHBOARD_SILENT.as_bytes().to_vec()),
+                // The framework is this process's own, and reads none of
+                // them; nothing is kept from it.
+                strip: Vec::new(),
+            },
+        });
     }
 
     /// Answers whoever asked, now that where a job's tunnel is, is known.
@@ -362,6 +386,11 @@ impl crate::Running {
                 answer: Answer::Proxy {
                     port,
                     refused: Bytes::new(SHOWING_NOTHING.as_bytes().to_vec()),
+                    // Whatever a job left listening is somebody else's, and
+                    // a session a person presented to this instance never
+                    // reaches it — see
+                    // `docs/decisions/0084-the-instance-authenticates-itself.md`.
+                    strip: crate::session::stripped(),
                 },
             }),
             None => Self::nobody(id, effects),

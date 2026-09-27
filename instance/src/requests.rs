@@ -124,6 +124,16 @@ pub enum Request {
     },
     /// The Instance page: the Apps this instance owns.
     Apps,
+    /// Set the dashboard's password, or change it: held while the current
+    /// one is checked and the new one is hashed, and answered with the
+    /// Instance page — see
+    /// `docs/decisions/0084-the-instance-authenticates-itself.md`.
+    SetPassword {
+        /// The one set now, blank when none is.
+        current: String,
+        /// The one to set.
+        new: String,
+    },
     /// A form to register an App with, minted for one attempt — see
     /// `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
     Registration {
@@ -231,6 +241,12 @@ impl fmt::Debug for Request {
                 ("credential", &"<redacted>"),
             ),
             Self::ForgetAgent { agent } => one(f, "ForgetAgent", ("agent", agent)),
+            Self::SetPassword { .. } => two(
+                f,
+                "SetPassword",
+                ("current", &"<redacted>"),
+                ("new", &"<redacted>"),
+            ),
             Self::Projects => f.write_str("Projects"),
             Self::Create { draft } => one(f, "Create", ("draft", draft)),
             Self::Amend { project, draft } => {
@@ -364,6 +380,13 @@ impl Running {
             self.reaches(id, through, effects);
             return;
         }
+        // A password is held on its own terms too: checked and hashed by
+        // derivations the world performs, and answered once the new hash
+        // is on the disk.
+        if let Request::SetPassword { current, new } = request {
+            self.set_password(id, &current, &new, effects);
+            return;
+        }
         match self.hold_for_checks(id, &request, effects) {
             Ok(true) => {}
             Ok(false) => self.respond(id, request, None, None, effects),
@@ -458,9 +481,14 @@ impl Running {
                     |us| Ok(Response::Bound(Bound { url: us.url })),
                 ),
                 // Routed before anything is held, above; a listing that reaches
-                // here was carried by a check it cannot have had.
+                // here was carried by a check it cannot have had, and so was a
+                // password.
                 Request::Reaches { .. } => {
                     tracing::error!("a listing was answered as if it had been checked");
+                    Err(Refusal::Failed)
+                }
+                Request::SetPassword { .. } => {
+                    tracing::error!("a password was answered as if it had been checked");
                     Err(Refusal::Failed)
                 }
             };
@@ -2218,6 +2246,7 @@ mod tests {
         let mut state = State {
             apps: std::collections::BTreeMap::new(),
             channel_apps: std::collections::BTreeMap::new(),
+            password: None,
             agents: BTreeMap::from([(
                 Agent::Claude,
                 AgentConfig {

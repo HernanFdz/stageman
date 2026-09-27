@@ -1,0 +1,1213 @@
+{
+  "meta": {
+    "title": "A first start names a password; a page is sent to the login, a wrong password earns a wait, the right one buys a session, and a restart forgets it"
+  },
+  "init": {
+    "seed": "0101010101010101010101010101010101010101010101010101010101010101",
+    "environment": {
+      "HOME": "/sim/home",
+      "STAGEMAN_KEY": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+      "STAGEMAN_PASSWORD": "correct horse",
+      "STAGEMAN_STATE": "/sim/instance.json"
+    },
+    "target": "Linux",
+    "effects": [
+      {
+        "Run": {
+          "id": 1,
+          "program": "/usr/bin/docker",
+          "arguments": [
+            "version"
+          ],
+          "environment": {
+            "HOME": "/sim/home"
+          },
+          "stdin": null
+        }
+      },
+      {
+        "Bind": {
+          "id": 2,
+          "address": "127.0.0.1:8080"
+        }
+      },
+      {
+        "Bind": {
+          "id": 3,
+          "address": "0.0.0.0:47113"
+        }
+      }
+    ],
+    "state": {
+      "booting": "runtime"
+    }
+  },
+  "turns": [
+    {
+      "at": 0,
+      "event": {
+        "App": {
+          "Presenting": {
+            "port": 9000
+          }
+        }
+      },
+      "effects": [],
+      "changed": []
+    },
+    {
+      "at": 0,
+      "event": {
+        "Ran": {
+          "id": 1,
+          "finished": {
+            "Exited": {
+              "status": 0,
+              "stdout": {
+                "text": "/usr/bin/docker version 0.0-simulated\n"
+              },
+              "stderr": {
+                "text": ""
+              }
+            }
+          }
+        }
+      },
+      "effects": [
+        {
+          "Read": {
+            "id": 4,
+            "path": "/sim/instance.json"
+          }
+        }
+      ],
+      "changed": [
+        {
+          "op": "replace",
+          "path": "/booting",
+          "value": "file"
+        }
+      ]
+    },
+    {
+      "at": 0,
+      "event": {
+        "Bound": {
+          "id": 2,
+          "outcome": {
+            "Ok": 8080
+          }
+        }
+      },
+      "effects": [],
+      "changed": []
+    },
+    {
+      "at": 0,
+      "event": {
+        "Bound": {
+          "id": 3,
+          "outcome": {
+            "Ok": 47113
+          }
+        }
+      },
+      "effects": [],
+      "changed": []
+    },
+    {
+      "at": 0,
+      "event": {
+        "Read": {
+          "id": 4,
+          "contents": {
+            "Ok": null
+          }
+        }
+      },
+      "effects": [
+        {
+          "Derive": {
+            "id": 5,
+            "secret": {
+              "text": "correct horse"
+            },
+            "salt": {
+              "hex": "3301e8d7e754db2cf57b0a4ca73f253c"
+            },
+            "memory": 19456,
+            "iterations": 2,
+            "parallelism": 1,
+            "length": 32
+          }
+        }
+      ],
+      "changed": [
+        {
+          "op": "replace",
+          "path": "/booting",
+          "value": "password"
+        }
+      ]
+    },
+    {
+      "at": 1,
+      "event": {
+        "Derived": {
+          "id": 5,
+          "derived": {
+            "Ok": {
+              "hex": "5edbaf63c6da20442039a5502ec946ec0eabff53160a1014506975a0fef9169c"
+            }
+          }
+        }
+      },
+      "effects": [
+        {
+          "Run": {
+            "id": 6,
+            "program": "/usr/bin/docker",
+            "arguments": [
+              "ps",
+              "--all",
+              "--filter",
+              "label=stageman.job",
+              "--format",
+              "{{.Names}}"
+            ],
+            "environment": {
+              "HOME": "/sim/home"
+            },
+            "stdin": null
+          }
+        },
+        {
+          "Run": {
+            "id": 7,
+            "program": "/usr/bin/docker",
+            "arguments": [
+              "ps",
+              "--filter",
+              "label=stageman.job",
+              "--format",
+              "{{.Names}}"
+            ],
+            "environment": {
+              "HOME": "/sim/home"
+            },
+            "stdin": null
+          }
+        }
+      ],
+      "changed": [
+        {
+          "op": "replace",
+          "path": "/booting",
+          "value": "listing"
+        }
+      ]
+    },
+    {
+      "at": 1,
+      "event": {
+        "Ran": {
+          "id": 6,
+          "finished": {
+            "Exited": {
+              "status": 0,
+              "stdout": {
+                "text": ""
+              },
+              "stderr": {
+                "text": ""
+              }
+            }
+          }
+        }
+      },
+      "effects": [],
+      "changed": []
+    },
+    {
+      "at": 1,
+      "event": {
+        "Ran": {
+          "id": 7,
+          "finished": {
+            "Exited": {
+              "status": 0,
+              "stdout": {
+                "text": ""
+              },
+              "stderr": {
+                "text": ""
+              }
+            }
+          }
+        }
+      },
+      "effects": [
+        {
+          "Run": {
+            "id": 8,
+            "program": "/usr/bin/docker",
+            "arguments": [
+              "images",
+              "--filter",
+              "reference=stageman",
+              "--format",
+              "{{.Repository}}:{{.Tag}}"
+            ],
+            "environment": {
+              "HOME": "/sim/home"
+            },
+            "stdin": null
+          }
+        },
+        {
+          "Wake": {
+            "id": 9,
+            "after": {
+              "secs": 60,
+              "nanos": 0
+            }
+          }
+        },
+        {
+          "Write": {
+            "id": 10,
+            "path": "/sim/instance.json",
+            "bytes": {
+              "text": "{\n  \"instance\": \"7053ad2b-c539-4777-ba03-9b258e59ad9d\",\n  \"agents\": {},\n  \"projects\": {},\n  \"apps\": {},\n  \"channel_apps\": {},\n  \"password\": {\n    \"nonce\": \"/w4sdlIYfa35Wje2\",\n    \"ciphertext\": \"CQweedMcQO6nSROmJsDLgLGSMf5iMD/H+FrDXzpZdKDbl8lefQ+jAB15VCOaZTXL2/hdyzEh+FflucG2DdyxcJqRMgp/fG8QLDzVIzgAb7H6e/zQuEsGsbK3kDoDRvsSLrHdLmR1eIs3decRLeYB3n4L+TeFdV0LmEPZpwlltlK8PoUE\"\n  }\n}"
+            },
+            "private": false
+          }
+        }
+      ],
+      "changed": [
+        {
+          "op": "add",
+          "path": "/kept",
+          "value": {
+            "agents": {},
+            "projects": {},
+            "password": "argon2id$19456$2$1$3301e8d7e754db2cf57b0a4ca73f253c$5edbaf63c6da20442039a5502ec946ec0eabff53160a1014506975a0fef9169c"
+          }
+        },
+        {
+          "op": "add",
+          "path": "/held",
+          "value": {
+            "id": "7053ad2b-c539-4777-ba03-9b258e59ad9d",
+            "key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+            "key_source": "STAGEMAN_KEY",
+            "path": "/sim/instance.json",
+            "domain": "localhost",
+            "serving": 8080,
+            "reached": 8080,
+            "address": "127.0.0.1:8080",
+            "runtime": "/usr/bin/docker",
+            "runtime_environment": {
+              "HOME": "/sim/home"
+            },
+            "next": 11,
+            "turns": [],
+            "talking": [],
+            "building": {},
+            "warrants": {},
+            "interrupted": [],
+            "asking": [],
+            "tunnels": [],
+            "routing": [],
+            "probes": [],
+            "checks": [],
+            "checking": [],
+            "registrations": [],
+            "exchanging": [],
+            "app_failure": null,
+            "sent": [],
+            "listeners": {},
+            "sockets": [],
+            "draining": [],
+            "deferred": [
+              [
+                10,
+                []
+              ]
+            ],
+            "timers": [
+              [
+                9,
+                "Settling"
+              ]
+            ],
+            "asked": [
+              [
+                8,
+                "Images"
+              ]
+            ],
+            "listing": [],
+            "dirty": false,
+            "staged": [],
+            "announced": false,
+            "swept": {
+              "resumed": 0,
+              "lost": 0,
+              "cleared": 0,
+              "unidentified": 0,
+              "forgotten": 0,
+              "unclaimed": 0,
+              "elsewhere": 0
+            },
+            "begun": [],
+            "installs": [],
+            "install_failure": null,
+            "workspaces_begun": [],
+            "workspace_exchanges": [],
+            "workspace_failure": null,
+            "reaching": [],
+            "reaches": [],
+            "listing_tokens": {},
+            "minted": {},
+            "minting": [],
+            "awaiting_tokens": [],
+            "sessions": {},
+            "logins": [],
+            "deriving": [],
+            "failures": {},
+            "entered": {},
+            "grants": {},
+            "setting": [],
+            "setup": null,
+            "password_source": "set from STAGEMAN_PASSWORD"
+          }
+        },
+        {
+          "op": "remove",
+          "path": "/booting"
+        }
+      ]
+    },
+    {
+      "at": 1,
+      "event": {
+        "Ran": {
+          "id": 8,
+          "finished": {
+            "Exited": {
+              "status": 0,
+              "stdout": {
+                "text": "stageman:unneeded\n"
+              },
+              "stderr": {
+                "text": ""
+              }
+            }
+          }
+        }
+      },
+      "effects": [
+        {
+          "Run": {
+            "id": 11,
+            "program": "/usr/bin/docker",
+            "arguments": [
+              "rmi",
+              "stageman:unneeded"
+            ],
+            "environment": {
+              "HOME": "/sim/home"
+            },
+            "stdin": null
+          }
+        }
+      ],
+      "changed": [
+        {
+          "op": "replace",
+          "path": "/held/next",
+          "value": 12
+        },
+        {
+          "op": "replace",
+          "path": "/held/asked/0/0",
+          "value": 11
+        },
+        {
+          "op": "replace",
+          "path": "/held/asked/0/1",
+          "value": {
+            "Reclaimed": {
+              "image": "stageman:unneeded"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "at": 1,
+      "event": {
+        "Ran": {
+          "id": 11,
+          "finished": {
+            "Exited": {
+              "status": 0,
+              "stdout": {
+                "text": ""
+              },
+              "stderr": {
+                "text": ""
+              }
+            }
+          }
+        }
+      },
+      "effects": [],
+      "changed": [
+        {
+          "op": "remove",
+          "path": "/held/asked/0"
+        }
+      ]
+    },
+    {
+      "at": 2,
+      "event": {
+        "Written": {
+          "id": 10,
+          "outcome": {
+            "Ok": null
+          }
+        }
+      },
+      "effects": [
+        {
+          "Print": {
+            "text": "\nstageman is running.\n  version    none — not a release build\n  runtime    /usr/bin/docker\n  key        STAGEMAN_KEY\n  instance   /sim/instance.json\n  domain     localhost\n  password   set from STAGEMAN_PASSWORD\n\n  dashboard  http://127.0.0.1:8080\n\n"
+          }
+        }
+      ],
+      "changed": [
+        {
+          "op": "remove",
+          "path": "/held/deferred/0"
+        },
+        {
+          "op": "replace",
+          "path": "/held/announced",
+          "value": true
+        }
+      ]
+    },
+    {
+      "at": 2,
+      "event": {
+        "Arrived": {
+          "listener": 2,
+          "id": 1,
+          "request": {
+            "method": "GET",
+            "path": "/projects?open=1",
+            "headers": {
+              "host": "localhost"
+            },
+            "peer": "127.0.0.1:50000"
+          }
+        }
+      },
+      "effects": [
+        {
+          "Answer": {
+            "id": 1,
+            "answer": {
+              "Respond": {
+                "status": 303,
+                "headers": {
+                  "location": "/login?back=%2Fprojects%3Fopen%3D1"
+                },
+                "body": {
+                  "text": ""
+                }
+              }
+            }
+          }
+        }
+      ],
+      "changed": []
+    },
+    {
+      "at": 2,
+      "event": {
+        "Arrived": {
+          "listener": 2,
+          "id": 2,
+          "request": {
+            "method": "GET",
+            "path": "/api/home",
+            "headers": {
+              "host": "localhost"
+            },
+            "peer": "127.0.0.1:50000"
+          }
+        }
+      },
+      "effects": [
+        {
+          "Answer": {
+            "id": 2,
+            "answer": {
+              "Respond": {
+                "status": 401,
+                "headers": {
+                  "content-type": "text/plain"
+                },
+                "body": {
+                  "text": "Sign in to the dashboard first.\n"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "changed": []
+    },
+    {
+      "at": 2,
+      "event": {
+        "Arrived": {
+          "listener": 2,
+          "id": 3,
+          "request": {
+            "method": "GET",
+            "path": "/login",
+            "headers": {
+              "host": "localhost"
+            },
+            "peer": "127.0.0.1:50000"
+          }
+        }
+      },
+      "effects": [
+        {
+          "Answer": {
+            "id": 3,
+            "answer": {
+              "Proxy": {
+                "port": 9000,
+                "refused": {
+                  "text": "The dashboard is not answering."
+                },
+                "strip": []
+              }
+            }
+          }
+        }
+      ],
+      "changed": []
+    },
+    {
+      "at": 2,
+      "event": {
+        "Arrived": {
+          "listener": 2,
+          "id": 4,
+          "request": {
+            "method": "GET",
+            "path": "/assets/styles.css",
+            "headers": {
+              "host": "localhost"
+            },
+            "peer": "127.0.0.1:50000"
+          }
+        }
+      },
+      "effects": [
+        {
+          "Answer": {
+            "id": 4,
+            "answer": {
+              "Proxy": {
+                "port": 9000,
+                "refused": {
+                  "text": "The dashboard is not answering."
+                },
+                "strip": []
+              }
+            }
+          }
+        }
+      ],
+      "changed": []
+    },
+    {
+      "at": 2,
+      "event": {
+        "Arrived": {
+          "listener": 2,
+          "id": 5,
+          "request": {
+            "method": "GET",
+            "path": "/wasm/stageman.js",
+            "headers": {
+              "host": "localhost"
+            },
+            "peer": "127.0.0.1:50000"
+          }
+        }
+      },
+      "effects": [
+        {
+          "Answer": {
+            "id": 5,
+            "answer": {
+              "Proxy": {
+                "port": 9000,
+                "refused": {
+                  "text": "The dashboard is not answering."
+                },
+                "strip": []
+              }
+            }
+          }
+        }
+      ],
+      "changed": []
+    },
+    {
+      "at": 2,
+      "event": {
+        "Arrived": {
+          "listener": 2,
+          "id": 6,
+          "request": {
+            "method": "GET",
+            "path": "/up",
+            "headers": {
+              "host": "localhost"
+            },
+            "peer": "127.0.0.1:50000"
+          }
+        }
+      },
+      "effects": [
+        {
+          "Answer": {
+            "id": 6,
+            "answer": {
+              "Respond": {
+                "status": 200,
+                "headers": {
+                  "content-type": "text/plain"
+                },
+                "body": {
+                  "text": "up\n"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "changed": []
+    },
+    {
+      "at": 2,
+      "event": {
+        "Arrived": {
+          "listener": 2,
+          "id": 7,
+          "request": {
+            "method": "POST",
+            "path": "/login",
+            "headers": {
+              "content-type": "application/x-www-form-urlencoded",
+              "host": "localhost"
+            },
+            "peer": "127.0.0.1:50000"
+          }
+        }
+      },
+      "effects": [
+        {
+          "Answer": {
+            "id": 7,
+            "answer": {
+              "Read": {
+                "limit": 4096
+              }
+            }
+          }
+        }
+      ],
+      "changed": [
+        {
+          "op": "add",
+          "path": "/held/logins/0",
+          "value": [
+            7,
+            {
+              "peer": "127.0.0.1:50000"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "at": 2,
+      "event": {
+        "Body": {
+          "id": 7,
+          "outcome": {
+            "Ok": {
+              "text": "password=battery+staple&back=%2Fprojects"
+            }
+          }
+        }
+      },
+      "effects": [
+        {
+          "Derive": {
+            "id": 12,
+            "secret": {
+              "text": "battery staple"
+            },
+            "salt": {
+              "hex": "3301e8d7e754db2cf57b0a4ca73f253c"
+            },
+            "memory": 19456,
+            "iterations": 2,
+            "parallelism": 1,
+            "length": 32
+          }
+        }
+      ],
+      "changed": [
+        {
+          "op": "replace",
+          "path": "/held/next",
+          "value": 13
+        },
+        {
+          "op": "remove",
+          "path": "/held/logins/0"
+        },
+        {
+          "op": "add",
+          "path": "/held/deriving/0",
+          "value": [
+            12,
+            {
+              "request": 7,
+              "peer": "127.0.0.1:50000",
+              "back": "/projects",
+              "expected": [
+                94,
+                219,
+                175,
+                99,
+                198,
+                218,
+                32,
+                68,
+                32,
+                57,
+                165,
+                80,
+                46,
+                201,
+                70,
+                236,
+                14,
+                171,
+                255,
+                83,
+                22,
+                10,
+                16,
+                20,
+                80,
+                105,
+                117,
+                160,
+                254,
+                249,
+                22,
+                156
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "at": 3,
+      "event": {
+        "Derived": {
+          "id": 12,
+          "derived": {
+            "Ok": {
+              "hex": "708721dba8c60e34aee5eb68c095c80c40b711eb9896de647eb51b1830e5385c"
+            }
+          }
+        }
+      },
+      "effects": [
+        {
+          "Answer": {
+            "id": 7,
+            "answer": {
+              "Respond": {
+                "status": 303,
+                "headers": {
+                  "location": "/login?said=wrong&back=%2Fprojects"
+                },
+                "body": {
+                  "text": ""
+                }
+              }
+            }
+          }
+        }
+      ],
+      "changed": [
+        {
+          "op": "remove",
+          "path": "/held/deriving/0"
+        },
+        {
+          "op": "add",
+          "path": "/held/failures/127.0.0.1",
+          "value": {
+            "count": 1,
+            "until": 1003
+          }
+        }
+      ]
+    },
+    {
+      "at": 1002,
+      "event": {
+        "Arrived": {
+          "listener": 2,
+          "id": 8,
+          "request": {
+            "method": "POST",
+            "path": "/login",
+            "headers": {
+              "content-type": "application/x-www-form-urlencoded",
+              "host": "localhost"
+            },
+            "peer": "127.0.0.1:50000"
+          }
+        }
+      },
+      "effects": [
+        {
+          "Answer": {
+            "id": 8,
+            "answer": {
+              "Read": {
+                "limit": 4096
+              }
+            }
+          }
+        }
+      ],
+      "changed": [
+        {
+          "op": "add",
+          "path": "/held/logins/0",
+          "value": [
+            8,
+            {
+              "peer": "127.0.0.1:50000"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "at": 1002,
+      "event": {
+        "Body": {
+          "id": 8,
+          "outcome": {
+            "Ok": {
+              "text": "password=correct+horse&back=%2Fprojects"
+            }
+          }
+        }
+      },
+      "effects": [
+        {
+          "Answer": {
+            "id": 8,
+            "answer": {
+              "Respond": {
+                "status": 303,
+                "headers": {
+                  "location": "/login?said=wait&back=%2Fprojects"
+                },
+                "body": {
+                  "text": ""
+                }
+              }
+            }
+          }
+        }
+      ],
+      "changed": [
+        {
+          "op": "remove",
+          "path": "/held/logins/0"
+        }
+      ]
+    },
+    {
+      "at": 1003,
+      "event": {
+        "Arrived": {
+          "listener": 2,
+          "id": 9,
+          "request": {
+            "method": "POST",
+            "path": "/login",
+            "headers": {
+              "content-type": "application/x-www-form-urlencoded",
+              "host": "localhost"
+            },
+            "peer": "127.0.0.1:50000"
+          }
+        }
+      },
+      "effects": [
+        {
+          "Answer": {
+            "id": 9,
+            "answer": {
+              "Read": {
+                "limit": 4096
+              }
+            }
+          }
+        }
+      ],
+      "changed": [
+        {
+          "op": "add",
+          "path": "/held/logins/0",
+          "value": [
+            9,
+            {
+              "peer": "127.0.0.1:50000"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "at": 1003,
+      "event": {
+        "Body": {
+          "id": 9,
+          "outcome": {
+            "Ok": {
+              "text": "password=correct+horse&back=%2Fprojects"
+            }
+          }
+        }
+      },
+      "effects": [
+        {
+          "Derive": {
+            "id": 13,
+            "secret": {
+              "text": "correct horse"
+            },
+            "salt": {
+              "hex": "3301e8d7e754db2cf57b0a4ca73f253c"
+            },
+            "memory": 19456,
+            "iterations": 2,
+            "parallelism": 1,
+            "length": 32
+          }
+        }
+      ],
+      "changed": [
+        {
+          "op": "replace",
+          "path": "/held/next",
+          "value": 14
+        },
+        {
+          "op": "remove",
+          "path": "/held/logins/0"
+        },
+        {
+          "op": "add",
+          "path": "/held/deriving/0",
+          "value": [
+            13,
+            {
+              "request": 9,
+              "peer": "127.0.0.1:50000",
+              "back": "/projects",
+              "expected": [
+                94,
+                219,
+                175,
+                99,
+                198,
+                218,
+                32,
+                68,
+                32,
+                57,
+                165,
+                80,
+                46,
+                201,
+                70,
+                236,
+                14,
+                171,
+                255,
+                83,
+                22,
+                10,
+                16,
+                20,
+                80,
+                105,
+                117,
+                160,
+                254,
+                249,
+                22,
+                156
+              ]
+            }
+          ]
+        },
+        {
+          "op": "remove",
+          "path": "/held/failures/127.0.0.1"
+        }
+      ]
+    },
+    {
+      "at": 1004,
+      "event": {
+        "Derived": {
+          "id": 13,
+          "derived": {
+            "Ok": {
+              "hex": "5edbaf63c6da20442039a5502ec946ec0eabff53160a1014506975a0fef9169c"
+            }
+          }
+        }
+      },
+      "effects": [
+        {
+          "Answer": {
+            "id": 9,
+            "answer": {
+              "Respond": {
+                "status": 303,
+                "headers": {
+                  "location": "/projects",
+                  "set-cookie": "stageman_session=c44327c0d2ba45bab820f0f8984fbf706fa435493b714e9faaff1b587314ba32; Path=/; HttpOnly; SameSite=Lax"
+                },
+                "body": {
+                  "text": ""
+                }
+              }
+            }
+          }
+        }
+      ],
+      "changed": [
+        {
+          "op": "add",
+          "path": "/held/sessions/c44327c0d2ba45bab820f0f8984fbf706fa435493b714e9faaff1b587314ba32",
+          "value": 1209601004
+        },
+        {
+          "op": "remove",
+          "path": "/held/deriving/0"
+        }
+      ]
+    },
+    {
+      "at": 1004,
+      "event": {
+        "Arrived": {
+          "listener": 2,
+          "id": 10,
+          "request": {
+            "method": "GET",
+            "path": "/projects",
+            "headers": {
+              "cookie": "stageman_session=c44327c0d2ba45bab820f0f8984fbf706fa435493b714e9faaff1b587314ba32",
+              "host": "localhost"
+            },
+            "peer": "127.0.0.1:50000"
+          }
+        }
+      },
+      "effects": [
+        {
+          "Answer": {
+            "id": 10,
+            "answer": {
+              "Proxy": {
+                "port": 9000,
+                "refused": {
+                  "text": "The dashboard is not answering."
+                },
+                "strip": []
+              }
+            }
+          }
+        }
+      ],
+      "changed": []
+    },
+    {
+      "at": 1004,
+      "event": {
+        "Arrived": {
+          "listener": 2,
+          "id": 11,
+          "request": {
+            "method": "GET",
+            "path": "/api/home",
+            "headers": {
+              "cookie": "stageman_session=c44327c0d2ba45bab820f0f8984fbf706fa435493b714e9faaff1b587314ba32",
+              "host": "localhost"
+            },
+            "peer": "127.0.0.1:50000"
+          }
+        }
+      },
+      "effects": [
+        {
+          "Answer": {
+            "id": 11,
+            "answer": {
+              "Proxy": {
+                "port": 9000,
+                "refused": {
+                  "text": "The dashboard is not answering."
+                },
+                "strip": []
+              }
+            }
+          }
+        }
+      ],
+      "changed": []
+    }
+  ]
+}

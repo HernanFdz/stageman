@@ -177,6 +177,15 @@ dev *arguments:
     fi
     export STAGEMAN_KEY="$(cat "$key")"
     export STAGEMAN_STATE="${STAGEMAN_STATE:-$scratch/instance.json}"
+    # The dashboard's password, set on the first start of a development
+    # instance whose file holds none and ignored after, per
+    # `docs/decisions/0084-the-instance-authenticates-itself.md`. Left to the
+    # caller where they said otherwise; the value is the one a checkout's own
+    # instance is entered with and nothing a real instance would be given.
+    if [ -z "${STAGEMAN_PASSWORD:-}" ]; then
+      echo "the dashboard password is 'stageman' — set on this instance's first start; STAGEMAN_PASSWORD overrides"
+    fi
+    export STAGEMAN_PASSWORD="${STAGEMAN_PASSWORD:-stageman}"
     # A port of its own for the tools a job is told to call, for the reason
     # `image-session` takes one: serving this out of the checkout beside the
     # real daemon is the ordinary arrangement, and the real one is very

@@ -318,6 +318,19 @@ pub struct Simulation {
     /// Writes asked for and not yet answered, in order; `None` is one that
     /// will fail rather than land.
     landing: VecDeque<Option<(PathBuf, Vec<u8>)>>,
+    /// The headers of every answer given at the door, by request.
+    headers: BTreeMap<Asked, BTreeMap<String, String>>,
+    /// The cookies every forwarded request was stripped of, by request.
+    strips: BTreeMap<Asked, Vec<String>>,
+    /// The session the simulated person holds on the dashboard, bought
+    /// through the link the startup block prints while there is no
+    /// password: sent with every request at the door that names no cookie
+    /// of its own, so that a scenario about anything but the door meets
+    /// no door. A scenario that wants to be nobody names an empty cookie.
+    signed: Option<String>,
+    /// Whether what is performed right now is the harness's own doing
+    /// rather than the flow under test, and so is kept out of the trace.
+    quiet: bool,
     /// Whether a container runtime is installed.
     has_runtime: bool,
     /// Everything printed to standard output, in order.
@@ -526,6 +539,33 @@ pub const fn project() -> ProjectId {
 pub const CHANNEL: &str = "C0123456789";
 
 /// A job of that project, by number.
+/// What the simulated world derives from a secret and a salt: bytes that
+/// depend on both and on nothing else, mixed just enough that two
+/// passwords of the same length differ. Not a hash function and not meant
+/// as one — the real world's is argon2id, and what a scenario checks is
+/// that the instance asks for the right derivation and compares its answer.
+pub fn stand_in_derivation(secret: &[u8], salt: &[u8], length: u32) -> Vec<u8> {
+    let length = usize::try_from(length).expect("a short hash");
+    // Wrapping throughout, and every overflow is meant: this mixes bytes the
+    // way a hash does, and a value that wrapped is the point rather than a
+    // wrong answer, which is what each mark below says to the gate.
+    (0..length)
+        .map(|at| {
+            let mut folded: u8 = 0;
+            for (i, byte) in secret.iter().enumerate() {
+                let position = u8::try_from(i % 251).expect("small");
+                folded = folded.wrapping_mul(31); // CLAMP-OK: mixing, not a clamp
+                folded = folded.wrapping_add(*byte); // CLAMP-OK: mixing, not a clamp
+                folded = folded.wrapping_add(position); // CLAMP-OK: mixing, not a clamp
+            }
+            let salted = salt.get(at % salt.len().max(1)).copied().unwrap_or(0);
+            let stride = u8::try_from(at % 251).expect("small");
+            let stride = stride.wrapping_add(1); // CLAMP-OK: mixing, not a clamp
+            folded.wrapping_mul(stride) ^ salted // CLAMP-OK: mixing, not a clamp
+        })
+        .collect()
+}
+
 pub fn job(n: u128) -> JobId {
     JobId::from_uuid(Uuid::from_u128(n))
 }
@@ -672,6 +712,7 @@ fn configured(project: Project) -> State {
     State {
         apps: std::collections::BTreeMap::new(),
         channel_apps: std::collections::BTreeMap::new(),
+        password: None,
         agents: BTreeMap::from([(
             Agent::Claude,
             AgentConfig {
@@ -783,6 +824,10 @@ impl Simulation {
             containers: BTreeMap::new(),
             files: BTreeMap::new(),
             landing: VecDeque::new(),
+            headers: BTreeMap::new(),
+            strips: BTreeMap::new(),
+            signed: None,
+            quiet: false,
             has_runtime: true,
             printed: Vec::new(),
             exited: None,
@@ -1070,13 +1115,18 @@ impl Simulation {
     /// What to do about a request being held open.
     fn answered(&mut self, id: Asked, answer: Answering) {
         match answer {
-            Answering::Respond { status, body, .. } => {
+            Answering::Respond {
+                status,
+                body,
+                headers,
+            } => {
                 // A refusal to whoever visited a name, or an answer to a
                 // call: which it is, is which listener it arrived on, and a
                 // test knows because it said.
                 if status == 404 && !body.is_empty() {
                     self.routes.insert(id, Sent::Nowhere);
                 }
+                self.headers.insert(id, headers);
                 self.texts
                     .insert(id, String::from_utf8_lossy(body.as_slice()).into_owned());
                 let body = serde_json::from_slice(body.as_slice()).ok();
@@ -1093,9 +1143,9 @@ impl Simulation {
                 };
                 self.schedule(self.now, Event::Body { id, outcome });
             }
-            // Nothing is forwarded yet: the tunnel is the next family.
-            Answering::Proxy { port, .. } => {
+            Answering::Proxy { port, strip, .. } => {
                 self.routes.insert(id, Sent::To(port));
+                self.strips.insert(id, strip);
             }
         }
     }
@@ -1108,6 +1158,70 @@ impl Simulation {
             .find(|(_, address)| address.starts_with("0.0.0.0:") == tools)
             .map(|(id, _)| *id)
             .expect("an address was taken before anything arrived on it")
+    }
+
+    /// Says a browser made a request on the dashboard's listener: a method,
+    /// a path, headers of the caller's — a cookie, say — and a body held
+    /// for whenever it is asked for.
+    pub fn browses(
+        &mut self,
+        at: Now,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: &str,
+    ) -> Asked {
+        let mut with_host = vec![("host", "localhost")];
+        with_host.extend_from_slice(headers);
+        self.arriving(
+            self.listener(false),
+            at,
+            method,
+            path,
+            &with_host,
+            "127.0.0.1:50000",
+            body,
+        )
+    }
+
+    /// Says a browser made a request on the dashboard's listener with
+    /// exactly the headers given, host included: how a job's host is
+    /// visited, since that is a name under the domain rather than the apex.
+    pub fn browses_on(
+        &mut self,
+        at: Now,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+    ) -> Asked {
+        self.arriving(
+            self.listener(false),
+            at,
+            method,
+            path,
+            headers,
+            "127.0.0.1:50000",
+            "",
+        )
+    }
+
+    /// The status one request at the door was answered with, if it was
+    /// answered rather than forwarded.
+    pub fn status(&self, id: Asked) -> Option<u16> {
+        self.tool_answers.get(&id).map(|(status, _)| *status)
+    }
+
+    /// The cookies one forwarded request was stripped of.
+    pub fn stripped(&self, id: Asked) -> Option<&[String]> {
+        self.strips.get(&id).map(Vec::as_slice)
+    }
+
+    /// One header of the answer to one request at the door.
+    pub fn header(&self, id: Asked, name: &str) -> Option<&str> {
+        self.headers
+            .get(&id)
+            .and_then(|headers| headers.get(name))
+            .map(String::as_str)
     }
 
     /// Says the browser arrived at a path on the dashboard's listener, as
@@ -1157,6 +1271,19 @@ impl Simulation {
         let id = Asked(self.asking_next);
         self.asking_next += 1;
         self.bodies.insert(id, body.as_bytes().to_vec());
+        let mut headers: BTreeMap<String, String> = headers
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect();
+        // The simulated person's session, unless the scenario said whose
+        // cookie the request carries — an empty one being nobody's.
+        if listener == self.listener(false)
+            && !headers.contains_key("cookie")
+            && let Some(signed) = &self.signed
+        {
+            headers.insert("cookie".to_owned(), signed.clone());
+        }
+        headers.retain(|name, value| name != "cookie" || !value.is_empty());
         self.schedule(
             at,
             Event::Arrived {
@@ -1165,10 +1292,7 @@ impl Simulation {
                 request: Arrival {
                     method: method.to_owned(),
                     path: path.to_owned(),
-                    headers: headers
-                        .iter()
-                        .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
-                        .collect(),
+                    headers,
                     peer: peer.to_owned(),
                 },
             },
@@ -1339,11 +1463,69 @@ impl Simulation {
         self.stepped(&mut instance, AppEvent::Presenting { port: 9000 }.into());
         let now = self.now;
         self.run_until(&mut instance, now);
+        // A start forgets every session, and prints a new link when it has
+        // no password: the simulated person signs in again through it, so
+        // that a scenario about anything but the door meets no door.
+        self.signed = None;
+        self.signs_in_from_the_link(&mut instance);
         instance
+    }
+
+    /// Signs the simulated person in through the link the startup block
+    /// prints, when the instance holds one to print — as the harness's own
+    /// doing, recorded for a replay and kept out of the trace.
+    ///
+    /// The token is read off what the instance holds rather than off the
+    /// block, because the block is printed once the first write has
+    /// landed, a tick after waking, and a scenario's first request at the
+    /// door is often earlier than that: what a person reads a moment later
+    /// is what the instance already holds.
+    fn signs_in_from_the_link(&mut self, instance: &mut Instance) {
+        let Some(token) = instance
+            .snapshot()
+            .get("held")
+            .and_then(|held| held.get("setup"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        let path = format!("/setup?t={token}");
+        let id = Asked(self.asking_next);
+        self.asking_next += 1;
+        let event = Event::Arrived {
+            listener: self.listener(false),
+            id,
+            request: Arrival {
+                method: "GET".to_owned(),
+                path,
+                headers: [("host".to_owned(), "localhost".to_owned())].into(),
+                peer: "127.0.0.1:50000".to_owned(),
+            },
+        };
+        self.quiet = true;
+        self.stepped(instance, event);
+        self.quiet = false;
+        self.signed = self
+            .headers
+            .get(&id)
+            .and_then(|headers| headers.get("set-cookie"))
+            .and_then(|set| set.split_once(';'))
+            .map(|(pair, _)| pair.to_owned());
+        assert!(
+            self.signed.is_some(),
+            "the printed link signs the simulated person in"
+        );
     }
 
     /// Kills the daemon and starts it again.
     pub fn crash(&mut self, seed: Seed) -> Instance {
+        self.crash_given(seed, Self::environment())
+    }
+
+    /// Kills the daemon and starts it again with an environment of the
+    /// caller's own.
+    pub fn crash_given(&mut self, seed: Seed, environment: Environment) -> Instance {
         self.queue.retain(|_, event| {
             !matches!(
                 event,
@@ -1354,6 +1536,7 @@ impl Simulation {
                     | Event::Line { .. }
                     | Event::Ended { .. }
                     | Event::Probed { .. }
+                    | Event::Derived { .. }
                     | Event::Responded { .. }
                     | Event::Frame { .. }
                     | Event::Disconnected { .. }
@@ -1372,7 +1555,7 @@ impl Simulation {
         self.listings.clear();
         self.seen.clear();
         self.trace.push(format!("{}: CRASH", self.now));
-        self.wake(seed)
+        self.wake_given(seed, environment)
     }
 
     pub fn schedule(&mut self, at: Now, event: impl Into<Event>) {
@@ -2229,12 +2412,14 @@ impl Simulation {
         {
             self.platform_calls.push((self.trace.len(), call));
         }
-        self.trace.push(format!(
-            "{}: -> {}{}",
-            self.now,
-            effect.kind(),
-            serialised(&effect)
-        ));
+        if !self.quiet {
+            self.trace.push(format!(
+                "{}: -> {}{}",
+                self.now,
+                effect.kind(),
+                serialised(&effect)
+            ));
+        }
         let Some(effect) = self.generic(effect) else {
             return;
         };
@@ -3260,6 +3445,27 @@ impl Simulation {
             Effect::Probe { id, port, .. } => {
                 let probed = self.probed(port);
                 self.schedule(self.now + 1, Event::Probed { id, probed });
+            }
+            // Answered a tick later, as a probe is, with a stand-in for the
+            // slow function: deterministic in the secret and the salt, which
+            // is the whole of what the instance relies on, and cheap, which
+            // the real one is deliberately not. A world routes by shape and
+            // decides nothing, and which bytes come back is not a decision.
+            Effect::Derive {
+                id,
+                secret,
+                salt,
+                length,
+                ..
+            } => {
+                let derived = stand_in_derivation(secret.as_slice(), salt.as_slice(), length);
+                self.schedule(
+                    self.now + 1,
+                    Event::Derived {
+                        id,
+                        derived: Ok(Bytes::new(derived)),
+                    },
+                );
             }
             Effect::Request {
                 id,

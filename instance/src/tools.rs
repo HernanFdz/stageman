@@ -1635,6 +1635,7 @@ mod tests {
         let mut state = State {
             apps: std::collections::BTreeMap::new(),
             channel_apps: std::collections::BTreeMap::new(),
+            password: None,
             agents: BTreeMap::from([(
                 Agent::Claude,
                 AgentConfig {

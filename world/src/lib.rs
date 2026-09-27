@@ -268,6 +268,11 @@ pub fn run<D, P>(
 /// Performs one effect: a generic one as the mechanism it names, and one of
 /// the application's by handing it over.
 #[mutants::skip]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one arm per mechanism, and the mechanisms are the vocabulary: splitting the \
+              match would hide which effect reaches which performer"
+)]
 async fn perform<A: App, P: Perform<A>>(
     world: &Arc<World<A>>,
     performer: &Arc<P>,
@@ -341,6 +346,26 @@ async fn perform<A: App, P: Perform<A>>(
         Effect::Transmit { id, text } => world.transmit(id, text),
         Effect::Disconnect { id } => world.disconnect(id),
         Effect::Probe { id, port, within } => probing(world, id, port, within),
+        Effect::Derive {
+            id,
+            secret,
+            salt,
+            memory,
+            iterations,
+            parallelism,
+            length,
+        } => deriving(
+            world,
+            id,
+            Derivation {
+                secret,
+                salt,
+                memory,
+                iterations,
+                parallelism,
+                length,
+            },
+        ),
         Effect::Print { text } => {
             // Whoever started this process is reading here, and a reader
             // that has gone away is not a reason to stop: the write is
@@ -438,7 +463,7 @@ async fn request(
     }
     let answer = match building.send().await {
         Ok(answer) => answer,
-        Err(why) => return Responded::Failed(why.to_string()),
+        Err(why) => return Responded::Failed(chained(&why)),
     };
     let status = answer.status().as_u16();
     let headers = named(answer.headers());
@@ -448,7 +473,7 @@ async fn request(
             headers,
             body: Bytes::new(body.to_vec()),
         },
-        Err(why) => Responded::Failed(why.to_string()),
+        Err(why) => Responded::Failed(chained(&why)),
     }
 }
 
@@ -613,6 +638,81 @@ pub async fn probe(port: u16, within: Duration) -> Probed {
         Ok(Ok(_)) => Probed::Spoke,
         Err(_) => Probed::Silent,
     }
+}
+
+/// An error with every cause under it, joined, so that a transport failure
+/// says what failed — a name that did not resolve, a connection refused —
+/// rather than only that a request could not be sent. The HTTP client's
+/// own message stops one level up, which is the level nobody can act on.
+fn chained(error: &dyn std::error::Error) -> String {
+    let mut said = error.to_string();
+    let mut cause = error.source();
+    while let Some(reason) = cause {
+        said.push_str(": ");
+        said.push_str(&reason.to_string());
+        cause = reason.source();
+    }
+    said
+}
+
+/// What one derivation is asked with, carried whole to the thread that
+/// performs it.
+struct Derivation {
+    secret: Bytes,
+    salt: Bytes,
+    memory: u32,
+    iterations: u32,
+    parallelism: u32,
+    length: u32,
+}
+
+/// Derives on a blocking thread, and says what came of it.
+#[mutants::skip]
+fn deriving<A: App>(world: &Arc<World<A>>, id: EffectId, asked: Derivation) {
+    let world = Arc::clone(world);
+    drop(tokio::spawn(async move {
+        let derived = tokio::task::spawn_blocking(move || {
+            derive(
+                asked.secret.as_slice(),
+                asked.salt.as_slice(),
+                asked.memory,
+                asked.iterations,
+                asked.parallelism,
+                asked.length,
+            )
+        })
+        .await
+        .unwrap_or_else(|why| Err(why.to_string()));
+        world.send(Event::Derived { id, derived });
+    }));
+}
+
+/// Derives bytes from a secret with argon2id, as [`Effect::Derive`] asks.
+///
+/// Refuses parameters the function refuses — a salt too short, memory too
+/// small for the lanes — as a reason rather than as a panic, because they
+/// are the deciding half's and a mistake there is its to hear about.
+fn derive(
+    secret: &[u8],
+    salt: &[u8],
+    memory: u32,
+    iterations: u32,
+    parallelism: u32,
+    length: u32,
+) -> Result<Bytes, String> {
+    let length = usize::try_from(length).map_err(|why| why.to_string())?;
+    let parameters = argon2::Params::new(memory, iterations, parallelism, Some(length))
+        .map_err(|why| why.to_string())?;
+    let function = argon2::Argon2::new(
+        argon2::Algorithm::Argon2id,
+        argon2::Version::V0x13,
+        parameters,
+    );
+    let mut derived = vec![0_u8; length];
+    function
+        .hash_password_into(secret, salt, &mut derived)
+        .map_err(|why| why.to_string())?;
+    Ok(Bytes::new(derived))
 }
 
 /// Reads a file whole, telling absent from unreadable.
@@ -952,8 +1052,12 @@ async fn asked<A: App>(
                 headers,
                 body,
             } => return responded(status, &headers, &body),
-            Answer::Proxy { port, refused } => {
-                return relayed(port, &refused, parts, body).await;
+            Answer::Proxy {
+                port,
+                refused,
+                strip,
+            } => {
+                return relayed(port, &refused, &strip, parts, body).await;
             }
             Answer::Read { limit } => {
                 let (outcome, read) = taken(body, limit).await;
@@ -1062,6 +1166,7 @@ fn nobody(said: &Bytes) -> hyper::Response<Sent> {
 async fn relayed(
     port: u16,
     refused: &Bytes,
+    strip: &[String],
     mut parts: hyper::http::request::Parts,
     body: Waiting,
 ) -> hyper::Response<Sent> {
@@ -1071,6 +1176,23 @@ async fn relayed(
     // decoded, and the client re-derives it from what it is given. Left in
     // place, the two disagree and the request is refused.
     parts.headers.remove(hyper::header::TRANSFER_ENCODING);
+    // The cookies the deciding half named are its own and go no further;
+    // whatever else the browser sent belongs to what answers behind the
+    // port, and is forwarded as it came.
+    if !strip.is_empty() {
+        let presented: Vec<String> = parts
+            .headers
+            .get_all(hyper::header::COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok().map(str::to_owned))
+            .collect();
+        parts.headers.remove(hyper::header::COOKIE);
+        if let Some(kept) = kept_cookies(&presented.join("; "), strip)
+            && let Ok(value) = hyper::header::HeaderValue::from_str(&kept)
+        {
+            parts.headers.insert(hyper::header::COOKIE, value);
+        }
+    }
 
     let stream = match tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).await {
         Ok(stream) => stream,
@@ -1132,6 +1254,22 @@ async fn relayed(
     response.map(|body| body.map_err(BoxedError::from).boxed())
 }
 
+/// A cookie header with the named cookies removed, or nothing when none
+/// remain: a pure function of the header, so that what is forwarded can be
+/// pinned without a connection.
+fn kept_cookies(header: &str, strip: &[String]) -> Option<String> {
+    let kept: Vec<&str> = header
+        .split(';')
+        .map(str::trim)
+        .filter(|pair| !pair.is_empty())
+        .filter(|pair| {
+            let name = pair.split_once('=').map_or(*pair, |(name, _)| name).trim();
+            !strip.iter().any(|stripped| stripped == name)
+        })
+        .collect();
+    (!kept.is_empty()).then(|| kept.join("; "))
+}
+
 /// Whatever a response carries, however it was made.
 type Sent = http_body_util::combinators::BoxBody<bytes::Bytes, BoxedError>;
 
@@ -1160,7 +1298,10 @@ mod tests {
         App, Disconnected, EffectId, Ended, Environment, Named, Probed, Responded,
     };
 
-    use super::{Answer, Bytes, Effect, Event, Perform, World, read, write, write_atomically};
+    use super::{
+        Answer, Bytes, Effect, Event, Perform, World, chained, derive, kept_cookies, read, write,
+        write_atomically,
+    };
 
     /// An application that adds nothing, so what is tested here is the
     /// mechanisms and nothing of anybody's domain.
@@ -1176,6 +1317,102 @@ mod tests {
     impl App for Nothing {
         type Event = Self;
         type Effect = Self;
+    }
+
+    /// The cookies the deciding half names are removed and every other is
+    /// forwarded as it came; a header left with nothing is no header.
+    #[test]
+    fn the_named_cookies_are_stripped_and_the_rest_forwarded() {
+        let strip = [
+            "stageman_tunnel".to_owned(),
+            "__Host-stageman_session".to_owned(),
+        ];
+        assert_eq!(
+            kept_cookies("theirs=1; stageman_tunnel=abc; more = 2", &strip).as_deref(),
+            Some("theirs=1; more = 2")
+        );
+        assert_eq!(kept_cookies("stageman_tunnel=abc", &strip), None);
+        assert_eq!(kept_cookies("", &strip), None);
+        assert_eq!(
+            kept_cookies("theirs=1", &[]).as_deref(),
+            Some("theirs=1"),
+            "nothing named, nothing removed"
+        );
+    }
+
+    /// A failure says every cause under it, outermost first, joined so that
+    /// the line a person reads ends with the one they can act on.
+    #[test]
+    fn a_failure_is_said_with_every_cause_under_it() {
+        /// An error with a cause of its own, since the standard library's
+        /// own errors hand back their cause's cause rather than their cause.
+        #[derive(Debug)]
+        struct Layered {
+            said: &'static str,
+            under: Option<Box<Self>>,
+        }
+
+        impl std::fmt::Display for Layered {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.said)
+            }
+        }
+
+        impl std::error::Error for Layered {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                self.under
+                    .as_ref()
+                    .map(|under| -> &(dyn std::error::Error + 'static) { under.as_ref() })
+            }
+        }
+
+        let outer = Layered {
+            said: "could not send",
+            under: Some(Box::new(Layered {
+                said: "name did not resolve",
+                under: Some(Box::new(Layered {
+                    said: "refused",
+                    under: None,
+                })),
+            })),
+        };
+        assert_eq!(
+            chained(&outer),
+            "could not send: name did not resolve: refused"
+        );
+        let alone = Layered {
+            said: "refused",
+            under: None,
+        };
+        assert_eq!(chained(&alone), "refused");
+    }
+
+    /// The same secret and salt derive the same bytes, a different salt
+    /// derives different ones, and a salt the function refuses is a reason
+    /// rather than a panic.
+    ///
+    /// Small parameters, because what is checked is that the mechanism is
+    /// wired and answers, not how slow it is: the cost is the deciding
+    /// half's to set.
+    #[test]
+    fn a_derivation_is_deterministic_and_refuses_what_the_function_refuses() {
+        let once = derive(b"correct horse", &[1; 16], 8, 1, 1, 32)
+            .expect("derives")
+            .into_inner();
+        let again = derive(b"correct horse", &[1; 16], 8, 1, 1, 32)
+            .expect("derives")
+            .into_inner();
+        assert_eq!(once, again);
+        assert_eq!(once.len(), 32);
+        let salted = derive(b"correct horse", &[2; 16], 8, 1, 1, 32)
+            .expect("derives")
+            .into_inner();
+        assert_ne!(once, salted);
+        let other = derive(b"battery staple", &[1; 16], 8, 1, 1, 32)
+            .expect("derives")
+            .into_inner();
+        assert_ne!(once, other);
+        assert!(derive(b"correct horse", &[1; 2], 8, 1, 1, 32).is_err());
     }
 
     /// Absent is an answer, and unreadable is a different one.
@@ -1554,6 +1791,7 @@ mod tests {
                 answer: Answer::Proxy {
                     port: behind,
                     refused: Bytes::new(Vec::new()),
+                    strip: Vec::new(),
                 },
             },
         )
@@ -1648,6 +1886,7 @@ mod tests {
                 answer: Answer::Proxy {
                     port,
                     refused: Bytes::new(Vec::new()),
+                    strip: Vec::new(),
                 },
             },
         )
@@ -1669,6 +1908,81 @@ mod tests {
             .expect("it came back before this gave up")
             .expect("it comes back through the upgrade");
         assert_eq!(&echoed, b"hello");
+        upstream.await.expect("the far end finished");
+    }
+
+    /// A forward loses the cookies it is told to strip and keeps the rest,
+    /// and what is behind the port sees only what was kept.
+    #[tokio::test]
+    async fn a_forward_loses_the_named_cookies_and_keeps_the_rest() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let (world, mut events) = World::<Nothing>::new();
+        let front = bound(&world, &mut events, EffectId(1)).await;
+
+        let behind = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("it binds");
+        let port = behind.local_addr().expect("it has an address").port();
+        let upstream = tokio::spawn(async move {
+            let (mut stream, _) = behind.accept().await.expect("it is reached");
+            let mut head = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut chunk).await.expect("a head arrives");
+                assert!(read > 0, "the request came through");
+                head.extend_from_slice(&chunk[..read]);
+            }
+            let seen = String::from_utf8_lossy(&head)
+                .lines()
+                .find(|line| line.to_ascii_lowercase().starts_with("cookie:"))
+                .map_or_else(|| "no cookie".to_owned(), str::to_owned);
+            let answer = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{seen}",
+                seen.len()
+            );
+            stream
+                .write_all(answer.as_bytes())
+                .await
+                .expect("it answers");
+            stream.shutdown().await.expect("it hangs up");
+        });
+
+        let asking = tokio::spawn(saying(
+            front,
+            "GET /page HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\
+             Cookie: stageman_session=ours; theirs=kept; __Host-stageman_session=ours\r\n\r\n"
+                .to_owned(),
+        ));
+        let id = match next(&mut events).await {
+            Event::Arrived { id, .. } => id,
+            other => panic!("expected an arrival: {}", other.kind()),
+        };
+        answering(
+            &world,
+            Effect::Answer {
+                id,
+                answer: Answer::Proxy {
+                    port,
+                    refused: Bytes::new(Vec::new()),
+                    strip: vec![
+                        "stageman_session".to_owned(),
+                        "__Host-stageman_session".to_owned(),
+                    ],
+                },
+            },
+        )
+        .await;
+
+        let answered = asking.await.expect("the client finished");
+        assert!(answered.starts_with("HTTP/1.1 200"), "{answered}");
+        assert!(
+            answered
+                .to_ascii_lowercase()
+                .ends_with("cookie: theirs=kept"),
+            "{answered}"
+        );
+        assert!(!answered.contains("stageman_session"), "{answered}");
         upstream.await.expect("the far end finished");
     }
 
@@ -1697,6 +2011,7 @@ mod tests {
                 answer: Answer::Proxy {
                     port: empty,
                     refused: Bytes::new(b"nothing is showing".to_vec()),
+                    strip: Vec::new(),
                 },
             },
         )

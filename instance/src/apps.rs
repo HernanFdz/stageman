@@ -94,6 +94,7 @@ impl Running {
         let channel = Channel::Slack;
         let instance = crate::tunnel::dashboard(&self.domain, self.reached);
         Apps {
+            password_set: self.state.password.is_some(),
             github: self.state.apps.get(&platform).map(|app| PlatformAppView {
                 slug: app.slug.clone(),
                 link: stageman_platform::app_link(platform, &app.slug),

@@ -485,17 +485,7 @@ Intended next steps, in order, each with its reason. Written as intentions, not
 progress: "next X, because Y" — never "X is 60% done", which is both derivable
 and wrong within a day.
 
-- Next, the instance authenticates itself, per
-  `docs/decisions/0084-the-instance-authenticates-itself.md`, because a
-  hosted instance faces the Internet before anything else in
-  `docs/decisions/0083-hosting-is-one-instance-per-customer.md` can be tried,
-  and because the setup link is the first-run story `README.md` has wanted.
-  In chunks: the hashing effect, the sealed field and the door's login;
-  a job's host entered through the apex and the proxy's strip list; the
-  first run, from the variable and from the link; the Instance page's
-  change-password control and the README.
-
-- Then the instance's apps held elsewhere, per
+- Next, the instance's apps held elsewhere, per
   `docs/decisions/0085-the-instances-apps-may-be-held-elsewhere.md`, Slack
   first because that is where the setup cost is — ten minutes per project
   under 0081 — and GitHub second. In chunks: the field and the Instance
@@ -506,7 +496,7 @@ and wrong within a day.
 - Then the cap on concurrent jobs, once its open question above is
   answered, because it is the first thing a hosted plan sizes.
 
-- Next, the small things the dashboard pass of
+- Then the small things the dashboard pass of
   `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md` left:
   the projects list's rows padding themselves on a rule that always
   matches, which the job rows had and fixed on the list item; and whether

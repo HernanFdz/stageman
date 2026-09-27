@@ -44,6 +44,10 @@ pub struct Agent {
 /// `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Apps {
+    /// Whether the dashboard has a password — see
+    /// `docs/decisions/0084-the-instance-authenticates-itself.md`. A fact
+    /// and never the password, which no page may know.
+    pub password_set: bool,
     /// The GitHub App, if one is registered.
     pub github: Option<PlatformAppView>,
     /// Why the last registration was not kept, if the last one was not.
@@ -1285,6 +1289,15 @@ pub enum Refusal {
     /// An agent was configured with nothing.
     #[error("that agent needs a credential")]
     CredentialMissing,
+    /// The current password typed to change it was not the current
+    /// password — see
+    /// `docs/decisions/0084-the-instance-authenticates-itself.md`.
+    #[error("that is not the current password")]
+    WrongPassword,
+    /// A new password was too short. Length is the one thing asked of it,
+    /// because length is what makes guessing moot.
+    #[error("a password is at least twelve characters")]
+    PasswordShort,
     /// An agent cannot be forgotten while a project names it.
     #[error("{agent} is still used by {}", projects.join(", "))]
     AgentInUse {
@@ -1567,7 +1580,9 @@ impl Refusal {
             | Self::ChannelAppMissing { .. } => 404,
             // Well-formed requests that describe something invalid, which
             // the operator can fix by typing something different.
+            Self::WrongPassword => 403,
             Self::CredentialMissing
+            | Self::PasswordShort
             | Self::Incomplete { .. }
             | Self::RepositoryRefused { .. }
             | Self::KitsMissing
@@ -1642,6 +1657,8 @@ impl Refusal {
             Self::VariableValueMissing | Self::VariableReserved { .. } => Some(Part::Variables),
             Self::UnknownAgent { .. }
             | Self::CredentialMissing
+            | Self::WrongPassword
+            | Self::PasswordShort
             | Self::AgentInUse { .. }
             | Self::UnknownProject { .. }
             | Self::ChannelMissing { .. }

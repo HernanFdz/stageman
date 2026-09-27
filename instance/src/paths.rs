@@ -39,6 +39,15 @@ pub const KEY_VARIABLE: &str = "STAGEMAN_KEY";
 /// What names the domain this instance answers on.
 pub const DOMAIN_VARIABLE: &str = "STAGEMAN_DOMAIN";
 
+/// What sets the dashboard's password on a first start.
+///
+/// Honoured only while the file holds no hash — see
+/// `docs/decisions/0084-the-instance-authenticates-itself.md`. How a
+/// machine provisioned for somebody sets one without a person; the line
+/// that carried it is the provisioner's to remove once the daemon has
+/// started.
+pub const PASSWORD_VARIABLE: &str = "STAGEMAN_PASSWORD";
+
 /// What names a different port for the tools a container reaches.
 pub const TOOLS_VARIABLE: &str = "STAGEMAN_JOB_PORT";
 

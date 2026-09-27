@@ -30,7 +30,7 @@ use stageman_vocabulary::{Bytes, Effect as Generic, EffectId, Environment, Finis
 
 use crate::tunnel::Domain;
 use crate::vocabulary::{AppEvent, Container};
-use crate::{Effect, Event, Running, file, paths};
+use crate::{Effect, Event, Running, file, paths, session};
 
 /// Where the key came from, for the startup block.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +53,29 @@ impl fmt::Display for KeySource {
     }
 }
 
+/// Whether the dashboard has a password, and where it came from, for the
+/// startup block — see
+/// `docs/decisions/0084-the-instance-authenticates-itself.md`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PasswordSource {
+    /// The environment named it on this start, and it was hashed and kept.
+    Environment,
+    /// The file held one.
+    Kept,
+    /// None is set, so the dashboard is open.
+    None,
+}
+
+impl fmt::Display for PasswordSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Environment => write!(f, "set from {}", paths::PASSWORD_VARIABLE),
+            Self::Kept => f.write_str("set"),
+            Self::None => f.write_str("none"),
+        }
+    }
+}
+
 /// Which question is in flight.
 enum Phase {
     /// Whether the candidate answers.
@@ -63,6 +86,10 @@ enum Phase {
     KeyWritten { asked: EffectId },
     /// Whether the instance's file is there.
     File { asked: EffectId },
+    /// Whether the password the environment names has been hashed, and
+    /// with which salt — see
+    /// `docs/decisions/0084-the-instance-authenticates-itself.md`.
+    Password { asked: EffectId, salt: Vec<u8> },
     /// Which containers were left behind, and which are up.
     Listing {
         all: EffectId,
@@ -98,6 +125,8 @@ pub struct Boot {
     runtime: Option<PathBuf>,
     key: Option<(Key, KeySource)>,
     opened: Option<(State, Option<InstanceId>)>,
+    /// Whether the dashboard has a password, once the file has been read.
+    password: PasswordSource,
     /// Where the presentation server is, once the entry point says.
     presenting: Option<u16>,
     /// The address a person reaches this instance on, and the bind that
@@ -172,6 +201,7 @@ impl Boot {
                     runtime: None,
                     key: None,
                     opened: None,
+                    password: PasswordSource::None,
                     presenting: None,
                     dashboard_asked: (String::new(), None),
                     dashboard: Some(0),
@@ -204,6 +234,7 @@ impl Boot {
             runtime: None,
             key: None,
             opened: None,
+            password: PasswordSource::None,
             presenting: None,
             dashboard_asked: (dashboard_address, None),
             dashboard: None,
@@ -261,6 +292,7 @@ impl Boot {
             Phase::Key { .. } => "key",
             Phase::KeyWritten { .. } => "key written",
             Phase::File { .. } => "file",
+            Phase::Password { .. } => "password",
             Phase::Listing { .. } => "listing",
             Phase::Labels { .. } => "labels",
             Phase::Ready { .. } => "ready",
@@ -348,6 +380,7 @@ impl Boot {
             Event::Ran { id, finished } => self.ran(id, finished),
             Event::Read { id, contents } => self.read(id, contents),
             Event::Written { id, outcome } => self.written(id, outcome),
+            Event::Derived { id, derived } => self.derived(id, derived),
             // Booting asks for no timer and no listener, so an answer to
             // either is somebody else's and is ignored rather than acted on.
             Event::Bound { id, outcome } if Some(id) == self.dashboard_asked.1 => {
@@ -660,7 +693,7 @@ impl Boot {
                                     );
                                 }
                                 self.opened = Some(opened);
-                                self.ask_listing()
+                                self.ask_password_or_listing()
                             }
                             Err(why) => self.refuse(format!(
                                 "the instance at {} could not be opened\n  caused by: {}",
@@ -678,6 +711,66 @@ impl Boot {
             }
             other => {
                 tracing::warn!("a file was read that booting did not ask about; ignored");
+                self.phase = other;
+                Booting::Asking(Vec::new())
+            }
+        }
+    }
+
+    /// Asks for the password the environment names to be hashed, when it
+    /// names one and the file holds none; else goes on to the listing.
+    ///
+    /// Honoured only while the file holds no hash, so that a line left in a
+    /// service unit never silently replaces a password somebody changed
+    /// from the dashboard. Said rather than acted on in that case, because
+    /// a variable that does nothing is worth one line.
+    fn ask_password_or_listing(&mut self) -> Vec<Effect> {
+        let kept = self
+            .opened
+            .as_ref()
+            .is_some_and(|(state, _)| state.password.is_some());
+        if kept {
+            self.password = PasswordSource::Kept;
+        }
+        let Some(password) = paths::told(&self.environment, paths::PASSWORD_VARIABLE) else {
+            return self.ask_listing();
+        };
+        if kept {
+            tracing::info!(
+                "a password is set already, so the one {} names is not used",
+                paths::PASSWORD_VARIABLE
+            );
+            return self.ask_listing();
+        }
+        let mut salt = vec![0_u8; session::SALT_LEN];
+        self.rng.fill_bytes(&mut salt);
+        let asked = self.effect_id();
+        let effect = session::derivation(asked, &password, &salt);
+        self.phase = Phase::Password { asked, salt };
+        vec![effect]
+    }
+
+    /// The password the environment names was hashed, or could not be.
+    fn derived(&mut self, id: EffectId, derived: Result<Bytes, String>) -> Booting {
+        match std::mem::replace(&mut self.phase, Phase::Refused) {
+            Phase::Password { asked, salt } if asked == id => {
+                let effects = match derived {
+                    Ok(hash) => {
+                        if let Some((state, _)) = &mut self.opened {
+                            state.password = Some(session::spelled(&salt, hash.as_slice()));
+                        }
+                        self.password = PasswordSource::Environment;
+                        self.ask_listing()
+                    }
+                    Err(why) => self.refuse(format!(
+                        "the password {} names could not be hashed\n  caused by: {why}",
+                        paths::PASSWORD_VARIABLE
+                    )),
+                };
+                Booting::Asking(effects)
+            }
+            other => {
+                tracing::warn!("a derivation was answered that booting did not ask for; ignored");
                 self.phase = other;
                 Booting::Asking(Vec::new())
             }
@@ -819,6 +912,18 @@ impl Boot {
             address,
             port,
             reached: paths::reached_port(&self.environment).unwrap_or(port),
+            password: self.password.clone(),
+            // With no password there is one way in: a link minted here,
+            // printed once, good until a password is set or the daemon
+            // restarts — see
+            // `docs/decisions/0084-the-instance-authenticates-itself.md`.
+            setup: (self.password == PasswordSource::None).then(|| {
+                format!(
+                    "{}{}",
+                    crate::mint(&mut self.rng).simple(),
+                    crate::mint(&mut self.rng).simple()
+                )
+            }),
         });
         let mut asked = effects;
         asked.extend(running.waking_up(&containers));
