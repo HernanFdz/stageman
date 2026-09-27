@@ -1261,7 +1261,8 @@ mod tests {
     };
 
     use super::{
-        Answer, Bytes, Effect, Event, Perform, World, derive, read, write, write_atomically,
+        Answer, Bytes, Effect, Event, Perform, World, chained, derive, read, write,
+        write_atomically,
     };
 
     /// An application that adds nothing, so what is tested here is the
@@ -1278,6 +1279,53 @@ mod tests {
     impl App for Nothing {
         type Event = Self;
         type Effect = Self;
+    }
+
+    /// A failure says every cause under it, outermost first, joined so that
+    /// the line a person reads ends with the one they can act on.
+    #[test]
+    fn a_failure_is_said_with_every_cause_under_it() {
+        /// An error with a cause of its own, since the standard library's
+        /// own errors hand back their cause's cause rather than their cause.
+        #[derive(Debug)]
+        struct Layered {
+            said: &'static str,
+            under: Option<Box<Self>>,
+        }
+
+        impl std::fmt::Display for Layered {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.said)
+            }
+        }
+
+        impl std::error::Error for Layered {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                self.under
+                    .as_ref()
+                    .map(|under| -> &(dyn std::error::Error + 'static) { under.as_ref() })
+            }
+        }
+
+        let outer = Layered {
+            said: "could not send",
+            under: Some(Box::new(Layered {
+                said: "name did not resolve",
+                under: Some(Box::new(Layered {
+                    said: "refused",
+                    under: None,
+                })),
+            })),
+        };
+        assert_eq!(
+            chained(&outer),
+            "could not send: name did not resolve: refused"
+        );
+        let alone = Layered {
+            said: "refused",
+            under: None,
+        };
+        assert_eq!(chained(&alone), "refused");
     }
 
     /// The same secret and salt derive the same bytes, a different salt
