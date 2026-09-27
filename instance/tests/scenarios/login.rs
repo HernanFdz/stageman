@@ -275,6 +275,17 @@ fn a_first_start_without_a_password_prints_the_one_way_in() {
 /// check against; from then on it is checked, and a wrong current one or
 /// a short new one is refused. Once set, the printed link buys nothing and
 /// the login takes the password.
+/// The salt of the hash on file, as spelled: the segment before the last.
+fn salt_of(instance: &Instance) -> String {
+    let on_file = instance.state().password.clone().expect("a hash on file");
+    on_file
+        .expose()
+        .rsplit('$')
+        .nth(1)
+        .expect("the salt")
+        .to_owned()
+}
+
 #[test]
 fn the_password_is_set_from_the_page_and_changed_after() {
     let mut sim = Simulation::new();
@@ -304,13 +315,14 @@ fn the_password_is_set_from_the_page_and_changed_after() {
     assert_eq!(short, Some(Response::Refused(Refusal::PasswordShort)));
     assert!(instance.state().password.is_none());
 
+    // Twelve characters exactly: the least that is taken.
     let set = asks(
         &mut sim,
         &mut instance,
         2,
         Request::SetPassword {
             current: String::new(),
-            new: "correct horse battery".to_owned(),
+            new: "twelve chars".to_owned(),
         },
     );
     let Some(Response::Apps(apps)) = set else {
@@ -318,6 +330,12 @@ fn the_password_is_set_from_the_page_and_changed_after() {
     };
     assert!(apps.password_set);
     assert!(instance.state().password.is_some());
+    let first_salt = salt_of(&instance);
+    assert_eq!(
+        first_salt.len(),
+        32,
+        "sixteen bytes of salt, spelled in hex"
+    );
 
     // The link is spent by the password being set.
     let now = sim.now();
@@ -327,7 +345,7 @@ fn the_password_is_set_from_the_page_and_changed_after() {
 
     // The login takes it.
     let now = sim.now();
-    let right = logs_in(&mut sim, &mut instance, now, "correct+horse+battery", "");
+    let right = logs_in(&mut sim, &mut instance, now, "twelve+chars", "");
     assert_eq!(sim.header(right, "location"), Some("/"));
     assert!(sim.header(right, "set-cookie").is_some());
 
@@ -348,14 +366,17 @@ fn the_password_is_set_from_the_page_and_changed_after() {
         &mut instance,
         4,
         Request::SetPassword {
-            current: "correct horse battery".to_owned(),
+            current: "twelve chars".to_owned(),
             new: "a different password".to_owned(),
         },
     );
     assert!(matches!(changed, Some(Response::Apps(_))), "{changed:?}");
     assert_ne!(instance.state().password, before);
+    let second_salt = salt_of(&instance);
+    assert_eq!(second_salt.len(), 32);
+    assert_ne!(second_salt, first_salt, "fresh salt for every hash");
     let now = sim.now();
-    let old = logs_in(&mut sim, &mut instance, now, "correct+horse+battery", "");
+    let old = logs_in(&mut sim, &mut instance, now, "twelve+chars", "");
     assert_eq!(sim.header(old, "location"), Some("/login?said=wrong"));
     let now = sim.now() + 2_000;
     let new = logs_in(&mut sim, &mut instance, now, "a+different+password", "");
@@ -625,7 +646,8 @@ fn a_grant_lapses_after_a_minute() {
         .map(|(_, token)| token.to_owned())
         .expect("a token");
 
-    let late = sim.now() + 61_000;
+    // A minute exactly: the last moment of it is not in it.
+    let late = now + 60_000;
     let host = tunnel_host(&job(1));
     let lapsed = sim.browses_on(
         late,
@@ -639,5 +661,70 @@ fn a_grant_lapses_after_a_minute() {
         sim.header(lapsed, "location")
             .is_some_and(|to| to.starts_with("http://localhost:8080/enter/")),
         "lapsed, so back to the apex"
+    );
+}
+
+/// A grant the apex minted outlives the minting of another, and one that
+/// has reached its minute is forgotten as another is minted, spent or not.
+#[test]
+fn the_apex_keeps_a_live_grant_and_forgets_a_lapsed_one_as_it_mints_another() {
+    let mut sim = Simulation::new();
+    sim.holding(&watching(&[(job(1), Progress::Working)]));
+    let (name, held) = Simulation::ours(&stageman_job::container(&job(1)));
+    sim.container(&name, held);
+    let mut instance = started(&mut sim, with_a_password("correct horse"));
+    let now = sim.now();
+    let right = logs_in(&mut sim, &mut instance, now, "correct+horse", "");
+    let cookie = cookie_of(&sim, right);
+
+    let path = format!("/enter/{}", job(1));
+    let minted = |sim: &mut Simulation, instance: &mut Instance, at: Now| -> String {
+        let granted = sim.browses(at, "GET", &path, &[("cookie", &cookie)], "");
+        sim.run_until(instance, at);
+        sim.header(granted, "location")
+            .and_then(|to| to.rsplit_once("?t="))
+            .map(|(_, token)| token.to_owned())
+            .expect("a token")
+    };
+    let held = |instance: &Instance| -> usize {
+        instance.snapshot()["held"]["grants"]
+            .as_object()
+            .map_or(0, serde_json::Map::len)
+    };
+
+    let first_at = sim.now();
+    let first = minted(&mut sim, &mut instance, first_at);
+    let second_at = first_at + 1_000;
+    let _second = minted(&mut sim, &mut instance, second_at);
+    assert_eq!(
+        held(&instance),
+        2,
+        "the first is kept as the second is minted"
+    );
+
+    // The first is spent after the second was minted.
+    let host = tunnel_host(&job(1));
+    let spent_at = second_at + 1_000;
+    let spent = sim.browses_on(
+        spent_at,
+        "GET",
+        &format!("{ENTRY_PATH}?t={first}"),
+        &[("host", &host)],
+    );
+    sim.run_until(&mut instance, spent_at + 5);
+    assert_eq!(sim.status(spent), Some(303));
+    assert!(
+        sim.header(spent, "set-cookie").is_some(),
+        "a session for the host"
+    );
+    assert_eq!(held(&instance), 1);
+
+    // At the second's minute exactly, minting a third forgets it.
+    let third_at = second_at + 60_000;
+    let _third = minted(&mut sim, &mut instance, third_at);
+    assert_eq!(
+        held(&instance),
+        1,
+        "the second lapsed as the third was minted"
     );
 }

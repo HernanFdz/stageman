@@ -276,8 +276,8 @@ fn Password(set: bool, onchanged: EventHandler<DashboardResult<Apps>>) -> Elemen
     let mut new = use_signal(String::new);
     let mut again = use_signal(String::new);
     let mut refused = use_signal(|| None::<DashboardError>);
-    let mismatch = !again().is_empty() && again() != new();
-    let complete = !new().is_empty() && again() == new() && (!set || !current().is_empty());
+    let mismatch = differs(&new(), &again());
+    let complete = sendable(set, &current(), &new(), &again());
     let (under_current, under_new) = match refused() {
         Some(DashboardError::Refused(Refusal::WrongPassword)) => {
             (Some("That is not the current password.".to_owned()), None)
@@ -897,6 +897,19 @@ fn complete(client_id: &str, client_secret: &str, app_token: &str) -> bool {
     !client_id.trim().is_empty() && !client_secret.trim().is_empty() && !app_token.trim().is_empty()
 }
 
+/// Whether the second typing of a new password disagrees with the first:
+/// said under the third box once something is typed there, and not
+/// before, since a box not yet reached is not yet wrong.
+fn differs(new: &str, again: &str) -> bool {
+    !again.is_empty() && again != new
+}
+
+/// Whether the password form holds something to send: a new password,
+/// typed the same twice, and the current one where one is set.
+fn sendable(set: bool, current: &str, new: &str, again: &str) -> bool {
+    !new.is_empty() && again == new && (!set || !current.is_empty())
+}
+
 /// Where a refusal is said on the registration form: beside the token's
 /// box where it names the token, and above the form otherwise. Of the
 /// three values, only the token has a check of its own, so only a refusal
@@ -919,7 +932,7 @@ fn placed(refused: Option<&DashboardError>) -> (Option<String>, Option<String>) 
 
 #[cfg(test)]
 mod tests {
-    use super::{DashboardError, complete, placed};
+    use super::{DashboardError, complete, differs, placed, sendable};
     use stageman_wire::Refusal;
 
     /// The press waits for all three values, whichever is missing.
@@ -929,6 +942,29 @@ mod tests {
         assert!(!complete(" ", "s3cret", "xapp-1"));
         assert!(!complete("1234.5678", "", "xapp-1"));
         assert!(!complete("1234.5678", "s3cret", "\t"));
+    }
+
+    /// The second typing is wrong once it is typed and differs, and not
+    /// while it is empty.
+    #[test]
+    fn the_second_typing_differs_once_typed_and_different() {
+        assert!(!differs("abc", ""));
+        assert!(!differs("", ""));
+        assert!(!differs("abc", "abc"));
+        assert!(differs("abc", "abd"));
+    }
+
+    /// The press waits for a new password typed twice the same, and for
+    /// the current one only where one is set.
+    #[test]
+    fn the_password_press_waits_for_what_is_missing() {
+        assert!(sendable(false, "", "abc", "abc"));
+        assert!(!sendable(false, "", "", ""));
+        assert!(!sendable(false, "", "abc", "ab"));
+        assert!(!sendable(true, "", "abc", "abc"));
+        assert!(sendable(true, "cur", "abc", "abc"));
+        assert!(!sendable(true, "cur", "", ""));
+        assert!(!sendable(true, "cur", "abc", "ab"));
     }
 
     /// A refusal of the app-level token is said beside its box; a refusal

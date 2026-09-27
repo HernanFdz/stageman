@@ -1911,6 +1911,81 @@ mod tests {
         upstream.await.expect("the far end finished");
     }
 
+    /// A forward loses the cookies it is told to strip and keeps the rest,
+    /// and what is behind the port sees only what was kept.
+    #[tokio::test]
+    async fn a_forward_loses_the_named_cookies_and_keeps_the_rest() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let (world, mut events) = World::<Nothing>::new();
+        let front = bound(&world, &mut events, EffectId(1)).await;
+
+        let behind = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("it binds");
+        let port = behind.local_addr().expect("it has an address").port();
+        let upstream = tokio::spawn(async move {
+            let (mut stream, _) = behind.accept().await.expect("it is reached");
+            let mut head = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut chunk).await.expect("a head arrives");
+                assert!(read > 0, "the request came through");
+                head.extend_from_slice(&chunk[..read]);
+            }
+            let seen = String::from_utf8_lossy(&head)
+                .lines()
+                .find(|line| line.to_ascii_lowercase().starts_with("cookie:"))
+                .map_or_else(|| "no cookie".to_owned(), str::to_owned);
+            let answer = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{seen}",
+                seen.len()
+            );
+            stream
+                .write_all(answer.as_bytes())
+                .await
+                .expect("it answers");
+            stream.shutdown().await.expect("it hangs up");
+        });
+
+        let asking = tokio::spawn(saying(
+            front,
+            "GET /page HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\
+             Cookie: stageman_session=ours; theirs=kept; __Host-stageman_session=ours\r\n\r\n"
+                .to_owned(),
+        ));
+        let id = match next(&mut events).await {
+            Event::Arrived { id, .. } => id,
+            other => panic!("expected an arrival: {}", other.kind()),
+        };
+        answering(
+            &world,
+            Effect::Answer {
+                id,
+                answer: Answer::Proxy {
+                    port,
+                    refused: Bytes::new(Vec::new()),
+                    strip: vec![
+                        "stageman_session".to_owned(),
+                        "__Host-stageman_session".to_owned(),
+                    ],
+                },
+            },
+        )
+        .await;
+
+        let answered = asking.await.expect("the client finished");
+        assert!(answered.starts_with("HTTP/1.1 200"), "{answered}");
+        assert!(
+            answered
+                .to_ascii_lowercase()
+                .ends_with("cookie: theirs=kept"),
+            "{answered}"
+        );
+        assert!(!answered.contains("stageman_session"), "{answered}");
+        upstream.await.expect("the far end finished");
+    }
+
     /// A forward to a port with nothing behind it says what it was told to.
     ///
     /// What it means for nothing to answer is the deciding half's to know,
