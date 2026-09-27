@@ -825,6 +825,13 @@ fn a_password_puts_the_dashboard_behind_the_login() {
     assert!(login.contains("200 OK"), "{login}");
     assert!(login.contains(r#"name="password""#), "{login}");
     assert!(login.contains("That is not the password."), "{login}");
+    let waiting = running.get("/login?said=wait");
+    assert!(waiting.contains("Too many tries in a row."), "{waiting}");
+    let plain = running.get("/login");
+    assert!(
+        !plain.contains("That is not the password.") && !plain.contains("Too many tries"),
+        "{plain}"
+    );
 
     let wrong = running.post_form("/login", "password=battery+staple&back=%2Fprojects");
     assert!(wrong.contains("303 See Other"), "{wrong}");

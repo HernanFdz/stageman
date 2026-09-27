@@ -18,7 +18,6 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use rand::Rng as _;
 use serde::{Deserialize, Serialize};
 use stageman_core::Secret;
 use stageman_vocabulary::{Answer, Arrival, Bytes, Effect as Generic, EffectId, Now, RequestId};
@@ -537,16 +536,16 @@ impl crate::Running {
         true
     }
 
-    /// The world derived what a typed password hashes to. False when the
-    /// derivation was nobody's.
+    /// The world derived what a typed password hashes to.
     pub fn derived(
         &mut self,
         id: EffectId,
         derived: &Result<Bytes, String>,
         effects: &mut Vec<Effect>,
-    ) -> bool {
+    ) {
         let Some(deriving) = self.deriving.remove(&id) else {
-            return false;
+            tracing::warn!("a derivation was answered that nobody was waiting on; ignored");
+            return;
         };
         let address = address_of(&deriving.peer);
         match derived {
@@ -580,7 +579,6 @@ impl crate::Running {
                 );
             }
         }
-        true
     }
 
     /// Counts a wrong password against an address, doubling the wait.
@@ -618,13 +616,6 @@ impl crate::Running {
                 body: Bytes::new(body.as_bytes().to_vec()),
             },
         });
-    }
-
-    /// Fresh salt for a new hash, from the one generator.
-    pub fn salt(&mut self) -> Vec<u8> {
-        let mut salt = vec![0_u8; SALT_LEN];
-        self.rng.fill_bytes(&mut salt);
-        salt
     }
 }
 
@@ -759,5 +750,9 @@ mod tests {
         assert!(!same(b"abc", b"abd"));
         assert!(!same(b"abc", b"ab"));
         assert!(same(b"", b""));
+        // Two differences that would cancel under a fold that mixed rather
+        // than accumulated: swapped bytes, and a pair of bit flips.
+        assert!(!same(b"ab", b"ba"));
+        assert!(!same(&[1, 2], &[2, 1]));
     }
 }

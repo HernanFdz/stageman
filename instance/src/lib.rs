@@ -1087,11 +1087,7 @@ impl Running {
                     self.read(id, outcome, &mut effects);
                 }
             }
-            Event::Derived { id, derived } => {
-                if !self.derived(id, &derived, &mut effects) {
-                    tracing::warn!("a derivation was answered that nobody was waiting on; ignored");
-                }
-            }
+            Event::Derived { id, derived } => self.derived(id, &derived, &mut effects),
             Event::Line { id, line } => self.line(id, &line, &mut effects),
             Event::Ended { id, ended } => self.process_ended(id, &ended, &mut effects),
             Event::Probed { id, probed } => self.probed(id, probed, &mut effects),

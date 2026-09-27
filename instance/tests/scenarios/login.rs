@@ -92,12 +92,14 @@ fn a_password_named_at_a_first_start_gates_the_dashboard() {
 
     // A wrong password is sent back to the login page saying so, and the
     // next attempt from the same address, before the wait is over, is
-    // refused without being checked.
-    let now = sim.now();
+    // refused without being checked. The wait after one wrong password is
+    // a second from the moment it was found wrong, which is a tick after
+    // it was posted, since the derivation is answered a tick later.
+    let wrong_at = sim.now();
     let wrong = logs_in(
         &mut sim,
         &mut instance,
-        now,
+        wrong_at,
         "battery+staple",
         "%2Fprojects",
     );
@@ -106,20 +108,24 @@ fn a_password_named_at_a_first_start_gates_the_dashboard() {
         sim.header(wrong, "location"),
         Some("/login?said=wrong&back=%2Fprojects")
     );
-    let now = sim.now();
-    let waited = logs_in(&mut sim, &mut instance, now, "correct+horse", "%2Fprojects");
+    let waited = logs_in(
+        &mut sim,
+        &mut instance,
+        wrong_at + 1_000,
+        "correct+horse",
+        "%2Fprojects",
+    );
     assert_eq!(
         sim.header(waited, "location"),
         Some("/login?said=wait&back=%2Fprojects")
     );
 
-    // Once the wait is over the right password buys a session, and the
-    // browser is sent where it was going with the cookie.
-    let later = sim.now() + 2_000;
+    // The moment the wait is over the right password buys a session, and
+    // the browser is sent where it was going with the cookie.
     let right = logs_in(
         &mut sim,
         &mut instance,
-        later,
+        wrong_at + 1_001,
         "correct+horse",
         "%2Fprojects",
     );
