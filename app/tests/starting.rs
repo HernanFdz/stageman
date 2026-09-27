@@ -219,7 +219,9 @@ impl Serving {
         connection
     }
 
-    /// Writes a request and reads everything the server says back.
+    /// Writes a request and reads everything the server says back, with
+    /// a chunked body reassembled, so that what a test matches is what a
+    /// browser reads.
     fn request(&self, request: &str) -> String {
         let mut connection = TcpStream::connect(&self.address).expect("the dashboard accepts");
         connection
@@ -238,8 +240,101 @@ impl Serving {
             }
         }
         assert!(!response.is_empty(), "the connection closed saying nothing");
-        String::from_utf8_lossy(&response).into_owned()
+        String::from_utf8_lossy(&dechunked(&response)).into_owned()
     }
+}
+
+/// The response with its chunked body reassembled, and any other as it
+/// came.
+///
+/// A page is streamed in chunks of a size the server chooses, and where
+/// a chunk ends depends on how many bytes came before it — a port with
+/// one digit more moves every boundary after it. So a test that matched
+/// the wire's text matched a sentence by luck and missed it by luck,
+/// whenever a size line fell inside it. A body that ends before its last
+/// chunk is a failure said as one, since a test reading a cut page would
+/// fail on whatever the cut took and say nothing of the cut.
+fn dechunked(response: &[u8]) -> Vec<u8> {
+    let Some((head, body)) = split_once(response, b"\r\n\r\n") else {
+        return response.to_vec();
+    };
+    let chunked = String::from_utf8_lossy(head)
+        .to_ascii_lowercase()
+        .contains("transfer-encoding: chunked");
+    if !chunked {
+        return response.to_vec();
+    }
+
+    let mut whole = head.to_vec();
+    whole.extend_from_slice(b"\r\n\r\n");
+    let mut rest = body;
+    loop {
+        let Some((size, after)) = split_once(rest, b"\r\n") else {
+            panic!(
+                "a chunked body ended without a size line after {} bytes",
+                whole.len()
+            );
+        };
+        let size = String::from_utf8_lossy(size);
+        let size = match size.split_once(';') {
+            Some((size, _extension)) => size,
+            None => &size,
+        };
+        let size = usize::from_str_radix(size.trim(), 16).expect("a chunk's size is hexadecimal");
+        if size == 0 {
+            break;
+        }
+        let Some((chunk, after)) = after.split_at_checked(size) else {
+            panic!(
+                "a chunked body was cut inside a chunk after {} bytes",
+                whole.len()
+            );
+        };
+        whole.extend_from_slice(chunk);
+        rest = after
+            .strip_prefix(b"\r\n")
+            .expect("a chunk is followed by a line end");
+    }
+    whole
+}
+
+/// The bytes before the first `separator` and the bytes after it, or
+/// nothing when it does not occur.
+fn split_once<'a>(bytes: &'a [u8], separator: &[u8]) -> Option<(&'a [u8], &'a [u8])> {
+    let at = bytes
+        .windows(separator.len())
+        .position(|window| window == separator)?;
+    let (before, rest) = bytes.split_at_checked(at)?;
+    Some((before, rest.strip_prefix(separator)?))
+}
+
+#[test]
+fn a_chunked_body_is_reassembled_before_a_test_reads_it() {
+    let wire = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
+                 5\r\nNowhe\r\n7;ext=1\r\nre yet.\r\n0\r\n\r\n";
+    assert_eq!(
+        dechunked(wire),
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nNowhere yet."
+    );
+}
+
+#[test]
+fn a_body_that_is_not_chunked_comes_as_it_was() {
+    let wire = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nNowhe";
+    assert_eq!(dechunked(wire), wire);
+    assert_eq!(dechunked(b"no head at all"), b"no head at all");
+}
+
+#[test]
+#[should_panic(expected = "cut inside a chunk")]
+fn a_body_cut_inside_a_chunk_is_a_failure() {
+    let _cut = dechunked(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n10\r\nNowhe");
+}
+
+#[test]
+#[should_panic(expected = "without a size line")]
+fn a_body_that_ends_before_its_last_chunk_is_a_failure() {
+    let _cut = dechunked(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nNowhe\r\n");
 }
 
 /// Reads from an open response until `needle` has arrived, or gives up
