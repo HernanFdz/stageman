@@ -49,7 +49,7 @@ mod status_view;
 
 use dioxus::prelude::*;
 
-use crate::ui::{Button, ButtonVariant, THEME_SCRIPT, ThemeToggle};
+use crate::ui::{ButtonVariant, THEME_SCRIPT, ThemeToggle};
 
 pub use agents_view::{Agent, AgentsView};
 pub use error::{DashboardError, DashboardResult};
@@ -241,7 +241,14 @@ pub fn Shell() -> Element {
                         // a server function's answer cannot clear a cookie —
                         // see `docs/decisions/0084-the-instance-authenticates-itself.md`.
                         form { method: "post", action: "/logout", class: "flex",
-                            Button { variant: ButtonVariant::Secondary, r#type: "submit", "Sign out" }
+                            // A bare element dressed as a button rather than the
+                            // component, which is `type="button"` so that a press
+                            // inside a form never submits it; this one exists to.
+                            button {
+                                r#type: "submit",
+                                class: ButtonVariant::Secondary.styled(""),
+                                "Sign out"
+                            }
                         }
                     }
                 }

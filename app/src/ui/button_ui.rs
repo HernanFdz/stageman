@@ -62,7 +62,10 @@ pub struct ButtonProps {
     pub class: String,
     /// What pressing it does.
     pub onclick: Option<EventHandler<MouseEvent>>,
-    /// Anything else a caller wants on the element.
+    /// Anything else a caller wants on the element — but not its type,
+    /// which is decided below: a spread of the same name renders a second
+    /// attribute, and a browser keeps the first. A press that has to
+    /// submit a form is a bare element wearing [`ButtonVariant::styled`].
     #[props(extends = button, extends = GlobalAttributes)]
     pub attributes: Vec<Attribute>,
     /// The label.

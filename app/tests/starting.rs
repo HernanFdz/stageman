@@ -1022,6 +1022,17 @@ fn a_password_puts_the_dashboard_behind_the_login() {
     assert!(opened.contains("aviary"), "{opened}");
     let page = running.get_with_cookie("/projects", &cookie);
     assert!(page.contains("200 OK"), "{page}");
+
+    // The sign-out is a form the browser submits, so its button has to be
+    // one that submits: the component's is `type="button"` by design, and
+    // a press on one of those inside a form does nothing at all.
+    let signing_out = page
+        .split_once(r#"action="/logout""#)
+        .and_then(|(_, rest)| rest.split_once("</form>"))
+        .map(|(form, _)| form)
+        .expect("the sign-out form on a signed-in page");
+    assert!(signing_out.contains(r#"type="submit""#), "{signing_out}");
+    assert!(!signing_out.contains(r#"type="button""#), "{signing_out}");
 }
 
 /// `docs/conventions.md` §4 asks that secrets never render, and this is where
