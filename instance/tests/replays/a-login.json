@@ -378,6 +378,8 @@
             "failures": {},
             "entered": {},
             "grants": {},
+            "setting": [],
+            "setup": null,
             "password_source": "set from STAGEMAN_PASSWORD"
           }
         },

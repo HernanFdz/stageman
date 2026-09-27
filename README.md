@@ -83,16 +83,17 @@ commits they make are the App's. Register it under your account, or under
 an organisation whose repositories it should reach; the Instance page
 lists every installation.
 
-**The dashboard is entered with one password.** Name it in `STAGEMAN_PASSWORD`
-for the first start: it is hashed into the instance's file before anything is
-served, and the variable is never read again while the file holds a hash, so
-a line left in a service unit never silently replaces a password changed
-later. That is how a machine provisioned for somebody is given one without a
-person at it. Until a password is set the dashboard is open, as it always
-was; a first start with none will print a one-time link to set one, and the
-Instance page will change it, in the chunks that follow this one — see
-`docs/decisions/0084-the-instance-authenticates-itself.md`. A session lasts
-a fortnight from its last use and is forgotten when the daemon restarts.
+**The dashboard is entered with one password.** A first start with none
+prints a link where the daemon started, and that link is the only way in:
+open it, and the Instance page asks you to set a password, after which the
+link is spent. A machine provisioned for somebody names the password in
+`STAGEMAN_PASSWORD` for the first start instead: it is hashed into the
+instance's file before anything is served, and the variable is never read
+again while the file holds a hash, so a line left in a service unit never
+silently replaces a password changed later. Change it from the Instance
+page, and sign out from the header. A session lasts a fortnight from its
+last use and is forgotten when the daemon restarts — see
+`docs/decisions/0084-the-instance-authenticates-itself.md`.
 
 **It needs nothing named in the environment either.** Its file is encrypted
 under a key, and a key cannot live in the file it protects — so on a first run

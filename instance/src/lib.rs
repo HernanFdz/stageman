@@ -64,7 +64,9 @@ pub use boot::{KeySource, PasswordSource};
 pub use file::LoadError;
 pub use paths::{DOMAIN_VARIABLE, KEY_VARIABLE, PASSWORD_VARIABLE, STATE_VARIABLE};
 pub use requests::{Request, Response};
-pub use session::{ENTER_PREFIX, ENTRY_PATH, LOGIN_PATH, UP_PATH};
+pub use session::{
+    ENTER_PREFIX, ENTRY_PATH, LOGIN_PATH, LOGOUT_PATH, SETUP_PATH, SHORTEST_PASSWORD, UP_PATH,
+};
 /// Which platform this build was made for, handed to [`Instance::boot`].
 ///
 /// The agent crate's, because that is where what a platform means is known:
@@ -477,6 +479,9 @@ pub struct Facts {
     pub port: u16,
     /// Whether the dashboard has a password, for the startup block.
     pub password: boot::PasswordSource,
+    /// The one way in while there is no password: the token in the link
+    /// the startup block prints, minted while booting.
+    pub setup: Option<String>,
     /// The port a person reaches it on: the framework's tooling's when it
     /// stands in front, and the served one otherwise — see
     /// `paths::reached_port`.
@@ -507,6 +512,10 @@ pub struct Running {
     /// Whether the dashboard has a password, and from where, for the
     /// startup block.
     password: boot::PasswordSource,
+    /// The token in the link the startup block prints while there is no
+    /// password, which signs a browser in so that one can be set; held,
+    /// and forgotten once a password is.
+    setup: Option<String>,
     /// Where the file is.
     path: PathBuf,
     /// The domain this instance answers on.
@@ -685,6 +694,10 @@ pub struct Running {
     /// Grants the apex minted for jobs' hosts, by token, until each host
     /// takes its own or it lapses.
     grants: BTreeMap<String, session::Grant>,
+    /// Passwords being set from the Instance page, by the identifier the
+    /// derivation's answer carries: the request held, and which step it
+    /// has reached.
+    setting: BTreeMap<EffectId, session::Setting>,
     /// Whether this step changed what is kept.
     dirty: bool,
     /// Effects of this step held back until the write lands.
@@ -700,6 +713,11 @@ impl Running {
     /// An awake instance, from what booting learned.
     ///
     /// A file that had no identity has one from the moment it is opened.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one line per field of held state, and the list is the point: what a restart \
+                  begins without is read here in full"
+    )]
     pub(crate) fn woken(facts: Facts) -> Self {
         let Facts {
             state,
@@ -721,6 +739,7 @@ impl Running {
             port,
             reached,
             password,
+            setup,
         } = facts;
         let id = named.unwrap_or_else(|| {
             let minted = InstanceId::from_uuid(mint(&mut rng));
@@ -734,6 +753,7 @@ impl Running {
             key,
             source,
             password,
+            setup,
             path,
             domain,
             serving: port,
@@ -792,6 +812,7 @@ impl Running {
             failures: BTreeMap::new(),
             entered: BTreeMap::new(),
             grants: BTreeMap::new(),
+            setting: BTreeMap::new(),
             listeners: BTreeMap::new(),
             sockets: BTreeMap::new(),
             draining: BTreeSet::new(),
@@ -1216,15 +1237,27 @@ impl Running {
     /// ordering is load-bearing: it is what anything supervising a start
     /// waits for, so everything worth reading has to be above it.
     fn announcement(&self) -> String {
+        // The one way in while there is no password, printed here and
+        // nowhere else: whoever can read where the daemon started can set
+        // one, which is who should be able to.
+        let password = self.setup.as_ref().map_or_else(
+            || self.password.to_string(),
+            |token| {
+                format!(
+                    "none — set one at {}{}?t={token}",
+                    tunnel::dashboard(&self.domain, self.reached),
+                    session::SETUP_PATH
+                )
+            },
+        );
         format!(
             "\nstageman is running.\n  version    {}\n  runtime    {}\n  key        {}\n  \
-             instance   {}\n  domain     {}\n  password   {}\n\n  dashboard  http://{}\n\n",
+             instance   {}\n  domain     {}\n  password   {password}\n\n  dashboard  http://{}\n\n",
             release::described(),
             self.runtime.display(),
             self.source,
             self.path.display(),
             self.domain,
-            self.password,
             self.address,
         )
     }

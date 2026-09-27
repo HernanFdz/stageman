@@ -4,10 +4,14 @@
 //! `docs/decisions/0084-the-instance-authenticates-itself.md`.
 
 use stageman_core::{Outcome, Progress};
-use stageman_instance::{ENTRY_PATH, Instance, LOGIN_PATH, PASSWORD_VARIABLE, UP_PATH};
+use stageman_instance::{
+    ENTRY_PATH, Instance, LOGIN_PATH, LOGOUT_PATH, PASSWORD_VARIABLE, Request, Response,
+    SETUP_PATH, UP_PATH,
+};
 use stageman_vocabulary::{Environment, Now, RequestId};
+use stageman_wire::Refusal;
 
-use crate::simulation::{Sent, Simulation, job, seed, tunnel_host, watching};
+use crate::simulation::{Sent, Simulation, job, request, seed, tunnel_host, watching};
 
 /// The environment of a start that names a password.
 fn with_a_password(password: &str) -> Environment {
@@ -189,23 +193,198 @@ fn a_session_lapses_a_fortnight_after_its_last_use() {
     assert_eq!(sim.status(lapsed), Some(303), "a fortnight unused");
 }
 
-/// Without a password set the dashboard is what it always was, and the
-/// form posted anyway sends the browser where it was going.
+/// Asks the dashboard something as a server function does, and runs until
+/// it has been answered — through whatever derivations and writes that
+/// takes.
+fn asks(
+    sim: &mut Simulation,
+    instance: &mut Instance,
+    id: u64,
+    asked: Request,
+) -> Option<Response> {
+    let now = sim.now();
+    for effect in instance.step(now, request(id, asked)) {
+        sim.perform(effect);
+    }
+    sim.run_until(instance, now + 10);
+    sim.response(id).cloned()
+}
+
+/// A first start with no password prints one link where the daemon
+/// started, and that link is the only way in: a stranger is sent to the
+/// login page saying so, a route refuses them, the link signs a browser in
+/// and sends it where a password is set, and a token that is not the one
+/// printed buys nothing.
 #[test]
-fn without_a_password_the_dashboard_is_open() {
+fn a_first_start_without_a_password_prints_the_one_way_in() {
     let mut sim = Simulation::new();
     let mut instance = sim.wake(seed(1));
     assert!(instance.state().password.is_none());
-
+    // The block is printed once the first write has landed, a tick later.
     let now = sim.now();
-    let page = sim.browses(now, "GET", "/projects", &[], "");
+    sim.run_until(&mut instance, now + 1);
+    let block = sim.printed().join("\n");
+    let link = block
+        .split_once("password   none — set one at ")
+        .map(|(_, rest)| {
+            rest.split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .expect("the startup block prints the link");
+    assert!(link.starts_with("http://localhost:8080/setup?t="), "{link}");
+    let path = link.trim_start_matches("http://localhost:8080").to_owned();
+
+    // A stranger: nobody's cookie, which the simulation reads as none.
+    let now = sim.now();
+    let stranger = sim.browses(now, "GET", "/projects", &[("cookie", "")], "");
+    let route = sim.browses(now, "GET", "/api/home", &[("cookie", "")], "");
+    let signed = sim.browses(now, "GET", "/projects", &[], "");
+    let wrong = sim.browses(
+        now,
+        "GET",
+        &format!("{SETUP_PATH}?t=not-the-token"),
+        &[("cookie", "")],
+        "",
+    );
+    let again = sim.browses(now, "GET", &path, &[("cookie", "")], "");
     sim.run_until(&mut instance, now);
-    assert_eq!(sim.route(page), Some(Sent::To(9000)));
+    assert_eq!(sim.status(stranger), Some(303));
+    assert_eq!(
+        sim.header(stranger, "location"),
+        Some("/login?said=none&back=%2Fprojects")
+    );
+    assert_eq!(sim.status(route), Some(401));
+    assert_eq!(
+        sim.route(signed),
+        Some(Sent::To(9000)),
+        "the simulation signed itself in"
+    );
+    assert_eq!(sim.status(wrong), Some(404));
+    assert_eq!(
+        sim.status(again),
+        Some(303),
+        "the link is good until a password is set"
+    );
+    assert_eq!(sim.header(again, "location"), Some("/instance"));
+    assert!(sim.header(again, "set-cookie").is_some());
+}
+
+/// The first password is set from the Instance page, with nothing to
+/// check against; from then on it is checked, and a wrong current one or
+/// a short new one is refused. Once set, the printed link buys nothing and
+/// the login takes the password.
+#[test]
+fn the_password_is_set_from_the_page_and_changed_after() {
+    let mut sim = Simulation::new();
+    let mut instance = sim.wake(seed(1));
+    let now = sim.now();
+    sim.run_until(&mut instance, now + 1);
+    let block = sim.printed().join("\n");
+    let path = block
+        .split_once("set one at http://localhost:8080")
+        .map(|(_, rest)| {
+            rest.split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .expect("the link");
+
+    let short = asks(
+        &mut sim,
+        &mut instance,
+        1,
+        Request::SetPassword {
+            current: String::new(),
+            new: "short".to_owned(),
+        },
+    );
+    assert_eq!(short, Some(Response::Refused(Refusal::PasswordShort)));
+    assert!(instance.state().password.is_none());
+
+    let set = asks(
+        &mut sim,
+        &mut instance,
+        2,
+        Request::SetPassword {
+            current: String::new(),
+            new: "correct horse battery".to_owned(),
+        },
+    );
+    let Some(Response::Apps(apps)) = set else {
+        panic!("the page is answered: {set:?}");
+    };
+    assert!(apps.password_set);
+    assert!(instance.state().password.is_some());
+
+    // The link is spent by the password being set.
+    let now = sim.now();
+    let lapsed = sim.browses(now, "GET", &path, &[("cookie", "")], "");
+    sim.run_until(&mut instance, now);
+    assert_eq!(sim.status(lapsed), Some(404));
+
+    // The login takes it.
+    let now = sim.now();
+    let right = logs_in(&mut sim, &mut instance, now, "correct+horse+battery", "");
+    assert_eq!(sim.header(right, "location"), Some("/"));
+    assert!(sim.header(right, "set-cookie").is_some());
+
+    // Changing it checks the current one first.
+    let wrong = asks(
+        &mut sim,
+        &mut instance,
+        3,
+        Request::SetPassword {
+            current: "battery staple".to_owned(),
+            new: "a different password".to_owned(),
+        },
+    );
+    assert_eq!(wrong, Some(Response::Refused(Refusal::WrongPassword)));
+    let before = instance.state().password.clone();
+    let changed = asks(
+        &mut sim,
+        &mut instance,
+        4,
+        Request::SetPassword {
+            current: "correct horse battery".to_owned(),
+            new: "a different password".to_owned(),
+        },
+    );
+    assert!(matches!(changed, Some(Response::Apps(_))), "{changed:?}");
+    assert_ne!(instance.state().password, before);
+    let now = sim.now();
+    let old = logs_in(&mut sim, &mut instance, now, "correct+horse+battery", "");
+    assert_eq!(sim.header(old, "location"), Some("/login?said=wrong"));
+    let now = sim.now() + 2_000;
+    let new = logs_in(&mut sim, &mut instance, now, "a+different+password", "");
+    assert_eq!(sim.header(new, "location"), Some("/"));
+}
+
+/// Signing out forgets the session and clears its cookie, and what it
+/// opened is closed again.
+#[test]
+fn signing_out_forgets_the_session() {
+    let mut sim = Simulation::new();
+    let mut instance = started(&mut sim, with_a_password("correct horse"));
+    let now = sim.now();
+    let right = logs_in(&mut sim, &mut instance, now, "correct+horse", "");
+    let cookie = cookie_of(&sim, right);
 
     let now = sim.now();
-    let posted = logs_in(&mut sim, &mut instance, now, "anything", "%2Fprojects");
-    assert_eq!(sim.status(posted), Some(303));
-    assert_eq!(sim.header(posted, "location"), Some("/projects"));
+    let out = sim.browses(now, "POST", LOGOUT_PATH, &[("cookie", &cookie)], "");
+    sim.run_until(&mut instance, now);
+    assert_eq!(sim.status(out), Some(303));
+    assert_eq!(sim.header(out, "location"), Some(LOGIN_PATH));
+    assert_eq!(
+        sim.header(out, "set-cookie"),
+        Some("stageman_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0")
+    );
+    let now = sim.now();
+    let closed = sim.browses(now, "GET", "/projects", &[("cookie", &cookie)], "");
+    sim.run_until(&mut instance, now);
+    assert_eq!(sim.status(closed), Some(303), "the session is forgotten");
 }
 
 /// Where the browser is sent back is a path on this host or the front

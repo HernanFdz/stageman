@@ -71,11 +71,7 @@ impl fmt::Display for PasswordSource {
         match self {
             Self::Environment => write!(f, "set from {}", paths::PASSWORD_VARIABLE),
             Self::Kept => f.write_str("set"),
-            Self::None => write!(
-                f,
-                "none — the dashboard is open until {} sets one",
-                paths::PASSWORD_VARIABLE
-            ),
+            Self::None => f.write_str("none"),
         }
     }
 }
@@ -917,6 +913,17 @@ impl Boot {
             port,
             reached: paths::reached_port(&self.environment).unwrap_or(port),
             password: self.password.clone(),
+            // With no password there is one way in: a link minted here,
+            // printed once, good until a password is set or the daemon
+            // restarts — see
+            // `docs/decisions/0084-the-instance-authenticates-itself.md`.
+            setup: (self.password == PasswordSource::None).then(|| {
+                format!(
+                    "{}{}",
+                    crate::mint(&mut self.rng).simple(),
+                    crate::mint(&mut self.rng).simple()
+                )
+            }),
         });
         let mut asked = effects;
         asked.extend(running.waking_up(&containers));

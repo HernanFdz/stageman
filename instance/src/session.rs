@@ -18,12 +18,17 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
+use rand::Rng as _;
 use serde::{Deserialize, Serialize};
 use stageman_core::{JobId, Progress, Secret};
 use stageman_vocabulary::{Answer, Arrival, Bytes, Effect as Generic, EffectId, Now, RequestId};
 
+use stageman_wire::Refusal;
+
 use crate::Effect;
+use crate::requests::Response;
 use crate::tunnel::{address, dashboard};
+use crate::vocabulary::AppEffect;
 
 /// Memory the derivation uses, in kibibytes: nineteen mebibytes, which is
 /// the first of the parameter sets the function's own guidance recommends.
@@ -53,6 +58,23 @@ pub const LOGIN_PATH: &str = "/login";
 /// The one path that answers without a session: whether the instance is
 /// up, for whatever supervises it, and nothing else.
 pub const UP_PATH: &str = "/up";
+
+/// Where the link the startup block prints signs a browser in while there
+/// is no password, so that one can be set from the Instance page.
+pub const SETUP_PATH: &str = "/setup";
+
+/// Where a session is given up.
+///
+/// A post, so that a cross-site link cannot sign a person out, answered by
+/// forgetting the session and clearing its cookie.
+pub const LOGOUT_PATH: &str = "/logout";
+
+/// The fewest characters a password may be.
+///
+/// Length is the one thing asked of it, because length is what makes
+/// guessing moot; anything else asked would be a rule a person works
+/// around rather than a strength.
+pub const SHORTEST_PASSWORD: usize = 12;
 
 /// Where the apex grants entry to a job's host, the job's name after it.
 ///
@@ -239,6 +261,34 @@ pub struct Grant {
     pub expires: Now,
 }
 
+/// A password being set from the Instance page: the request held, and
+/// which of its two derivations is in flight.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Setting {
+    /// The request held for the answer.
+    pub request: crate::vocabulary::RequestId,
+    /// Which step.
+    pub step: Step,
+}
+
+/// The steps of setting a password: the current one checked, where there
+/// is one, and then the new one hashed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Step {
+    /// The typed current password is being hashed to compare.
+    Checking {
+        /// What to set once it compares.
+        new: String,
+        /// What the derivation has to come out as.
+        expected: Vec<u8>,
+    },
+    /// The new password is being hashed to keep.
+    Hashing {
+        /// The salt it is hashed with, kept beside the hash.
+        salt: Vec<u8>,
+    },
+}
+
 /// What wrong passwords from one address have earned it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Failing {
@@ -295,6 +345,13 @@ pub fn stripped() -> Vec<String> {
 fn set_cookie(name: &str, local: bool, session: &str) -> String {
     let secure = if local { "" } else { "; Secure" };
     format!("{name}={session}; Path=/; HttpOnly; SameSite=Lax{secure}")
+}
+
+/// The header that clears a cookie: the same name and terms, with nothing
+/// in it and no life left, which is how a browser is told to forget one.
+fn clear_cookie(name: &str, local: bool) -> String {
+    let secure = if local { "" } else { "; Secure" };
+    format!("{name}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{secure}")
 }
 
 /// The cookie a request presents under a name, if it presents one.
@@ -488,14 +545,24 @@ impl crate::Running {
                 self.pages(id, effects);
                 true
             }
-            // No password set means no door yet: the first run sets one, and
-            // until then the dashboard is what it always was.
-            _ if self.state.password.is_none() => false,
+            // The link the startup block prints while there is no password:
+            // it signs the browser in and sends it where a password is set.
+            ("GET", SETUP_PATH) => {
+                self.setup_visited(id, query, local, effects);
+                true
+            }
+            ("POST", LOGOUT_PATH) => {
+                self.signed_out(id, request, local, effects);
+                true
+            }
             _ if !self.session_presented(request, local) => {
                 if path.starts_with(API_PREFIX) {
                     Self::answer_now(id, 401, &[], "Sign in to the dashboard first.\n", effects);
                 } else {
-                    let page = login_page(None, back_of(request).as_deref());
+                    // With no password there is nothing to type: the page
+                    // says to open the link printed where the daemon started.
+                    let said = self.state.password.is_none().then_some("none");
+                    let page = login_page(said, back_of(request).as_deref());
                     Self::answer_now(id, 303, &[("location", &page)], "", effects);
                 }
                 true
@@ -506,6 +573,62 @@ impl crate::Running {
             }
             _ => false,
         }
+    }
+
+    /// Somebody opened the link the startup block printed: with the token
+    /// it carries, they are signed in and sent where a password is set;
+    /// with any other, told the link is no longer good.
+    fn setup_visited(
+        &mut self,
+        id: RequestId,
+        query: &str,
+        local: bool,
+        effects: &mut Vec<Effect>,
+    ) {
+        let token = form_field(query, "t").unwrap_or_default();
+        if token.is_empty() || self.setup.as_deref() != Some(token.as_str()) {
+            Self::answer_now(
+                id,
+                404,
+                &[],
+                "This link is no longer good: a password has been set, or the daemon has started \
+                 again and printed another.\n",
+                effects,
+            );
+            return;
+        }
+        let session = self.unguessable();
+        self.sessions.insert(session.clone(), lapsing(self.now));
+        let cookie = set_cookie(cookie_name(local), local, &session);
+        Self::answer_now(
+            id,
+            303,
+            &[("location", "/instance"), ("set-cookie", &cookie)],
+            "",
+            effects,
+        );
+    }
+
+    /// Somebody signed out: the session they presented is forgotten, the
+    /// browser is told to forget its cookie, and it is sent to the login.
+    fn signed_out(
+        &mut self,
+        id: RequestId,
+        request: &Arrival,
+        local: bool,
+        effects: &mut Vec<Effect>,
+    ) {
+        if let Some(session) = presented(request, cookie_name(local)) {
+            self.sessions.remove(session);
+        }
+        let cleared = clear_cookie(cookie_name(local), local);
+        Self::answer_now(
+            id,
+            303,
+            &[("location", LOGIN_PATH), ("set-cookie", &cleared)],
+            "",
+            effects,
+        );
     }
 
     /// Somebody signed in on the apex asked to enter a job's host: a grant
@@ -732,13 +855,143 @@ impl crate::Running {
         true
     }
 
-    /// The world derived what a typed password hashes to.
+    /// Sets the dashboard's password from the Instance page, or changes it.
+    ///
+    /// Held rather than answered: the current password, where one is set,
+    /// is checked by a derivation, and the new one is hashed by another,
+    /// and the page is answered once the new hash is on the disk. Nothing
+    /// is asked of a new password but its length, per
+    /// [`SHORTEST_PASSWORD`].
+    pub fn set_password(
+        &mut self,
+        id: crate::vocabulary::RequestId,
+        current: &str,
+        new: &str,
+        effects: &mut Vec<Effect>,
+    ) {
+        if new.chars().count() < SHORTEST_PASSWORD {
+            self.defer(AppEffect::Respond {
+                id,
+                response: Response::Refused(Refusal::PasswordShort),
+            });
+            return;
+        }
+        let effect = self.effect_id();
+        let on_file = self
+            .state
+            .password
+            .as_ref()
+            .map(|on_file| Hashed::parse(on_file.expose()));
+        let step = match on_file {
+            None => {
+                let salt = self.salt();
+                effects.push(derivation(effect, new, &salt));
+                Step::Hashing { salt }
+            }
+            Some(Some(hashed)) => {
+                let Some(checking) = hashed.checking(effect, current) else {
+                    tracing::error!("the password on file is too long to check against");
+                    self.defer(AppEffect::Respond {
+                        id,
+                        response: Response::Refused(Refusal::Failed),
+                    });
+                    return;
+                };
+                effects.push(checking);
+                Step::Checking {
+                    new: new.to_owned(),
+                    expected: hashed.hash,
+                }
+            }
+            Some(None) => {
+                tracing::error!(
+                    "the password on file is not spelled as this instance spells one, so it \
+                     cannot be checked; set the variable on the next start"
+                );
+                self.defer(AppEffect::Respond {
+                    id,
+                    response: Response::Refused(Refusal::Failed),
+                });
+                return;
+            }
+        };
+        self.setting.insert(effect, Setting { request: id, step });
+    }
+
+    /// A derivation asked for by the Instance page came back: the current
+    /// password compared, or the new one ready to keep.
+    fn password_derived(
+        &mut self,
+        setting: Setting,
+        derived: &Result<Bytes, String>,
+        effects: &mut Vec<Effect>,
+    ) {
+        let Setting { request, step } = setting;
+        let bytes = match derived {
+            Ok(bytes) => bytes,
+            Err(why) => {
+                tracing::error!(%why, "a password could not be hashed");
+                self.defer(AppEffect::Respond {
+                    id: request,
+                    response: Response::Refused(Refusal::Failed),
+                });
+                return;
+            }
+        };
+        match step {
+            Step::Checking { new, expected } => {
+                if !same(bytes.as_slice(), &expected) {
+                    self.defer(AppEffect::Respond {
+                        id: request,
+                        response: Response::Refused(Refusal::WrongPassword),
+                    });
+                    return;
+                }
+                let effect = self.effect_id();
+                let salt = self.salt();
+                effects.push(derivation(effect, &new, &salt));
+                self.setting.insert(
+                    effect,
+                    Setting {
+                        request,
+                        step: Step::Hashing { salt },
+                    },
+                );
+            }
+            Step::Hashing { salt } => {
+                self.state.password = Some(spelled(&salt, bytes.as_slice()));
+                // The link that signed the first person in has done its
+                // work; from here the password is the way in.
+                self.setup = None;
+                self.dirty = true;
+                let response = Response::Apps(self.apps());
+                self.defer(AppEffect::Respond {
+                    id: request,
+                    response,
+                });
+            }
+        }
+    }
+
+    /// Fresh salt for a new hash, from the one generator.
+    fn salt(&mut self) -> Vec<u8> {
+        let mut salt = vec![0_u8; SALT_LEN];
+        self.rng.fill_bytes(&mut salt);
+        salt
+    }
+
+    /// The world derived what a typed password hashes to: for a login, or
+    /// for a password being set from the Instance page.
     pub fn derived(
         &mut self,
         id: EffectId,
         derived: &Result<Bytes, String>,
         effects: &mut Vec<Effect>,
     ) {
+        if let Some(setting) = self.setting.remove(&id) {
+            self.password_derived(setting, derived, effects);
+            return;
+        }
         let Some(deriving) = self.deriving.remove(&id) else {
             tracing::warn!("a derivation was answered that nobody was waiting on; ignored");
             return;
@@ -934,6 +1187,10 @@ mod tests {
             ),
             None,
             "a plain cookie is not the prefixed one"
+        );
+        assert_eq!(
+            super::clear_cookie(cookie_name(false), false),
+            "__Host-stageman_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0; Secure"
         );
         assert_eq!(super::tunnel_cookie_name(true), "stageman_tunnel");
         assert_eq!(super::tunnel_cookie_name(false), "__Host-stageman_tunnel");

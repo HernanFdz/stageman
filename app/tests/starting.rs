@@ -75,6 +75,11 @@ struct Serving {
     child: Child,
     /// Everything it said before it began serving.
     said: String,
+    /// The session bought through the link the startup block prints while
+    /// there is no password, once a request has needed one: sent with
+    /// every request that names no cookie of its own, so that a test about
+    /// anything but the door meets no door.
+    signed: std::cell::RefCell<Option<String>>,
     /// The address it is actually listening on, which is not the one asked for
     /// — the tests ask for port zero so that two running at once cannot
     /// collide.
@@ -102,10 +107,48 @@ impl Serving {
             .to_owned()
     }
 
+    /// The cookie line every request carries unless it names its own: the
+    /// session the printed link bought, bought on the first request that
+    /// needs one. Empty where the start printed no link, which is a start
+    /// that was given a password.
+    fn cookie_line(&self) -> String {
+        if self.signed.borrow().is_none() {
+            let link = self
+                .said
+                .lines()
+                .find_map(|line| line.split_once("set one at "))
+                .map(|(_, link)| link.trim().to_owned());
+            if let Some(link) = link {
+                let path = link
+                    .split_once("/setup")
+                    .map_or_else(|| link.clone(), |(_, rest)| format!("/setup{rest}"));
+                let answer = self.request(&format!(
+                    "GET {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+                    self.address
+                ));
+                let cookie = answer
+                    .lines()
+                    .find_map(|line| {
+                        line.split_once(": ")
+                            .filter(|(name, _)| name.eq_ignore_ascii_case("set-cookie"))
+                            .map(|(_, value)| value.to_owned())
+                    })
+                    .and_then(|set| set.split_once(';').map(|(pair, _)| pair.to_owned()))
+                    .expect("the printed link signs the harness in");
+                *self.signed.borrow_mut() = Some(cookie);
+            }
+        }
+        self.signed
+            .borrow()
+            .as_ref()
+            .map_or_else(String::new, |cookie| format!("Cookie: {cookie}\r\n"))
+    }
+
     /// The whole of the response to one `POST` of JSON, headers included.
     fn post(&self, path: &str, body: &str) -> String {
+        let cookie = self.cookie_line();
         self.request(&format!(
-            "POST {path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\n\
+            "POST {path} HTTP/1.1\r\nHost: {}\r\n{cookie}Content-Type: application/json\r\n\
              Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
             self.address,
             body.len()
@@ -113,7 +156,8 @@ impl Serving {
     }
 
     /// The whole of the response to one `POST` of a form, as a browser posts
-    /// one, headers included.
+    /// one, headers included, and as nobody: the login form is what buys a
+    /// session, so it carries none.
     fn post_form(&self, path: &str, body: &str) -> String {
         self.request(&format!(
             "POST {path} HTTP/1.1\r\nHost: {}\r\n\
@@ -151,8 +195,9 @@ impl Serving {
     /// fail against the partial text, which says far more than
     /// `ConnectionReset` did.
     fn get(&self, path: &str) -> String {
+        let cookie = self.cookie_line();
         self.request(&format!(
-            "GET {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            "GET {path} HTTP/1.1\r\nHost: {}\r\n{cookie}Connection: close\r\n\r\n",
             self.address
         ))
     }
@@ -160,9 +205,16 @@ impl Serving {
     /// Opens a `GET` and hands back the socket with only the request sent,
     /// for a response that does not end: the caller reads what it waits for.
     fn opened(&self, path: &str) -> TcpStream {
+        let cookie = self.cookie_line();
         let mut connection = TcpStream::connect(&self.address).expect("the dashboard accepts");
         connection
-            .write_all(format!("GET {path} HTTP/1.1\r\nHost: {}\r\n\r\n", self.address).as_bytes())
+            .write_all(
+                format!(
+                    "GET {path} HTTP/1.1\r\nHost: {}\r\n{cookie}\r\n",
+                    self.address
+                )
+                .as_bytes(),
+            )
             .expect("the request is sent");
         connection
     }
@@ -279,6 +331,7 @@ fn started(variables: &[(&str, String)]) -> Serving {
         child,
         said,
         address,
+        signed: std::cell::RefCell::new(None),
     }
 }
 

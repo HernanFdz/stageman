@@ -128,6 +128,8 @@ fn signing_in(running: &Running) -> Value {
         "failures": value(&running.failures),
         "entered": value(&running.entered),
         "grants": value(&running.grants),
+        "setting": value(&running.setting.iter().collect::<Vec<_>>()),
+        "setup": value(&running.setup),
         "password_source": running.password.to_string(),
     })
 }

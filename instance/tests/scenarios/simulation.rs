@@ -322,6 +322,15 @@ pub struct Simulation {
     headers: BTreeMap<Asked, BTreeMap<String, String>>,
     /// The cookies every forwarded request was stripped of, by request.
     strips: BTreeMap<Asked, Vec<String>>,
+    /// The session the simulated person holds on the dashboard, bought
+    /// through the link the startup block prints while there is no
+    /// password: sent with every request at the door that names no cookie
+    /// of its own, so that a scenario about anything but the door meets
+    /// no door. A scenario that wants to be nobody names an empty cookie.
+    signed: Option<String>,
+    /// Whether what is performed right now is the harness's own doing
+    /// rather than the flow under test, and so is kept out of the trace.
+    quiet: bool,
     /// Whether a container runtime is installed.
     has_runtime: bool,
     /// Everything printed to standard output, in order.
@@ -817,6 +826,8 @@ impl Simulation {
             landing: VecDeque::new(),
             headers: BTreeMap::new(),
             strips: BTreeMap::new(),
+            signed: None,
+            quiet: false,
             has_runtime: true,
             printed: Vec::new(),
             exited: None,
@@ -1260,6 +1271,19 @@ impl Simulation {
         let id = Asked(self.asking_next);
         self.asking_next += 1;
         self.bodies.insert(id, body.as_bytes().to_vec());
+        let mut headers: BTreeMap<String, String> = headers
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect();
+        // The simulated person's session, unless the scenario said whose
+        // cookie the request carries — an empty one being nobody's.
+        if listener == self.listener(false)
+            && !headers.contains_key("cookie")
+            && let Some(signed) = &self.signed
+        {
+            headers.insert("cookie".to_owned(), signed.clone());
+        }
+        headers.retain(|name, value| name != "cookie" || !value.is_empty());
         self.schedule(
             at,
             Event::Arrived {
@@ -1268,10 +1292,7 @@ impl Simulation {
                 request: Arrival {
                     method: method.to_owned(),
                     path: path.to_owned(),
-                    headers: headers
-                        .iter()
-                        .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
-                        .collect(),
+                    headers,
                     peer: peer.to_owned(),
                 },
             },
@@ -1442,7 +1463,59 @@ impl Simulation {
         self.stepped(&mut instance, AppEvent::Presenting { port: 9000 }.into());
         let now = self.now;
         self.run_until(&mut instance, now);
+        // A start forgets every session, and prints a new link when it has
+        // no password: the simulated person signs in again through it, so
+        // that a scenario about anything but the door meets no door.
+        self.signed = None;
+        self.signs_in_from_the_link(&mut instance);
         instance
+    }
+
+    /// Signs the simulated person in through the link the startup block
+    /// prints, when the instance holds one to print — as the harness's own
+    /// doing, recorded for a replay and kept out of the trace.
+    ///
+    /// The token is read off what the instance holds rather than off the
+    /// block, because the block is printed once the first write has
+    /// landed, a tick after waking, and a scenario's first request at the
+    /// door is often earlier than that: what a person reads a moment later
+    /// is what the instance already holds.
+    fn signs_in_from_the_link(&mut self, instance: &mut Instance) {
+        let Some(token) = instance
+            .snapshot()
+            .get("held")
+            .and_then(|held| held.get("setup"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        let path = format!("/setup?t={token}");
+        let id = Asked(self.asking_next);
+        self.asking_next += 1;
+        let event = Event::Arrived {
+            listener: self.listener(false),
+            id,
+            request: Arrival {
+                method: "GET".to_owned(),
+                path,
+                headers: [("host".to_owned(), "localhost".to_owned())].into(),
+                peer: "127.0.0.1:50000".to_owned(),
+            },
+        };
+        self.quiet = true;
+        self.stepped(instance, event);
+        self.quiet = false;
+        self.signed = self
+            .headers
+            .get(&id)
+            .and_then(|headers| headers.get("set-cookie"))
+            .and_then(|set| set.split_once(';'))
+            .map(|(pair, _)| pair.to_owned());
+        assert!(
+            self.signed.is_some(),
+            "the printed link signs the simulated person in"
+        );
     }
 
     /// Kills the daemon and starts it again.
@@ -2339,12 +2412,14 @@ impl Simulation {
         {
             self.platform_calls.push((self.trace.len(), call));
         }
-        self.trace.push(format!(
-            "{}: -> {}{}",
-            self.now,
-            effect.kind(),
-            serialised(&effect)
-        ));
+        if !self.quiet {
+            self.trace.push(format!(
+                "{}: -> {}{}",
+                self.now,
+                effect.kind(),
+                serialised(&effect)
+            ));
+        }
         let Some(effect) = self.generic(effect) else {
             return;
         };

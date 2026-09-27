@@ -30,7 +30,7 @@ use dioxus::prelude::*;
 #[cfg(feature = "server")]
 use stageman_instance::{Request, Response};
 
-use stageman_wire::Part;
+use stageman_wire::{Part, Refusal};
 
 use super::error::{DashboardError, DashboardResult};
 use super::live::{Live, Reading, use_reading};
@@ -49,6 +49,21 @@ pub use stageman_wire::{
 /// # Errors
 ///
 /// Fails if this process is not operating an instance.
+/// Sets the dashboard's password, or changes it — see
+/// `docs/decisions/0084-the-instance-authenticates-itself.md`.
+///
+/// # Errors
+///
+/// Fails if the current password typed is not the current one, or if the
+/// new one is too short.
+#[post("/api/instance/password")]
+pub async fn set_password(current: String, new: String) -> DashboardResult<Apps> {
+    match super::ask(Request::SetPassword { current, new }).await? {
+        Response::Apps(apps) => Ok(apps),
+        other => Err(super::unexpected(&other)),
+    }
+}
+
 #[get("/api/instance/apps")]
 pub async fn apps() -> DashboardResult<Apps> {
     match super::ask(Request::Apps).await? {
@@ -200,6 +215,19 @@ pub fn InstanceView() -> Element {
                 Reading::Read(mut read) => {
                     let shown = read();
                     rsx! {
+                        // First, because it is the first thing a new instance
+                        // asks: the link that signed the first person in leads
+                        // here to set one.
+                        Password {
+                            set: shown.password_set,
+                            onchanged: move |outcome: DashboardResult<Apps>| match outcome {
+                                Ok(fresh) => {
+                                    failure.set(None);
+                                    read.set(fresh);
+                                }
+                                Err(reason) => failure.set(Some(reason)),
+                            },
+                        }
                         GitHubApp {
                             app: shown.github,
                             failed: shown.failed,
@@ -230,6 +258,107 @@ pub fn InstanceView() -> Element {
                     }
                 },
                 Reading::NotYet => rsx! { Skeleton {} },
+            }
+        }
+    }
+}
+
+/// The dashboard's password: set from here when none is, and changed here
+/// after — see `docs/decisions/0084-the-instance-authenticates-itself.md`.
+///
+/// The password never comes back down: the page knows whether one is set
+/// and nothing else. A wrong current password is said under its box, a
+/// short new one under its, and a second typing that differs under the
+/// third, before anything is sent.
+#[component]
+fn Password(set: bool, onchanged: EventHandler<DashboardResult<Apps>>) -> Element {
+    let mut current = use_signal(String::new);
+    let mut new = use_signal(String::new);
+    let mut again = use_signal(String::new);
+    let mut refused = use_signal(|| None::<DashboardError>);
+    let mismatch = !again().is_empty() && again() != new();
+    let complete = !new().is_empty() && again() == new() && (!set || !current().is_empty());
+    let (under_current, under_new) = match refused() {
+        Some(DashboardError::Refused(Refusal::WrongPassword)) => {
+            (Some("That is not the current password.".to_owned()), None)
+        }
+        Some(DashboardError::Refused(Refusal::PasswordShort)) => {
+            (None, Some("At least twelve characters.".to_owned()))
+        }
+        Some(other) => (None, Some(other.to_string())),
+        None => (None, None),
+    };
+
+    rsx! {
+        Card {
+            title: "Password",
+            note: if set {
+                "The one the dashboard is entered with. A session lasts a fortnight from its last use."
+            } else {
+                "None is set yet: the link printed where the daemon started signed you in. Set one now, and that link stops working."
+            },
+            info: "Hashed and sealed in the instance's file, never kept in the clear. Nothing is \
+                   asked of it but its length, because length is what makes guessing moot; \
+                   twelve characters is the least. Changing it signs nobody out.",
+            div { class: "flex flex-col gap-4",
+                if set {
+                    Field {
+                        label: "Current password",
+                        note: "The one set now.",
+                        problem: under_current,
+                        input {
+                            r#type: "password",
+                            autocomplete: "current-password",
+                            class: FIELD,
+                            value: "{current}",
+                            oninput: move |event| current.set(event.value()),
+                        }
+                    }
+                }
+                Field {
+                    label: "New password",
+                    note: "At least twelve characters, and nothing else is asked of it.",
+                    problem: under_new,
+                    input {
+                        r#type: "password",
+                        autocomplete: "new-password",
+                        class: FIELD,
+                        value: "{new}",
+                        oninput: move |event| new.set(event.value()),
+                    }
+                }
+                Field {
+                    label: "Again",
+                    note: "The same, once more.",
+                    problem: mismatch.then(|| "That is not the same password.".to_owned()),
+                    input {
+                        r#type: "password",
+                        autocomplete: "new-password",
+                        class: FIELD,
+                        value: "{again}",
+                        oninput: move |event| again.set(event.value()),
+                    }
+                }
+                div {
+                    Button {
+                        disabled: !complete,
+                        onclick: move |_| {
+                            spawn(async move {
+                                match set_password(current(), new()).await {
+                                    Ok(fresh) => {
+                                        refused.set(None);
+                                        current.set(String::new());
+                                        new.set(String::new());
+                                        again.set(String::new());
+                                        onchanged.call(Ok(fresh));
+                                    }
+                                    Err(why) => refused.set(Some(why)),
+                                }
+                            });
+                        },
+                        if set { "Change the password" } else { "Set the password" }
+                    }
+                }
             }
         }
     }

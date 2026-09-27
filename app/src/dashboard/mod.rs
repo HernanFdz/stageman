@@ -49,7 +49,7 @@ mod status_view;
 
 use dioxus::prelude::*;
 
-use crate::ui::{THEME_SCRIPT, ThemeToggle};
+use crate::ui::{Button, ButtonVariant, THEME_SCRIPT, ThemeToggle};
 
 pub use agents_view::{Agent, AgentsView};
 pub use error::{DashboardError, DashboardResult};
@@ -237,6 +237,12 @@ pub fn Shell() -> Element {
                     div { class: "ml-auto flex items-center gap-4 self-center",
                         LiveMark { live }
                         ThemeToggle {}
+                        // A post to a path the instance answers itself, since
+                        // a server function's answer cannot clear a cookie —
+                        // see `docs/decisions/0084-the-instance-authenticates-itself.md`.
+                        form { method: "post", action: "/logout", class: "flex",
+                            Button { variant: ButtonVariant::Secondary, r#type: "submit", "Sign out" }
+                        }
                     }
                 }
             }

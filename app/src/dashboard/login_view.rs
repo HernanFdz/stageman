@@ -35,6 +35,23 @@ pub fn LoginView(said: String, back: String) -> Element {
         "wait" => Some("Too many tries in a row. Wait a moment, then try again.".to_owned()),
         _ => None,
     };
+    // No password is set, so there is nothing to type: the one way in is
+    // the link printed where the daemon started, which signs a browser in
+    // and leads to the page that sets one.
+    if said == "none" {
+        return rsx! {
+            Head {}
+            main { class: "flex min-h-screen items-center justify-center bg-background px-6 font-sans text-foreground",
+                div { class: "flex w-full max-w-sm flex-col gap-3 rounded-lg border border-border bg-surface p-6",
+                    h1 { class: "text-base font-semibold tracking-tight", "stageman" }
+                    p { class: "text-sm text-muted-foreground",
+                        "No password is set yet. Open the link printed where the daemon started: it \
+                         signs you in, and the Instance page asks you to set one."
+                    }
+                }
+            }
+        };
+    }
 
     rsx! {
         Head {}
