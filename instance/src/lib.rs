@@ -64,7 +64,7 @@ pub use boot::{KeySource, PasswordSource};
 pub use file::LoadError;
 pub use paths::{DOMAIN_VARIABLE, KEY_VARIABLE, PASSWORD_VARIABLE, STATE_VARIABLE};
 pub use requests::{Request, Response};
-pub use session::{LOGIN_PATH, UP_PATH};
+pub use session::{ENTER_PREFIX, ENTRY_PATH, LOGIN_PATH, UP_PATH};
 /// Which platform this build was made for, handed to [`Instance::boot`].
 ///
 /// The agent crate's, because that is where what a platform means is known:
@@ -679,6 +679,12 @@ pub struct Running {
     /// What wrong passwords have earned each address, until each wait is
     /// over.
     failures: BTreeMap<String, session::Failing>,
+    /// The sessions for jobs' hosts, by the value each cookie carries:
+    /// whose host, and when each lapses unless used before then.
+    entered: BTreeMap<String, session::Entered>,
+    /// Grants the apex minted for jobs' hosts, by token, until each host
+    /// takes its own or it lapses.
+    grants: BTreeMap<String, session::Grant>,
     /// Whether this step changed what is kept.
     dirty: bool,
     /// Effects of this step held back until the write lands.
@@ -784,6 +790,8 @@ impl Running {
             logins: BTreeMap::new(),
             deriving: BTreeMap::new(),
             failures: BTreeMap::new(),
+            entered: BTreeMap::new(),
+            grants: BTreeMap::new(),
             listeners: BTreeMap::new(),
             sockets: BTreeMap::new(),
             draining: BTreeSet::new(),

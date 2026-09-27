@@ -350,7 +350,15 @@ impl crate::Running {
                 );
                 Self::nobody(id, effects);
             }
-            Routed::Job(job) => self.tunnel_asked(id, job, effects),
+            // A job's host is entered through the apex, per the same record:
+            // with a session for that host the request goes on to the
+            // tunnel, and without one the browser is sent to be granted one.
+            Routed::Job(job) => {
+                if self.gate_tunnel(id, &job, request, effects) {
+                    return;
+                }
+                self.tunnel_asked(id, job, effects);
+            }
         }
     }
 
@@ -363,6 +371,9 @@ impl crate::Running {
             answer: Answer::Proxy {
                 port: self.presenting,
                 refused: Bytes::new(DASHBOARD_SILENT.as_bytes().to_vec()),
+                // The framework is this process's own, and reads none of
+                // them; nothing is kept from it.
+                strip: Vec::new(),
             },
         });
     }
@@ -375,6 +386,11 @@ impl crate::Running {
                 answer: Answer::Proxy {
                     port,
                     refused: Bytes::new(SHOWING_NOTHING.as_bytes().to_vec()),
+                    // Whatever a job left listening is somebody else's, and
+                    // a session a person presented to this instance never
+                    // reaches it — see
+                    // `docs/decisions/0084-the-instance-authenticates-itself.md`.
+                    strip: crate::session::stripped(),
                 },
             }),
             None => Self::nobody(id, effects),

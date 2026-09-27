@@ -320,6 +320,8 @@ pub struct Simulation {
     landing: VecDeque<Option<(PathBuf, Vec<u8>)>>,
     /// The headers of every answer given at the door, by request.
     headers: BTreeMap<Asked, BTreeMap<String, String>>,
+    /// The cookies every forwarded request was stripped of, by request.
+    strips: BTreeMap<Asked, Vec<String>>,
     /// Whether a container runtime is installed.
     has_runtime: bool,
     /// Everything printed to standard output, in order.
@@ -814,6 +816,7 @@ impl Simulation {
             files: BTreeMap::new(),
             landing: VecDeque::new(),
             headers: BTreeMap::new(),
+            strips: BTreeMap::new(),
             has_runtime: true,
             printed: Vec::new(),
             exited: None,
@@ -1129,9 +1132,9 @@ impl Simulation {
                 };
                 self.schedule(self.now, Event::Body { id, outcome });
             }
-            // Nothing is forwarded yet: the tunnel is the next family.
-            Answering::Proxy { port, .. } => {
+            Answering::Proxy { port, strip, .. } => {
                 self.routes.insert(id, Sent::To(port));
+                self.strips.insert(id, strip);
             }
         }
     }
@@ -1170,10 +1173,36 @@ impl Simulation {
         )
     }
 
+    /// Says a browser made a request on the dashboard's listener with
+    /// exactly the headers given, host included: how a job's host is
+    /// visited, since that is a name under the domain rather than the apex.
+    pub fn browses_on(
+        &mut self,
+        at: Now,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+    ) -> Asked {
+        self.arriving(
+            self.listener(false),
+            at,
+            method,
+            path,
+            headers,
+            "127.0.0.1:50000",
+            "",
+        )
+    }
+
     /// The status one request at the door was answered with, if it was
     /// answered rather than forwarded.
     pub fn status(&self, id: Asked) -> Option<u16> {
         self.tool_answers.get(&id).map(|(status, _)| *status)
+    }
+
+    /// The cookies one forwarded request was stripped of.
+    pub fn stripped(&self, id: Asked) -> Option<&[String]> {
+        self.strips.get(&id).map(Vec::as_slice)
     }
 
     /// One header of the answer to one request at the door.

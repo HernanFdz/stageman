@@ -338,6 +338,8 @@
             "logins": [],
             "deriving": [],
             "failures": {},
+            "entered": {},
+            "grants": {},
             "password_source": "none — the dashboard is open until STAGEMAN_PASSWORD sets one"
           }
         },

@@ -113,6 +113,11 @@ pub enum Answer {
         /// refusal. Carried rather than composed here, because what it
         /// means for nothing to answer is the deciding half's to know.
         refused: Bytes,
+        /// Cookies to remove from the request before it is forwarded, by
+        /// name. What a person presented to the deciding half is its own,
+        /// and whatever answers behind the port is somebody else's — see
+        /// `docs/decisions/0084-the-instance-authenticates-itself.md`.
+        strip: Vec<String>,
     },
     /// Read its body and hand it back, then ask again.
     ///
@@ -1186,6 +1191,7 @@ mod tests {
                 answer: Answer::Proxy {
                     port: 8080,
                     refused: Bytes::new(b"nothing there".to_vec()),
+                    strip: vec!["session".to_owned()],
                 },
             },
             Effect::Answer {

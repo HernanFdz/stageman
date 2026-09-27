@@ -490,9 +490,9 @@ and wrong within a day.
   hosted instance faces the Internet before anything else in
   `docs/decisions/0083-hosting-is-one-instance-per-customer.md` can be tried,
   and because the setup link is the first-run story `README.md` has wanted.
-  The door's login, the hashing effect, the sealed field and the password
-  set from the environment are built; what remains, in chunks: a job's host
-  entered through the apex and the proxy's strip list; the first run
+  The door's login, the hashing effect, the sealed field, the password set
+  from the environment, and a job's host entered through the apex with the
+  proxy's strip list are built; what remains, in chunks: the first run
   printing the one-time link, which is what closes the door on an instance
   with no password; and the Instance page's change-password control and a
   sign-out, with the README's paragraph made whole.

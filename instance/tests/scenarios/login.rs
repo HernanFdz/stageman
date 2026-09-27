@@ -3,10 +3,11 @@
 //! performs, and bought as a session a restart forgets — see
 //! `docs/decisions/0084-the-instance-authenticates-itself.md`.
 
-use stageman_instance::{Instance, LOGIN_PATH, PASSWORD_VARIABLE, UP_PATH};
+use stageman_core::{Outcome, Progress};
+use stageman_instance::{ENTRY_PATH, Instance, LOGIN_PATH, PASSWORD_VARIABLE, UP_PATH};
 use stageman_vocabulary::{Environment, Now, RequestId};
 
-use crate::simulation::{Sent, Simulation, seed};
+use crate::simulation::{Sent, Simulation, job, seed, tunnel_host, watching};
 
 /// The environment of a start that names a password.
 fn with_a_password(password: &str) -> Environment {
@@ -222,4 +223,242 @@ fn the_login_never_sends_a_browser_to_another_host() {
         "%2F%2Fevil.example%2F",
     );
     assert_eq!(sim.header(elsewhere, "location"), Some("/"));
+}
+
+/// Visits a job's host with the headers given, and runs until answered.
+fn visits_job(
+    sim: &mut Simulation,
+    instance: &mut Instance,
+    which: u128,
+    path: &str,
+    headers: &[(&str, &str)],
+) -> RequestId {
+    let now = sim.now();
+    let host = tunnel_host(&job(which));
+    let mut with_host = vec![("host", host.as_str())];
+    with_host.extend_from_slice(headers);
+    let id = sim.browses_on(now, "GET", path, &with_host);
+    sim.run_until(instance, now + 5);
+    id
+}
+
+/// A job's host is entered through the apex: a visit without a session is
+/// sent to the apex to be granted one, the apex grants it to somebody
+/// signed in and sends the browser to the host's own entry with a token,
+/// the entry spends the token for a session of the host's own, and every
+/// forwarded request is stripped of the cookies of this instance's.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one walk from the cold visit to the stripped forward and every refusal after, \
+              and splitting it would set the host up three times to say the same thing"
+)]
+fn a_jobs_host_is_entered_through_the_apex() {
+    let mut sim = Simulation::new();
+    sim.holding(&watching(&[
+        (job(1), Progress::Working),
+        (job(2), Progress::Working),
+        (job(3), Progress::Retired(Outcome::Done)),
+    ]));
+    for which in [1, 2] {
+        let (name, held) = Simulation::ours(&stageman_job::container(&job(which)));
+        sim.container(&name, held);
+    }
+    let mut instance = started(&mut sim, with_a_password("correct horse"));
+    let port = sim
+        .port_of(&stageman_job::container(&job(1)))
+        .expect("resumed, so running on a port");
+
+    // Without a session for the host, the browser is sent to the apex,
+    // carrying where it was going.
+    let cold = visits_job(&mut sim, &mut instance, 1, "/page?x=1", &[]);
+    assert_eq!(sim.status(cold), Some(303));
+    let entry = format!(
+        "http://localhost:8080/enter/{}?back=%2Fpage%3Fx%3D1",
+        job(1)
+    );
+    assert_eq!(sim.header(cold, "location"), Some(entry.as_str()));
+
+    // The apex asks for its own session first, then grants one for the
+    // host and sends the browser to the host's entry with a token.
+    let now = sim.now();
+    let path = format!("/enter/{}?back=%2Fpage%3Fx%3D1", job(1));
+    let unsigned = sim.browses(now, "GET", &path, &[], "");
+    sim.run_until(&mut instance, now);
+    assert_eq!(sim.status(unsigned), Some(303));
+    assert!(
+        sim.header(unsigned, "location")
+            .is_some_and(|to| to.starts_with("/login?back=")),
+        "the apex's own login first"
+    );
+    let now = sim.now();
+    let right = logs_in(&mut sim, &mut instance, now, "correct+horse", "");
+    let cookie = cookie_of(&sim, right);
+    let now = sim.now();
+    let granted = sim.browses(now, "GET", &path, &[("cookie", &cookie)], "");
+    sim.run_until(&mut instance, now);
+    assert_eq!(sim.status(granted), Some(303));
+    let to = sim
+        .header(granted, "location")
+        .expect("sent to the host")
+        .to_owned();
+    let prefix = format!("http://{}:8080{ENTRY_PATH}?t=", tunnel_host(&job(1)));
+    assert!(to.starts_with(&prefix), "{to}");
+    let token = to.strip_prefix(&prefix).expect("a token").to_owned();
+
+    // The host's entry spends the token for a session of its own, and
+    // sends the browser where it was going.
+    let entered = visits_job(
+        &mut sim,
+        &mut instance,
+        1,
+        &format!("{ENTRY_PATH}?t={token}"),
+        &[],
+    );
+    assert_eq!(sim.status(entered), Some(303));
+    assert_eq!(sim.header(entered, "location"), Some("/page?x=1"));
+    let set = sim
+        .header(entered, "set-cookie")
+        .expect("a session for the host");
+    assert!(
+        set.starts_with("stageman_tunnel=") && set.ends_with("; Path=/; HttpOnly; SameSite=Lax"),
+        "{set}"
+    );
+    let tunnel_cookie = set
+        .split_once(';')
+        .map(|(pair, _)| pair.to_owned())
+        .expect("a pair");
+
+    // With it, the request is forwarded to the container, stripped of every
+    // cookie of this instance's and of nothing else.
+    let warm = visits_job(
+        &mut sim,
+        &mut instance,
+        1,
+        "/page?x=1",
+        &[("cookie", &tunnel_cookie)],
+    );
+    assert_eq!(sim.route(warm), Some(Sent::To(port)));
+    let stripped = sim.stripped(warm).expect("forwarded with a strip list");
+    assert!(
+        stripped.iter().any(|name| name == "stageman_tunnel"),
+        "{stripped:?}"
+    );
+    assert!(
+        stripped
+            .iter()
+            .any(|name| name == "__Host-stageman_session"),
+        "{stripped:?}"
+    );
+
+    // A token is spent once, and the host sends the browser back to the
+    // apex for another rather than refusing outright.
+    let spent = visits_job(
+        &mut sim,
+        &mut instance,
+        1,
+        &format!("{ENTRY_PATH}?t={token}"),
+        &[],
+    );
+    assert_eq!(sim.status(spent), Some(303));
+    assert!(
+        sim.header(spent, "location")
+            .is_some_and(|to| to.starts_with("http://localhost:8080/enter/")),
+        "back to the apex"
+    );
+
+    // A session for one host opens no other, and a grant for one host is
+    // refused at another's entry.
+    let elsewhere = visits_job(
+        &mut sim,
+        &mut instance,
+        2,
+        "/",
+        &[("cookie", &tunnel_cookie)],
+    );
+    assert_eq!(sim.status(elsewhere), Some(303), "another host's session");
+    let now = sim.now();
+    let for_one = sim.browses(
+        now,
+        "GET",
+        &format!("/enter/{}", job(1)),
+        &[("cookie", &cookie)],
+        "",
+    );
+    sim.run_until(&mut instance, now);
+    let to = sim.header(for_one, "location").expect("granted").to_owned();
+    let token = to
+        .rsplit_once("?t=")
+        .map(|(_, token)| token.to_owned())
+        .expect("a token");
+    let misused = visits_job(
+        &mut sim,
+        &mut instance,
+        2,
+        &format!("{ENTRY_PATH}?t={token}"),
+        &[],
+    );
+    assert_eq!(sim.status(misused), Some(303));
+    assert!(
+        sim.header(misused, "location")
+            .is_some_and(|to| to.starts_with("http://localhost:8080/enter/")),
+        "another host's grant buys nothing here"
+    );
+
+    // A job that is over has no host to enter.
+    let now = sim.now();
+    let over = sim.browses(
+        now,
+        "GET",
+        &format!("/enter/{}", job(3)),
+        &[("cookie", &cookie)],
+        "",
+    );
+    let nobody = sim.browses(now, "GET", "/enter/not-a-name", &[("cookie", &cookie)], "");
+    sim.run_until(&mut instance, now);
+    assert_eq!(sim.status(over), Some(404));
+    assert_eq!(sim.status(nobody), Some(404));
+}
+
+/// A grant lapses a minute after it was minted.
+#[test]
+fn a_grant_lapses_after_a_minute() {
+    let mut sim = Simulation::new();
+    sim.holding(&watching(&[(job(1), Progress::Working)]));
+    let (name, held) = Simulation::ours(&stageman_job::container(&job(1)));
+    sim.container(&name, held);
+    let mut instance = started(&mut sim, with_a_password("correct horse"));
+    let now = sim.now();
+    let right = logs_in(&mut sim, &mut instance, now, "correct+horse", "");
+    let cookie = cookie_of(&sim, right);
+    let now = sim.now();
+    let granted = sim.browses(
+        now,
+        "GET",
+        &format!("/enter/{}", job(1)),
+        &[("cookie", &cookie)],
+        "",
+    );
+    sim.run_until(&mut instance, now);
+    let to = sim.header(granted, "location").expect("granted").to_owned();
+    let token = to
+        .rsplit_once("?t=")
+        .map(|(_, token)| token.to_owned())
+        .expect("a token");
+
+    let late = sim.now() + 61_000;
+    let host = tunnel_host(&job(1));
+    let lapsed = sim.browses_on(
+        late,
+        "GET",
+        &format!("{ENTRY_PATH}?t={token}"),
+        &[("host", &host)],
+    );
+    sim.run_until(&mut instance, late + 5);
+    assert_eq!(sim.status(lapsed), Some(303));
+    assert!(
+        sim.header(lapsed, "location")
+            .is_some_and(|to| to.starts_with("http://localhost:8080/enter/")),
+        "lapsed, so back to the apex"
+    );
 }

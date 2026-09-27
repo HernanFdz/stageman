@@ -1052,8 +1052,12 @@ async fn asked<A: App>(
                 headers,
                 body,
             } => return responded(status, &headers, &body),
-            Answer::Proxy { port, refused } => {
-                return relayed(port, &refused, parts, body).await;
+            Answer::Proxy {
+                port,
+                refused,
+                strip,
+            } => {
+                return relayed(port, &refused, &strip, parts, body).await;
             }
             Answer::Read { limit } => {
                 let (outcome, read) = taken(body, limit).await;
@@ -1162,6 +1166,7 @@ fn nobody(said: &Bytes) -> hyper::Response<Sent> {
 async fn relayed(
     port: u16,
     refused: &Bytes,
+    strip: &[String],
     mut parts: hyper::http::request::Parts,
     body: Waiting,
 ) -> hyper::Response<Sent> {
@@ -1171,6 +1176,23 @@ async fn relayed(
     // decoded, and the client re-derives it from what it is given. Left in
     // place, the two disagree and the request is refused.
     parts.headers.remove(hyper::header::TRANSFER_ENCODING);
+    // The cookies the deciding half named are its own and go no further;
+    // whatever else the browser sent belongs to what answers behind the
+    // port, and is forwarded as it came.
+    if !strip.is_empty() {
+        let presented: Vec<String> = parts
+            .headers
+            .get_all(hyper::header::COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok().map(str::to_owned))
+            .collect();
+        parts.headers.remove(hyper::header::COOKIE);
+        if let Some(kept) = kept_cookies(&presented.join("; "), strip)
+            && let Ok(value) = hyper::header::HeaderValue::from_str(&kept)
+        {
+            parts.headers.insert(hyper::header::COOKIE, value);
+        }
+    }
 
     let stream = match tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).await {
         Ok(stream) => stream,
@@ -1232,6 +1254,22 @@ async fn relayed(
     response.map(|body| body.map_err(BoxedError::from).boxed())
 }
 
+/// A cookie header with the named cookies removed, or nothing when none
+/// remain: a pure function of the header, so that what is forwarded can be
+/// pinned without a connection.
+fn kept_cookies(header: &str, strip: &[String]) -> Option<String> {
+    let kept: Vec<&str> = header
+        .split(';')
+        .map(str::trim)
+        .filter(|pair| !pair.is_empty())
+        .filter(|pair| {
+            let name = pair.split_once('=').map_or(*pair, |(name, _)| name).trim();
+            !strip.iter().any(|stripped| stripped == name)
+        })
+        .collect();
+    (!kept.is_empty()).then(|| kept.join("; "))
+}
+
 /// Whatever a response carries, however it was made.
 type Sent = http_body_util::combinators::BoxBody<bytes::Bytes, BoxedError>;
 
@@ -1261,7 +1299,7 @@ mod tests {
     };
 
     use super::{
-        Answer, Bytes, Effect, Event, Perform, World, chained, derive, read, write,
+        Answer, Bytes, Effect, Event, Perform, World, chained, derive, kept_cookies, read, write,
         write_atomically,
     };
 
@@ -1279,6 +1317,27 @@ mod tests {
     impl App for Nothing {
         type Event = Self;
         type Effect = Self;
+    }
+
+    /// The cookies the deciding half names are removed and every other is
+    /// forwarded as it came; a header left with nothing is no header.
+    #[test]
+    fn the_named_cookies_are_stripped_and_the_rest_forwarded() {
+        let strip = [
+            "stageman_tunnel".to_owned(),
+            "__Host-stageman_session".to_owned(),
+        ];
+        assert_eq!(
+            kept_cookies("theirs=1; stageman_tunnel=abc; more = 2", &strip).as_deref(),
+            Some("theirs=1; more = 2")
+        );
+        assert_eq!(kept_cookies("stageman_tunnel=abc", &strip), None);
+        assert_eq!(kept_cookies("", &strip), None);
+        assert_eq!(
+            kept_cookies("theirs=1", &[]).as_deref(),
+            Some("theirs=1"),
+            "nothing named, nothing removed"
+        );
     }
 
     /// A failure says every cause under it, outermost first, joined so that
@@ -1732,6 +1791,7 @@ mod tests {
                 answer: Answer::Proxy {
                     port: behind,
                     refused: Bytes::new(Vec::new()),
+                    strip: Vec::new(),
                 },
             },
         )
@@ -1826,6 +1886,7 @@ mod tests {
                 answer: Answer::Proxy {
                     port,
                     refused: Bytes::new(Vec::new()),
+                    strip: Vec::new(),
                 },
             },
         )
@@ -1875,6 +1936,7 @@ mod tests {
                 answer: Answer::Proxy {
                     port: empty,
                     refused: Bytes::new(b"nothing is showing".to_vec()),
+                    strip: Vec::new(),
                 },
             },
         )

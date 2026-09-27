@@ -376,6 +376,8 @@
             "logins": [],
             "deriving": [],
             "failures": {},
+            "entered": {},
+            "grants": {},
             "password_source": "set from STAGEMAN_PASSWORD"
           }
         },
@@ -593,7 +595,8 @@
                 "port": 9000,
                 "refused": {
                   "text": "The dashboard is not answering."
-                }
+                },
+                "strip": []
               }
             }
           }
@@ -626,7 +629,8 @@
                 "port": 9000,
                 "refused": {
                   "text": "The dashboard is not answering."
-                }
+                },
+                "strip": []
               }
             }
           }
@@ -659,7 +663,8 @@
                 "port": 9000,
                 "refused": {
                   "text": "The dashboard is not answering."
-                }
+                },
+                "strip": []
               }
             }
           }
@@ -1158,7 +1163,8 @@
                 "port": 9000,
                 "refused": {
                   "text": "The dashboard is not answering."
-                }
+                },
+                "strip": []
               }
             }
           }
@@ -1192,7 +1198,8 @@
                 "port": 9000,
                 "refused": {
                   "text": "The dashboard is not answering."
-                }
+                },
+                "strip": []
               }
             }
           }

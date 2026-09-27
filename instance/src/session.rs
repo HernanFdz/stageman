@@ -19,10 +19,11 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
-use stageman_core::Secret;
+use stageman_core::{JobId, Progress, Secret};
 use stageman_vocabulary::{Answer, Arrival, Bytes, Effect as Generic, EffectId, Now, RequestId};
 
 use crate::Effect;
+use crate::tunnel::{address, dashboard};
 
 /// Memory the derivation uses, in kibibytes: nineteen mebibytes, which is
 /// the first of the parameter sets the function's own guidance recommends.
@@ -52,6 +53,27 @@ pub const LOGIN_PATH: &str = "/login";
 /// The one path that answers without a session: whether the instance is
 /// up, for whatever supervises it, and nothing else.
 pub const UP_PATH: &str = "/up";
+
+/// Where the apex grants entry to a job's host, the job's name after it.
+///
+/// The one place a session for a job's host is bought, since a cookie sent
+/// to one host is not sent to another — see
+/// `docs/decisions/0084-the-instance-authenticates-itself.md`.
+pub const ENTER_PREFIX: &str = "/enter/";
+
+/// Where a job's host takes the grant the apex minted and sets its own
+/// cookie.
+///
+/// A path of the instance's own on a host that otherwise serves whatever a
+/// job put there, dotted so that nothing a job serves is likely to sit
+/// under it.
+pub const ENTRY_PATH: &str = "/.stageman/enter";
+
+/// How long a grant is good for, in milliseconds.
+///
+/// Long enough for one redirect to land, and no longer, since it travels
+/// in an address.
+pub const GRANT_LIFETIME: Now = 60_000;
 
 /// What the framework serves that the login page needs: its assets, and the
 /// browser's half. Two prefixes, both the framework's, so that a session is
@@ -197,6 +219,26 @@ pub struct Deriving {
     pub expected: Vec<u8>,
 }
 
+/// A session for one job's host, bought through the apex.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Entered {
+    /// Whose host.
+    pub job: JobId,
+    /// When it lapses unless used before then.
+    pub expires: Now,
+}
+
+/// A grant the apex minted for one job's host, until the host takes it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Grant {
+    /// Whose host.
+    pub job: JobId,
+    /// Where the person was going on it.
+    pub back: Option<String>,
+    /// When it is no longer good.
+    pub expires: Now,
+}
+
 /// What wrong passwords from one address have earned it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Failing {
@@ -221,18 +263,42 @@ pub const fn cookie_name(local: bool) -> &'static str {
     }
 }
 
-/// The header that sets the cookie for one session.
-fn set_cookie(local: bool, session: &str) -> String {
-    let secure = if local { "" } else { "; Secure" };
-    format!(
-        "{}={session}; Path=/; HttpOnly; SameSite=Lax{secure}",
-        cookie_name(local)
-    )
+/// The cookie a job's host is entered with: a session of its own, since a
+/// cookie sent to one host is not sent to another, prefixed and Secure on
+/// the same terms as the apex's.
+#[must_use]
+pub const fn tunnel_cookie_name(local: bool) -> &'static str {
+    if local {
+        "stageman_tunnel"
+    } else {
+        "__Host-stageman_tunnel"
+    }
 }
 
-/// The session a request presents, if it presents one.
-fn presented(request: &Arrival, local: bool) -> Option<&str> {
-    let name = cookie_name(local);
+/// Every cookie name of this instance's, in both spellings, which is what a
+/// request forwarded to a container is stripped of: what a person presented
+/// to this instance is this instance's, and never a job's to read.
+#[must_use]
+pub fn stripped() -> Vec<String> {
+    [
+        cookie_name(true),
+        cookie_name(false),
+        tunnel_cookie_name(true),
+        tunnel_cookie_name(false),
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+/// The header that sets a cookie for one session, on this host alone.
+fn set_cookie(name: &str, local: bool, session: &str) -> String {
+    let secure = if local { "" } else { "; Secure" };
+    format!("{name}={session}; Path=/; HttpOnly; SameSite=Lax{secure}")
+}
+
+/// The cookie a request presents under a name, if it presents one.
+fn presented<'a>(request: &'a Arrival, name: &str) -> Option<&'a str> {
     request
         .headers
         .get("cookie")?
@@ -391,7 +457,7 @@ impl crate::Running {
     /// session to show. False means the request goes on to what the door
     /// did before: the instance's own paths, and then the pages.
     pub fn gate(&mut self, id: RequestId, request: &Arrival, effects: &mut Vec<Effect>) -> bool {
-        let (path, _) = request.path.split_once('?').unwrap_or((&request.path, ""));
+        let (path, query) = request.path.split_once('?').unwrap_or((&request.path, ""));
         let local = self.domain.is_local();
         match (request.method.as_str(), path) {
             ("GET" | "HEAD", UP_PATH) => {
@@ -425,24 +491,149 @@ impl crate::Running {
             // No password set means no door yet: the first run sets one, and
             // until then the dashboard is what it always was.
             _ if self.state.password.is_none() => false,
-            _ if self.session_presented(request, local) => false,
-            _ if path.starts_with(API_PREFIX) => {
-                Self::answer_now(id, 401, &[], "Sign in to the dashboard first.\n", effects);
+            _ if !self.session_presented(request, local) => {
+                if path.starts_with(API_PREFIX) {
+                    Self::answer_now(id, 401, &[], "Sign in to the dashboard first.\n", effects);
+                } else {
+                    let page = login_page(None, back_of(request).as_deref());
+                    Self::answer_now(id, 303, &[("location", &page)], "", effects);
+                }
                 true
             }
-            _ => {
-                let page = login_page(None, back_of(request).as_deref());
-                Self::answer_now(id, 303, &[("location", &page)], "", effects);
+            _ if let Some(named) = path.strip_prefix(ENTER_PREFIX) => {
+                self.entry_granted(id, named, query, effects);
                 true
             }
+            _ => false,
         }
+    }
+
+    /// Somebody signed in on the apex asked to enter a job's host: a grant
+    /// is minted for that host, good for one redirect, and the browser is
+    /// sent there with it.
+    fn entry_granted(
+        &mut self,
+        id: RequestId,
+        named: &str,
+        query: &str,
+        effects: &mut Vec<Effect>,
+    ) {
+        let job = JobId::parse(named).ok();
+        let showing = job
+            .as_ref()
+            .and_then(|job| self.state.job(job))
+            .is_some_and(|recorded| !matches!(recorded.progress, Progress::Retired(_)));
+        let (Some(job), true) = (job, showing) else {
+            Self::answer_now(id, 404, &[], "No job answers on this address.\n", effects);
+            return;
+        };
+        let back = form_field(query, "back").filter(|back| !back.is_empty());
+        self.grants.retain(|_, grant| grant.expires > self.now);
+        let token = self.unguessable();
+        self.grants.insert(
+            token.clone(),
+            Grant {
+                job: job.clone(),
+                back,
+                expires: self.now.saturating_add(GRANT_LIFETIME), // CLAMP-OK: past the end of time is the end of time
+            },
+        );
+        let entry = format!(
+            "{}{ENTRY_PATH}?t={token}",
+            address(&self.domain, &job, self.serving)
+        );
+        Self::answer_now(id, 303, &[("location", &entry)], "", effects);
+    }
+
+    /// Decides at a job's host whether a request may go on to the tunnel:
+    /// with a session for that host, yes; at the entry path, with a grant
+    /// the apex minted for that host, a session is set and the browser sent
+    /// on; otherwise the browser is sent to the apex to be granted one.
+    /// False means the request goes on to the tunnel.
+    pub fn gate_tunnel(
+        &mut self,
+        id: RequestId,
+        job: &JobId,
+        request: &Arrival,
+        effects: &mut Vec<Effect>,
+    ) -> bool {
+        if self.state.password.is_none() {
+            return false;
+        }
+        let (path, query) = request.path.split_once('?').unwrap_or((&request.path, ""));
+        let local = self.domain.is_local();
+        if path == ENTRY_PATH {
+            self.grants.retain(|_, grant| grant.expires > self.now);
+            let token = form_field(query, "t").unwrap_or_default();
+            let granted = self.grants.remove(&token).filter(|grant| grant.job == *job);
+            let Some(grant) = granted else {
+                // Spent, lapsed, or somebody else's: the apex mints another,
+                // and the person notices nothing but a moment.
+                let again = self.entry_of(job, None);
+                Self::answer_now(id, 303, &[("location", &again)], "", effects);
+                return true;
+            };
+            let session = self.unguessable();
+            self.entered.insert(
+                session.clone(),
+                Entered {
+                    job: job.clone(),
+                    expires: lapsing(self.now),
+                },
+            );
+            let cookie = set_cookie(tunnel_cookie_name(local), local, &session);
+            let page = destination(grant.back.as_deref());
+            Self::answer_now(
+                id,
+                303,
+                &[("location", &page), ("set-cookie", &cookie)],
+                "",
+                effects,
+            );
+            return true;
+        }
+        if self.tunnel_presented(request, job, local) {
+            return false;
+        }
+        let entry = self.entry_of(job, Some(&request.path));
+        Self::answer_now(id, 303, &[("location", &entry)], "", effects);
+        true
+    }
+
+    /// Where a browser is sent to be granted entry to a job's host: the
+    /// apex, which is where the session is.
+    fn entry_of(&self, job: &JobId, back: Option<&str>) -> String {
+        let mut entry = format!(
+            "{}{ENTER_PREFIX}{job}",
+            dashboard(&self.domain, self.reached)
+        );
+        if let Some(back) = back {
+            let _ = write!(entry, "?back={}", percent_encoded(back));
+        }
+        entry
+    }
+
+    /// Whether the request carries a session for this job's host that has
+    /// not lapsed, renewing it when it does.
+    fn tunnel_presented(&mut self, request: &Arrival, job: &JobId, local: bool) -> bool {
+        let Some(session) = presented(request, tunnel_cookie_name(local)) else {
+            return false;
+        };
+        let Some(entered) = self.entered.get_mut(session) else {
+            return false;
+        };
+        if entered.expires <= self.now || entered.job != *job {
+            return false;
+        }
+        entered.expires = lapsing(self.now);
+        true
     }
 
     /// Whether the request carries a session this instance minted and has
     /// not yet let lapse. A session that is presented is renewed, so that
     /// its lifetime runs from its last use.
     fn session_presented(&mut self, request: &Arrival, local: bool) -> bool {
-        let Some(session) = presented(request, local) else {
+        let Some(session) = presented(request, cookie_name(local)) else {
             return false;
         };
         let Some(expires) = self.sessions.get_mut(session) else {
@@ -558,7 +749,8 @@ impl crate::Running {
                 self.failures.remove(&address);
                 let session = self.unguessable();
                 self.sessions.insert(session.clone(), lapsing(self.now));
-                let cookie = set_cookie(self.domain.is_local(), &session);
+                let local = self.domain.is_local();
+                let cookie = set_cookie(cookie_name(local), local, &session);
                 let page = destination(deriving.back.as_deref());
                 Self::answer_now(
                     deriving.request,
@@ -722,20 +914,33 @@ mod tests {
         assert_eq!(cookie_name(true), "stageman_session");
         assert_eq!(cookie_name(false), "__Host-stageman_session");
         assert_eq!(
-            set_cookie(true, "abc"),
+            set_cookie(cookie_name(true), true, "abc"),
             "stageman_session=abc; Path=/; HttpOnly; SameSite=Lax"
         );
         assert_eq!(
-            set_cookie(false, "abc"),
+            set_cookie(cookie_name(false), false, "abc"),
             "__Host-stageman_session=abc; Path=/; HttpOnly; SameSite=Lax; Secure"
         );
         let several = arrival("/", Some("other=1; stageman_session=abc ; more=2"));
-        assert_eq!(super::presented(&several, true), Some("abc"));
-        assert_eq!(super::presented(&arrival("/", None), true), None);
+        assert_eq!(super::presented(&several, cookie_name(true)), Some("abc"));
         assert_eq!(
-            super::presented(&arrival("/", Some("stageman_session=abc")), false),
+            super::presented(&arrival("/", None), cookie_name(true)),
+            None
+        );
+        assert_eq!(
+            super::presented(
+                &arrival("/", Some("stageman_session=abc")),
+                cookie_name(false)
+            ),
             None,
             "a plain cookie is not the prefixed one"
+        );
+        assert_eq!(super::tunnel_cookie_name(true), "stageman_tunnel");
+        assert_eq!(super::tunnel_cookie_name(false), "__Host-stageman_tunnel");
+        assert_eq!(
+            super::stripped().len(),
+            4,
+            "every name of this instance's, both spellings"
         );
     }
 
