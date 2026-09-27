@@ -42,6 +42,7 @@ mod instance_view;
 mod job_view;
 mod jobs_view;
 mod live;
+mod login_view;
 mod project_settings_view;
 mod projects_view;
 mod status_view;
@@ -57,6 +58,7 @@ pub use instance_view::{Apps, InstanceView, PlatformAppView, Registration};
 pub use job_view::{JobPage, ProjectJobView};
 pub use jobs_view::{Job, ProjectJobsView, Standing, Working};
 pub use live::{Live, LiveMark};
+pub use login_view::LoginView;
 pub use project_settings_view::{ProjectNewView, ProjectSettingsView};
 pub use projects_view::{Choice, Fitted, KitDraft, ModelChoice, Project, ProjectsView, Shape};
 pub use status_view::{Instance, Status};
@@ -175,6 +177,13 @@ pub enum Route {
         // `docs/decisions/0070-the-dashboard-opens-on-what-needs-a-person.md`.
         #[route("/projects/:project/jobs/:job")]
         ProjectJobView { project: String, job: String },
+    #[end_layout]
+
+    // Outside the shell: a person with no session sees no navigation and
+    // opens no stream, since both read through routes that refuse them —
+    // see `docs/decisions/0084-the-instance-authenticates-itself.md`.
+    #[route("/login?:said&:back")]
+    LoginView { said: String, back: String },
 }
 
 /// The whole dashboard.
@@ -204,16 +213,7 @@ pub fn Shell() -> Element {
     live::use_live(live);
 
     rsx! {
-        document::Link { rel: "icon", r#type: "image/svg+xml", href: FAVICON }
-        // Told to the browser as well as decided by the script below, so that
-        // its own controls and scrollbars follow the look.
-        document::Meta { name: "color-scheme", content: "light dark" }
-        // Before the stylesheet, so the class the dark tokens hang off is on
-        // the root before the first rule applies, and a dark page is dark from
-        // its first frame — see
-        // `docs/decisions/0072-the-dashboard-has-a-dark-theme.md`.
-        document::Script { "{THEME_SCRIPT}" }
-        document::Stylesheet { href: STYLESHEET }
+        Head {}
         // A column as tall as the window, so the status line sits at its
         // foot whatever a page's height, rather than wherever the contents
         // happened to end.
@@ -245,6 +245,28 @@ pub fn Shell() -> Element {
             // of their own — see the same record.
             Status {}
         }
+    }
+}
+
+/// What every page puts in the document's head: the icon, the colour
+/// scheme, the theme script and the stylesheet.
+///
+/// Its own component because two roots need it — the shell every screen
+/// is drawn in, and the login page drawn outside it — and a head declared
+/// twice is a head that drifts.
+#[component]
+pub fn Head() -> Element {
+    rsx! {
+        document::Link { rel: "icon", r#type: "image/svg+xml", href: FAVICON }
+        // Told to the browser as well as decided by the script below, so that
+        // its own controls and scrollbars follow the look.
+        document::Meta { name: "color-scheme", content: "light dark" }
+        // Before the stylesheet, so the class the dark tokens hang off is on
+        // the root before the first rule applies, and a dark page is dark from
+        // its first frame — see
+        // `docs/decisions/0072-the-dashboard-has-a-dark-theme.md`.
+        document::Script { "{THEME_SCRIPT}" }
+        document::Stylesheet { href: STYLESHEET }
     }
 }
 

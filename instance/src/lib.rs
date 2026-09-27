@@ -36,6 +36,7 @@ mod paths;
 pub mod release;
 mod replies;
 mod requests;
+mod session;
 mod snapshot;
 mod sweep;
 mod threads;
@@ -61,8 +62,9 @@ use stageman_vocabulary::{Effect as Generic, EffectId, Environment, Finished, No
 
 pub use boot::KeySource;
 pub use file::LoadError;
-pub use paths::{DOMAIN_VARIABLE, KEY_VARIABLE, STATE_VARIABLE};
+pub use paths::{DOMAIN_VARIABLE, KEY_VARIABLE, PASSWORD_VARIABLE, STATE_VARIABLE};
 pub use requests::{Request, Response};
+pub use session::{LOGIN_PATH, UP_PATH};
 /// Which platform this build was made for, handed to [`Instance::boot`].
 ///
 /// The agent crate's, because that is where what a platform means is known:
@@ -659,6 +661,19 @@ pub struct Running {
     /// Sockets the platform said it would close, read until they do while
     /// their replacements are opened.
     draining: BTreeSet<EffectId>,
+    /// The sessions minted by logins, by the value each cookie carries: when
+    /// each lapses unless used before then. Held and never kept — see
+    /// `docs/decisions/0084-the-instance-authenticates-itself.md`.
+    sessions: BTreeMap<String, Now>,
+    /// Logins whose forms are being read, by the identifier the world holds
+    /// each open under.
+    logins: BTreeMap<stageman_vocabulary::RequestId, session::Login>,
+    /// Typed passwords being hashed for comparison, by the identifier the
+    /// answer carries.
+    deriving: BTreeMap<EffectId, session::Deriving>,
+    /// What wrong passwords have earned each address, until each wait is
+    /// over.
+    failures: BTreeMap<String, session::Failing>,
     /// Whether this step changed what is kept.
     dirty: bool,
     /// Effects of this step held back until the write lands.
@@ -758,6 +773,10 @@ impl Running {
             pending_threads: BTreeMap::new(),
             threads_read: BTreeMap::new(),
             timers: BTreeMap::new(),
+            sessions: BTreeMap::new(),
+            logins: BTreeMap::new(),
+            deriving: BTreeMap::new(),
+            failures: BTreeMap::new(),
             listeners: BTreeMap::new(),
             sockets: BTreeMap::new(),
             draining: BTreeSet::new(),
@@ -1063,7 +1082,16 @@ impl Running {
                 id,
                 request,
             } => self.arrived(listener, id, &request, &mut effects),
-            Event::Body { id, outcome } => self.read(id, outcome, &mut effects),
+            Event::Body { id, outcome } => {
+                if !self.login_read(id, &outcome, &mut effects) {
+                    self.read(id, outcome, &mut effects);
+                }
+            }
+            Event::Derived { id, derived } => {
+                if !self.derived(id, &derived, &mut effects) {
+                    tracing::warn!("a derivation was answered that nobody was waiting on; ignored");
+                }
+            }
             Event::Line { id, line } => self.line(id, &line, &mut effects),
             Event::Ended { id, ended } => self.process_ended(id, &ended, &mut effects),
             Event::Probed { id, probed } => self.probed(id, probed, &mut effects),

@@ -16,6 +16,11 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# Deriving bytes from a secret is a mechanism like running a process is: the
+# instance says which parameters and waits for the bytes, and this crate is
+# where the slow part runs, on a thread of its own. Argon2id, and only that:
+# which function is not a decision anybody makes twice.
+argon2 = "0.5.3"
 # Speaking HTTP is a mechanism like running a process is: this crate serves
 # what it is told to bind, hands each request's head to whoever is deciding,
 # and forwards one to a port when told to. None of it names a domain.

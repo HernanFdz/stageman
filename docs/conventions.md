@@ -625,6 +625,18 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   what the platform grants and this instance can only hold a record of.
   Not *integration*, refused under **channel** for describing plumbing,
   and the word the redesign began with.
+- **session** — a browser's standing with the instance: bought once with
+  the password at the door, carried as a cookie sent to one host, and held
+  rather than kept — minted from the one generator, lapsing a fortnight
+  after its last use, gone when the daemon restarts — see
+  `docs/decisions/0084-the-instance-authenticates-itself.md`. Not a
+  *login*, which is the act that buys one; not a *token*, refused under
+  **warrant** for naming three other things already; not an *account*,
+  which there is not: one password, no username, and nobody to tell apart.
+  The near-miss worth recording is the agent's *session*, the conversation
+  an adapter keeps in a container across turns, which this codebase names
+  in full wherever both could be meant.
+
 - **App** — what this instance owns on a platform: registered once, from
   the Instance page, by the platform's own flow, and kept sealed with its
   key; a project *installs* it on a repository rather than holding a
@@ -1196,6 +1208,19 @@ justify is usually obsolete.
   between groups than within them, and no divider inside a pair that is one
   decision — done or discarded is a verdict — since what needs parting is
   the pair from everything else.
+
+- **A session is a host-only cookie, and a job's host never sees it.** The
+  dashboard's cookie carries the `__Host-` prefix, Secure, HttpOnly and
+  SameSite Lax, so no page a job serves can set one the apex receives and a
+  cross-site form post carries none — and Lax rather than Strict, because
+  the platform landings are top-level navigations from another site and
+  Strict would strip the cookie exactly there. On a local domain the prefix
+  and Secure are dropped, since neither can hold without a certificate and
+  nothing stands between the browser and this process; the name and the
+  rules are otherwise the same. The password is checked by a derivation the
+  world performs, never inside a step: argon2 is slow by design, and a
+  flood of wrong passwords hashed in the loop would stall every turn behind
+  it. See `docs/decisions/0084-the-instance-authenticates-itself.md`.
 
 ## 4. Quality bar beyond the gate
 

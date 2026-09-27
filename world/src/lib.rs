@@ -268,6 +268,11 @@ pub fn run<D, P>(
 /// Performs one effect: a generic one as the mechanism it names, and one of
 /// the application's by handing it over.
 #[mutants::skip]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one arm per mechanism, and the mechanisms are the vocabulary: splitting the \
+              match would hide which effect reaches which performer"
+)]
 async fn perform<A: App, P: Perform<A>>(
     world: &Arc<World<A>>,
     performer: &Arc<P>,
@@ -341,6 +346,26 @@ async fn perform<A: App, P: Perform<A>>(
         Effect::Transmit { id, text } => world.transmit(id, text),
         Effect::Disconnect { id } => world.disconnect(id),
         Effect::Probe { id, port, within } => probing(world, id, port, within),
+        Effect::Derive {
+            id,
+            secret,
+            salt,
+            memory,
+            iterations,
+            parallelism,
+            length,
+        } => deriving(
+            world,
+            id,
+            Derivation {
+                secret,
+                salt,
+                memory,
+                iterations,
+                parallelism,
+                length,
+            },
+        ),
         Effect::Print { text } => {
             // Whoever started this process is reading here, and a reader
             // that has gone away is not a reason to stop: the write is
@@ -613,6 +638,66 @@ pub async fn probe(port: u16, within: Duration) -> Probed {
         Ok(Ok(_)) => Probed::Spoke,
         Err(_) => Probed::Silent,
     }
+}
+
+/// What one derivation is asked with, carried whole to the thread that
+/// performs it.
+struct Derivation {
+    secret: Bytes,
+    salt: Bytes,
+    memory: u32,
+    iterations: u32,
+    parallelism: u32,
+    length: u32,
+}
+
+/// Derives on a blocking thread, and says what came of it.
+#[mutants::skip]
+fn deriving<A: App>(world: &Arc<World<A>>, id: EffectId, asked: Derivation) {
+    let world = Arc::clone(world);
+    drop(tokio::spawn(async move {
+        let derived = tokio::task::spawn_blocking(move || {
+            derive(
+                asked.secret.as_slice(),
+                asked.salt.as_slice(),
+                asked.memory,
+                asked.iterations,
+                asked.parallelism,
+                asked.length,
+            )
+        })
+        .await
+        .unwrap_or_else(|why| Err(why.to_string()));
+        world.send(Event::Derived { id, derived });
+    }));
+}
+
+/// Derives bytes from a secret with argon2id, as [`Effect::Derive`] asks.
+///
+/// Refuses parameters the function refuses — a salt too short, memory too
+/// small for the lanes — as a reason rather than as a panic, because they
+/// are the deciding half's and a mistake there is its to hear about.
+fn derive(
+    secret: &[u8],
+    salt: &[u8],
+    memory: u32,
+    iterations: u32,
+    parallelism: u32,
+    length: u32,
+) -> Result<Bytes, String> {
+    let length = usize::try_from(length).map_err(|why| why.to_string())?;
+    let parameters = argon2::Params::new(memory, iterations, parallelism, Some(length))
+        .map_err(|why| why.to_string())?;
+    let function = argon2::Argon2::new(
+        argon2::Algorithm::Argon2id,
+        argon2::Version::V0x13,
+        parameters,
+    );
+    let mut derived = vec![0_u8; length];
+    function
+        .hash_password_into(secret, salt, &mut derived)
+        .map_err(|why| why.to_string())?;
+    Ok(Bytes::new(derived))
 }
 
 /// Reads a file whole, telling absent from unreadable.
@@ -1160,7 +1245,9 @@ mod tests {
         App, Disconnected, EffectId, Ended, Environment, Named, Probed, Responded,
     };
 
-    use super::{Answer, Bytes, Effect, Event, Perform, World, read, write, write_atomically};
+    use super::{
+        Answer, Bytes, Effect, Event, Perform, World, derive, read, write, write_atomically,
+    };
 
     /// An application that adds nothing, so what is tested here is the
     /// mechanisms and nothing of anybody's domain.
@@ -1176,6 +1263,34 @@ mod tests {
     impl App for Nothing {
         type Event = Self;
         type Effect = Self;
+    }
+
+    /// The same secret and salt derive the same bytes, a different salt
+    /// derives different ones, and a salt the function refuses is a reason
+    /// rather than a panic.
+    ///
+    /// Small parameters, because what is checked is that the mechanism is
+    /// wired and answers, not how slow it is: the cost is the deciding
+    /// half's to set.
+    #[test]
+    fn a_derivation_is_deterministic_and_refuses_what_the_function_refuses() {
+        let once = derive(b"correct horse", &[1; 16], 8, 1, 1, 32)
+            .expect("derives")
+            .into_inner();
+        let again = derive(b"correct horse", &[1; 16], 8, 1, 1, 32)
+            .expect("derives")
+            .into_inner();
+        assert_eq!(once, again);
+        assert_eq!(once.len(), 32);
+        let salted = derive(b"correct horse", &[2; 16], 8, 1, 1, 32)
+            .expect("derives")
+            .into_inner();
+        assert_ne!(once, salted);
+        let other = derive(b"battery staple", &[1; 16], 8, 1, 1, 32)
+            .expect("derives")
+            .into_inner();
+        assert_ne!(once, other);
+        assert!(derive(b"correct horse", &[1; 2], 8, 1, 1, 32).is_err());
     }
 
     /// Absent is an answer, and unreadable is a different one.

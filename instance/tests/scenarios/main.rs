@@ -24,6 +24,7 @@ mod foreman_room;
 mod inbox;
 mod installations;
 mod listening;
+mod login;
 mod notices;
 mod replies;
 mod shared_app;

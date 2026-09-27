@@ -18,6 +18,13 @@ Names below that this project does not yet define are unbackticked
 deliberately, for the reason 0042 gives: `just drift` resolves a backticked
 identifier against this source.
 
+Amended by its first chunk in one particular: on a local domain the cookie
+carries neither the prefix nor Secure, since there is no certificate for
+either to hold under and nothing stands between the browser and this
+process; the name is otherwise the same and the rules are. Every browser
+this was tried in accepts a Secure cookie on a loopback address, and one
+that did not would have made a laptop's dashboard impossible to enter.
+
 ## Context
 
 0042 spent the loopback default and answered the authentication question

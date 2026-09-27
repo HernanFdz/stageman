@@ -112,6 +112,26 @@ impl Serving {
         ))
     }
 
+    /// The whole of the response to one `POST` of a form, as a browser posts
+    /// one, headers included.
+    fn post_form(&self, path: &str, body: &str) -> String {
+        self.request(&format!(
+            "POST {path} HTTP/1.1\r\nHost: {}\r\n\
+             Content-Type: application/x-www-form-urlencoded\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            self.address,
+            body.len()
+        ))
+    }
+
+    /// The whole of the response to one `GET` carrying a cookie.
+    fn get_with_cookie(&self, path: &str, cookie: &str) -> String {
+        self.request(&format!(
+            "GET {path} HTTP/1.1\r\nHost: {}\r\nCookie: {cookie}\r\nConnection: close\r\n\r\n",
+            self.address
+        ))
+    }
+
     /// The whole of the response to one `GET`, headers included.
     ///
     /// Written by hand rather than with an HTTP client, because `Connection:
@@ -378,6 +398,7 @@ fn watching(name: &str, repository: &str) -> State {
     State {
         apps: std::collections::BTreeMap::new(),
         channel_apps: std::collections::BTreeMap::new(),
+        password: None,
         agents: BTreeMap::from([(
             Agent::Claude,
             AgentConfig {
@@ -762,6 +783,83 @@ fn the_route_the_page_reads_through_answers_on_its_own() {
 
     assert!(answer.contains("200 OK"), "{answer}");
     assert!(answer.contains("aviary"), "{answer}");
+}
+
+/// A password named at the first start puts the dashboard behind the login:
+/// a page is sent to it, a route is refused, the login page and the bundle
+/// are served, a wrong password is sent back saying so, the right one buys a
+/// session in a cookie, and the cookie opens what was refused — see
+/// `docs/decisions/0084-the-instance-authenticates-itself.md`.
+///
+/// Against the real binary rather than the simulation, because what is
+/// checked here is the door as a browser meets it: the framework serving
+/// the login page through the proxy, the form read at the door, and the
+/// cookie set on a real response.
+#[test]
+fn a_password_puts_the_dashboard_behind_the_login() {
+    let (_kept, snapshot) = scratch();
+    let watched = watching("aviary", "https://github.com/example/aviary");
+    written(&snapshot, &watched);
+
+    let running = serving(
+        &snapshot,
+        &[
+            ("STAGEMAN_KEY", KEY),
+            ("STAGEMAN_PASSWORD", "correct horse"),
+        ],
+    );
+
+    let page = running.get("/projects");
+    assert!(page.contains("303 See Other"), "{page}");
+    assert!(
+        page.to_ascii_lowercase()
+            .contains("location: /login?back=%2fprojects"),
+        "{page}"
+    );
+    let route = running.get("/api/home");
+    assert!(route.contains("401 Unauthorized"), "{route}");
+    let up = running.get("/up");
+    assert!(up.contains("200 OK"), "{up}");
+
+    let login = running.get("/login?said=wrong&back=%2Fprojects");
+    assert!(login.contains("200 OK"), "{login}");
+    assert!(login.contains(r#"name="password""#), "{login}");
+    assert!(login.contains("That is not the password."), "{login}");
+
+    let wrong = running.post_form("/login", "password=battery+staple&back=%2Fprojects");
+    assert!(wrong.contains("303 See Other"), "{wrong}");
+    assert!(
+        wrong
+            .to_ascii_lowercase()
+            .contains("location: /login?said=wrong&back=%2fprojects"),
+        "{wrong}"
+    );
+
+    // The wait a wrong password earns is a second, which is longer than
+    // this test takes to post again, so the right password waits it out.
+    std::thread::sleep(Duration::from_millis(1_100));
+    let right = running.post_form("/login", "password=correct+horse&back=%2Fprojects");
+    assert!(right.contains("303 See Other"), "{right}");
+    assert!(
+        right.to_ascii_lowercase().contains("location: /projects"),
+        "{right}"
+    );
+    let cookie = right
+        .lines()
+        .find_map(|line| {
+            line.to_ascii_lowercase()
+                .strip_prefix("set-cookie: ")
+                .map(|_| line.split_once(": ").map_or(line, |(_, value)| value))
+        })
+        .and_then(|set| set.split_once(';').map(|(pair, _)| pair.to_owned()))
+        .expect("a session was set");
+    assert!(cookie.starts_with("stageman_session="), "{cookie}");
+
+    let opened = running.get_with_cookie("/api/home", &cookie);
+    assert!(opened.contains("200 OK"), "{opened}");
+    assert!(opened.contains("aviary"), "{opened}");
+    let page = running.get_with_cookie("/projects", &cookie);
+    assert!(page.contains("200 OK"), "{page}");
 }
 
 /// `docs/conventions.md` §4 asks that secrets never render, and this is where
@@ -1272,6 +1370,7 @@ fn two_projects_each_with_a_job() -> (State, Vec<(JobId, &'static str, &'static 
     let mut state = State {
         apps: BTreeMap::new(),
         channel_apps: BTreeMap::new(),
+        password: None,
         agents: BTreeMap::from([(
             Agent::Claude,
             AgentConfig {

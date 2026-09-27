@@ -485,15 +485,17 @@ Intended next steps, in order, each with its reason. Written as intentions, not
 progress: "next X, because Y" — never "X is 60% done", which is both derivable
 and wrong within a day.
 
-- Next, the instance authenticates itself, per
+- Next, the rest of
   `docs/decisions/0084-the-instance-authenticates-itself.md`, because a
   hosted instance faces the Internet before anything else in
   `docs/decisions/0083-hosting-is-one-instance-per-customer.md` can be tried,
   and because the setup link is the first-run story `README.md` has wanted.
-  In chunks: the hashing effect, the sealed field and the door's login;
-  a job's host entered through the apex and the proxy's strip list; the
-  first run, from the variable and from the link; the Instance page's
-  change-password control and the README.
+  The door's login, the hashing effect, the sealed field and the password
+  set from the environment are built; what remains, in chunks: a job's host
+  entered through the apex and the proxy's strip list; the first run
+  printing the one-time link, which is what closes the door on an instance
+  with no password; and the Instance page's change-password control and a
+  sign-out, with the README's paragraph made whole.
 
 - Then the instance's apps held elsewhere, per
   `docs/decisions/0085-the-instances-apps-may-be-held-elsewhere.md`, Slack
