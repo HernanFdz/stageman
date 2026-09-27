@@ -9,6 +9,12 @@ authentication before it left `127.0.0.1` — that entry is removed in the same
 change. Read the consequences before the decision: who authenticates is the
 expensive half of this record, and the tunnel is the cheap one.
 
+Its authentication clause — that this project authenticates nothing and
+whatever forwards the domain does — is superseded by
+`docs/decisions/0084-the-instance-authenticates-itself.md`; the tunnel, the
+routing and the uniform rule that a job's host is protected exactly as the
+apex is all stand.
+
 Names below that this project does not yet define are unbackticked
 deliberately, for the reason
 `docs/decisions/0034-tools-are-served-not-shipped.md` gives about protocol

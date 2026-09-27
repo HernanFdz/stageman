@@ -24,6 +24,10 @@ else. Answers the open question on Slack's setup being one redirect, as far
 as the platform lets it be. Builds on
 `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`
 for the shape of an install that comes back under a state.
+Amended by `docs/decisions/0085-the-instances-apps-may-be-held-elsewhere.md`:
+the one connection per app-level token may be opened by whoever holds the
+app, and a project then listens through that holder's relay in this same
+protocol, with a stand-in presented where the app-level token is.
 
 ## Context
 

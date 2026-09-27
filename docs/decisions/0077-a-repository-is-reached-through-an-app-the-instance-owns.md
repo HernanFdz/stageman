@@ -30,6 +30,12 @@ repository is chosen from what the access reaches.
 The Slack app the decision below says the Instance page will hold is
 `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`'s.
 
+Amended by `docs/decisions/0085-the-instances-apps-may-be-held-elsewhere.md`:
+an App may be held elsewhere, with its key never on this machine and
+stand-ins in its place, and the rejection below of a public App owned by
+this project's maintainers is answered by that record for a key that is
+held elsewhere.
+
 ## Context
 
 Route 1 asks an operator to mint a token on the platform, scope it by
