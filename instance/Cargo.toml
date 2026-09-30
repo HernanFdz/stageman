@@ -35,6 +35,7 @@ stageman-core.workspace = true
 stageman-foreman.workspace = true
 stageman-job.workspace = true
 stageman-platform.workspace = true
+stageman-provider.workspace = true
 stageman-vocabulary.workspace = true
 stageman-wire.workspace = true
 thiserror = "2.0.20"

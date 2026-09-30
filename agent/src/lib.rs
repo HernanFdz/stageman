@@ -48,7 +48,8 @@ use sha2::{Digest as _, Sha256};
 #[cfg(test)]
 use stageman_core::Channel;
 use stageman_core::{
-    Agent, ClaudeEffort, ClaudeModel, Handout, InstanceId, Kit, Platform, Role, Secret, Uuid,
+    Agent, ClaudeEffort, ClaudeModel, ClaudePurse, Handout, InstanceId, Kit, Platform, Role,
+    Secret, Uuid,
 };
 use tokio::io::AsyncWriteExt as _;
 
@@ -765,10 +766,10 @@ pub(crate) const WORKSPACE: &str = "/workspace";
 /// Fails if a project's variable claims a name this project delivers itself,
 /// which would change who pays — `docs/decisions/0008-one-credential-per-agent.md`.
 pub fn environment(handout: &Handout) -> Result<Vec<(String, Secret)>, AgentError> {
-    let mut set: Vec<(String, Secret)> = vec![match handout.agent() {
-        Agent::Claude => (
-            claude_credential_variable(handout.agent_credential()).to_owned(),
-            handout.agent_credential().clone(),
+    let mut set: Vec<(String, Secret)> = vec![match handout.kit() {
+        Kit::Claude { purse, .. } => (
+            claude_purse_variable(*purse).to_owned(),
+            handout.purse().clone(),
         ),
     }];
 
@@ -852,24 +853,23 @@ pub const RESERVED: &[&str] = &[
 /// minted once, with the job, rather than per turn.
 pub const WARRANT_VARIABLE: &str = "STAGEMAN_WARRANT";
 
-/// Which variable this agent's credential belongs in.
+/// Which variable Claude reads each purse from.
 ///
 /// Two exist and they are not interchangeable, which was measured rather than
-/// assumed: an OAuth token placed in the API-key variable does not fail, it
-/// *hangs* — no error, no refusal, just a turn that never ends. A wrong answer
-/// that announces itself is cheap; this one costs however long you wait before
-/// suspecting the variable name.
+/// assumed: a subscription's token placed in the key's variable does not
+/// fail, it *hangs* — no error, no refusal, just a turn that never ends. A
+/// wrong answer that announces itself is cheap; this one costs however long
+/// you wait before suspecting the variable name.
 ///
-/// Sniffing the prefix rather than asking an operator which kind they have:
-/// the prefix is unambiguous, and
-/// `docs/decisions/0013-an-instance-is-configured-before-it-exists.md` already
-/// asks them for a credential on first run, where a second question about its
-/// species is friction with no better answer behind it.
-fn claude_credential_variable(credential: &Secret) -> &'static str {
-    if credential.expose().starts_with("sk-ant-oat") {
-        "CLAUDE_CODE_OAUTH_TOKEN"
-    } else {
-        "ANTHROPIC_API_KEY"
+/// Decided by which purse the kit charges rather than by the credential's
+/// first characters, since
+/// `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`: the kind is
+/// what the operator pasted into, and a credential whose shape belongs in
+/// the other box is refused where it was typed, before anything is kept.
+const fn claude_purse_variable(purse: ClaudePurse) -> &'static str {
+    match purse {
+        ClaudePurse::Key => "ANTHROPIC_API_KEY",
+        ClaudePurse::Subscription => "CLAUDE_CODE_OAUTH_TOKEN",
     }
 }
 
@@ -900,7 +900,7 @@ const MODE_OPTION: (&str, &str) = ("mode", "default");
 pub(crate) fn wired(kit: &Kit) -> Vec<(&'static str, &'static str)> {
     let mut set = vec![MODE_OPTION];
     match kit {
-        Kit::Claude { model } => {
+        Kit::Claude { model, .. } => {
             set.push(("model", claude_model(*model)));
             if let Some(effort) = model.effort() {
                 set.push(("effort", claude_effort(effort)));
@@ -2276,6 +2276,7 @@ mod tests {
     fn a_kit_is_spelled_mode_first_and_effort_only_where_there_is_one() {
         assert_eq!(
             wired(&Kit::Claude {
+                purse: ClaudePurse::Key,
                 model: ClaudeModel::Opus {
                     effort: ClaudeEffort::XHigh,
                 },
@@ -2284,12 +2285,13 @@ mod tests {
         );
         assert_eq!(
             wired(&Kit::Claude {
+                purse: ClaudePurse::Key,
                 model: ClaudeModel::Haiku
             }),
             vec![("mode", "default"), ("model", "haiku")],
         );
         assert_eq!(
-            wired(&Kit::defaults(Agent::Claude)),
+            wired(&a_kit()),
             vec![
                 ("mode", "default"),
                 ("model", "default"),
@@ -2668,6 +2670,7 @@ mod tests {
     /// Every kit the domain can spell for Claude.
     fn every_claude_kit() -> Vec<Kit> {
         let mut kits = vec![Kit::Claude {
+            purse: ClaudePurse::Key,
             model: ClaudeModel::Haiku,
         }];
         for effort in ClaudeEffort::ALL.iter().copied() {
@@ -2676,7 +2679,10 @@ mod tests {
                 ClaudeModel::Sonnet { effort },
                 ClaudeModel::Opus { effort },
             ] {
-                kits.push(Kit::Claude { model });
+                kits.push(Kit::Claude {
+                    purse: ClaudePurse::Key,
+                    model,
+                });
             }
         }
         kits
@@ -3376,30 +3382,39 @@ mod tests {
         }
     }
 
-    use stageman_core::{AgentConfig, Handout, Job, Project, ProjectId, State, Uuid};
+    use stageman_core::{
+        ClaudePurse, Handout, Job, Project, ProjectId, Purse, PurseName, State, Uuid,
+    };
     use std::collections::BTreeMap;
 
-    /// An instance configured with one agent and nothing else.
-    /// An instance with one agent configured and nothing else.
+    /// An instance holding one purse, the Anthropic key, and nothing else.
     fn instance(credential: &str) -> State {
+        holding(Purse::AnthropicKey(Secret::new(credential.to_owned())))
+    }
+
+    /// An instance holding one purse and nothing else.
+    fn holding(purse: Purse) -> State {
+        let mut purses = stageman_core::Purses::default();
+        purses.hold(purse);
         State {
             apps: std::collections::BTreeMap::new(),
             channel_apps: std::collections::BTreeMap::new(),
-            agents: BTreeMap::from([(
-                Agent::Claude,
-                AgentConfig {
-                    auth_token: Secret::new(credential.to_owned()),
-                },
-            )]),
+            purses,
             ..State::default()
         }
+    }
+
+    /// Claude as it comes, charging the key.
+    fn a_kit() -> Kit {
+        Kit::defaults(Agent::Claude, PurseName::AnthropicKey).expect("Claude charges a key")
     }
 
     fn only_claude() -> std::collections::BTreeMap<stageman_core::KitName, stageman_core::KitConfig>
     {
         std::collections::BTreeMap::from([(
             stageman_core::KitName::new("Claude").expect("a name"),
-            stageman_core::KitConfig::defaults(Agent::Claude),
+            stageman_core::KitConfig::defaults(Agent::Claude, PurseName::AnthropicKey)
+                .expect("Claude charges a key"),
         )])
     }
 
@@ -3423,7 +3438,7 @@ mod tests {
                 name: "example".to_owned(),
                 repository: stageman_core::RepositoryAddress::new("example", "repo")
                     .expect("an address"),
-                foreman_kit: Kit::defaults(Agent::Claude),
+                foreman_kit: a_kit(),
                 kits: only_claude(),
                 access,
                 channels: BTreeMap::new(),
@@ -3490,8 +3505,8 @@ mod tests {
 
     #[test]
     fn a_thread_is_never_delivered_as_a_variable() {
-        let (state, project) = instance_with_a_channel("sk-ant-oat01-xyz");
-        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project, warrant())
+        let (state, project) = instance_with_a_channel("sk-ant-api03-xyz");
+        let handout = Handout::for_job(&state, a_kit(), project, warrant())
             .expect("a watched project")
             .speaking_in(stageman_core::Place::from(stageman_core::Thread {
                 channel: Channel::Slack,
@@ -3536,12 +3551,11 @@ mod tests {
     /// anywhere.
     #[test]
     fn a_container_is_given_no_credential_it_has_no_use_for() {
-        let (state, project) = instance_with_a_channel("sk-ant-oat01-xyz");
+        let (state, project) = instance_with_a_channel("sk-ant-api03-xyz");
 
         for handout in [
             Handout::for_foreman(&state, project).expect("a watched project"),
-            Handout::for_job(&state, Kit::defaults(Agent::Claude), project, warrant())
-                .expect("a watched project"),
+            Handout::for_job(&state, a_kit(), project, warrant()).expect("a watched project"),
         ] {
             let named = names_of(&handout);
             assert!(
@@ -3571,9 +3585,9 @@ mod tests {
     /// an unbound project from a broken one.
     #[test]
     fn a_job_with_no_channel_is_delivered_no_channel_variables() {
-        let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
-        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project, warrant())
-            .expect("a watched project");
+        let (state, project) = instance_with_a_project("sk-ant-api03-xyz");
+        let handout =
+            Handout::for_job(&state, a_kit(), project, warrant()).expect("a watched project");
 
         let named = names_of(&handout);
 
@@ -3583,28 +3597,60 @@ mod tests {
         );
     }
 
+    /// The purse the kit charges decides the variable, and nothing about the
+    /// credential's text does: the same text is delivered under whichever
+    /// name the kit's purse takes.
     #[test]
-    fn an_oauth_token_and_an_api_key_go_to_different_variables() {
+    fn the_subscription_and_the_key_go_to_different_variables_by_the_kits_purse() {
         assert_eq!(
-            claude_credential_variable(&Secret::new("sk-ant-oat01-xyz".to_owned())),
+            claude_purse_variable(ClaudePurse::Subscription),
             "CLAUDE_CODE_OAUTH_TOKEN"
         );
-        assert_eq!(
-            claude_credential_variable(&Secret::new("sk-ant-api03-xyz".to_owned())),
-            "ANTHROPIC_API_KEY"
-        );
+        assert_eq!(claude_purse_variable(ClaudePurse::Key), "ANTHROPIC_API_KEY");
+
+        let mut state = holding(Purse::AnthropicSubscription(Secret::new(
+            "the-same-text".to_owned(),
+        )));
+        state
+            .purses
+            .hold(Purse::AnthropicKey(Secret::new("the-same-text".to_owned())));
+        let project = ProjectId::from_uuid(Uuid::from_u128(7));
+        state.projects.insert(project, {
+            let (with_project, _) = instance_with_a_project("the-same-text");
+            with_project
+                .projects
+                .into_values()
+                .next()
+                .expect("the project")
+        });
+        for (purse, variable) in [
+            (PurseName::AnthropicSubscription, "CLAUDE_CODE_OAUTH_TOKEN"),
+            (PurseName::AnthropicKey, "ANTHROPIC_API_KEY"),
+        ] {
+            let kit = Kit::defaults(Agent::Claude, purse).expect("Claude charges both");
+            let handout =
+                Handout::for_job(&state, kit, project, warrant()).expect("a watched project");
+            let delivered = environment(&handout).expect("no reserved name");
+            assert!(
+                delivered
+                    .iter()
+                    .any(|(name, value)| name == variable && value.expose() == "the-same-text"),
+                "{purse:?} goes under {variable}: {:?}",
+                delivered.iter().map(|(name, _)| name).collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]
-    fn a_foreman_is_delivered_its_credential_and_nothing_else() {
-        let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
+    fn a_foreman_is_delivered_its_purse_and_nothing_else() {
+        let (state, project) = instance_with_a_project("sk-ant-api03-xyz");
         let handout = Handout::for_foreman(&state, project).expect("a watched project");
 
         let delivered = environment(&handout).expect("a handout with no reserved name");
 
         assert_eq!(delivered.len(), 1, "{delivered:?}");
-        assert_eq!(delivered[0].0, "CLAUDE_CODE_OAUTH_TOKEN");
-        assert_eq!(delivered[0].1.expose(), "sk-ant-oat01-xyz");
+        assert_eq!(delivered[0].0, "ANTHROPIC_API_KEY");
+        assert_eq!(delivered[0].1.expose(), "sk-ant-api03-xyz");
     }
 
     /// A job's container is given its warrant, and never the platform
@@ -3613,15 +3659,15 @@ mod tests {
     /// `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
     #[test]
     fn a_job_is_delivered_its_warrant_and_no_platform_credential() {
-        let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
-        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project, warrant())
-            .expect("a watched project");
+        let (state, project) = instance_with_a_project("sk-ant-api03-xyz");
+        let handout =
+            Handout::for_job(&state, a_kit(), project, warrant()).expect("a watched project");
 
         let delivering = environment(&handout).expect("a handout with no reserved name");
         let named = names_of(&handout);
 
         assert!(
-            named.iter().any(|name| name == "CLAUDE_CODE_OAUTH_TOKEN"),
+            named.iter().any(|name| name == "ANTHROPIC_API_KEY"),
             "{named:?}"
         );
         assert!(!named.iter().any(|name| name == "GH_TOKEN"), "{named:?}");
@@ -3644,7 +3690,7 @@ mod tests {
     /// The whole of what the feature does, from the delivery side.
     #[test]
     fn a_job_is_delivered_its_projects_variables() {
-        let (mut state, project) = instance_with_a_project("sk-ant-oat01-xyz");
+        let (mut state, project) = instance_with_a_project("sk-ant-api03-xyz");
         state
             .projects
             .get_mut(&project)
@@ -3656,8 +3702,8 @@ mod tests {
                     "sk-test-not-a-real-key".to_owned(),
                 )),
             );
-        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project, warrant())
-            .expect("a watched project");
+        let handout =
+            Handout::for_job(&state, a_kit(), project, warrant()).expect("a watched project");
 
         let delivering = environment(&handout).expect("no reserved name here");
         let found = delivering
@@ -3671,7 +3717,7 @@ mod tests {
     /// And a foreman's container is given none of them.
     #[test]
     fn a_foreman_is_delivered_no_variable_of_its_projects() {
-        let (mut state, project) = instance_with_a_project("sk-ant-oat01-xyz");
+        let (mut state, project) = instance_with_a_project("sk-ant-api03-xyz");
         state
             .projects
             .get_mut(&project)
@@ -3703,7 +3749,7 @@ mod tests {
     #[test]
     fn a_variable_claiming_a_name_this_project_delivers_is_refused() {
         for claimed in RESERVED {
-            let (mut state, project) = instance_with_a_project("sk-ant-oat01-xyz");
+            let (mut state, project) = instance_with_a_project("sk-ant-api03-xyz");
             state
                 .projects
                 .get_mut(&project)
@@ -3716,8 +3762,7 @@ mod tests {
                     )),
                 );
             let handout =
-                Handout::for_job(&state, Kit::defaults(Agent::Claude), project, warrant())
-                    .expect("a watched project");
+                Handout::for_job(&state, a_kit(), project, warrant()).expect("a watched project");
 
             let refused = environment(&handout).expect_err("that name is ours");
 
@@ -3728,30 +3773,34 @@ mod tests {
         }
     }
 
-    /// What keeps [`RESERVED`] honest as agents are added.
+    /// What keeps [`RESERVED`] honest as agents and purses are added.
     ///
     /// The list is written by hand, so nothing makes it follow the adapters it
     /// describes. This is what notices: everything a real handout delivers on
-    /// this project's own account has to be in it, so an agent whose credential
+    /// this project's own account has to be in it, so an agent whose purse
     /// goes in a new variable fails here until somebody adds it — rather than
     /// silently letting an operator claim that name.
     ///
-    /// Both of Claude's credential variables are covered because the two
-    /// fixtures below differ in the shape of the token, which is what chooses
-    /// between them.
+    /// Every purse every agent can charge is walked, because the purse is
+    /// what chooses the variable.
     #[test]
     fn every_name_this_project_delivers_is_one_it_reserves() {
-        for credential in ["sk-ant-oat01-xyz", "sk-ant-api03-xyz"] {
-            let (state, project) = instance_with_a_project(credential);
-            let handout =
-                Handout::for_job(&state, Kit::defaults(Agent::Claude), project, warrant())
-                    .expect("a watched project");
+        for agent in Agent::ALL {
+            for purse in agent.purses() {
+                let (mut state, project) = instance_with_a_project("sk-ant-api03-xyz");
+                state
+                    .purses
+                    .hold(Purse::new(purse, Secret::new("a-credential".to_owned())));
+                let kit = Kit::defaults(*agent, purse).expect("the agent charges its own purses");
+                let handout =
+                    Handout::for_job(&state, kit, project, warrant()).expect("a watched project");
 
-            for name in names_of(&handout) {
-                assert!(
-                    RESERVED.contains(&name.as_str()),
-                    "{name} is delivered but not reserved, so an operator could claim it",
-                );
+                for name in names_of(&handout) {
+                    assert!(
+                        RESERVED.contains(&name.as_str()),
+                        "{name} is delivered but not reserved, so an operator could claim it",
+                    );
+                }
             }
         }
     }
@@ -3761,9 +3810,9 @@ mod tests {
     /// arguments must *name* each variable and never carry its value.
     #[test]
     fn no_credential_ever_appears_in_a_containers_arguments() {
-        let (state, project) = instance_with_a_channel("sk-ant-oat01-secret-value");
-        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project, warrant())
-            .expect("a watched project");
+        let (state, project) = instance_with_a_channel("sk-ant-api03-secret-value");
+        let handout =
+            Handout::for_job(&state, a_kit(), project, warrant()).expect("a watched project");
 
         let arguments = retained_arguments(
             "stageman-job-abc",
@@ -3774,14 +3823,14 @@ mod tests {
         );
         let line = arguments.join(" ");
 
-        assert!(!line.contains("sk-ant-oat01-secret-value"), "{line}");
+        assert!(!line.contains("sk-ant-api03-secret-value"), "{line}");
         assert!(!line.contains("gh-not-a-real-token"), "{line}");
         assert!(!line.contains(WARRANT), "{line}");
         // The newest credential, and the one a reviewer would not think to
         // check: a channel binding arrived through a different map and a
         // different loop, so it is a second chance to make the same mistake.
         assert!(!line.contains("xoxb-not-a-real-token"), "{line}");
-        assert!(line.contains("--env CLAUDE_CODE_OAUTH_TOKEN"), "{line}");
+        assert!(line.contains("--env ANTHROPIC_API_KEY"), "{line}");
         assert!(line.contains("--env STAGEMAN_WARRANT"), "{line}");
         assert!(!line.contains("GH_TOKEN"), "{line}");
         // No channel credential is named at all since 0034, because none is
@@ -3793,7 +3842,7 @@ mod tests {
     /// agent: it holds itself open, and the agent is run inside it.
     #[test]
     fn a_retained_container_is_not_cut_off_from_the_network_and_is_not_the_agent() {
-        let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
+        let (state, project) = instance_with_a_project("sk-ant-api03-xyz");
         let handout = Handout::for_foreman(&state, project).expect("a watched project");
 
         let arguments = retained_arguments(
@@ -3818,7 +3867,7 @@ mod tests {
 
     #[test]
     fn a_retained_container_is_named_labelled_and_survives_its_own_exit() {
-        let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
+        let (state, project) = instance_with_a_project("sk-ant-api03-xyz");
         let handout = Handout::for_foreman(&state, project).expect("a watched project");
 
         let arguments = retained_arguments(
@@ -3862,7 +3911,7 @@ mod tests {
     /// empty host port this would be picking one itself, which is a race.
     #[test]
     fn a_retained_container_publishes_its_tunnel_on_loopback() {
-        let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
+        let (state, project) = instance_with_a_project("sk-ant-api03-xyz");
         let handout = Handout::for_foreman(&state, project).expect("a watched project");
 
         let arguments = retained_arguments(
@@ -3887,9 +3936,9 @@ mod tests {
     /// like this instance's own abandoned work.
     #[test]
     fn a_retained_container_says_which_instance_started_it() {
-        let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
-        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project, warrant())
-            .expect("a watched project");
+        let (state, project) = instance_with_a_project("sk-ant-api03-xyz");
+        let handout =
+            Handout::for_job(&state, a_kit(), project, warrant()).expect("a watched project");
 
         let arguments = retained_arguments(
             "stageman-job-abc",
@@ -4037,7 +4086,7 @@ mod tests {
     /// every stop waits for a timeout first.
     #[test]
     fn a_retained_container_is_created_with_an_init() {
-        let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
+        let (state, project) = instance_with_a_project("sk-ant-api03-xyz");
         let handout = Handout::for_foreman(&state, project).expect("a watched project");
 
         let arguments = retained_arguments(
@@ -4234,7 +4283,7 @@ mod tests {
         let name = "stageman-job-lifetime-probe";
         discard(&runtime, name).await.expect("a clean slate");
 
-        let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
+        let (state, project) = instance_with_a_project("sk-ant-api03-xyz");
         let handout = Handout::for_foreman(&state, project).expect("a watched project");
         let delivering = environment(&handout).expect("a handout with no reserved name");
         let image = build(&runtime, Agent::Claude, Role::Foreman)
@@ -4644,12 +4693,17 @@ mod tests {
 
         fn handout_of() -> (State, Handout) {
             let mut state = State::default();
-            state.agents.insert(
-                Agent::Claude,
-                AgentConfig {
-                    auth_token: credential(),
-                },
-            );
+            // The file declares no kind, so the harness reads it the way the
+            // box on the Agents page would refuse it: a subscription's token
+            // begins as one, and anything else is a key.
+            let purse = if credential().expose().starts_with("sk-ant-oat") {
+                Purse::AnthropicSubscription(credential())
+            } else {
+                Purse::AnthropicKey(credential())
+            };
+            let charging = purse.name();
+            state.purses.hold(purse);
+            let kit = Kit::defaults(Agent::Claude, charging).expect("Claude charges both");
             let project = ProjectId::from_uuid(Uuid::from_u128(3));
             state.projects.insert(
                 project,
@@ -4657,8 +4711,14 @@ mod tests {
                     name: "probe".to_owned(),
                     repository: stageman_core::RepositoryAddress::new("example", "repo")
                         .expect("an address"),
-                    foreman_kit: Kit::defaults(Agent::Claude),
-                    kits: only_claude(),
+                    foreman_kit: kit.clone(),
+                    kits: std::collections::BTreeMap::from([(
+                        stageman_core::KitName::new("Claude").expect("a name"),
+                        stageman_core::KitConfig {
+                            description: "the probe's".to_owned(),
+                            kit,
+                        },
+                    )]),
                     access: BTreeMap::new(),
                     channels: BTreeMap::new(),
                     variables: BTreeMap::new(),

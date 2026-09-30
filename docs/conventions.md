@@ -369,13 +369,6 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   included, so forgetting a purse later cannot rewrite the record of work
   already done.
 
-  One near-miss is imported rather than invented: the protocol library uses the
-  same word for the *role* at the far end of a connection. Both types are in
-  scope in an adapter, and `ConnectionTo<Agent>` compiles and reads correctly
-  against either one, so the protocol's is aliased at the import rather than
-  used bare. This is the one place in the codebase where the wrong meaning of
-  this word type-checks.
-
 - **kit** — one agent, set the way one job runs it: which model, how hard it
   thinks, and whatever else that agent's adapter can be told. A job runs on
   exactly one, fixed when the job is created and settled again at the start of

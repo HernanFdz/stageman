@@ -163,6 +163,7 @@ fn Shown(page: JobPage, failure: Signal<Option<DashboardError>>) -> Element {
                         KitChip {
                             agent: job.kit.agent.clone(),
                             agent_name: job.kit.agent_name.clone(),
+                            purse: job.kit.purse.clone(),
                             model: job.kit.model.clone(),
                             effort: job.kit.effort.clone(),
                         }

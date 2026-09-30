@@ -27,12 +27,66 @@ pub struct Agent {
     pub name: String,
     /// What it is good for.
     pub description: String,
-    /// Whether a credential has been supplied for it.
-    pub configured: bool,
-    /// The projects that would break if it were forgotten. Empty means it
-    /// can go; anything else is what a refusal would say, and carrying it
-    /// lets a page grey the button *and* explain.
-    pub used_by: Vec<String>,
+    /// Whether some purse it can charge is held, which is what makes a kit
+    /// for it possible — see
+    /// `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`.
+    pub ready: bool,
+    /// The purses it can charge, by identifier, held or not: what a page
+    /// says would make it ready.
+    pub purses: Vec<String>,
+}
+
+/// What the Agents page shows: the purses, by provider, and the agents.
+///
+/// The purses come first because they are what is configured; an agent is
+/// ready or not by what is held, and nothing is set on an agent itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Agents {
+    /// Every provider this build can charge, with its purses.
+    pub providers: Vec<ProviderView>,
+    /// Every agent this build can run.
+    pub agents: Vec<Agent>,
+}
+
+/// One provider, with the purses it hands out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderView {
+    /// What the browser names it back as, and its mark is keyed by.
+    pub id: String,
+    /// What it is called on screen.
+    pub name: String,
+    /// Its purses, in the order a page lists them.
+    pub purses: Vec<PurseView>,
+}
+
+/// One purse, held or not, as much of it as a page may know.
+///
+/// **A credential travels one way.** It is sent in and never sent back:
+/// nothing here carries one, which is the invariant in
+/// `docs/architecture.md` §2 expressed as a type rather than as care.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PurseView {
+    /// What the browser names it back as.
+    pub id: String,
+    /// What it is called on screen: the kind, in a person's words.
+    pub name: String,
+    /// One line on what it is for and who can charge it.
+    pub note: String,
+    /// Where the provider mints one: a link to the provider's own page,
+    /// composed on the server from tracked text.
+    pub guide: String,
+    /// The verb on that link: what pressing it opens.
+    pub minting: String,
+    /// What to do there and what to bring back, a hover away from the link.
+    pub guidance: String,
+    /// Whether a credential is held for it.
+    pub held: bool,
+    /// What charges it, in words. Empty means it can go; anything else is
+    /// what a refusal would say, and carrying it lets a page grey the
+    /// control *and* explain.
+    pub charged_by: Vec<String>,
+    /// The agents that can charge it, by name.
+    pub agents: Vec<String>,
 }
 
 // ------------------------------------------------------------------ apps
@@ -597,12 +651,13 @@ pub struct Reachable {
 pub struct Watching {
     /// What is being watched now.
     pub projects: Vec<Project>,
-    /// The agents that could be named. Only the configured ones: naming an
-    /// agent without a credential is refused, so offering it would be an
-    /// invitation to fail.
+    /// The agents that could be named. Only the ready ones: a kit charging
+    /// a purse that is not held is refused, so offering an agent with none
+    /// would be an invitation to fail.
     pub available: Vec<Agent>,
     /// What each of those can be set to. Built by the instance from the
-    /// domain's closed sets, because the browser's half cannot name them.
+    /// domain's closed sets and from what is held, because the browser's
+    /// half cannot name either.
     pub shapes: Vec<Shape>,
     /// Where each platform's own form is, filled in, for a project that
     /// does not exist yet.
@@ -641,6 +696,10 @@ pub struct Guides {
 pub struct Fitted {
     /// Which agent.
     pub agent: String,
+    /// Which purse its work is charged to, among those the agent can
+    /// charge — see
+    /// `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`.
+    pub purse: String,
     /// Which of its models.
     pub model: String,
     /// How hard it thinks, or empty where the model has no such choice.
@@ -648,14 +707,14 @@ pub struct Fitted {
 }
 
 impl Fitted {
-    /// Whether this names an agent and a model.
+    /// Whether this names an agent, a purse and a model.
     ///
     /// The effort is not required here because the screen cannot know
     /// whether the model takes one without the shape, and the instance
     /// refuses a model given none.
     #[must_use]
     pub const fn is_complete(&self) -> bool {
-        !self.agent.is_empty() && !self.model.is_empty()
+        !self.agent.is_empty() && !self.purse.is_empty() && !self.model.is_empty()
     }
 }
 
@@ -688,6 +747,10 @@ impl KitDraft {
 pub struct Shape {
     /// The agent, by identifier.
     pub agent: String,
+    /// The purses it can charge that are held, in the order they are
+    /// listed. Only the held ones: a kit charging one that is not is
+    /// refused, so offering it would be offering something to refuse.
+    pub purses: Vec<Choice>,
     /// Its models, the default first.
     pub models: Vec<ModelChoice>,
     /// Its effort levels, the default first, for the models that take one.
@@ -1122,9 +1185,11 @@ impl Standing {
     }
 }
 
-/// What a job runs on, as a chip is drawn from it: the agent by the
-/// identifier the wire uses and by name, the model by name, and the effort
-/// by its spelling and its name where the model takes one.
+/// What a job runs on, as a chip is drawn from it.
+///
+/// The agent by the identifier the wire uses and by name, the purse by
+/// name, the model by name, and the effort by its spelling and its name
+/// where the model takes one.
 ///
 /// Resolved on the server, unlike a project's kits, which a browser edits
 /// and so carries as identifiers with the shapes to read them by: a job's
@@ -1135,6 +1200,8 @@ pub struct Kit {
     pub agent: String,
     /// The agent, as a person reads it.
     pub agent_name: String,
+    /// The purse its work is charged to, as a person reads it.
+    pub purse: String,
     /// The model, as a person reads it.
     pub model: String,
     /// The effort, as the wire spells it and as a person reads it, where the
@@ -1286,9 +1353,26 @@ pub enum Refusal {
         /// What was asked for.
         name: String,
     },
-    /// An agent was configured with nothing.
-    #[error("that agent needs a credential")]
+    /// Nothing by that name is a purse. The set is closed and compiled in,
+    /// so this is a stale page or a hand-made request.
+    #[error("no purse is called {name}")]
+    UnknownPurse {
+        /// What was asked for.
+        name: String,
+    },
+    /// A purse was to be held with nothing in it.
+    #[error("that purse needs a credential")]
     CredentialMissing,
+    /// What was pasted does not have the shape of the purse it was pasted
+    /// as: a credential belonging in the other box, most often. Says what
+    /// the box takes and never what was pasted.
+    #[error("{purse} was not kept: {rule}")]
+    PurseMisshapen {
+        /// The purse, as the screen names it.
+        purse: String,
+        /// What a credential of that kind looks like.
+        rule: String,
+    },
     /// The current password typed to change it was not the current
     /// password — see
     /// `docs/decisions/0084-the-instance-authenticates-itself.md`.
@@ -1298,13 +1382,13 @@ pub enum Refusal {
     /// because length is what makes guessing moot.
     #[error("a password is at least twelve characters")]
     PasswordShort,
-    /// An agent cannot be forgotten while a project names it.
-    #[error("{agent} is still used by {}", projects.join(", "))]
-    AgentInUse {
-        /// The agent that was to be forgotten.
-        agent: String,
-        /// What would have broken, by name.
-        projects: Vec<String>,
+    /// A purse cannot be forgotten while something charges it.
+    #[error("{purse} is still charged by {}", by.join(", "))]
+    PurseInUse {
+        /// The purse that was to be forgotten, as the screen names it.
+        purse: String,
+        /// What would have broken, in words.
+        by: Vec<String>,
     },
     /// Nothing by that identifier is being watched.
     #[error("no project has the identifier {id}")]
@@ -1384,11 +1468,20 @@ pub enum Refusal {
         /// The project, as the screen names it.
         project: String,
     },
-    /// A project names an agent that has no credential.
-    #[error("{name} has no credential, so a project cannot name it")]
-    AgentNotConfigured {
-        /// The agent, as the screen names it.
+    /// A kit charges a purse that is not held.
+    #[error("{name} is not held, so a kit cannot charge it")]
+    PurseNotHeld {
+        /// The purse, as the screen names it.
         name: String,
+    },
+    /// A kit charges a purse its agent cannot charge: a subscription that
+    /// belongs to another vendor's agent, most often.
+    #[error("{agent} cannot charge {purse}")]
+    PurseUnchargeable {
+        /// The agent, as the screen names it.
+        agent: String,
+        /// The purse, as the screen names it.
+        purse: String,
     },
     /// A project's jobs may not run on that kit.
     #[error("{project} offers no kit called {name}")]
@@ -1574,6 +1667,7 @@ impl Refusal {
         match self {
             Self::Failed => 500,
             Self::UnknownAgent { .. }
+            | Self::UnknownPurse { .. }
             | Self::UnknownProject { .. }
             | Self::UnknownJob { .. }
             | Self::AppMissing { .. }
@@ -1582,11 +1676,13 @@ impl Refusal {
             // the operator can fix by typing something different.
             Self::WrongPassword => 403,
             Self::CredentialMissing
+            | Self::PurseMisshapen { .. }
             | Self::PasswordShort
             | Self::Incomplete { .. }
             | Self::RepositoryRefused { .. }
             | Self::KitsMissing
-            | Self::AgentNotConfigured { .. }
+            | Self::PurseNotHeld { .. }
+            | Self::PurseUnchargeable { .. }
             | Self::KitNotOnProject { .. }
             | Self::KitNameTaken { .. }
             | Self::UnknownSetting { .. }
@@ -1613,7 +1709,7 @@ impl Refusal {
             | Self::ChannelUnchecked { .. } => 502,
             // The request is well formed and the instance is in a state that
             // forbids it, which is what a conflict means.
-            Self::AgentInUse { .. }
+            Self::PurseInUse { .. }
             | Self::AppInUse { .. }
             | Self::ChannelAppInUse { .. }
             | Self::WorkspaceInUse { .. }
@@ -1656,16 +1752,19 @@ impl Refusal {
             }
             Self::VariableValueMissing | Self::VariableReserved { .. } => Some(Part::Variables),
             Self::UnknownAgent { .. }
+            | Self::UnknownPurse { .. }
             | Self::CredentialMissing
+            | Self::PurseMisshapen { .. }
             | Self::WrongPassword
             | Self::PasswordShort
-            | Self::AgentInUse { .. }
+            | Self::PurseInUse { .. }
             | Self::UnknownProject { .. }
             | Self::ChannelMissing { .. }
             | Self::ChannelAppIncomplete
             | Self::ChannelAppMissing { .. }
             | Self::NoSuchWorkspace { .. }
-            | Self::AgentNotConfigured { .. }
+            | Self::PurseNotHeld { .. }
+            | Self::PurseUnchargeable { .. }
             | Self::KitNotOnProject { .. }
             | Self::UnknownSetting { .. }
             | Self::EffortNotOnModel { .. }
@@ -1712,6 +1811,7 @@ mod tests {
     fn as_it_comes() -> Fitted {
         Fitted {
             agent: "claude".to_owned(),
+            purse: "anthropic-key".to_owned(),
             model: "default".to_owned(),
             effort: "default".to_owned(),
         }
@@ -2411,14 +2511,17 @@ mod tests {
 
     #[test]
     fn a_refusal_is_not_reported_as_a_fault() {
-        let refused = Refusal::AgentInUse {
-            agent: "claude".to_owned(),
-            projects: vec!["aviary".to_owned(), "burrow".to_owned()],
+        let refused = Refusal::PurseInUse {
+            purse: "Anthropic key".to_owned(),
+            by: vec![
+                "the foreman of aviary".to_owned(),
+                "the kit deep of burrow".to_owned(),
+            ],
         };
         assert_eq!(refused.status(), 409);
         assert_eq!(
             refused.to_string(),
-            "claude is still used by aviary, burrow"
+            "Anthropic key is still charged by the foreman of aviary, the kit deep of burrow"
         );
 
         assert_eq!(

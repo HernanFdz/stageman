@@ -60,6 +60,12 @@ pub struct KitChipProps {
     pub agent: String,
     /// The agent, as a person reads it.
     pub agent_name: String,
+    /// The purse its work is charged to, as a person reads it. Said in the
+    /// sentence and drawn nowhere: a glyph for the provider beside the
+    /// agent's would say the same thing twice on every row today, and is
+    /// worth drawing only when the two differ — see
+    /// `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`.
+    pub purse: String,
     /// The model, as a person reads it.
     pub model: String,
     /// The effort, as the wire spells it and as a person reads it, where the
@@ -71,19 +77,13 @@ pub struct KitChipProps {
 /// A kit, compactly.
 #[component]
 pub fn KitChip(props: KitChipProps) -> Element {
-    let saying = match (&props.name, &props.effort) {
-        (Some(name), Some((_, effort))) => {
-            format!(
-                "{name}: {} · {} · {effort} effort",
-                props.agent_name, props.model
-            )
-        }
-        (Some(name), None) => format!("{name}: {} · {}", props.agent_name, props.model),
-        (None, Some((_, effort))) => {
-            format!("{} · {} · {effort} effort", props.agent_name, props.model)
-        }
-        (None, None) => format!("{} · {}", props.agent_name, props.model),
-    };
+    let saying = sentence(
+        props.name.as_deref(),
+        &props.agent_name,
+        &props.purse,
+        &props.model,
+        props.effort.as_ref().map(|(_, effort)| effort.as_str()),
+    );
 
     rsx! {
         Tooltip { text: saying.clone(),
@@ -104,6 +104,36 @@ pub fn KitChip(props: KitChipProps) -> Element {
             }
         }
     }
+}
+
+/// What a chip says a hover away: the kit's name where it has one, then the
+/// agent, the model, the effort where the model takes one, and the purse the
+/// work is charged to.
+///
+/// Pure, so that the sentence can be tested without a browser.
+fn sentence(
+    name: Option<&str>,
+    agent: &str,
+    purse: &str,
+    model: &str,
+    effort: Option<&str>,
+) -> String {
+    let mut said = String::new();
+    if let Some(name) = name {
+        said.push_str(name);
+        said.push_str(": ");
+    }
+    said.push_str(agent);
+    said.push_str(" · ");
+    said.push_str(model);
+    if let Some(effort) = effort {
+        said.push_str(" · ");
+        said.push_str(effort);
+        said.push_str(" effort");
+    }
+    said.push_str(" · charging the ");
+    said.push_str(purse);
+    said
 }
 
 /// How hard, as a meter, where the effort is one of the steps; as its name
@@ -154,7 +184,27 @@ fn level(effort: &str) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{STEPS, level};
+    use super::{STEPS, level, sentence};
+
+    /// The sentence says everything a chip knows, in one order, with the
+    /// name and the effort only where there is one.
+    #[test]
+    fn a_chips_sentence_says_the_kit_whole() {
+        assert_eq!(
+            sentence(
+                Some("deep"),
+                "Claude",
+                "Anthropic subscription",
+                "Opus",
+                Some("Extra high")
+            ),
+            "deep: Claude · Opus · Extra high effort · charging the Anthropic subscription"
+        );
+        assert_eq!(
+            sentence(None, "Claude", "Anthropic key", "Haiku", None),
+            "Claude · Haiku · charging the Anthropic key"
+        );
+    }
 
     /// Every step of effort the wire spells is a step on the meter, in
     /// order, and the default is not one.

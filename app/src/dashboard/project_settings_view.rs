@@ -734,16 +734,21 @@ fn refused_before_asking(draft: &Draft, filling: &Filling, held: &[String]) -> b
     !draft.is_complete(filling, held)
 }
 
-/// An agent as it comes: the shape's first model, and its first effort where
-/// that model takes one.
+/// An agent as it comes: the first purse it can charge that is held, the
+/// shape's first model, and its first effort where that model takes one.
 ///
 /// What a new kit starts on, and what a fitted agent moves to when its agent
 /// changes — nothing carries over between agents, because a model is one
-/// agent's and not another's.
+/// agent's and not another's, and so is the set of purses it can charge.
 pub(super) fn seeded(shape: &Shape) -> Fitted {
     let model = shape.models.first();
     Fitted {
         agent: shape.agent.clone(),
+        purse: shape
+            .purses
+            .first()
+            .map(|purse| purse.id.clone())
+            .unwrap_or_default(),
         model: model.map(|model| model.id.clone()).unwrap_or_default(),
         effort: model
             .filter(|model| model.has_effort)
@@ -809,8 +814,19 @@ fn with_model(fitted: &Fitted, shape: &Shape, model: &str) -> Fitted {
     };
     Fitted {
         agent: fitted.agent.clone(),
+        purse: fitted.purse.clone(),
         model: model.to_owned(),
         effort,
+    }
+}
+
+/// A fitted agent moved to another of the purses it can charge. Nothing
+/// else moves: the purse is who pays, and the model and the effort are
+/// what runs.
+fn with_purse(fitted: &Fitted, purse: &str) -> Fitted {
+    Fitted {
+        purse: purse.to_owned(),
+        ..fitted.clone()
     }
 }
 
@@ -2094,6 +2110,20 @@ fn FittedEditor(
                 onchange: move |agent: String| onchange.call(with_agent(&shapes, &agent)),
             }
             if let Some(shape) = shape {
+                // Which purse pays, offered only where there is a choice:
+                // with one purse held that the agent can charge, the kit
+                // charges it and a control would say so to nobody.
+                if shape.purses.len() > 1 {
+                    Segmented {
+                        label: "Pays with",
+                        options: shape.purses.iter().map(|purse| (purse.id.clone(), purse.name.clone())).collect::<Vec<_>>(),
+                        value: fitted.purse.clone(),
+                        onchange: {
+                            let fitted = fitted.clone();
+                            move |purse: String| onchange.call(with_purse(&fitted, &purse))
+                        },
+                    }
+                }
                 Segmented {
                     label: "Model",
                     options: shape.models.iter().map(|model| (model.id.clone(), model.name.clone())).collect::<Vec<_>>(),
@@ -2132,7 +2162,7 @@ mod tests {
         Reachable, Reached, Repository, Said, Segment, Shape, TokenSlot, Watching, WorkspaceSlot,
         beside, host_of, items_of, not_reached_words, placed_own, placeholder,
         refused_before_asking, seeded, sentence, shape_for, slack_sentence, starting, takes_effort,
-        watched, with_agent, with_model,
+        watched, with_agent, with_model, with_purse,
     };
     use stageman_wire::{Choice, ModelChoice};
 
@@ -2797,6 +2827,7 @@ mod tests {
     fn as_it_comes() -> Fitted {
         Fitted {
             agent: "claude".to_owned(),
+            purse: "anthropic-key".to_owned(),
             model: "default".to_owned(),
             effort: "default".to_owned(),
         }
@@ -2815,6 +2846,7 @@ mod tests {
         };
         Shape {
             agent: "claude".to_owned(),
+            purses: vec![effort("anthropic-key"), effort("anthropic-subscription")],
             models: vec![
                 model("default", true),
                 model("sonnet", true),
@@ -2823,6 +2855,17 @@ mod tests {
             ],
             efforts: vec![effort("default"), effort("low"), effort("high")],
         }
+    }
+
+    /// Moving between purses changes who pays and nothing else, and a fresh
+    /// kit charges the first purse held.
+    #[test]
+    fn moving_between_purses_changes_who_pays_and_nothing_else() {
+        let moved = with_purse(&as_it_comes(), "anthropic-subscription");
+        assert_eq!(moved.purse, "anthropic-subscription");
+        assert_eq!(moved.model, "default");
+        assert_eq!(moved.effort, "default");
+        assert_eq!(seeded(&claude()).purse, "anthropic-key");
     }
 
     /// Moving between models keeps, clears or seeds the effort as the new
@@ -2941,8 +2984,11 @@ mod tests {
                 id: "claude".to_owned(),
                 name: "Claude".to_owned(),
                 description: "does the work".to_owned(),
-                configured: true,
-                used_by: Vec::new(),
+                ready: true,
+                purses: vec![
+                    "anthropic-key".to_owned(),
+                    "anthropic-subscription".to_owned(),
+                ],
             }],
             shapes: vec![claude()],
             guides: stageman_wire::Guides::default(),

@@ -41,10 +41,27 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use stageman_core::{
-    Access, Agent, AgentConfig, Channel, ChannelConfig, InstanceId, Job, JobId, Key, Kit,
-    KitConfig, KitName, NONCE_LEN, Outcome, Platform, Progress, Project, ProjectId, Role, Secret,
-    State, Timestamp, Waiting,
+    Access, Agent, Channel, ChannelConfig, InstanceId, Job, JobId, Key, Kit, KitConfig, KitName,
+    NONCE_LEN, Outcome, Platform, Progress, Project, ProjectId, Purse, PurseName, Purses, Role,
+    Secret, State, Timestamp, Waiting,
 };
+
+/// Claude as it comes, charging the key every fixture holds.
+fn a_kit() -> Kit {
+    Kit::defaults(Agent::Claude, PurseName::AnthropicKey).expect("Claude charges a key")
+}
+
+/// The kit above, described as Claude describes itself.
+fn a_kit_config() -> KitConfig {
+    KitConfig::defaults(Agent::Claude, PurseName::AnthropicKey).expect("Claude charges a key")
+}
+
+/// An instance's purses: the Anthropic key, holding this credential.
+fn purses_with(credential: &str) -> Purses {
+    let mut purses = Purses::default();
+    purses.hold(Purse::AnthropicKey(Secret::new(credential.to_owned())));
+    purses
+}
 
 /// A key, as an operator would supply it: thirty-two bytes of base64.
 const KEY: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
@@ -500,7 +517,7 @@ fn watch(stdout: ChildStdout) -> Result<(String, String), String> {
 /// One job, in whatever state the caller needs it.
 fn job(progress: Progress) -> Job {
     let mut job = Job::new(
-        Kit::defaults(Agent::Claude),
+        a_kit(),
         "because a test said so".to_owned(),
         "do the thing".to_owned(),
         Timestamp::UNIX_EPOCH,
@@ -547,23 +564,15 @@ fn watching(name: &str, repository: &str) -> State {
         apps: std::collections::BTreeMap::new(),
         channel_apps: std::collections::BTreeMap::new(),
         password: None,
-        agents: BTreeMap::from([(
-            Agent::Claude,
-            AgentConfig {
-                auth_token: Secret::new("not-a-real-credential".to_owned()),
-            },
-        )]),
+        purses: purses_with("not-a-real-credential"),
         projects: BTreeMap::from([(
             ProjectId::from_uuid(uuid::Uuid::nil()),
             Project {
                 name: name.to_owned(),
                 repository: stageman_core::RepositoryAddress::parse(repository)
                     .expect("an address on the platform"),
-                foreman_kit: Kit::defaults(Agent::Claude),
-                kits: BTreeMap::from([(
-                    KitName::new("Claude").expect("a name"),
-                    KitConfig::defaults(Agent::Claude),
-                )]),
+                foreman_kit: a_kit(),
+                kits: BTreeMap::from([(KitName::new("Claude").expect("a name"), a_kit_config())]),
                 access: BTreeMap::new(),
                 channels: BTreeMap::from([(
                     Channel::Slack,
@@ -1230,7 +1239,7 @@ fn the_first_page_arrives_with_its_regions_and_the_projects() {
     }
 }
 
-/// An agent a project still names cannot be forgotten.
+/// A purse a project still charges cannot be forgotten.
 ///
 /// The guard that matters most on the agents screen, and the one no unit test
 /// can reach: it lives in a route, and what is being checked is that the
@@ -1238,13 +1247,13 @@ fn the_first_page_arrives_with_its_regions_and_the_projects() {
 /// in a function. `docs/decisions/0021-an-instance-starts-empty.md` requires
 /// it, and mutation testing found it unprotected.
 #[test]
-fn an_agent_a_project_still_names_cannot_be_forgotten() {
+fn a_purse_a_project_still_charges_cannot_be_forgotten() {
     let (_kept, snapshot) = scratch();
     let watched = watching("aviary", "https://github.com/example/aviary");
     written(&snapshot, &watched);
 
     let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
-    let refused = running.post("/api/agents/forget", r#"{"agent":"claude"}"#);
+    let refused = running.post("/api/purses/forget", r#"{"purse":"anthropic-key"}"#);
 
     assert!(refused.contains("409"), "it should refuse: {refused}");
     assert!(
@@ -1254,7 +1263,7 @@ fn an_agent_a_project_still_names_cannot_be_forgotten() {
 
     // Still there, which is the half a status code does not prove.
     let listing = running.get("/api/agents");
-    assert!(listing.contains(r#""configured":true"#), "{listing}");
+    assert!(listing.contains(r#""held":true"#), "{listing}");
 }
 
 /// A credential is accepted, kept, and never handed back.
@@ -1264,14 +1273,15 @@ fn a_credential_is_taken_once_and_never_returned() {
 
     let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
     let saved = running.post(
-        "/api/agents/configure",
-        r#"{"agent":"claude","credential":"sk-not-a-real-token"}"#,
+        "/api/purses/hold",
+        r#"{"purse":"anthropic-key","credential":"sk-ant-api03-not-a-real-key"}"#,
     );
 
-    assert!(saved.contains(r#""configured":true"#), "{saved}");
+    assert!(saved.contains(r#""held":true"#), "{saved}");
+    assert!(saved.contains(r#""ready":true"#), "{saved}");
     for served in [saved, running.get("/api/agents"), running.get("/agents")] {
         assert!(
-            !served.contains("sk-not-a-real-token"),
+            !served.contains("sk-ant-api03-not-a-real-key"),
             "a credential reached the browser: {served}"
         );
     }
@@ -1415,8 +1425,8 @@ fn a_write_that_lands_is_told_to_an_open_page_as_a_tick() {
     );
 
     let saved = running.post(
-        "/api/agents/configure",
-        r#"{"agent":"claude","credential":"sk-not-a-real-token"}"#,
+        "/api/purses/hold",
+        r#"{"purse":"anthropic-key","credential":"sk-ant-api03-not-a-real-key"}"#,
     );
     assert!(saved.contains("200 OK"), "{saved}");
 
@@ -1554,12 +1564,7 @@ fn two_projects_each_with_a_job() -> (State, Vec<(JobId, &'static str, &'static 
         apps: BTreeMap::new(),
         channel_apps: BTreeMap::new(),
         password: None,
-        agents: BTreeMap::from([(
-            Agent::Claude,
-            AgentConfig {
-                auth_token: Secret::new("not-a-real-credential".to_owned()),
-            },
-        )]),
+        purses: purses_with("not-a-real-credential"),
         projects: BTreeMap::new(),
     };
     let jobs = vec![
@@ -1576,7 +1581,7 @@ fn two_projects_each_with_a_job() -> (State, Vec<(JobId, &'static str, &'static 
     ];
     for ((job, warrant, token), (n, name)) in jobs.iter().zip([(1_u128, "one"), (2, "other")]) {
         let mut recorded = Job::new(
-            Kit::defaults(Agent::Claude),
+            a_kit(),
             "a test said so".to_owned(),
             "fetch your credential".to_owned(),
             Timestamp::UNIX_EPOCH,
@@ -1589,11 +1594,8 @@ fn two_projects_each_with_a_job() -> (State, Vec<(JobId, &'static str, &'static 
                 name: name.to_owned(),
                 repository: stageman_core::RepositoryAddress::new("example", name)
                     .expect("an address"),
-                foreman_kit: Kit::defaults(Agent::Claude),
-                kits: BTreeMap::from([(
-                    KitName::new("Claude").expect("a name"),
-                    KitConfig::defaults(Agent::Claude),
-                )]),
+                foreman_kit: a_kit(),
+                kits: BTreeMap::from([(KitName::new("Claude").expect("a name"), a_kit_config())]),
                 access: BTreeMap::from([(
                     Platform::GitHub,
                     Access::Token {

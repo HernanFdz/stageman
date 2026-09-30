@@ -245,6 +245,16 @@ fn shown_as(available: &[Agent], identifier: &str) -> String {
         .map_or_else(|| identifier.to_owned(), |agent| agent.name.clone())
 }
 
+/// What a fitted agent's purse reads as: its name from the shape the server
+/// sent, or the identifier as it stands where it sent none.
+pub(super) fn purse_as(shapes: &[Shape], fitted: &Fitted) -> String {
+    shapes
+        .iter()
+        .find(|shape| shape.agent == fitted.agent)
+        .and_then(|shape| shape.purses.iter().find(|purse| purse.id == fitted.purse))
+        .map_or_else(|| fitted.purse.clone(), |purse| purse.name.clone())
+}
+
 /// What a fitted agent reads as: the model's name, and the effort's
 /// spelling and name where the model takes one — from the shape the server
 /// sent, or the identifiers as they stand where it sent none.
@@ -386,6 +396,7 @@ fn WatchedProject(project: Project, available: Vec<Agent>, shapes: Vec<Shape>) -
                 KitChip {
                     agent: project.foreman.agent.clone(),
                     agent_name: shown_as(&available, &project.foreman.agent),
+                    purse: purse_as(&shapes, &project.foreman),
                     model: foreman_model,
                     effort: foreman_effort,
                 }
@@ -402,6 +413,7 @@ fn WatchedProject(project: Project, available: Vec<Agent>, shapes: Vec<Shape>) -
                                 name: kit.name.clone(),
                                 agent: kit.fitted.agent.clone(),
                                 agent_name: shown_as(&available, &kit.fitted.agent),
+                                purse: purse_as(&shapes, &kit.fitted),
                                 model,
                                 effort,
                             }
@@ -465,7 +477,7 @@ mod tests {
         assert_eq!(super::noted(&watching), "watching C1");
     }
     use super::super::agents_view::Agent;
-    use super::{Choice, Fitted, ModelChoice, Shape, read_as, shown_as};
+    use super::{Choice, Fitted, ModelChoice, Shape, purse_as, read_as, shown_as};
 
     /// A project carries identifiers and a row shows names, so something has
     /// to map one to the other — and nothing else would notice if it stopped.
@@ -479,8 +491,8 @@ mod tests {
             id: "claude".to_owned(),
             name: "Claude".to_owned(),
             description: "does the work".to_owned(),
-            configured: true,
-            used_by: Vec::new(),
+            ready: true,
+            purses: vec!["anthropic-key".to_owned()],
         }];
 
         assert_eq!(shown_as(&available, "claude"), "Claude");
@@ -502,6 +514,10 @@ mod tests {
     fn a_fitted_agent_reads_as_names_where_the_shape_has_them() {
         let shape = Shape {
             agent: "claude".to_owned(),
+            purses: vec![Choice {
+                id: "anthropic-key".to_owned(),
+                name: "Anthropic key".to_owned(),
+            }],
             models: vec![ModelChoice {
                 id: "opus".to_owned(),
                 name: "Opus".to_owned(),
@@ -514,9 +530,15 @@ mod tests {
         };
         let fitted = Fitted {
             agent: "claude".to_owned(),
+            purse: "anthropic-key".to_owned(),
             model: "opus".to_owned(),
             effort: "xhigh".to_owned(),
         };
+        assert_eq!(
+            purse_as(std::slice::from_ref(&shape), &fitted),
+            "Anthropic key"
+        );
+        assert_eq!(purse_as(&[], &fitted), "anthropic-key");
         assert_eq!(
             read_as(std::slice::from_ref(&shape), &fitted),
             (

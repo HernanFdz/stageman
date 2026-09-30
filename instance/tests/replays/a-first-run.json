@@ -240,7 +240,7 @@
             "id": 9,
             "path": "/sim/instance.json",
             "bytes": {
-              "text": "{\n  \"instance\": \"3301e8d7-e754-4b2c-b57b-0a4ca73f253c\",\n  \"agents\": {},\n  \"projects\": {},\n  \"apps\": {},\n  \"channel_apps\": {},\n  \"password\": null\n}"
+              "text": "{\n  \"instance\": \"3301e8d7-e754-4b2c-b57b-0a4ca73f253c\",\n  \"purses\": [],\n  \"projects\": {},\n  \"apps\": {},\n  \"channel_apps\": {},\n  \"password\": null\n}"
             },
             "private": false
           }
@@ -251,7 +251,7 @@
           "op": "add",
           "path": "/kept",
           "value": {
-            "agents": {},
+            "purses": {},
             "projects": {},
             "password": null
           }

@@ -24,8 +24,8 @@ use std::time::Duration;
 
 use stageman::world::{Asking, Performer};
 use stageman_core::{
-    Access, Agent, AgentConfig, JobId, Key, Kit, KitConfig, KitName, NONCE_LEN, Platform, Project,
-    ProjectId, Secret, State, Uuid,
+    Access, Agent, JobId, Key, Kit, KitConfig, KitName, NONCE_LEN, Platform, Project, ProjectId,
+    Purse, Secret, State, Uuid,
 };
 use stageman_instance::{Instance, Request, Response, Seed, Target};
 use stageman_vocabulary::Environment;
@@ -82,12 +82,18 @@ async fn propose() -> Result<(), String> {
     // yet — that is the next step in `docs/open-questions.md` — so this builds
     // one directly, which is exactly what a dashboard will do later.
     let mut state = State::default();
-    state.agents.insert(
-        Agent::Claude,
-        AgentConfig {
-            auth_token: agent_token,
-        },
-    );
+    // The file declares no kind, so this reads it the way the box on the
+    // Agents page would refuse it: a subscription's token begins as one,
+    // and anything else is a key.
+    let purse = if agent_token.expose().starts_with("sk-ant-oat") {
+        Purse::AnthropicSubscription(agent_token)
+    } else {
+        Purse::AnthropicKey(agent_token)
+    };
+    let charging = purse.name();
+    state.purses.hold(purse);
+    let kit = Kit::defaults(Agent::Claude, charging)
+        .map_err(|error| format!("Claude charges both of Anthropic's purses: {error}"))?;
     let project = ProjectId::from_uuid(Uuid::new_v4());
     let mut access = std::collections::BTreeMap::new();
     access.insert(
@@ -105,10 +111,13 @@ async fn propose() -> Result<(), String> {
             repository: stageman_core::RepositoryAddress::parse(&repository).map_err(|error| {
                 format!("the repository has to be an address on GitHub: {error}")
             })?,
-            foreman_kit: Kit::defaults(Agent::Claude),
+            foreman_kit: kit.clone(),
             kits: std::collections::BTreeMap::from([(
                 KitName::new("Claude").map_err(|error| format!("a kit's name: {error}"))?,
-                KitConfig::defaults(Agent::Claude),
+                KitConfig {
+                    description: Agent::Claude.description().to_owned(),
+                    kit,
+                },
             )]),
             access,
             channels: std::collections::BTreeMap::new(),

@@ -59,8 +59,7 @@ hard it thinks. A purse is one credential at one provider: an API key, metered
 per token and usable by every agent that speaks that provider, or a
 subscription token, flat per month and usable by the vendor's own agent alone.
 Each kind is pasted in its own box on the Agents page, beside a link to where
-it is minted; a key is checked against its provider before it is kept, and a
-subscription token by its shape.
+it is minted, and is checked against its provider before it is kept.
 
 **A project reaches its repository one of two ways, and the repository is
 chosen from what that reaches.** With a token: press *Use a token* on the

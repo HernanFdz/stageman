@@ -69,8 +69,12 @@ One measurement decides the check. Anthropic's models listing answers a
 bogus key with `401` and *API key is invalid.*, and no key with `401` and
 *x-api-key header is required* — one read, with the credential, costing
 nothing, which is exactly the shape 0076 checks a platform credential by.
-Whether the subscription token answers the same listing was not measured
-here: it is the operator's token, and the measurement is theirs to make.
+A real subscription token answers the same listing with `200` when sent as
+a bearer token, with or without the beta header the vendor's own client
+sends, and with the same `401` as a bogus key when sent in the key's
+header. So both kinds are checked by one read, differing only in the
+header the credential travels in, and the wrong box is refused by the
+provider as well as by the shape.
 
 ## Decision
 
@@ -128,17 +132,15 @@ Nine things follow, and each is the decision rather than a detail of it.
   foreman's container is kept across a change of purse for the same reason
   it is kept across a change of model.
 
-- **The kind is declared, and the shape is refused before anything is
-  asked.** The Agents page takes a key and a subscription token in
-  different boxes, so the kind is what the operator pressed rather than
-  what a prefix suggests, and a value whose shape belongs to the other box
-  is refused where it was typed. A key is then checked by the provider's
-  listing before it is kept, on 0076's terms: one read, refused with the
-  provider's own words, or unchecked when the provider could not be
-  reached, and kept in neither case. A subscription token is kept after the
-  shape check alone, and its first turn is its check, as 0076 already
-  accepted for it; the listing is one measurement away, and the operator's
-  token is the one that can make it.
+- **The kind is declared, the shape is refused before anything is asked,
+  and both kinds are checked before they are kept.** The Agents page takes
+  a key and a subscription token in different boxes, so the kind is what
+  the operator pressed rather than what a prefix suggests, and a value
+  whose shape belongs to the other box is refused where it was typed. What
+  passes is then checked by the provider's listing, on 0076's terms: one
+  read with the credential in the header its kind travels in, refused with
+  the provider's own words, or unchecked when the provider could not be
+  reached, and kept in neither case.
 
 - **The names this project delivers are derived from the delivery table.**
   A project's variable may not claim a name any agent reads any purse from,

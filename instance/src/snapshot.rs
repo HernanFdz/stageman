@@ -32,8 +32,8 @@ fn value<T: serde::Serialize>(value: &T) -> Value {
 #[must_use]
 pub fn exposed(state: &State) -> Value {
     json!({
-        "agents": keyed(state.agents.iter().map(|(agent, config)| {
-            (format!("{agent:?}"), json!({ "auth_token": config.auth_token.expose() }))
+        "purses": keyed(state.purses.iter().map(|purse| {
+            (format!("{:?}", purse.name()), purse.credential().expose())
         })),
         "projects": keyed(state.projects.iter().map(|(id, project)| {
             (id, json!({

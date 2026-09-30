@@ -415,12 +415,10 @@ fn what_an_awake_instance_holds_reads_in_full() {
     assert_eq!(held["held"]["serving"], 8080);
     assert_eq!(held["held"]["announced"], true);
 
-    let agents = held["kept"]["agents"].as_object().expect("the agents");
+    let purses = held["kept"]["purses"].as_object().expect("the purses");
     assert!(
-        agents
-            .values()
-            .all(|configured| configured["auth_token"].is_string()),
-        "a credential reads as itself: {agents:?}"
+        !purses.is_empty() && purses.values().all(serde_json::Value::is_string),
+        "a purse's credential reads as itself, under the purse's name: {purses:?}"
     );
     let projects = held["kept"]["projects"].as_object().expect("the projects");
     let project = projects.values().next().expect("one project");

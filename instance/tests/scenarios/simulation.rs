@@ -19,9 +19,9 @@ use stageman_agent::ToolCallStatus;
 use stageman_agent::{Answer, Command, Heard, Label, Said, StopReason};
 use stageman_channel::{Call, Reaction};
 use stageman_core::{
-    Access, Agent, AgentConfig, Channel, ChannelConfig, Errand, InstanceId, Job, JobId, Key, Kit,
-    KitConfig, KitName, NONCE_LEN, Nonce, Place, Platform, Progress, Project, ProjectId,
-    RepositoryAddress, Room, Secret, Snapshot, State, Thread, Timestamp, Uuid,
+    Access, Agent, Channel, ChannelConfig, Errand, InstanceId, Job, JobId, Key, Kit, KitConfig,
+    KitName, NONCE_LEN, Nonce, Place, Platform, Progress, Project, ProjectId, Purse, PurseName,
+    Purses, RepositoryAddress, Room, Secret, Snapshot, State, Thread, Timestamp, Uuid,
 };
 use stageman_instance::{
     AppEffect, AppEvent, Effect, Event, Instance, Request, RequestId, Response, Seed, Target,
@@ -625,9 +625,14 @@ pub fn warrant_of(job: &JobId) -> String {
     format!("warrant-of-{job}")
 }
 
+/// Claude as it comes, charging the key every fixture holds.
+pub fn a_kit() -> Kit {
+    Kit::defaults(Agent::Claude, PurseName::AnthropicKey).expect("Claude charges a key")
+}
+
 fn a_job(id: &JobId, progress: &Progress, room: Option<Room>) -> Job {
     let mut job = Job::new(
-        Kit::defaults(Agent::Claude),
+        a_kit(),
         "a reason".to_owned(),
         "some work".to_owned(),
         Timestamp::UNIX_EPOCH,
@@ -646,7 +651,9 @@ pub fn without_a_warrant(job: &Job) -> Job {
     let mut nonces = || [7; NONCE_LEN];
     let mut sealed = job.seal(&key(), &mut nonces).expect("a job seals");
     sealed.warrant = None;
-    sealed.open(&key()).expect("and opens without one")
+    sealed
+        .open(&key(), None)
+        .expect("and opens without one, its kit naming its purse")
 }
 
 /// Gives the project a pasted token for its repository's platform.
@@ -692,10 +699,11 @@ fn a_project(jobs: BTreeMap<JobId, Job>, bound: bool) -> Project {
     Project {
         name: "example".to_owned(),
         repository: RepositoryAddress::new("example", "repo").expect("an address"),
-        foreman_kit: Kit::defaults(Agent::Claude),
+        foreman_kit: a_kit(),
         kits: BTreeMap::from([(
             KitName::new("Claude").expect("a name"),
-            KitConfig::defaults(Agent::Claude),
+            KitConfig::defaults(Agent::Claude, PurseName::AnthropicKey)
+                .expect("Claude charges a key"),
         )]),
         access: BTreeMap::new(),
         channels,
@@ -713,12 +721,11 @@ fn configured(project: Project) -> State {
         apps: std::collections::BTreeMap::new(),
         channel_apps: std::collections::BTreeMap::new(),
         password: None,
-        agents: BTreeMap::from([(
-            Agent::Claude,
-            AgentConfig {
-                auth_token: Secret::new("agent-token".to_owned()),
-            },
-        )]),
+        purses: {
+            let mut purses = Purses::default();
+            purses.hold(Purse::AnthropicKey(Secret::new("agent-token".to_owned())));
+            purses
+        },
         projects: BTreeMap::from([(self::project(), project)]),
     }
 }

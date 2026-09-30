@@ -169,10 +169,19 @@ mod tests {
             panic!("the request, as an event");
         };
         assert!(*request == Request::Instance, "the request, whole");
-        asking.answered(id, Response::Agents(Vec::new()));
+        asking.answered(
+            id,
+            Response::Agents(stageman_wire::Agents {
+                providers: Vec::new(),
+                agents: Vec::new(),
+            }),
+        );
         assert_eq!(
             soon(asked).await.expect("the task"),
-            Some(Response::Agents(Vec::new()))
+            Some(Response::Agents(stageman_wire::Agents {
+                providers: Vec::new(),
+                agents: Vec::new(),
+            }))
         );
     }
 

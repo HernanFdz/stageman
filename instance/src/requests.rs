@@ -15,9 +15,8 @@ use std::fmt;
 
 use stageman_channel::Identity;
 use stageman_core::{
-    Access, AgentConfig, Binding, Channel, ChannelConfig, JobId, Kit, KitConfig, KitName, Outcome,
-    Platform, Progress, Project, ProjectId, RepositoryAddress, Secret, State, Variable,
-    VariableName,
+    Access, Binding, Channel, ChannelConfig, JobId, Kit, KitConfig, KitName, Outcome, Platform,
+    Progress, Project, ProjectId, Purse, RepositoryAddress, Secret, State, Variable, VariableName,
 };
 use stageman_wire::{
     AccessDraft, BindingDraft, Bound, ChannelDraft, Draft, Ending, KitDraft, Refusal, Through,
@@ -48,19 +47,20 @@ pub enum Request {
     Instance,
     /// The first page.
     Home,
-    /// Every agent, whether or not it is configured.
+    /// Every purse, held or not, and every agent.
     Agents,
-    /// Give an agent a credential, or replace the one it has.
-    Configure {
-        /// The agent, by wire identifier.
-        agent: String,
+    /// Hold a purse, or replace the credential it holds — see
+    /// `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`.
+    HoldPurse {
+        /// The purse, by wire identifier: which box it was pasted into.
+        purse: String,
         /// The credential.
         credential: String,
     },
-    /// Remove an agent's credential, if nothing depends on it.
-    ForgetAgent {
-        /// The agent, by wire identifier.
-        agent: String,
+    /// Forget a purse, if nothing charges it.
+    ForgetPurse {
+        /// The purse, by wire identifier.
+        purse: String,
     },
     /// The projects screen.
     Projects,
@@ -234,13 +234,13 @@ impl fmt::Debug for Request {
             Self::Instance => f.write_str("Instance"),
             Self::Home => f.write_str("Home"),
             Self::Agents => f.write_str("Agents"),
-            Self::Configure { agent, .. } => two(
+            Self::HoldPurse { purse, .. } => two(
                 f,
-                "Configure",
-                ("agent", agent),
+                "HoldPurse",
+                ("purse", purse),
                 ("credential", &"<redacted>"),
             ),
-            Self::ForgetAgent { agent } => one(f, "ForgetAgent", ("agent", agent)),
+            Self::ForgetPurse { purse } => one(f, "ForgetPurse", ("purse", purse)),
             Self::SetPassword { .. } => two(
                 f,
                 "SetPassword",
@@ -343,8 +343,8 @@ pub enum Response {
     Instance(stageman_wire::Instance),
     /// The first page.
     Home(stageman_wire::Home),
-    /// The agents screen.
-    Agents(Vec<stageman_wire::Agent>),
+    /// The agents screen: the purses by provider, and the agents.
+    Agents(stageman_wire::Agents),
     /// The projects screen.
     Projects(stageman_wire::Watching),
     /// One project's screen.
@@ -422,8 +422,8 @@ impl Running {
                     self.stamp(),
                 ))),
                 Request::Agents => Ok(Response::Agents(views::listed(&self.state))),
-                Request::Configure { agent, credential } => self.configure(&agent, &credential),
-                Request::ForgetAgent { agent } => self.forget_agent(&agent),
+                Request::HoldPurse { purse, credential } => self.hold_purse(&purse, &credential),
+                Request::ForgetPurse { purse } => self.forget_purse(&purse),
                 Request::Projects => Ok(Response::Projects(self.projects_screen())),
                 Request::Create { draft } => self.create(&draft, learned),
                 Request::Amend { project, draft } => self.amend(&project, &draft, learned),
@@ -496,38 +496,43 @@ impl Running {
         self.defer(AppEffect::Respond { id, response });
     }
 
-    /// Gives an agent a credential, or replaces the one it has.
+    /// Holds a purse, or replaces the credential it holds.
     ///
-    /// Replacing rather than refusing when one already exists, because
+    /// Replacing rather than refusing when one is already held, because
     /// rotating a credential is the ordinary reason to come back to this
-    /// screen.
-    fn configure(&mut self, agent: &str, credential: &str) -> Result<Response, Refusal> {
-        let named = views::named(agent)?;
+    /// screen, and a replaced credential reaches every agent charging the
+    /// purse at its next turn. The kind is the box the credential was pasted
+    /// into, and text with the other box's shape is refused here, before
+    /// anything is kept — see
+    /// `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`.
+    fn hold_purse(&mut self, purse: &str, credential: &str) -> Result<Response, Refusal> {
+        let named = views::purse_named(purse)?;
         let credential = credential.trim();
         if credential.is_empty() {
             return Err(Refusal::CredentialMissing);
         }
-        self.state.agents.insert(
-            named,
-            AgentConfig {
-                auth_token: Secret::new(credential.to_owned()),
-            },
-        );
+        stageman_provider::shaped(named, credential).map_err(|why| Refusal::PurseMisshapen {
+            purse: views::wire_purse(named).1.to_owned(),
+            rule: why.to_string(),
+        })?;
+        self.state
+            .purses
+            .hold(Purse::new(named, Secret::new(credential.to_owned())));
         self.dirty = true;
         Ok(Response::Agents(views::listed(&self.state)))
     }
 
-    /// Removes an agent's credential, if nothing depends on it.
-    fn forget_agent(&mut self, agent: &str) -> Result<Response, Refusal> {
-        let named = views::named(agent)?;
-        let dependents = views::dependents(&self.state, named);
-        if !dependents.is_empty() {
-            return Err(Refusal::AgentInUse {
-                agent: agent.to_owned(),
-                projects: dependents,
+    /// Forgets a purse, if nothing charges it.
+    fn forget_purse(&mut self, purse: &str) -> Result<Response, Refusal> {
+        let named = views::purse_named(purse)?;
+        let by = views::charges(&self.state, named);
+        if !by.is_empty() {
+            return Err(Refusal::PurseInUse {
+                purse: views::wire_purse(named).1.to_owned(),
+                by,
             });
         }
-        self.state.agents.remove(&named);
+        self.state.purses.forget(named);
         self.dirty = true;
         Ok(Response::Agents(views::listed(&self.state)))
     }
@@ -1286,15 +1291,33 @@ mod tests {
         addressed, amended, binding, bound, busy, identify_job, kits_of, offered, resolved,
     };
     use stageman_core::{
-        Access, Agent, AgentConfig, Binding, Channel, ChannelConfig, ClaudeEffort, ClaudeModel,
-        Job, JobId, Kit, KitConfig, KitName, Platform, Progress, Project, ProjectId,
-        RepositoryAddress, Secret, State, Timestamp, Uuid, Variable, VariableName, Waiting,
+        Access, Agent, Binding, Channel, ChannelConfig, ClaudeEffort, ClaudeModel, ClaudePurse,
+        Job, JobId, Kit, KitConfig, KitName, Platform, Progress, Project, ProjectId, Purse,
+        PurseName, Purses, RepositoryAddress, Secret, State, Timestamp, Uuid, Variable,
+        VariableName, Waiting,
     };
     use stageman_wire::Draft;
     use stageman_wire::{
         AccessDraft, BindingDraft, ChannelDraft, Fitted, KitDraft, Refusal, VariableDraft,
     };
     use std::collections::BTreeMap;
+
+    /// An instance's purses: the Anthropic key, holding this credential.
+    fn purses_with(credential: Secret) -> Purses {
+        let mut purses = Purses::default();
+        purses.hold(Purse::AnthropicKey(credential));
+        purses
+    }
+
+    /// Claude as it comes, charging the key.
+    fn a_kit() -> Kit {
+        Kit::defaults(Agent::Claude, PurseName::AnthropicKey).expect("Claude charges a key")
+    }
+
+    /// The kit above, described as Claude describes itself.
+    fn a_kit_config() -> KitConfig {
+        KitConfig::defaults(Agent::Claude, PurseName::AnthropicKey).expect("Claude charges a key")
+    }
 
     /// A token as a project holds one, with nothing said of it yet.
     fn token(secret: &str) -> Access {
@@ -1321,15 +1344,12 @@ mod tests {
     }
 
     fn one_kit() -> BTreeMap<KitName, KitConfig> {
-        BTreeMap::from([(
-            KitName::new("Claude").expect("a name"),
-            KitConfig::defaults(Agent::Claude),
-        )])
+        BTreeMap::from([(KitName::new("Claude").expect("a name"), a_kit_config())])
     }
 
     fn job(progress: Progress) -> Job {
         let mut job = Job::new(
-            Kit::defaults(Agent::Claude),
+            a_kit(),
             "because a test said so".to_owned(),
             "do the thing".to_owned(),
             Timestamp::UNIX_EPOCH,
@@ -1344,7 +1364,7 @@ mod tests {
         Project {
             name: "aviary".to_owned(),
             repository: RepositoryAddress::new("example", "aviary").expect("an address"),
-            foreman_kit: Kit::defaults(Agent::Claude),
+            foreman_kit: a_kit(),
             kits: one_kit(),
             access: BTreeMap::new(),
             channels: BTreeMap::new(),
@@ -1366,6 +1386,7 @@ mod tests {
             name: name.to_owned(),
             description: description.to_owned(),
             fitted: Fitted {
+                purse: "anthropic-key".to_owned(),
                 agent: "claude".to_owned(),
                 model: model.to_owned(),
                 effort: effort.to_owned(),
@@ -1482,6 +1503,7 @@ mod tests {
         let deep = KitConfig {
             description: "refactors touching many files".to_owned(),
             kit: Kit::Claude {
+                purse: ClaudePurse::Key,
                 model: ClaudeModel::Opus {
                     effort: ClaudeEffort::XHigh,
                 },
@@ -1493,6 +1515,7 @@ mod tests {
             "renamed".to_owned(),
             RepositoryAddress::new("example", "renamed").expect("an address"),
             Kit::Claude {
+                purse: ClaudePurse::Key,
                 model: ClaudeModel::Haiku,
             },
             BTreeMap::from([(KitName::new("deep").expect("a name"), deep.clone())]),
@@ -1504,6 +1527,7 @@ mod tests {
         assert_eq!(
             project.foreman_kit,
             Kit::Claude {
+                purse: ClaudePurse::Key,
                 model: ClaudeModel::Haiku
             }
         );
@@ -1525,7 +1549,7 @@ mod tests {
             &mut project,
             "renamed".to_owned(),
             RepositoryAddress::new("example", "renamed").expect("an address"),
-            Kit::defaults(Agent::Claude),
+            a_kit(),
             one_kit(),
             token("ghp-the-new-one"),
             String::new(),
@@ -1542,7 +1566,7 @@ mod tests {
             &mut project,
             "renamed".to_owned(),
             RepositoryAddress::new("example", "renamed").expect("an address"),
-            Kit::defaults(Agent::Claude),
+            a_kit(),
             one_kit(),
             Access::Installation { id: 77 },
             String::new(),
@@ -1564,6 +1588,7 @@ mod tests {
         let mut draft = Draft {
             name: " aviary ".to_owned(),
             foreman: stageman_wire::Fitted {
+                purse: "anthropic-key".to_owned(),
                 agent: "claude".to_owned(),
                 model: "default".to_owned(),
                 effort: "default".to_owned(),
@@ -1659,6 +1684,7 @@ mod tests {
         let mut draft = Draft {
             name: " aviary ".to_owned(),
             foreman: stageman_wire::Fitted {
+                purse: "anthropic-key".to_owned(),
                 agent: "claude".to_owned(),
                 model: "default".to_owned(),
                 effort: "default".to_owned(),
@@ -2087,6 +2113,7 @@ mod tests {
         let quick = KitConfig {
             description: "for small fixes".to_owned(),
             kit: Kit::Claude {
+                purse: ClaudePurse::Key,
                 model: ClaudeModel::Haiku,
             },
         };
@@ -2110,13 +2137,13 @@ mod tests {
 
         let shown = format!(
             "{:?}",
-            Request::Configure {
-                agent: "claude".to_owned(),
+            Request::HoldPurse {
+                purse: "anthropic-key".to_owned(),
                 credential: "not-a-real-credential".to_owned(),
             }
         );
-        assert!(shown.contains("Configure"), "{shown}");
-        assert!(shown.contains("claude"), "{shown}");
+        assert!(shown.contains("HoldPurse"), "{shown}");
+        assert!(shown.contains("anthropic-key"), "{shown}");
         assert!(shown.contains("<redacted>"), "{shown}");
         assert!(!shown.contains("not-a-real-credential"), "{shown}");
 
@@ -2153,10 +2180,10 @@ mod tests {
             (Request::Agents, "Agents"),
             (Request::Projects, "Projects"),
             (
-                Request::ForgetAgent {
-                    agent: "claude".to_owned(),
+                Request::ForgetPurse {
+                    purse: "anthropic-key".to_owned(),
                 },
-                "ForgetAgent",
+                "ForgetPurse",
             ),
             (
                 Request::Amend {
@@ -2247,12 +2274,7 @@ mod tests {
             apps: std::collections::BTreeMap::new(),
             channel_apps: std::collections::BTreeMap::new(),
             password: None,
-            agents: BTreeMap::from([(
-                Agent::Claude,
-                AgentConfig {
-                    auth_token: Secret::new("a-credential".to_owned()),
-                },
-            )]),
+            purses: purses_with(Secret::new("a-credential".to_owned())),
             ..State::default()
         };
         let here = ProjectId::from_uuid(Uuid::from_u128(7));

@@ -349,18 +349,6 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   does, the move invites, and the README's sentence about inviting by hand
   goes.
 
-- **Should a subscription token be checked before it is kept?**
-  `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md` checks a key
-  by the provider's listing of models and keeps a subscription token after
-  a shape check alone, because whether the token answers that listing was
-  not measured: it is the operator's token, minted by the vendor for its own
-  client. If it answers, the check is the key's with the vendor's bearer
-  header and the beta header its client sends in place of the key's; if it
-  does not, the first turn stays the check, failing in seconds with a
-  precise error as 0008 measured. Settled by one request with a real token
-  against the vendor's endpoint that lists models, with and without that
-  header.
-
 - **Should a kit be allowed to leave a model or an effort to the agent's
   default?** `docs/decisions/0048-a-job-runs-on-a-kit.md` lets a kit say
   *default* for both, and the adapter resolves it at each turn, so what ran

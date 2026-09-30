@@ -10,9 +10,9 @@ use std::collections::BTreeMap;
 
 use stageman_channel::Identity;
 use stageman_core::{
-    Access, Agent, Attending, Binding, Channel, ClaudeEffort, ClaudeModel, Inconsistent,
-    Installation, Job, JobId, Kit, Outcome, Platform, Progress, Project, ProjectId,
-    RepositoryAddress, Room, State, Timestamp, Waiting, Workspace,
+    Access, Agent, Attending, Binding, Channel, Charge, ClaudeEffort, ClaudeModel, ClaudePurse,
+    Inconsistent, Installation, Job, JobId, Kit, Outcome, Platform, Progress, Project, ProjectId,
+    Provider, PurseKind, PurseName, RepositoryAddress, Room, State, Timestamp, Waiting, Workspace,
 };
 use stageman_wire::{
     AccessView, BindingView, Choice, Fitted, KitDraft, ModelChoice, Refusal, Shape, Standing,
@@ -38,6 +38,58 @@ pub fn named(identifier: &str) -> Result<Agent, Refusal> {
 pub const fn wire_name(agent: Agent) -> (&'static str, &'static str) {
     match agent {
         Agent::Claude => ("claude", "Claude"),
+    }
+}
+
+/// The purse named by a wire identifier.
+///
+/// # Errors
+///
+/// Fails if nothing is called that.
+pub fn purse_named(identifier: &str) -> Result<PurseName, Refusal> {
+    PurseName::ALL
+        .iter()
+        .copied()
+        .find(|purse| wire_purse(*purse).0 == identifier)
+        .ok_or_else(|| Refusal::UnknownPurse {
+            name: identifier.to_owned(),
+        })
+}
+
+/// What the browser calls a purse, and what to show for it: the provider
+/// and the kind, since a purse is one of each.
+pub const fn wire_purse(purse: PurseName) -> (&'static str, &'static str) {
+    match purse {
+        PurseName::AnthropicKey => ("anthropic-key", "Anthropic key"),
+        PurseName::AnthropicSubscription => ("anthropic-subscription", "Anthropic subscription"),
+    }
+}
+
+/// What the browser calls a provider, and what to show for it.
+pub const fn wire_provider(provider: Provider) -> (&'static str, &'static str) {
+    match provider {
+        Provider::Anthropic => ("anthropic", "Anthropic"),
+    }
+}
+
+/// What a purse's kind is called on a provider's card, where the provider
+/// is already named above it.
+const fn kind_shown(kind: PurseKind) -> &'static str {
+    match kind {
+        PurseKind::Key => "API key",
+        PurseKind::Subscription => "Subscription token",
+    }
+}
+
+/// One line on what a purse is for, in a person's words. Which agents can
+/// charge it follows on the same line, from the closed set.
+const fn kind_note(kind: PurseKind) -> &'static str {
+    match kind {
+        PurseKind::Key => "Metered per token, from the provider's own console.",
+        PurseKind::Subscription => {
+            "Flat per month, from a plan only the vendor's own agent may charge; minted for a \
+             year by the claude setup-token command."
+        }
     }
 }
 
@@ -85,8 +137,9 @@ const CLAUDE_MODELS: [ClaudeModel; 4] = [
 /// A kit, as a browser edits it.
 pub fn fitted(kit: &Kit) -> Fitted {
     match kit {
-        Kit::Claude { model } => Fitted {
+        Kit::Claude { purse, model } => Fitted {
             agent: wire_name(Agent::Claude).0.to_owned(),
+            purse: wire_purse(purse.name()).0.to_owned(),
             model: wire_model(*model).0.to_owned(),
             effort: model
                 .effort()
@@ -103,12 +156,24 @@ pub fn fitted(kit: &Kit) -> Fitted {
 ///
 /// # Errors
 ///
-/// Fails if the agent, the model or the effort is not one this build knows,
-/// if a model that takes an effort was given none, or if one that takes none
-/// was given one.
+/// Fails if the agent, the purse, the model or the effort is not one this
+/// build knows, if the agent cannot charge the purse, if a model that takes
+/// an effort was given none, or if one that takes none was given one.
 pub fn kit_of(fitted: &Fitted) -> Result<Kit, Refusal> {
-    match named(&fitted.agent)? {
+    let agent = named(&fitted.agent)?;
+    if fitted.purse.is_empty() {
+        return Err(Refusal::Incomplete {
+            field: "purse".to_owned(),
+        });
+    }
+    let purse = purse_named(&fitted.purse)?;
+    let unchargeable = || Refusal::PurseUnchargeable {
+        agent: shown(agent),
+        purse: wire_purse(purse).1.to_owned(),
+    };
+    match agent {
         Agent::Claude => {
+            let purse = ClaudePurse::of(purse).ok_or_else(unchargeable)?;
             let kind = CLAUDE_MODELS
                 .iter()
                 .copied()
@@ -145,17 +210,30 @@ pub fn kit_of(fitted: &Fitted) -> Result<Kit, Refusal> {
                 ClaudeModel::Sonnet { .. } => ClaudeModel::Sonnet { effort: effort()? },
                 ClaudeModel::Opus { .. } => ClaudeModel::Opus { effort: effort()? },
             };
-            Ok(Kit::Claude { model })
+            Ok(Kit::Claude { purse, model })
         }
     }
 }
 
-/// What one agent can be set to, as the choices a form offers. The first
-/// model and the first effort are the agent's defaults.
-pub fn shape_of(agent: Agent) -> Shape {
+/// What one agent can be set to, as the choices a form offers: the purses
+/// it can charge that are held, in the order they are listed, then its
+/// models and efforts, the agent's defaults first.
+pub fn shape_of(state: &State, agent: Agent) -> Shape {
+    let purses = agent
+        .purses()
+        .filter(|purse| state.purses.holds(*purse))
+        .map(|purse| {
+            let (id, name) = wire_purse(purse);
+            Choice {
+                id: id.to_owned(),
+                name: name.to_owned(),
+            }
+        })
+        .collect();
     match agent {
         Agent::Claude => Shape {
             agent: wire_name(agent).0.to_owned(),
+            purses,
             models: CLAUDE_MODELS
                 .iter()
                 .map(|model| {
@@ -186,9 +264,10 @@ pub fn shape_of(agent: Agent) -> Shape {
 /// takes one — resolved here, because a job's kit is only ever read.
 pub fn kit_shown(kit: &Kit) -> stageman_wire::Kit {
     match kit {
-        Kit::Claude { model } => stageman_wire::Kit {
+        Kit::Claude { purse, model } => stageman_wire::Kit {
             agent: wire_name(Agent::Claude).0.to_owned(),
             agent_name: wire_name(Agent::Claude).1.to_owned(),
+            purse: wire_purse(purse.name()).1.to_owned(),
             model: wire_model(*model).1.to_owned(),
             effort: model.effort().map(|effort| {
                 let (spelled, name) = wire_effort(effort);
@@ -246,12 +325,21 @@ pub fn shown(agent: Agent) -> String {
     wire_name(agent).1.to_owned()
 }
 
-/// The projects that would break if this agent were forgotten, by name.
-pub fn dependents(state: &State, agent: Agent) -> Vec<String> {
+/// What would break if this purse were forgotten, in words a page can say.
+pub fn charges(state: &State, purse: PurseName) -> Vec<String> {
     state
-        .used_by(agent)
-        .filter_map(|project| state.projects.get(&project))
-        .map(|project| project.name.clone())
+        .charged_by(purse)
+        .map(|charge| {
+            let project = state.projects.get(&charge.project()).map_or_else(
+                || charge.project().to_string(),
+                |project| project.name.clone(),
+            );
+            match charge {
+                Charge::Foreman(_) => format!("the foreman of {project}"),
+                Charge::Kit(_, name) => format!("the kit {name} of {project}"),
+                Charge::Job(_, job) => format!("the job {job} of {project}"),
+            }
+        })
         .collect()
 }
 
@@ -467,11 +555,43 @@ fn expiring(state: &State, now: Timestamp) -> Vec<stageman_wire::ExpiringToken> 
     raised.into_iter().map(|(_, token)| token).collect()
 }
 
-/// Every agent this build can run, as the browser sees them — the whole set,
-/// because a screen that hid the unconfigured ones could not be used to
-/// configure one.
-pub fn listed(state: &State) -> Vec<stageman_wire::Agent> {
-    Agent::ALL
+/// Every purse this build can hold, by provider, and every agent it can
+/// run, as the Agents page sees them — the whole set, held or not, because
+/// a screen that hid the purses not yet held could not be used to hold one.
+pub fn listed(state: &State) -> stageman_wire::Agents {
+    let providers = Provider::ALL
+        .iter()
+        .map(|provider| {
+            let (id, name) = wire_provider(*provider);
+            stageman_wire::ProviderView {
+                id: id.to_owned(),
+                name: name.to_owned(),
+                purses: PurseName::ALL
+                    .iter()
+                    .filter(|purse| purse.provider() == *provider)
+                    .map(|purse| {
+                        let guide = stageman_provider::guide(*purse);
+                        stageman_wire::PurseView {
+                            id: wire_purse(*purse).0.to_owned(),
+                            name: kind_shown(purse.kind()).to_owned(),
+                            note: kind_note(purse.kind()).to_owned(),
+                            guide: guide.link.to_owned(),
+                            minting: guide.label.to_owned(),
+                            guidance: guide.says.to_owned(),
+                            held: state.purses.holds(*purse),
+                            charged_by: charges(state, *purse),
+                            agents: Agent::ALL
+                                .iter()
+                                .filter(|agent| agent.charges(*purse))
+                                .map(|agent| wire_name(*agent).1.to_owned())
+                                .collect(),
+                        }
+                    })
+                    .collect(),
+            }
+        })
+        .collect();
+    let agents = Agent::ALL
         .iter()
         .map(|agent| {
             let (id, name) = wire_name(*agent);
@@ -479,11 +599,21 @@ pub fn listed(state: &State) -> Vec<stageman_wire::Agent> {
                 id: id.to_owned(),
                 name: name.to_owned(),
                 description: agent.description().to_owned(),
-                configured: state.agents.contains_key(agent),
-                used_by: dependents(state, *agent),
+                ready: ready(state, *agent),
+                purses: agent
+                    .purses()
+                    .map(|purse| wire_purse(purse).0.to_owned())
+                    .collect(),
             }
         })
-        .collect()
+        .collect();
+    stageman_wire::Agents { providers, agents }
+}
+
+/// Whether some purse the agent can charge is held, which is what makes a
+/// kit for it possible.
+fn ready(state: &State, agent: Agent) -> bool {
+    agent.purses().any(|purse| state.purses.holds(purse))
 }
 
 /// The domain's progress, as a page sees it. The failure's prose crosses
@@ -694,7 +824,10 @@ pub fn home(
 pub fn instance(state: &State, runtime: &str, domain: &Domain) -> stageman_wire::Instance {
     stageman_wire::Instance {
         container_runtime: runtime.to_owned(),
-        agents: state.agents.len(),
+        agents: Agent::ALL
+            .iter()
+            .filter(|agent| ready(state, **agent))
+            .count(),
         domain: domain.to_string(),
         version: crate::release::described(),
     }
@@ -713,13 +846,14 @@ pub fn watching_now(
     stageman_wire::Watching {
         projects: watching(state, identities, now),
         available: listed(state)
+            .agents
             .into_iter()
-            .filter(|agent| agent.configured)
+            .filter(|agent| agent.ready)
             .collect(),
         shapes: Agent::ALL
             .iter()
-            .filter(|agent| state.agents.contains_key(agent))
-            .map(|agent| shape_of(*agent))
+            .filter(|agent| ready(state, **agent))
+            .map(|agent| shape_of(state, *agent))
             .collect(),
         guides: stageman_wire::Guides {
             token_form: stageman_platform::token_form(Platform::GitHub, None),
@@ -734,8 +868,8 @@ pub fn watching_now(
 pub fn from_inconsistent(reason: &Inconsistent) -> Refusal {
     match reason {
         Inconsistent::NoKits(_) => Refusal::KitsMissing,
-        Inconsistent::UnconfiguredProjectAgent { agent, .. } => Refusal::AgentNotConfigured {
-            name: shown(*agent),
+        Inconsistent::UnconfiguredPurse { purse, .. } => Refusal::PurseNotHeld {
+            name: wire_purse(*purse).1.to_owned(),
         },
         Inconsistent::UnknownInstallation { installation, .. } => {
             Refusal::NoSuchInstallation { id: *installation }
@@ -749,19 +883,37 @@ pub fn from_inconsistent(reason: &Inconsistent) -> Refusal {
 #[cfg(test)]
 mod tests {
     use super::{
-        Domain, Identities, dependents, fitted, identify, kit_of, kit_shown, listed, named,
-        shape_of, shown, standing, wire_channel, wire_name, wire_platform, working,
+        Domain, Identities, charges, fitted, identify, kit_of, kit_shown, listed, named, shape_of,
+        shown, standing, wire_channel, wire_name, wire_platform, working,
     };
     use stageman_core::{
-        Agent, AgentConfig, ClaudeEffort, ClaudeModel, Job, JobId, Kit, KitConfig, KitName,
-        Outcome, Progress, Project, ProjectId, RepositoryAddress, Secret, State, Timestamp, Uuid,
-        Waiting,
+        Agent, ClaudeEffort, ClaudeModel, ClaudePurse, Job, JobId, Kit, KitConfig, KitName,
+        Outcome, Progress, Project, ProjectId, Purse, PurseName, Purses, RepositoryAddress, Secret,
+        State, Timestamp, Uuid, Waiting,
     };
     use stageman_wire::{Fitted, Refusal, Standing};
     use std::collections::BTreeMap;
 
+    /// An instance's purses: the Anthropic key, holding this credential.
+    fn purses_with(credential: Secret) -> Purses {
+        let mut purses = Purses::default();
+        purses.hold(Purse::AnthropicKey(credential));
+        purses
+    }
+
+    /// Claude as it comes, charging the key.
+    fn a_kit() -> Kit {
+        Kit::defaults(Agent::Claude, PurseName::AnthropicKey).expect("Claude charges a key")
+    }
+
+    /// The kit above, described as Claude describes itself.
+    fn a_kit_config() -> KitConfig {
+        KitConfig::defaults(Agent::Claude, PurseName::AnthropicKey).expect("Claude charges a key")
+    }
+
     fn every_claude_kit() -> Vec<Kit> {
         let mut kits = vec![Kit::Claude {
+            purse: ClaudePurse::Key,
             model: ClaudeModel::Haiku,
         }];
         for effort in ClaudeEffort::ALL.iter().copied() {
@@ -770,7 +922,10 @@ mod tests {
                 ClaudeModel::Sonnet { effort },
                 ClaudeModel::Opus { effort },
             ] {
-                kits.push(Kit::Claude { model });
+                kits.push(Kit::Claude {
+                    purse: ClaudePurse::Key,
+                    model,
+                });
             }
         }
         kits
@@ -790,8 +945,18 @@ mod tests {
 
     #[test]
     fn the_shape_of_claude_offers_an_effort_on_every_model_but_haiku() {
-        let shape = shape_of(Agent::Claude);
+        let shape = shape_of(&watching("aviary"), Agent::Claude);
         assert_eq!(shape.agent, "claude");
+        // Only the purses held are offered, and the key is the one held.
+        assert_eq!(
+            shape
+                .purses
+                .iter()
+                .map(|purse| purse.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["anthropic-key"]
+        );
+        assert!(shape_of(&State::default(), Agent::Claude).purses.is_empty());
         let without: Vec<&str> = shape
             .models
             .iter()
@@ -814,6 +979,7 @@ mod tests {
     #[test]
     fn a_kit_a_browser_describes_badly_is_refused_rather_than_mended() {
         let claude = |model: &str, effort: &str| Fitted {
+            purse: "anthropic-key".to_owned(),
             agent: "claude".to_owned(),
             model: model.to_owned(),
             effort: effort.to_owned(),
@@ -847,6 +1013,7 @@ mod tests {
         );
         assert_eq!(
             kit_of(&Fitted {
+                purse: "anthropic-key".to_owned(),
                 agent: "gpt".to_owned(),
                 model: "default".to_owned(),
                 effort: "default".to_owned(),
@@ -863,6 +1030,7 @@ mod tests {
     #[test]
     fn a_kit_is_shown_with_its_names_resolved() {
         let shown = kit_shown(&Kit::Claude {
+            purse: ClaudePurse::Key,
             model: ClaudeModel::Opus {
                 effort: ClaudeEffort::XHigh,
             },
@@ -875,12 +1043,13 @@ mod tests {
             Some(("xhigh".to_owned(), "Extra high".to_owned()))
         );
         assert_eq!(
-            kit_shown(&Kit::defaults(Agent::Claude)).effort,
+            kit_shown(&a_kit()).effort,
             Some(("default".to_owned(), "Default".to_owned())),
             "the agent's own default is a spelling the chip knows to leave unmetered"
         );
         assert_eq!(
             kit_shown(&Kit::Claude {
+                purse: ClaudePurse::Key,
                 model: ClaudeModel::Haiku,
             })
             .effort,
@@ -894,22 +1063,17 @@ mod tests {
             apps: std::collections::BTreeMap::new(),
             channel_apps: std::collections::BTreeMap::new(),
             password: None,
-            agents: BTreeMap::from([(
-                Agent::Claude,
-                AgentConfig {
-                    auth_token: Secret::new("not-a-real-credential".to_owned()),
-                },
-            )]),
+            purses: purses_with(Secret::new("not-a-real-credential".to_owned())),
             projects: BTreeMap::from([(
                 ProjectId::from_uuid(Uuid::nil()),
                 Project {
                     name: name.to_owned(),
                     repository: stageman_core::RepositoryAddress::new("example", "repo")
                         .expect("an address"),
-                    foreman_kit: Kit::defaults(Agent::Claude),
+                    foreman_kit: a_kit(),
                     kits: BTreeMap::from([(
                         KitName::new("Claude").expect("a name"),
-                        KitConfig::defaults(Agent::Claude),
+                        a_kit_config(),
                     )]),
                     access: BTreeMap::new(),
                     channels: BTreeMap::new(),
@@ -984,7 +1148,7 @@ mod tests {
             (3, Progress::Retired(Outcome::Done)),
         ] {
             let mut job = Job::new(
-                Kit::defaults(Agent::Claude),
+                a_kit(),
                 "because".to_owned(),
                 "do the thing".to_owned(),
                 Timestamp::UNIX_EPOCH,
@@ -1066,7 +1230,7 @@ mod tests {
             (7, 70, Progress::Working, false),
         ] {
             let mut job = Job::new(
-                Kit::defaults(Agent::Claude),
+                a_kit(),
                 "because".to_owned(),
                 "do the thing".to_owned(),
                 Timestamp::from_second(second).expect("a time"),
@@ -1151,28 +1315,65 @@ mod tests {
         assert_eq!(shown.watched, vec!["C0BT53FM079".to_owned()]);
     }
 
-    /// The query the whole removal guard rests on.
+    /// The query the whole removal guard rests on, in the words a page says.
     #[test]
-    fn a_project_naming_an_agent_is_named_as_depending_on_it() {
+    fn what_charges_a_purse_is_said_in_words() {
+        let said = charges(&watching("aviary"), PurseName::AnthropicKey);
         assert_eq!(
-            dependents(&watching("aviary"), Agent::Claude),
-            vec!["aviary".to_owned()]
+            said.first().map(String::as_str),
+            Some("the foreman of aviary")
         );
-        assert!(dependents(&State::default(), Agent::Claude).is_empty());
+        assert!(
+            said.contains(&"the kit Claude of aviary".to_owned()),
+            "{said:?}"
+        );
+        assert!(charges(&watching("aviary"), PurseName::AnthropicSubscription).is_empty());
+        assert!(charges(&State::default(), PurseName::AnthropicKey).is_empty());
     }
 
-    /// The listing is of every agent, not of the configured ones, and never
-    /// carries a credential.
+    /// The listing is of every purse and every agent, held or ready or not,
+    /// and never carries a credential.
     #[test]
-    fn every_agent_is_listed_and_never_its_credential() {
+    fn every_purse_and_agent_is_listed_and_never_a_credential() {
         let empty = listed(&State::default());
-        assert_eq!(empty.len(), Agent::ALL.len());
-        assert!(empty.iter().all(|agent| !agent.configured));
+        assert_eq!(empty.agents.len(), Agent::ALL.len());
+        assert!(empty.agents.iter().all(|agent| !agent.ready));
+        let purses: Vec<&str> = empty
+            .providers
+            .iter()
+            .flat_map(|provider| provider.purses.iter())
+            .map(|purse| purse.id.as_str())
+            .collect();
+        assert_eq!(purses, vec!["anthropic-key", "anthropic-subscription"]);
+        assert!(
+            empty
+                .providers
+                .iter()
+                .flat_map(|provider| provider.purses.iter())
+                .all(|purse| !purse.held && purse.charged_by.is_empty() && !purse.guide.is_empty())
+        );
 
         let listing = listed(&watching("aviary"));
-        let claude = listing.first().expect("Claude is listed");
-        assert!(claude.configured);
-        assert_eq!(claude.used_by, vec!["aviary".to_owned()]);
+        let claude = listing.agents.first().expect("Claude is listed");
+        assert!(claude.ready);
+        assert_eq!(
+            claude.purses,
+            vec![
+                "anthropic-key".to_owned(),
+                "anthropic-subscription".to_owned()
+            ]
+        );
+        let anthropic = listing.providers.first().expect("Anthropic is listed");
+        assert_eq!(anthropic.id, "anthropic");
+        let key = anthropic.purses.first().expect("the key is listed");
+        assert_eq!(key.name, "API key");
+        assert!(key.held);
+        assert_eq!(
+            key.charged_by.first().map(String::as_str),
+            Some("the foreman of aviary")
+        );
+        assert_eq!(key.agents, vec!["Claude".to_owned()]);
+        assert!(!anthropic.purses[1].held, "the subscription is not held");
         let served = serde_json::to_string(&listing).expect("it serialises");
         assert!(!served.contains("not-a-real-credential"), "{served}");
     }
@@ -1218,7 +1419,7 @@ mod tests {
             .expect("it");
         for which in 1..=2_u128 {
             let mut job = Job::new(
-                Kit::defaults(Agent::Claude),
+                a_kit(),
                 "because".to_owned(),
                 "do the thing".to_owned(),
                 Timestamp::UNIX_EPOCH,

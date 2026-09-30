@@ -1359,7 +1359,12 @@ mod tests {
     use crate::{AgentError, StopReason, Tools, declaration};
     use agent_client_protocol::Error;
     use agent_client_protocol::schema::v1::{RequestId, ToolCallStatus, ToolKind};
-    use stageman_core::{Agent, ClaudeEffort, ClaudeModel, Kit, Secret};
+    use stageman_core::{Agent, ClaudeEffort, ClaudeModel, ClaudePurse, Kit, PurseName, Secret};
+
+    /// Claude as it comes, charging the key.
+    fn a_kit() -> Kit {
+        Kit::defaults(Agent::Claude, PurseName::AnthropicKey).expect("Claude charges a key")
+    }
 
     fn tools() -> Tools {
         Tools::new(
@@ -1410,12 +1415,8 @@ mod tests {
     /// text, as it always did.
     #[test]
     fn what_the_agent_says_and_does_is_noticed_once_and_in_order() {
-        let (mut conversation, _) = Conversation::begin(
-            Opening::Fresh,
-            None,
-            Kit::defaults(Agent::Claude),
-            "look at the parser",
-        );
+        let (mut conversation, _) =
+            Conversation::begin(Opening::Fresh, None, a_kit(), "look at the parser");
         assert!(conversation.noticed().is_empty(), "nothing yet");
 
         continuing(&mut conversation, &Heard::said("sess-1", "Looking"));
@@ -1461,12 +1462,8 @@ mod tests {
     /// what is said, in order, and what the answer is made of.
     #[test]
     fn a_fresh_conversation_opens_a_session_settles_the_kit_and_asks() {
-        let (mut conversation, first) = Conversation::begin(
-            Opening::Fresh,
-            Some(&tools()),
-            Kit::defaults(Agent::Claude),
-            "hello",
-        );
+        let (mut conversation, first) =
+            Conversation::begin(Opening::Fresh, Some(&tools()), a_kit(), "hello");
         assert!(said(&first) == [Said::Initialize { id: 1 }]);
         assert_eq!(conversation.waiting_for(), "the handshake");
         assert!(!conversation.is_over());
@@ -1551,12 +1548,8 @@ mod tests {
     /// it with the tools declared again, and settles the kit again.
     #[test]
     fn a_resumed_conversation_loads_the_session_the_container_holds() {
-        let (mut conversation, first) = Conversation::begin(
-            Opening::Resumed,
-            None,
-            Kit::defaults(Agent::Claude),
-            "carry on",
-        );
+        let (mut conversation, first) =
+            Conversation::begin(Opening::Resumed, None, a_kit(), "carry on");
         assert!(said(&first) == [Said::Initialize { id: 1 }]);
         assert!(
             continuing(&mut conversation, &Heard::initialized(1)) == [Said::ListSessions { id: 2 }]
@@ -1587,12 +1580,8 @@ mod tests {
     /// A container with no session has nothing to resume.
     #[test]
     fn a_container_with_no_session_has_nothing_to_resume() {
-        let (mut conversation, _) = Conversation::begin(
-            Opening::Resumed,
-            None,
-            Kit::defaults(Agent::Claude),
-            "carry on",
-        );
+        let (mut conversation, _) =
+            Conversation::begin(Opening::Resumed, None, a_kit(), "carry on");
         drop(continuing(&mut conversation, &Heard::initialized(1)));
         let why = over(&mut conversation, &Heard::sessions(2, &[]))
             .expect("the conversation is over")
@@ -1604,8 +1593,7 @@ mod tests {
     /// prompt, in the adapter's own words.
     #[test]
     fn a_setting_the_agent_refuses_ends_the_conversation_with_its_words() {
-        let (mut conversation, _) =
-            Conversation::begin(Opening::Fresh, None, Kit::defaults(Agent::Claude), "hello");
+        let (mut conversation, _) = Conversation::begin(Opening::Fresh, None, a_kit(), "hello");
         drop(continuing(&mut conversation, &Heard::initialized(1)));
         drop(continuing(
             &mut conversation,
@@ -1641,6 +1629,7 @@ mod tests {
     #[test]
     fn a_setting_accepted_and_reported_unchanged_ends_the_conversation() {
         let opus = Kit::Claude {
+            purse: ClaudePurse::Key,
             model: ClaudeModel::Opus {
                 effort: ClaudeEffort::High,
             },
@@ -1730,6 +1719,7 @@ mod tests {
             Opening::Fresh,
             None,
             Kit::Claude {
+                purse: ClaudePurse::Key,
                 model: ClaudeModel::Haiku,
             },
             "hello",
@@ -1798,8 +1788,7 @@ mod tests {
     /// waiting, which is what the agent's own library would do with it.
     #[test]
     fn a_request_this_side_does_not_serve_is_declined() {
-        let (mut conversation, _) =
-            Conversation::begin(Opening::Fresh, None, Kit::defaults(Agent::Claude), "hello");
+        let (mut conversation, _) = Conversation::begin(Opening::Fresh, None, a_kit(), "hello");
         let asked = Heard::Asked {
             id: RequestId::Str("fs-1".to_owned()),
             method: "fs/read_text_file".to_owned(),
@@ -1819,8 +1808,7 @@ mod tests {
     /// is not JSON.
     #[test]
     fn what_is_not_the_protocol_or_not_waited_on_is_let_go() {
-        let (mut conversation, _) =
-            Conversation::begin(Opening::Fresh, None, Kit::defaults(Agent::Claude), "hello");
+        let (mut conversation, _) = Conversation::begin(Opening::Fresh, None, a_kit(), "hello");
         assert!(matches!(
             conversation.heard("not json at all"),
             Exchange::Continue(lines) if lines.is_empty()
@@ -1863,8 +1851,7 @@ mod tests {
     /// conversation saying what could not be read.
     #[test]
     fn an_answer_that_cannot_be_read_ends_the_conversation() {
-        let (mut conversation, _) =
-            Conversation::begin(Opening::Fresh, None, Kit::defaults(Agent::Claude), "hello");
+        let (mut conversation, _) = Conversation::begin(Opening::Fresh, None, a_kit(), "hello");
         drop(continuing(&mut conversation, &Heard::initialized(1)));
         let why = over(
             &mut conversation,
@@ -1884,8 +1871,7 @@ mod tests {
     /// A refusal of anything but a setting is the protocol's failure.
     #[test]
     fn a_refusal_of_the_handshake_is_the_protocols_failure() {
-        let (mut conversation, _) =
-            Conversation::begin(Opening::Fresh, None, Kit::defaults(Agent::Claude), "hello");
+        let (mut conversation, _) = Conversation::begin(Opening::Fresh, None, a_kit(), "hello");
         let why = over(&mut conversation, &Heard::option_refused(1, "x", "y"))
             .expect("the conversation is over")
             .expect_err("refused");
@@ -1896,8 +1882,7 @@ mod tests {
     /// complaint where it made one, and by what it was asked otherwise.
     #[test]
     fn an_agent_that_stops_before_answering_is_reported_by_its_complaint_or_by_what_it_was_asked() {
-        let (mut conversation, _) =
-            Conversation::begin(Opening::Fresh, None, Kit::defaults(Agent::Claude), "hello");
+        let (mut conversation, _) = Conversation::begin(Opening::Fresh, None, a_kit(), "hello");
         drop(continuing(&mut conversation, &Heard::initialized(1)));
 
         match conversation.stopped(Some(1), "  no such image\n") {
@@ -2059,8 +2044,7 @@ mod tests {
     /// A conversation brought as far as its question being put, by an
     /// adapter that can be steered or one that cannot.
     fn prompting(steerable: bool) -> Conversation {
-        let (mut conversation, _) =
-            Conversation::begin(Opening::Fresh, None, Kit::defaults(Agent::Claude), "hello");
+        let (mut conversation, _) = Conversation::begin(Opening::Fresh, None, a_kit(), "hello");
         let handshake = if steerable {
             Heard::initialized(1)
         } else {
@@ -2140,8 +2124,7 @@ mod tests {
         assert!(!unsteerable.can_steer());
         assert!(unsteerable.steer("Use Postgres.").is_none());
 
-        let (mut early, _) =
-            Conversation::begin(Opening::Fresh, None, Kit::defaults(Agent::Claude), "hello");
+        let (mut early, _) = Conversation::begin(Opening::Fresh, None, a_kit(), "hello");
         drop(continuing(&mut early, &Heard::initialized(1)));
         assert!(!early.can_steer(), "no question has been put");
         assert!(early.steer("Use Postgres.").is_none());
