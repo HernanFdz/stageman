@@ -463,7 +463,40 @@ Intended next steps, in order, each with its reason. Written as intentions, not
 progress: "next X, because Y" — never "X is 60% done", which is both derivable
 and wrong within a day.
 
-- Next, the instance's apps held elsewhere, per
+- Next, the purse travelling with every turn, per
+  `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`, because the
+  record and `docs/conventions.md` §3 already say it does and the code
+  still hands the purse to the container once. The command that runs the
+  agent names the purse's variables, a resumed turn looks its purse up
+  again, the replays re-record, and a container test pins on both runtimes
+  that the agent's process sees the variable and the container's
+  configuration does not, which is also where Podman's half of the
+  measurement is made.
+
+- Then the check before a purse is kept, per the same record, because
+  `README.md` already promises it. The provider crate renders the listing
+  and reads its answer, a held request waits on it as a project's
+  credentials do, the simulated world answers it with a scripted refusal
+  and a scripted silence, and the Agents page says the refusal beside the
+  box rather than at the top of the page.
+
+- Then what a turn cost, as a record of its own: every turn, a job's and
+  the foreman's, kept with its kit, what the session reported and the
+  usage the adapter sent — tokens everywhere, a cost where the agent says
+  one, never a total and never a price of this project's own. Before the
+  second agent, because a second agent is where *what did that cost, and
+  on which purse?* starts having more than one answer. The adapter's pin
+  moves with it, since a later release names the model beside the usage.
+
+- Then the second agent, as a record of its own, because being agnostic
+  about agents has been a commitment since
+  `docs/decisions/0006-agents-are-pluggable.md` and one adapter cannot
+  show whether the contract is the protocol's shape or that adapter's. The
+  one that reaches several providers first, since it is what the purse was
+  shaped for; then the vendors' own agents, each bringing a provider the
+  first can also charge.
+
+- Then the instance's apps held elsewhere, per
   `docs/decisions/0085-the-instances-apps-may-be-held-elsewhere.md`, Slack
   first because that is where the setup cost is — ten minutes per project
   under 0081 — and GitHub second. In chunks: the field and the Instance
