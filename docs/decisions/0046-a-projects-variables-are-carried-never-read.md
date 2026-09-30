@@ -4,7 +4,12 @@
 Accepted. Amended by
 `docs/decisions/0075-a-variable-says-what-it-is-for.md`: a variable carries
 a note beside its value, prose for the agent that this project still never
-reads, and a project's variables can be pasted as a `.env` file.
+reads, and a project's variables can be pasted as a `.env` file. Narrowed by
+`docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`: the purse an
+agent charges is handed to the agent's process on every turn rather than to
+the container at creation, and is the one thing in a container's environment
+that a resumed job does not keep; a project's variables are still fixed at
+creation, for the reason below.
 
 ## Context
 

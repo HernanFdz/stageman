@@ -240,14 +240,19 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   Settled by picking the forwarding infra, since the answer is a property of
   that choice rather than an independent decision.
 
-- **What should happen when an agent credential expires while nobody is
-  watching?** It will, and it lands on every job at once. The options run from
-  failing each job loudly and showing it on the dashboard, to pausing the
-  instance and saying so on the channel a human is actually reading. The second
-  is more work and is probably right, because a dashboard nobody is looking at
-  is exactly where this failure would otherwise sit until morning. Settled by
-  deciding what a job that cannot start should look like in general — the same
-  question wearing a different hat, and worth answering once.
+- **How is a purse's expiry noticed while nobody is watching?** It will
+  expire, and it lands on every job charging it at once. Since
+  `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md` the repair
+  is a paste: a replaced credential reaches a foreman at its next message
+  and a job when it resumes, with no container recreated. What is
+  undecided is how the expiry is noticed and where it is said. The options
+  run from failing each job loudly and showing it on the dashboard, to
+  pausing the instance and saying so on the channel a human is actually
+  reading. The second is more work and is probably right, because a
+  dashboard nobody is looking at is exactly where this failure would
+  otherwise sit until morning. Settled by deciding what a job that cannot
+  start should look like in general — the same question wearing a different
+  hat, and worth answering once.
 
 - **Should the browser's bundle live inside the binary?** What ships is a
   server executable and a `public/` directory of static assets beside it, which
@@ -268,21 +273,6 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   reimplemented to do it — if the answer is a route that reads from a compiled-in
   map instead of a directory, it is cheap; if it is the asset pipeline, it is
   not.
-
-- **When do credentials move from agents to providers?**
-  `docs/decisions/0048-a-job-runs-on-a-kit.md` decides that they will. With an
-  agent that reaches several providers, the credential is the provider's rather
-  than the agent's, and a job must be handed exactly the one its kit names or
-  the billing failure `docs/decisions/0008-one-credential-per-agent.md` guards
-  against returns through a new door. A provider is platform-shaped — a closed
-  set, because naming the variable an agent reads it from is code — and
-  anything stranger is already a project variable.
-
-  What is undecided is only when. Moving them before any configured agent has
-  more than one provider is a snapshot migration for a distinction nothing yet
-  has, so the honest answer is: with the first adapter that does. Settled by
-  that adapter landing, and worth deciding in the same change as its kit
-  variant, since that variant is where the provider has to be named.
 
 - **Should the instance keep a flight recorder?** Everything it does is a
   function of what it was constructed from and the events it was fed since,
@@ -359,17 +349,17 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   does, the move invites, and the README's sentence about inviting by hand
   goes.
 
-- **Should an agent's credential be checked before it is kept?**
-  `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`
-  checks a project's three credentials against their platforms at the form
-  and leaves the agent's alone: the one adapter's headless credential is a
-  token its vendor mints for its own client, and whether a request that
-  costs nothing — a listing of models, say — answers for it was not
-  measured. If one does, the check is the same shape as the others, with
-  the agent crate rendering it; if none does, the first turn stays the
-  check, failing in seconds with a precise error as 0008 measured. Settled
-  by one request with a real token, against the vendor's endpoint that
-  lists models, with and without the header the client sends.
+- **Should a subscription token be checked before it is kept?**
+  `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md` checks a key
+  by the provider's listing of models and keeps a subscription token after
+  a shape check alone, because whether the token answers that listing was
+  not measured: it is the operator's token, minted by the vendor for its own
+  client. If it answers, the check is the key's with the vendor's bearer
+  header and the beta header its client sends in place of the key's; if it
+  does not, the first turn stays the check, failing in seconds with a
+  precise error as 0008 measured. Settled by one request with a real token
+  against the vendor's endpoint that lists models, with and without that
+  header.
 
 - **Should a kit be allowed to leave a model or an effort to the agent's
   default?** `docs/decisions/0048-a-job-runs-on-a-kit.md` lets a kit say
@@ -459,12 +449,15 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   since a queue is what `docs/vision.md` §2 refuses. Settled by the first
   hosted plan, or the first laptop that swaps.
 
-- **Should an agent's credential be a gateway's?** 0085 decides that a
-  model credential can be held elsewhere the way an app can, and defers
-  the shape: an agent's configuration would become an address and a key,
-  each agent independently held or in custody, delivered as the two
-  variables the agent documents for a gateway, and the base-address
-  variable would join the names
+- **Should a purse be a gateway's?** 0085 decides that a model credential
+  can be held elsewhere the way an app can, and defers the shape: a purse
+  would become an address and a key beside the provider's own kinds, held
+  or in custody, delivered as the two variables each agent documents for a
+  gateway — or, once the protocol's providers extension stabilises, in a
+  header per session, which
+  `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md` names as the
+  delivery to prefer for a gateway — and the base-address variable would
+  join the names
   `docs/decisions/0046-a-projects-variables-are-carried-never-read.md`
   refuses, since one overriding it redirects an agent's traffic exactly as
   an inherited key changes who pays. Three facts read from the agent's
@@ -473,11 +466,8 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   upstream key's owner; a gateway must forward whatever the agent sends,
   and the agent grows with each release, so it is maintained infrastructure;
   and the vendor ships a self-hosted gateway of its own. What is unread is
-  the vendor's terms on resale, and what is undecided is whether the
-  credential then belongs to the agent or to a provider, which is the
-  question this file already holds on credentials moving from agents to
-  providers. Settled by reading the terms, and by the first customer who
-  brings no credential of their own.
+  the vendor's terms on resale. Settled by reading the terms, and by the
+  first customer who brings no credential of their own.
 
 ## Next
 

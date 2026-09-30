@@ -361,10 +361,12 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   is not only something inside a job — the foreman runs one too, to think
   with. In the code it is a closed set rather than an open list: the agents that
   can be run are the ones compiled in, because each needs an adapter and an
-  image and both are code. What an operator supplies per agent is an
-  `AgentConfig` — a credential, and nothing else, since where the program lives
-  is decided by an image rather than by this machine. A job stores its agent by
-  value, so removing that configuration later cannot rewrite the record of work
+  image and both are code. An operator supplies nothing per agent since
+  `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`: what an agent
+  authenticates with is a **purse**, and an agent is ready when some purse it
+  can charge is held. Where the program lives is decided by an image rather
+  than by this machine. A job stores its kit by value, agent and purse
+  included, so forgetting a purse later cannot rewrite the record of work
   already done.
 
   One near-miss is imported rather than invented: the protocol library uses the
@@ -380,9 +382,12 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   every turn — see `docs/decisions/0048-a-job-runs-on-a-kit.md`, which also
   decides that a project names the kits its jobs may run on. In the code its
   tag *is* the agent, so a kit cannot hold settings for an agent other than
-  its own; and what the adapter reports back after being set is kept on the
-  job beside the kit rather than derived from it, because the two were
-  measured to differ.
+  its own; its payload names the **purse** its work is charged to, from the
+  purses that agent can charge and no other, so a kit charging a purse its
+  agent cannot is unwritable rather than checked — see
+  `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`; and what the
+  adapter reports back after being set is kept on the job beside the kit
+  rather than derived from it, because the two were measured to differ.
 
   Not *profile* or *preset*, both of which name a saved form rather than the
   thing a job actually runs under. Not *assignment*, which names the act of a
@@ -392,6 +397,40 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   not apply, which is exactly the difference between the two concepts: a kit is
   read, by the adapter, on every turn. What rules those words out is that they
   name a bag of values, and a kit is a decision about one job.
+
+- **provider** — who serves a model and bills for it: Anthropic, and the
+  vendors the agents after the first reach. A closed set, for the reason
+  `Platform` and `Channel` are: delivering a credential to an agent is code —
+  the variable it is read from, the check it is checked by, the mark it is
+  drawn with — so a provider an operator could invent would only postpone
+  the failure to a job. See
+  `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`. Not
+  *vendor*, which names who makes a model where a cloud backend bills for
+  another's; not *backend*, which is an agent's word for where its requests
+  go and names the plumbing; not *platform*, which is taken by the
+  repository host, and GitHub is both — a platform a job reaches and, for
+  the Copilot agent, a provider a kit charges — under two maps for the
+  reason `docs/decisions/0027-a-channel-is-not-a-platform.md` keeps two.
+
+- **purse** — one credential at one provider, in the shape that provider
+  hands out, and the thing a kit's work is charged to. Two kinds: a **key**,
+  metered per token and honoured by every agent that speaks the provider,
+  and a **subscription**, flat per month and honoured by the vendor's own
+  agent alone — which is the vendors' rule, not this project's, and is
+  written into which purses each agent's kit can name. The instance holds
+  at most one of each kind per provider, keyed by the purse's own name; a
+  kit names one; the handout selects the credential by it; and it is
+  handed to the agent's process on every turn rather than to its container
+  once, so a replaced credential reaches a foreman at its next message and
+  the container never holds it. See
+  `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`. Not
+  *account*, which is what an App is installed on and would make a sentence
+  about GitHub say two things; not *plan*, which the protocol uses for what
+  an agent intends to do next; not *credential*, which names the secret and
+  not who pays, and the near-miss worth recording: the whole reason the
+  word exists is that two credentials at one provider are two different
+  answers to *who pays*, and a kit has to say which. Not *login* for the
+  subscription kind, refused under **session** for naming the act.
 
 - **brief** — free text an operator writes for a project's foreman, said to
   it on every turn beside the kits: the operator's standing instructions,
@@ -435,8 +474,8 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   allowed to blur. Not *setting* or *configuration*, both of which imply
   something here reads one.
 
-- **handout** — exactly what one agent process is allowed to see: its agent's
-  own credential, and — of the one project it works for — that project's
+- **handout** — exactly what one agent process is allowed to see: the purse
+  its kit charges, and — of the one project it works for — that project's
   platform credentials, its variables, and the *speaking* half of its channel
   bindings. Half,
   because a binding holds a second credential that opens an event stream, and
@@ -449,10 +488,12 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   `docs/decisions/0027-a-channel-is-not-a-platform.md`, and
   `docs/decisions/0046-a-projects-variables-are-carried-never-read.md` for the
   third. It is *decided* in the domain crate as a
-  pure function and *delivered* by an adapter, because which secrets a process
-  may see is a question about configuration while what they are called is
-  knowledge about one agent. Not *environment*, and that near-miss is the whole
-  reason this word exists: an environment names a delivery mechanism, and
+  pure function and *delivered* by an adapter — the purse with every turn,
+  the rest when the container is made, per
+  `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md` — because
+  which secrets a process may see is a question about configuration while
+  what they are called is knowledge about one agent. Not *environment*, and
+  that near-miss is the whole reason this word exists: an environment names a delivery mechanism, and
   delivery is precisely the half that differs — a variable for one agent, a file
   at an expected path for another — so a word presuming variables would make the
   wrong half sound settled. Not *credentials* either, which is a bag of secrets
@@ -552,9 +593,12 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   one per agent this build can run, keyed by the identifier the wire uses
   for it, with a generic one for an identifier this build does not know;
   and since the job page, a platform's and a channel's, for the links a
-  page makes to them, keyed the same way. A mark says *whose*; an icon says
-  *what*. Not a *logo*, which is a brand's full lockup and belongs to nobody
-  here; not an *icon*, which is reserved for the one set §3 names.
+  page makes to them, keyed the same way; and a provider's, on the Agents
+  page, since
+  `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`. A mark
+  says *whose*; an icon says *what*. Not a *logo*, which is a brand's full
+  lockup and belongs to nobody here; not an *icon*, which is reserved for
+  the one set §3 names.
 
 - **tick** — what an open page is told when a write of the instance's file
   has landed: that something may have changed, and nothing else — see
@@ -680,17 +724,32 @@ justify is usually obsolete.
   the terminal, and a token escapes through a formatted struct long before it
   escapes through the database. The mechanical half of this rule is §4 below.
 - **What a child process is handed is constructed, never inherited.** An agent
-  process receives exactly the credential material it ought to have — its own
-  agent's, and nothing belonging to any other. Delivery differs per agent: a
-  variable for one, a file at an expected path for another. What never differs
-  is that this project decides, and that nothing arrives by accident. This is
-  not tidiness. At least one agent resolves credentials by precedence and
-  prefers a per-token key when it finds one, so a variable inherited from
-  whatever shell started the daemon silently changes who pays — no error, no
-  log line, and no way to notice before the invoice arrives. Deciding what goes
-  where is a pure function in the core crate so it can be tested without
-  spawning anything; delivering it belongs to the adapter. Reasoning in
+  process receives exactly the credential material it ought to have — the
+  purse its kit charges, and nothing belonging to any other. Delivery differs
+  per agent and per purse: a variable under one name for a key, under
+  another for a subscription token, and a file at an expected path for an
+  agent that keeps one. What never differs is that this project decides, and
+  that nothing arrives by accident. This is not tidiness. At least one agent
+  resolves credentials by precedence and prefers a per-token key when it
+  finds one, so a variable inherited from whatever shell started the daemon
+  silently changes who pays — no error, no log line, and no way to notice
+  before the invoice arrives. Deciding what goes where is a pure function in
+  the core crate so it can be tested without spawning anything; delivering
+  it belongs to the adapter. Reasoning in
   `docs/decisions/0008-one-credential-per-agent.md`.
+
+  **The purse travels with every turn, and the container never holds it.**
+  Since `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md` the
+  purse's variables are named on the command that runs the agent inside
+  the container and carried in the runtime's own environment, on the first
+  turn and on every resume, so that a replaced credential reaches a foreman
+  at its next message and a job when it resumes, and the container's
+  inspectable configuration carries no credential at all. A project's
+  variables and a job's warrant are still given when the container is made
+  and fixed for its life, because they are part of what the job is. Measured
+  on Docker: a bare name on the run command forwards the variable from the
+  runtime's environment exactly as it does on creation, so a secret still
+  never travels in an argument list.
 
   **A job's process is handed no platform credential at all**, since
   `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`:
@@ -840,7 +899,13 @@ justify is usually obsolete.
   and for a platform the daemon asks something of itself — what a
   credential is checked with, what the answer means, and where the
   platform's own form is — which is the **platform** crate's, per
-  `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`.
+  `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`;
+  and for a provider — what a purse is checked with, what the answer means,
+  the shape a credential of each kind has, and where each is minted —
+  which is the **provider** crate's, per
+  `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`. What an
+  agent reads a purse *from* stays the agent crate's, because the variable
+  is the agent's and the check is the provider's.
 - **Packages carry a prefix; directories do not.** The directories are named
   for the concepts in `docs/architecture.md` §1, and the packages inside them
   are `stageman-core`, `stageman-foreman` and `stageman-job`, with the app

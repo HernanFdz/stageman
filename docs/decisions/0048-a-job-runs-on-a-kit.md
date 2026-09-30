@@ -7,7 +7,10 @@ which agent ran a job and has the foreman choose one: the thing recorded and
 chosen is now a *kit*, an agent set a particular way, and the agent alone is no
 longer enough to say what ran. Leaves
 `docs/decisions/0008-one-credential-per-agent.md` in force and names, under
-Consequences, the change that would revise it.
+Consequences, the change that would revise it; that change is
+`docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`, which fills
+the room *Providers come later* leaves: a kit's variant carries the purse it
+charges.
 
 ## Context
 

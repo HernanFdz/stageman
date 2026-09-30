@@ -50,11 +50,17 @@ a job's commands fetch it from stageman one at a time, as they run. Obtaining
 a credential is a one-time step you do wherever you happen to be, and only
 its result goes into stageman.
 
-**It asks you nothing to start.** A fresh instance has no agents and no
+**It asks you nothing to start.** A fresh instance has no purses and no
 projects, and that is a perfectly good instance — it simply has nothing to do
 yet. You give it those in the dashboard, in that order, because a project needs
 an agent to think with and at least one **kit** its jobs can run on — an agent,
-set a particular way: which model, and how hard it thinks.
+set a particular way: which **purse** pays for its work, which model, and how
+hard it thinks. A purse is one credential at one provider: an API key, metered
+per token and usable by every agent that speaks that provider, or a
+subscription token, flat per month and usable by the vendor's own agent alone.
+Each kind is pasted in its own box on the Agents page, beside a link to where
+it is minted; a key is checked against its provider before it is kept, and a
+subscription token by its shape.
 
 **A project reaches its repository one of two ways, and the repository is
 chosen from what that reaches.** With a token: press *Use a token* on the
@@ -360,12 +366,13 @@ where the browser's half came from. A build without one still serves the
 dashboard — the page is rendered on the server and arrives complete, it just
 does not update itself afterwards.
 
-Which agents are configured is yours to decide, and so is which kits each
-project offers: an agent, set the way you want jobs on that project to run it,
-under a name and a line saying what it is for. The foreman picks one per job
-from those and nothing else, and the dashboard shows which kit ran each job.
-Where an agent can be paid for by a subscription rather than by the token, that
-is the path stageman prefers.
+Which purses are held is yours to decide, and so is which kits each project
+offers: an agent, set the way you want jobs on that project to run it and
+charged to the purse you choose, under a name and a line saying what it is
+for. The foreman picks one per job from those and nothing else, and the
+dashboard shows which kit ran each job. A purse is handed to the agent on
+every turn rather than baked into its container, so a replaced credential
+reaches a foreman at its next message and a job when it next resumes.
 
 The dashboard opens on what needs you: every job waiting for an answer, a
 review or a fix, across every project, with what to do about it; then what is
