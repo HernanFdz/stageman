@@ -32,7 +32,7 @@ use super::live::{Live, Reading, use_reading};
 use super::projects_view::{amend, binds, create, forget, projects, reaches, workspace_arrival};
 use crate::ui::{
     BESIDE, Button, ButtonVariant, Card, Combobox, ComboboxItem, FIELD, Field, Guide, Icon, Modal,
-    PageHeader, Segmented, Skeleton, TextArea, Tooltip, When,
+    PageHeader, SecretBox, Segmented, Skeleton, TextArea, Tooltip, When,
 };
 
 pub use stageman_wire::{
@@ -1562,12 +1562,10 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
                                             link: app_form,
                                         }
                                     },
-                                    input {
-                                        r#type: "password",
-                                        class: "{FIELD} font-mono",
+                                    SecretBox {
                                         placeholder: "xoxb-…",
-                                        value: "{own_credential}",
-                                        oninput: move |event| own_credential.set(event.value()),
+                                        value: own_credential(),
+                                        oninput: move |event: FormEvent| own_credential.set(event.value()),
                                     }
                                 }
                                 Field {
@@ -1580,12 +1578,10 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
                                            app another project already speaks through is refused, since Slack \
                                            hands each event to one connection.",
                                     problem: beside_listening,
-                                    input {
-                                        r#type: "password",
-                                        class: "{FIELD} font-mono",
+                                    SecretBox {
                                         placeholder: "xapp-…",
-                                        value: "{own_listening}",
-                                        oninput: move |event| own_listening.set(event.value()),
+                                        value: own_listening(),
+                                        oninput: move |event: FormEvent| own_listening.set(event.value()),
                                     }
                                 }
                             }
@@ -1675,11 +1671,9 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
                                         link: token_form,
                                     }
                                 },
-                                input {
-                                    r#type: "password",
-                                    class: "{FIELD} font-mono",
+                                SecretBox {
                                     placeholder: "github_pat_…",
-                                    value: "{token_text}",
+                                    value: token_text(),
                                     // Focused by script once it exists: the autofocus
                                     // attribute is honoured only until the person has
                                     // focused anything, and the control that opened this
@@ -1692,7 +1686,7 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
                                             let _ = event.set_focus(true).await;
                                         });
                                     },
-                                    oninput: move |event| token_text.set(event.value()),
+                                    oninput: move |event: FormEvent| token_text.set(event.value()),
                                     onkeydown: move |event: KeyboardEvent| {
                                         if event.key() == Key::Enter {
                                             event.prevent_default();
@@ -1889,6 +1883,9 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
                         note: "One NAME=value per line. A comment above a line becomes its note.",
                         problem: unread(),
                         TextArea {
+                            // A file of secrets: readable, so that a paste can
+                            // be checked by eye, and kept from the browser.
+                            holds_secrets: true,
                             class: "min-h-48 font-mono",
                             placeholder: "# the payment provider, in test mode\nSTRIPE_API_KEY=sk_test_not_a_real_key\nexport DATABASE_URL=\"postgres://…\"",
                             value: pasted(),
@@ -2033,19 +2030,22 @@ fn Variable(
                         move |event| onchange.call(VariableDraft { name: event.value(), ..row.clone() })
                     },
                 }
-                input {
-                    r#type: "password",
-                    class: FIELD,
+                SecretBox {
+                    // The page's own face rather than a credential's: what
+                    // this box says while empty is a sentence, not a shape.
+                    class: "font-sans",
                     // Per row rather than per form, because *this row* is
                     // what decides it: a box says "keep" only where there
                     // is something to keep, which is a name the project
                     // already holds.
                     placeholder: if kept { "leave empty to keep" } else { "its value" },
                     aria_label: "Value of variable {position + 1}",
-                    value: "{row.value}",
+                    value: row.value.clone(),
                     oninput: {
                         let row = row.clone();
-                        move |event| onchange.call(VariableDraft { value: event.value(), ..row.clone() })
+                        move |event: FormEvent| {
+                            onchange.call(VariableDraft { value: event.value(), ..row.clone() });
+                        }
                     },
                 }
                 // What it is for, told to the agent beside the name — see

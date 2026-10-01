@@ -33,6 +33,13 @@ pub struct TextAreaProps {
     /// Extra classes, merged over the box's own.
     #[props(default)]
     pub class: String,
+    /// Whether what it holds is secret — a file of variables, say — and so
+    /// none of the browser's to complete, to restore, or to check the
+    /// spelling of, per `docs/conventions.md` §3. Readable all the same,
+    /// where a credential's box is masked: what is pasted here is checked
+    /// by eye.
+    #[props(default = false)]
+    pub holds_secrets: bool,
     /// Told what was typed.
     pub oninput: EventHandler<FormEvent>,
     /// Anything else a caller wants on the element — a name for whoever
@@ -53,6 +60,12 @@ pub fn TextArea(props: TextAreaProps) -> Element {
     rsx! {
         textarea {
             class: tw_merge!(FIELD, AREA, props.class),
+            // Said only by a box of secrets, and left to the browser by every
+            // other: a brief is prose, and wants its spelling checked.
+            autocomplete: if props.holds_secrets { "off" },
+            spellcheck: if props.holds_secrets { "false" },
+            autocapitalize: if props.holds_secrets { "off" },
+            "autocorrect": if props.holds_secrets { "off" },
             placeholder: props.placeholder,
             value: "{props.value}",
             dangerous_inner_html: as_text(&first),
@@ -75,6 +88,47 @@ fn as_text(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::as_text;
+
+    // On the daemon's half only, for the reason the icon tests give.
+    #[cfg(feature = "server")]
+    mod drawn {
+        use super::super::TextArea;
+        use dioxus::prelude::*;
+
+        /// A page holding one box of each kind, so that their handlers are
+        /// made where a handler can be: inside something being rendered.
+        fn page() -> Element {
+            rsx! {
+                TextArea { value: "a brief", oninput: |_| {} }
+                TextArea { value: "KEY=value", holds_secrets: true, oninput: |_| {} }
+            }
+        }
+
+        /// A box of secrets tells the browser to keep out of it, and any
+        /// other box says nothing, so that prose keeps its spelling checked.
+        #[test]
+        fn only_a_box_of_secrets_is_kept_from_the_browser() {
+            let mut dom = VirtualDom::new(page);
+            dom.rebuild_in_place();
+            let drawn = dioxus::ssr::render(&dom);
+            let (prose, secrets) = drawn
+                .split_once("</textarea>")
+                .expect("two boxes, one after the other");
+
+            for said in [
+                "autocomplete",
+                "spellcheck",
+                "autocapitalize",
+                "autocorrect",
+            ] {
+                assert!(!prose.contains(said), "{said} on a box of prose: {prose}");
+            }
+            assert!(secrets.contains(r#"autocomplete="off""#), "{secrets}");
+            assert!(secrets.contains(r#"spellcheck="false""#), "{secrets}");
+            assert!(secrets.contains(r#"autocapitalize="off""#), "{secrets}");
+            assert!(secrets.contains(r#"autocorrect="off""#), "{secrets}");
+        }
+    }
 
     /// Whatever a person typed comes back as they typed it, and nothing
     /// they typed can end the box or be read as a reference.

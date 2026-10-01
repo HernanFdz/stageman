@@ -23,8 +23,8 @@ use stageman_instance::{Request, Response};
 use super::error::{DashboardError, DashboardResult};
 use super::live::{Live, Reading, use_reading};
 use crate::ui::{
-    BESIDE, Badge, BadgeTone, Button, ButtonVariant, Card, EmptyState, Guide, Icon, Mark, Skeleton,
-    Tooltip,
+    BESIDE, Badge, BadgeTone, Button, ButtonVariant, Card, EmptyState, Guide, Icon, Mark,
+    SecretBox, Skeleton, Tooltip,
 };
 
 pub use stageman_wire::{Agent, Agents, ProviderView, PurseView};
@@ -218,15 +218,12 @@ fn PurseRow(
             }
             div { class: "flex flex-wrap items-center gap-2",
                 if pasting {
-                    input {
-                        r#type: "password",
-                        class: "w-full max-w-sm rounded-md border border-border bg-surface px-2 py-1.5 \
-                                font-mono text-xs placeholder:text-faint-foreground focus-visible:outline-none \
-                                focus-visible:ring-2 focus-visible:ring-primary",
-                        placeholder: "{purse.example}",
+                    SecretBox {
+                        class: "max-w-sm text-xs",
+                        placeholder: purse.example.clone(),
                         aria_label: "The {purse.name}",
-                        value: "{credential}",
-                        oninput: move |event| credential.set(event.value()),
+                        value: credential(),
+                        oninput: move |event: FormEvent| credential.set(event.value()),
                     }
                     Button {
                         disabled: credential().trim().is_empty(),

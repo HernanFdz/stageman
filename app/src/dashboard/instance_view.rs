@@ -36,7 +36,7 @@ use super::error::{DashboardError, DashboardResult};
 use super::live::{Live, Reading, use_reading};
 use crate::ui::{
     BESIDE, Button, ButtonVariant, Card, EmptyState, FIELD, Field, Guide, Icon, Mark, Modal,
-    Reference, Segmented, Skeleton, Tooltip,
+    Reference, SecretBox, Segmented, Skeleton, Tooltip,
 };
 
 pub use stageman_wire::{
@@ -842,12 +842,10 @@ fn RegisteringSlack(form: String, onchanged: EventHandler<DashboardResult<Apps>>
             Field {
                 label: "Client secret",
                 note: "Beside the client ID. Kept sealed, and checked by the first install.",
-                input {
-                    r#type: "password",
-                    class: "{FIELD} font-mono",
+                SecretBox {
                     placeholder: "…",
-                    value: "{client_secret}",
-                    oninput: move |event| client_secret.set(event.value()),
+                    value: client_secret(),
+                    oninput: move |event: FormEvent| client_secret.set(event.value()),
                 }
             }
             Field {
@@ -855,12 +853,10 @@ fn RegisteringSlack(form: String, onchanged: EventHandler<DashboardResult<Apps>>
                 note: "What listens. Starts with xapp, with the connections:write scope; checked \
                        against Slack before it is kept.",
                 problem: beside_token,
-                input {
-                    r#type: "password",
-                    class: "{FIELD} font-mono",
+                SecretBox {
                     placeholder: "xapp-…",
-                    value: "{app_token}",
-                    oninput: move |event| app_token.set(event.value()),
+                    value: app_token(),
+                    oninput: move |event: FormEvent| app_token.set(event.value()),
                 }
             }
             div {

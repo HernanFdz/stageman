@@ -1178,6 +1178,31 @@ justify is usually obsolete.
   box pads its rows in from the edge every other control on the page sits
   at.
 
+- **A box that takes a secret is not a password field.** Since
+  `docs/decisions/0084-the-instance-authenticates-itself.md` the dashboard
+  has a password of its own, so a browser holds a saved login for its
+  address, and every password-typed box on every page is that login's to
+  fill. Measured on 2026-10-01 in Firefox and in Chrome, each holding one
+  login saved as the sign-in form saves it: the dashboard's password
+  arrived in the box for a purse and in the box for a project's token as
+  the page did, and a token's box is sent to its platform to be checked, so
+  one press would have sent the password there; and once a key had been
+  pasted and kept, Firefox offered to replace the saved password with the
+  key. Turning completion off changes none of it, because a browser
+  ignores that on a password field. So a credential, a token and a
+  variable's value are typed into a text box, masked by a style rather
+  than by its type, with completion, spelling and capitalisation off,
+  through one component; and a file of variables is pasted into a box that
+  stays readable, with the same three off. The only password-typed boxes
+  are the sign-in's and the three that change the password, each saying
+  which it is, and a test refuses another. Not the `new-password` hint,
+  which is the near-miss worth recording: it stops the fill on arrival and
+  keeps the rest — the saved password a click away in a dropdown when the
+  box is focused, a generated one beside it, and the offer to update
+  afterwards — because the box is still a password field, asking a
+  password manager to stand down. Safari was not measured, nor any
+  password manager that is an extension.
+
 - **A tooltip, and what the info control beside a label says, show on
   hover and on a focus that came from the keyboard, never for a click.** A
   control that is clicked keeps its focus, so a tooltip shown for focus

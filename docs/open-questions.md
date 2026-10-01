@@ -457,6 +457,25 @@ yet — it is unease, and belongs in your own notes until it sharpens.
   the vendor's terms on resale. Settled by reading the terms, and by the
   first customer who brings no credential of their own.
 
+- **Should a platform's or a channel's credential be refused by its shape
+  before it is sent?**
+  `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md` refuses a
+  purse whose text has the other box's shape before anything is asked of
+  the provider.
+  `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`
+  checks a project's token and its Slack tokens by sending them, so
+  whatever is in the box reaches the platform: a paste of the wrong thing,
+  or, until a box that takes a secret stopped being a password field per
+  `docs/conventions.md` §3, the dashboard's own password filled in by a
+  browser. Each of those credentials has a documented beginning, so the
+  same refusal is available, as a function per platform in the crates that
+  already own what each credential is checked with. What is undecided is
+  whether a beginning is stable enough to refuse on: a platform that
+  mints a new kind of token would be refused here until this project
+  learned of it, which is a failure that checking by asking does not
+  have. Settled by reading how each platform documents its token formats,
+  and whether it promises them.
+
 ## Next
 
 Intended next steps, in order, each with its reason. Written as intentions, not

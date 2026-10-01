@@ -83,3 +83,19 @@
         --color-failed: #e28174;
     }
 }
+
+/* What a box that takes a secret wears: its text drawn as discs by a style,
+   rather than by the box being a password field. A password-typed box is a
+   saved login's to fill, and the dashboard has one, so a secret is typed
+   into a text box and this is what keeps it off the screen — see
+   `docs/conventions.md` §3. The property is a vendor's own and every engine
+   draws it. It is inherited, so the placeholder is told to stay readable:
+   the two engines measured leave it readable by themselves, and the line is
+   for one that might not. */
+@utility masked {
+    -webkit-text-security: disc;
+
+    &::placeholder {
+        -webkit-text-security: none;
+    }
+}
