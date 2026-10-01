@@ -368,7 +368,9 @@ does not update itself afterwards.
 Which purses are held is yours to decide, and so is which kits each project
 offers: an agent, set the way you want jobs on that project to run it and
 charged to the purse you choose, under a name and a line saying what it is
-for. The foreman picks one per job from those and nothing else, and the
+for. Where an agent can charge a subscription and you hold one, a new kit
+starts on it — flat per month, and already yours — and can be moved to the
+key. The foreman picks one per job from those and nothing else, and the
 dashboard shows which kit ran each job. A purse is handed to the agent on
 every turn rather than baked into its container, so a replaced credential
 reaches a foreman at its next message and a job when it next resumes.

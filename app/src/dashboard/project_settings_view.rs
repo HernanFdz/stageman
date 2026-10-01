@@ -2827,7 +2827,7 @@ mod tests {
     fn as_it_comes() -> Fitted {
         Fitted {
             agent: "claude".to_owned(),
-            purse: "anthropic-key".to_owned(),
+            purse: "anthropic-subscription".to_owned(),
             model: "default".to_owned(),
             effort: "default".to_owned(),
         }
@@ -2846,7 +2846,7 @@ mod tests {
         };
         Shape {
             agent: "claude".to_owned(),
-            purses: vec![effort("anthropic-key"), effort("anthropic-subscription")],
+            purses: vec![effort("anthropic-subscription"), effort("anthropic-key")],
             models: vec![
                 model("default", true),
                 model("sonnet", true),
@@ -2858,14 +2858,15 @@ mod tests {
     }
 
     /// Moving between purses changes who pays and nothing else, and a fresh
-    /// kit charges the first purse held.
+    /// kit charges the first purse the shape offers, which the server orders
+    /// as the agent prefers them.
     #[test]
     fn moving_between_purses_changes_who_pays_and_nothing_else() {
-        let moved = with_purse(&as_it_comes(), "anthropic-subscription");
-        assert_eq!(moved.purse, "anthropic-subscription");
+        let moved = with_purse(&as_it_comes(), "anthropic-key");
+        assert_eq!(moved.purse, "anthropic-key");
         assert_eq!(moved.model, "default");
         assert_eq!(moved.effort, "default");
-        assert_eq!(seeded(&claude()).purse, "anthropic-key");
+        assert_eq!(seeded(&claude()).purse, "anthropic-subscription");
     }
 
     /// Moving between models keeps, clears or seeds the effort as the new
@@ -2986,8 +2987,8 @@ mod tests {
                 description: "does the work".to_owned(),
                 ready: true,
                 purses: vec![
-                    "anthropic-key".to_owned(),
                     "anthropic-subscription".to_owned(),
+                    "anthropic-key".to_owned(),
                 ],
             }],
             shapes: vec![claude()],

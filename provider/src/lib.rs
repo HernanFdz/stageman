@@ -31,6 +31,16 @@ pub const fn guide(purse: PurseName) -> Guide {
     }
 }
 
+/// What a purse of this kind looks like, for the box it is pasted into:
+/// what the shape check will require, said as a placeholder, so that the box
+/// teaches the shape before a refusal does.
+#[must_use]
+pub const fn example(purse: PurseName) -> &'static str {
+    match purse.provider() {
+        Provider::Anthropic => anthropic::example(purse),
+    }
+}
+
 /// A guide to where a purse is minted: the link, the verb on it, and the
 /// sentence a hover away.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,7 +64,9 @@ pub struct Guide {
 /// # Errors
 ///
 /// Fails with what the shape ought to be, and never with what was pasted:
-/// an error message is a place credentials escape.
+/// an error message is a place credentials escape. Nor with where the paste
+/// belongs instead, which is the page's to say — the page is what has a box
+/// per purse.
 pub fn shaped(purse: PurseName, pasted: &str) -> Result<(), Misshapen> {
     match purse.provider() {
         Provider::Anthropic => anthropic::shaped(purse, pasted),
@@ -68,14 +80,30 @@ pub struct Misshapen {
     /// Which purse it was pasted as.
     pub purse: PurseName,
     /// What a credential of that kind looks like, in words a person can act
-    /// on.
+    /// on, and nothing about where else a paste might belong.
     pub expected: &'static str,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{guide, shaped};
+    use super::{example, guide, shaped};
     use stageman_core::PurseName;
+
+    /// What a box shows as an example has the shape its check requires, and
+    /// not the other box's: a placeholder that passed both checks would teach
+    /// nothing, and one that passed neither would teach a refusal.
+    #[test]
+    fn every_example_has_the_shape_its_own_box_requires_and_no_other() {
+        for purse in PurseName::ALL {
+            assert_eq!(shaped(*purse, example(*purse)), Ok(()), "{purse:?}");
+            for other in PurseName::ALL.iter().filter(|other| *other != purse) {
+                assert!(
+                    shaped(*other, example(*purse)).is_err(),
+                    "{purse:?}'s example passes as {other:?}"
+                );
+            }
+        }
+    }
 
     /// Every purse has somewhere it is minted, the link is the provider's
     /// own site over a secure scheme, and the words beside it say something.

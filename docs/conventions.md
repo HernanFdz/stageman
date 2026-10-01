@@ -780,7 +780,7 @@ justify is usually obsolete.
   healthy to any check of the filesystem.
 
   Both of those are conditional on there being something to check. An instance
-  starts with nothing configured — no agents, no projects, no runtime — and an
+  starts with nothing configured — no purses, no projects, no runtime — and an
   instance with nothing to run is not unusable, it is empty; see
   `docs/decisions/0021-an-instance-starts-empty.md`. So a runtime is verified
   when one has been configured, and what must not happen is a project created
@@ -1411,8 +1411,8 @@ it lands.
   be free is discovering that a shim nobody could test had rotted.
 
   **What must survive that window is the instance, not every job in it.** The
-  configured agents and the projects, with their credentials and bindings,
-  must open on the release after the one that wrote them, because losing
+  purses held and the projects, with their access and bindings, must open
+  on the release after the one that wrote them, because losing
   them is losing everything an operator typed. A job, a foreman's inbox, or
   the half of a binding that cannot be carried honestly may be dropped on
   opening, with a line at startup saying so, when carrying it would mean
@@ -1582,9 +1582,13 @@ hand.
 `just propose` opens a real pull request. Both read from files this repository
 ignores rather than from the environment, so nothing inherits them by accident:
 
-- **`anthropic-token`** — what the agent authenticates with. Needed by
-  `just image-session`, which is the only thing exercising session resumption
-  and a job running end to end.
+- **`anthropic-subscription`** or **`anthropic-key`** — the purse the agent
+  charges, in the file named for the box it would be pasted into on the
+  Agents page, so that the file declares its kind as the box does and
+  nothing sniffs it; the subscription's is read first when both exist, as a
+  form offers it first. Needed by `just image-session`, which is the only
+  thing exercising session resumption and a job running end to end, and by
+  `just propose`.
 - **`github-token`** — needed by `just propose` alone. A fine-grained token
   scoped to this one repository, with contents and pull requests write, and
   nothing else.

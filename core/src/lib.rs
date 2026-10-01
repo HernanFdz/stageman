@@ -551,9 +551,13 @@ impl fmt::Display for Purse {
 /// `docs/decisions/0021-an-instance-starts-empty.md`.
 ///
 /// A purse may not be forgotten while something charges it. Nothing here
-/// prevents that directly, and three things catch it: [`State::charged_by`]
-/// is the query a caller consults first, sealing refuses a state that has
-/// broken the rule, and opening refuses a file that has.
+/// prevents that directly. [`State::charged_by`] is the query a caller
+/// consults first, and [`State::check`] refuses a foreman's kit or an
+/// offered kit charging a purse that is not held, on the way into a
+/// snapshot and out of one. A job's kit is a record rather than a reference
+/// and the check leaves it alone, because a file must not fail to open over
+/// a job — `docs/conventions.md` §4 — so an unfinished job whose purse has
+/// gone fails at its next turn instead, where its handout is refused.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Purses(BTreeMap<PurseName, Purse>);
 
@@ -617,8 +621,14 @@ pub enum ClaudePurse {
 }
 
 impl ClaudePurse {
-    /// Every purse Claude can charge, in the order a form offers them.
-    pub const ALL: &'static [Self] = &[Self::Key, Self::Subscription];
+    /// Every purse Claude can charge, in the order a form offers them, which
+    /// is the order Claude prefers them: a new kit charges the first of these
+    /// that is held. The subscription comes first because an operator who
+    /// holds both added the flat one for this agent alone — the vendor's own
+    /// agent is the only one that can charge it — so a kit for it starting on
+    /// the key would be the surprise. See
+    /// `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`.
+    pub const ALL: &'static [Self] = &[Self::Subscription, Self::Key];
 
     /// The purse this names, among every purse there is.
     #[must_use]
@@ -2362,7 +2372,7 @@ impl State {
                 .chain(project.kits.values().map(|offered| offered.kit.purse()))
             {
                 if !self.purses.holds(charged) {
-                    return Err(Inconsistent::UnconfiguredPurse {
+                    return Err(Inconsistent::PurseNotHeld {
                         project: *id,
                         purse: charged,
                     });
@@ -2830,7 +2840,7 @@ pub enum Inconsistent {
     NoKits(ProjectId),
     /// A project charges a purse this instance does not hold.
     #[error("project {project} charges {purse:?}, which is not held")]
-    UnconfiguredPurse {
+    PurseNotHeld {
         /// The project holding the dangling reference.
         project: ProjectId,
         /// The purse it charges.
@@ -4692,7 +4702,7 @@ mod tests {
 
         assert_eq!(
             state.check(),
-            Err(Inconsistent::UnconfiguredPurse {
+            Err(Inconsistent::PurseNotHeld {
                 project: ProjectId::from_uuid(Uuid::from_u128(3)),
                 purse: PurseName::AnthropicKey,
             })
@@ -4773,9 +4783,11 @@ mod tests {
             assert_eq!(kit.purse(), *purse);
             assert_eq!(kit.agent(), Agent::Claude);
         }
+        // The subscription first: it is what a new kit charges when both are
+        // held.
         assert_eq!(
             Agent::Claude.purses().collect::<Vec<_>>(),
-            vec![PurseName::AnthropicKey, PurseName::AnthropicSubscription]
+            vec![PurseName::AnthropicSubscription, PurseName::AnthropicKey]
         );
         for purse in ClaudePurse::ALL {
             assert_eq!(ClaudePurse::of(purse.name()), Some(*purse));
@@ -6535,7 +6547,7 @@ mod tests {
         snapshot.purses.clear();
         assert!(matches!(
             snapshot.open(&key()),
-            Err(OpenError::Inconsistent(Inconsistent::UnconfiguredPurse {
+            Err(OpenError::Inconsistent(Inconsistent::PurseNotHeld {
                 purse: PurseName::AnthropicKey,
                 ..
             }))

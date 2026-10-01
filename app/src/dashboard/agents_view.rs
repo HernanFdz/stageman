@@ -175,7 +175,9 @@ pub fn AgentsView() -> Element {
 /// because a purse a project has been running on for a while is charged by
 /// every unfinished job, and a list that long is a wall. The guide to where
 /// the credential is minted sits at the end of the line, whatever the
-/// state.
+/// state. The box's placeholder is what a credential of its kind begins
+/// with, so the box teaches the shape before a refusal does, and Save is
+/// offered only once there is something to save.
 #[component]
 fn PurseRow(
     provider: String,
@@ -189,7 +191,7 @@ fn PurseRow(
     let forgetting_says = if in_use {
         format!("{charged_by}, so it cannot be forgotten")
     } else {
-        format!("Forget this {}", purse.name.to_lowercase())
+        "Forget this purse".to_owned()
     };
     let charged_by_agents = purse.agents.join(", ");
     let identifier = purse.id.clone();
@@ -221,12 +223,13 @@ fn PurseRow(
                         class: "w-full max-w-sm rounded-md border border-border bg-surface px-2 py-1.5 \
                                 font-mono text-xs placeholder:text-faint-foreground focus-visible:outline-none \
                                 focus-visible:ring-2 focus-visible:ring-primary",
-                        placeholder: if purse.held { "replace the credential" } else { "paste it here" },
+                        placeholder: "{purse.example}",
                         aria_label: "The {purse.name}",
                         value: "{credential}",
                         oninput: move |event| credential.set(event.value()),
                     }
                     Button {
+                        disabled: credential().trim().is_empty(),
                         onclick: move |_| {
                             let identifier = identifier.clone();
                             let supplied = credential();
@@ -337,6 +340,7 @@ mod tests {
             id: id.to_owned(),
             name: name.to_owned(),
             note: String::new(),
+            example: String::new(),
             guide: String::new(),
             minting: String::new(),
             guidance: String::new(),

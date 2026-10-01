@@ -72,6 +72,9 @@ pub struct PurseView {
     pub name: String,
     /// One line on what it is for and who can charge it.
     pub note: String,
+    /// What one looks like, for the box's placeholder: the shape the check
+    /// will require, so the box teaches it before a refusal does.
+    pub example: String,
     /// Where the provider mints one: a link to the provider's own page,
     /// composed on the server from tracked text.
     pub guide: String,
@@ -197,8 +200,9 @@ pub struct Instance {
     /// than a version, because the operator's next question when something
     /// misbehaves is *which one is it using*.
     pub container_runtime: String,
-    /// How many agents are configured. A count and not a list, because an
-    /// agent's configuration is a credential.
+    /// How many agents are ready — some purse each can charge is held. A
+    /// count and not a list, because the line is a glance and the list is
+    /// the Agents page's.
     pub agents: usize,
     /// The domain the dashboard answers at and jobs are shown under.
     pub domain: String,

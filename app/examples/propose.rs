@@ -75,21 +75,12 @@ async fn propose() -> Result<(), String> {
         .nth(1)
         .ok_or("give the repository URL as the only argument")?;
 
-    let agent_token = read_secret("anthropic-token")?;
+    let purse = read_purse()?;
     let platform_token = read_secret("github-token")?;
 
-    // An instance that exists only for this run. Nothing configures a project
-    // yet — that is the next step in `docs/open-questions.md` — so this builds
-    // one directly, which is exactly what a dashboard will do later.
+    // An instance that exists only for this run, built directly rather than
+    // through the dashboard, which builds exactly this.
     let mut state = State::default();
-    // The file declares no kind, so this reads it the way the box on the
-    // Agents page would refuse it: a subscription's token begins as one,
-    // and anything else is a key.
-    let purse = if agent_token.expose().starts_with("sk-ant-oat") {
-        Purse::AnthropicSubscription(agent_token)
-    } else {
-        Purse::AnthropicKey(agent_token)
-    };
     let charging = purse.name();
     state.purses.hold(purse);
     let kit = Kit::defaults(Agent::Claude, charging)
@@ -245,9 +236,30 @@ fn seed() -> Seed {
     seed
 }
 
+/// The purse the run charges, from whichever of the two gitignored files
+/// holds one. Each is named for the box it would be pasted into on the
+/// Agents page, so the file declares its kind as the box does and nothing
+/// here sniffs it; the subscription's is read first when both exist, as a
+/// form offers it first.
+fn read_purse() -> Result<Purse, String> {
+    if local().join("anthropic-subscription").exists() {
+        let token = read_secret("anthropic-subscription")?;
+        return Ok(Purse::AnthropicSubscription(token));
+    }
+    let key = read_secret("anthropic-key").map_err(|why| {
+        format!("{why}; a subscription's token goes in .local/anthropic-subscription instead")
+    })?;
+    Ok(Purse::AnthropicKey(key))
+}
+
+/// The gitignored directory the credentials are read from.
+fn local() -> PathBuf {
+    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../.local"))
+}
+
 /// A credential, from the gitignored file this project keeps it in.
 fn read_secret(name: &str) -> Result<Secret, String> {
-    let path = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../.local")).join(name);
+    let path = local().join(name);
     let raw = std::fs::read_to_string(&path)
         .map_err(|error| format!("no credential at {}: {error}", path.display()))?;
     let trimmed = raw.trim();

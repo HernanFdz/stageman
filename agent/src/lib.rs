@@ -750,8 +750,9 @@ pub(crate) const WORKSPACE: &str = "/workspace";
 /// pure question about configuration and lives in the domain crate; what they
 /// are called here is knowledge about one agent and lives in its adapter. See
 /// `docs/conventions.md` §3.
+///
 /// Exactly the environment a container running this handout is given, in the
-/// order it is set: the agent's own credential under the variable its
+/// order it is set: the purse its kit charges under the variable its
 /// adapter reads, a job's warrant under the variable its wrapper reads, and
 /// the project's variables last, refused on collision. No platform
 /// credential, since
@@ -827,8 +828,10 @@ pub fn environment(handout: &Handout) -> Result<Vec<(String, Secret)>, AgentErro
 /// the ones a given handout will, and the difference matters: an agent added to
 /// a project later must not turn a name that was accepted into a collision.
 /// Both of Claude's are here for the same reason — which one is used depends on
-/// the shape of the credential, so reserving only the one in force would make
-/// the rule depend on a token an operator has not supplied yet.
+/// the purse the kit charges, so reserving only the ones held would make the
+/// rule depend on a purse an operator has not supplied yet: the set is every
+/// name the delivery can produce, per
+/// `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`.
 ///
 /// The platform's variable stays here although nothing delivers it into an
 /// environment any more: the wrapper sets it for the tool's own process, so
@@ -4678,29 +4681,35 @@ mod tests {
     mod costs_a_credential {
         use super::*;
 
-        /// The credential, from the gitignored file this project keeps it in.
+        /// The purse, from whichever of the two gitignored files this project
+        /// keeps one in. Each is named for the box it would be pasted into on
+        /// the Agents page, so the file declares its kind as the box does and
+        /// nothing here sniffs it; the subscription's is read first when both
+        /// exist, as a form offers it first.
         ///
-        /// Panics rather than skipping when it is absent. A test that quietly
-        /// passes because it could not run is the failure mode the ignored
-        /// tests above are arranged to avoid, and it would be perverse to
-        /// reintroduce it here.
-        fn credential() -> Secret {
-            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../.local/anthropic-token");
-            let raw = std::fs::read_to_string(path)
-                .expect("write an agent credential to .local/anthropic-token (it is gitignored)");
-            Secret::new(raw.trim().to_owned())
+        /// Panics rather than skipping when neither is there. A test that
+        /// quietly passes because it could not run is the failure mode the
+        /// ignored tests above are arranged to avoid, and it would be perverse
+        /// to reintroduce it here.
+        fn purse() -> Purse {
+            let local = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.local"));
+            let read = |name: &str| match std::fs::read_to_string(local.join(name)) {
+                Ok(raw) => Some(Secret::new(raw.trim().to_owned())),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => panic!("{} could not be read: {error}", local.join(name).display()),
+            };
+            read("anthropic-subscription")
+                .map(Purse::AnthropicSubscription)
+                .or_else(|| read("anthropic-key").map(Purse::AnthropicKey))
+                .expect(
+                    "write a subscription's token to .local/anthropic-subscription or an API \
+                     key to .local/anthropic-key (both are gitignored)",
+                )
         }
 
         fn handout_of() -> (State, Handout) {
             let mut state = State::default();
-            // The file declares no kind, so the harness reads it the way the
-            // box on the Agents page would refuse it: a subscription's token
-            // begins as one, and anything else is a key.
-            let purse = if credential().expose().starts_with("sk-ant-oat") {
-                Purse::AnthropicSubscription(credential())
-            } else {
-                Purse::AnthropicKey(credential())
-            };
+            let purse = purse();
             let charging = purse.name();
             state.purses.hold(purse);
             let kit = Kit::defaults(Agent::Claude, charging).expect("Claude charges both");

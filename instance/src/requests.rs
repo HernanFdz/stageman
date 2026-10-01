@@ -511,10 +511,7 @@ impl Running {
         if credential.is_empty() {
             return Err(Refusal::CredentialMissing);
         }
-        stageman_provider::shaped(named, credential).map_err(|why| Refusal::PurseMisshapen {
-            purse: views::wire_purse(named).1.to_owned(),
-            rule: why.to_string(),
-        })?;
+        stageman_provider::shaped(named, credential).map_err(|why| views::misshapen(&why))?;
         self.state
             .purses
             .hold(Purse::new(named, Secret::new(credential.to_owned())));

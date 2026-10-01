@@ -93,6 +93,35 @@ const fn kind_note(kind: PurseKind) -> &'static str {
     }
 }
 
+/// A purse's kind as a sentence names it, where the provider is known from
+/// the rest of the sentence.
+const fn kind_phrase(kind: PurseKind) -> &'static str {
+    match kind {
+        PurseKind::Key => "an API key",
+        PurseKind::Subscription => "a subscription's token",
+    }
+}
+
+/// A paste refused for its shape, said with where it belongs: the provider
+/// says what a purse of that kind looks like, and this is the one place that
+/// knows the page has a box per purse the provider hands out, so the other
+/// box is named here. There are two kinds and a purse is one of them at one
+/// provider, so the other box is at most one, and the sentence is built as a
+/// list rather than branched on.
+pub fn misshapen(why: &stageman_provider::Misshapen) -> Refusal {
+    let mut rule = vec![why.to_string()];
+    rule.extend(
+        PurseName::ALL
+            .iter()
+            .filter(|other| other.provider() == why.purse.provider() && **other != why.purse)
+            .map(|other| format!("{} goes in the other box", kind_phrase(other.kind()))),
+    );
+    Refusal::PurseMisshapen {
+        purse: wire_purse(why.purse).1.to_owned(),
+        rule: rule.join("; "),
+    }
+}
+
 /// What the browser calls one of Claude's models, and what to show for it.
 ///
 /// The browser's vocabulary rather than the adapter's, which spells the same
@@ -575,6 +604,7 @@ pub fn listed(state: &State) -> stageman_wire::Agents {
                             id: wire_purse(*purse).0.to_owned(),
                             name: kind_shown(purse.kind()).to_owned(),
                             note: kind_note(purse.kind()).to_owned(),
+                            example: stageman_provider::example(*purse).to_owned(),
                             guide: guide.link.to_owned(),
                             minting: guide.label.to_owned(),
                             guidance: guide.says.to_owned(),
@@ -868,7 +898,7 @@ pub fn watching_now(
 pub fn from_inconsistent(reason: &Inconsistent) -> Refusal {
     match reason {
         Inconsistent::NoKits(_) => Refusal::KitsMissing,
-        Inconsistent::UnconfiguredPurse { purse, .. } => Refusal::PurseNotHeld {
+        Inconsistent::PurseNotHeld { purse, .. } => Refusal::PurseNotHeld {
             name: wire_purse(*purse).1.to_owned(),
         },
         Inconsistent::UnknownInstallation { installation, .. } => {
@@ -883,8 +913,8 @@ pub fn from_inconsistent(reason: &Inconsistent) -> Refusal {
 #[cfg(test)]
 mod tests {
     use super::{
-        Domain, Identities, charges, fitted, identify, kit_of, kit_shown, listed, named, shape_of,
-        shown, standing, wire_channel, wire_name, wire_platform, working,
+        Domain, Identities, charges, fitted, identify, kit_of, kit_shown, listed, misshapen, named,
+        shape_of, shown, standing, wire_channel, wire_name, wire_platform, working,
     };
     use stageman_core::{
         Agent, ClaudeEffort, ClaudeModel, ClaudePurse, Job, JobId, Kit, KitConfig, KitName,
@@ -1331,6 +1361,33 @@ mod tests {
         assert!(charges(&State::default(), PurseName::AnthropicKey).is_empty());
     }
 
+    /// A paste of the other box's shape is refused with what this box takes
+    /// and where the paste belongs, and never with the paste.
+    #[test]
+    fn a_misshapen_paste_is_refused_with_the_other_box_named() {
+        let refused = stageman_provider::shaped(PurseName::AnthropicKey, "sk-ant-oat01-secret")
+            .expect_err("the other box");
+        assert_eq!(
+            misshapen(&refused),
+            Refusal::PurseMisshapen {
+                purse: "Anthropic key".to_owned(),
+                rule: "an Anthropic API key begins with sk-ant-api; a subscription's token goes \
+                       in the other box"
+                    .to_owned(),
+            }
+        );
+        let refused =
+            stageman_provider::shaped(PurseName::AnthropicSubscription, "sk-ant-api03-secret")
+                .expect_err("the other box");
+        let said = misshapen(&refused).to_string();
+        assert_eq!(
+            said,
+            "Anthropic subscription was not kept: a Claude subscription's token, from claude \
+             setup-token, begins with sk-ant-oat; an API key goes in the other box"
+        );
+        assert!(!said.contains("secret"), "{said}");
+    }
+
     /// The listing is of every purse and every agent, held or ready or not,
     /// and never carries a credential.
     #[test]
@@ -1359,9 +1416,10 @@ mod tests {
         assert_eq!(
             claude.purses,
             vec![
-                "anthropic-key".to_owned(),
-                "anthropic-subscription".to_owned()
-            ]
+                "anthropic-subscription".to_owned(),
+                "anthropic-key".to_owned()
+            ],
+            "in the order the agent prefers them, which puts the subscription first"
         );
         let anthropic = listing.providers.first().expect("Anthropic is listed");
         assert_eq!(anthropic.id, "anthropic");

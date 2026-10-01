@@ -171,7 +171,13 @@ Nine things follow, and each is the decision rather than a detail of it.
   minted. The agent rows lose their credential box and say which purses
   would make each ready. A kit's editor gains one control, *pays with*,
   offering only the purses held that the chosen agent can charge, and
-  hidden when exactly one fits. A chip's sentence names the purse, and
+  hidden when exactly one fits. A new kit charges the first held purse in
+  its agent's order, and that order puts the subscription first: an
+  operator who holds both added the flat one for the vendor's own agent,
+  the only one that can charge it, so a kit for that agent starting on the
+  key would be the surprise. Each box's placeholder is what a credential of
+  its kind begins with, so the box teaches the shape before a refusal does.
+  A chip's sentence names the purse, and
   nothing else on a chip changes: a glyph for the provider would say
   *Anthropic* beside *Claude* on every row today, and is worth drawing only
   when the two differ.
