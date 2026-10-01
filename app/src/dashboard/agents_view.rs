@@ -20,7 +20,7 @@ use dioxus::prelude::*;
 #[cfg(feature = "server")]
 use stageman_instance::{Request, Response};
 
-use super::error::{DashboardError, DashboardResult};
+use super::error::{DashboardError, DashboardResult, Refusal};
 use super::live::{Live, Reading, use_reading};
 use crate::ui::{
     BESIDE, Badge, BadgeTone, Button, ButtonVariant, Card, EmptyState, Guide, Icon, Mark, Row,
@@ -45,7 +45,9 @@ pub async fn agents() -> DashboardResult<Agents> {
     }
 }
 
-/// Holds a purse, or replaces the credential it holds.
+/// Holds a purse, or replaces the credential it holds, once its provider
+/// has accepted it: the answer waits on the provider, for as long as a
+/// person at a button is asked to.
 ///
 /// Replacing rather than refusing when one is already held, because
 /// rotating a credential is the ordinary reason to come back to this screen
@@ -55,7 +57,9 @@ pub async fn agents() -> DashboardResult<Agents> {
 /// # Errors
 ///
 /// Fails if the purse is not one this build knows, if the credential is
-/// empty, or if it has the shape of the other box's.
+/// empty, if it has the shape of the other box's, if its provider does not
+/// accept it, or if the provider could not be asked — and keeps nothing in
+/// any of those cases, so a purse already held stays as it was.
 #[post("/api/purses/hold")]
 pub async fn hold(purse: String, credential: String) -> DashboardResult<Agents> {
     match super::ask(Request::HoldPurse { purse, credential }).await? {
@@ -84,15 +88,9 @@ pub async fn forget(purse: String) -> DashboardResult<Agents> {
 pub fn AgentsView() -> Element {
     let live = use_context::<Live>();
     let reading = use_reading(live, agents)?;
-    let mut failure = use_signal(|| None::<DashboardError>);
 
     rsx! {
         div { class: "flex flex-col gap-4",
-            if let Some(reason) = failure() {
-                Card { title: "That did not work",
-                    p { class: "text-sm text-failed", "{reason}" }
-                }
-            }
             match reading {
                 Reading::Read(mut listing) => {
                     let shown = listing();
@@ -118,15 +116,7 @@ pub fn AgentsView() -> Element {
                                                     PurseRow {
                                                         provider: provider.id.clone(),
                                                         purse: purse.clone(),
-                                                        onchanged: move |outcome: DashboardResult<Agents>| {
-                                                            match outcome {
-                                                                Ok(fresh) => {
-                                                                    failure.set(None);
-                                                                    listing.set(fresh);
-                                                                }
-                                                                Err(reason) => failure.set(Some(reason)),
-                                                            }
-                                                        },
+                                                        onchanged: move |fresh: Agents| listing.set(fresh),
                                                     }
                                                 }
                                             }
@@ -181,14 +171,22 @@ pub fn AgentsView() -> Element {
 /// state. The box's placeholder is what a credential of its kind begins
 /// with, so the box teaches the shape before a refusal does, and Save is
 /// offered only once there is something to save.
+///
+/// **Saving waits on the provider**, which is asked about what was pasted
+/// before any of it is kept — see
+/// `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`. Save says
+/// so while it waits, and what went wrong is said in the row, in the place
+/// of the line that says what the purse is for: a problem takes the line's
+/// place, per `docs/conventions.md` §3, and the row already names the purse.
+/// Nothing is told to the page above but a listing that changed.
 #[component]
-fn PurseRow(
-    provider: String,
-    purse: PurseView,
-    onchanged: EventHandler<DashboardResult<Agents>>,
-) -> Element {
+fn PurseRow(provider: String, purse: PurseView, onchanged: EventHandler<Agents>) -> Element {
     let mut credential = use_signal(String::new);
     let mut replacing = use_signal(|| false);
+    // Whether the provider is being asked about what was pasted, and what
+    // the last thing tried on this row was refused with.
+    let mut checking = use_signal(|| false);
+    let mut problem = use_signal(|| None::<DashboardError>);
     let in_use = !purse.charged_by.is_empty();
     let charged_by = format!("Charged by {}", purse.charged_by.join(", "));
     let forgetting_says = if in_use {
@@ -199,6 +197,33 @@ fn PurseRow(
     let charged_by_agents = purse.agents.join(", ");
     let identifier = purse.id.clone();
     let pasting = !purse.held || replacing();
+    // Pressed on the button and on Enter in the box alike. Through the hook
+    // rather than made here, because a callback made in a component's body
+    // is kept until the component goes, and this body runs on every key.
+    let save = {
+        let identifier = identifier.clone();
+        use_callback(move |()| {
+            let supplied = credential();
+            if held_back(&supplied, checking()) {
+                return;
+            }
+            let identifier = identifier.clone();
+            checking.set(true);
+            problem.set(None);
+            spawn(async move {
+                let outcome = hold(identifier, supplied).await;
+                checking.set(false);
+                match outcome {
+                    Ok(fresh) => {
+                        credential.set(String::new());
+                        replacing.set(false);
+                        onchanged.call(fresh);
+                    }
+                    Err(why) => problem.set(Some(why)),
+                }
+            });
+        })
+    };
 
     rsx! {
         div { class: "flex flex-col gap-2",
@@ -216,8 +241,18 @@ fn PurseRow(
                     }
                 }
             }
-            p { class: "max-w-prose text-xs text-muted-foreground",
-                "{purse.note} Charged by {charged_by_agents}."
+            // One line, and a problem takes its place: what the last thing
+            // tried here was refused with, or what the purse is for. The
+            // problem runs the row's width rather than a paragraph's: it
+            // names what a credential begins with, a browser breaks a line
+            // at a hyphen, and at a paragraph's width the break fell inside
+            // the very prefix the sentence is there to teach.
+            if let Some(why) = problem() {
+                p { role: "alert", class: "text-xs text-failed", "{row_says(&why)}" }
+            } else {
+                p { class: "max-w-prose text-xs text-muted-foreground",
+                    "{purse.note} Charged by {charged_by_agents}."
+                }
             }
             div { class: "flex flex-wrap items-center gap-2",
                 if pasting {
@@ -227,29 +262,34 @@ fn PurseRow(
                         aria_label: "The {purse.name}",
                         value: credential(),
                         oninput: move |event: FormEvent| credential.set(event.value()),
+                        onkeydown: move |event: KeyboardEvent| {
+                            if event.key() == Key::Enter {
+                                event.prevent_default();
+                                save.call(());
+                            }
+                        },
                     }
+                    // Not disabled while the provider is asked, though it
+                    // says so: a control disabled under the pointer drops
+                    // its focus. The guard in the save is what stops a
+                    // second press.
                     Button {
                         disabled: credential().trim().is_empty(),
-                        onclick: move |_| {
-                            let identifier = identifier.clone();
-                            let supplied = credential();
-                                async move {
-                                    let outcome = hold(identifier, supplied).await;
-                                    if outcome.is_ok() {
-                                        credential.set(String::new());
-                                        replacing.set(false);
-                                    }
-                                    onchanged.call(outcome);
-                                }
-                        },
-                        "Save"
+                        onclick: move |_| save.call(()),
+                        if checking() { "Checking…" } else { "Save" }
                     }
                     if purse.held {
+                        // Greyed while the provider is asked: a save that
+                        // has gone cannot be called back, and pressing this
+                        // then would say the old one was kept while the new
+                        // one was on its way to replacing it.
                         Button {
                             variant: ButtonVariant::Secondary,
+                            disabled: checking(),
                             onclick: move |_| {
                                 credential.set(String::new());
                                 replacing.set(false);
+                                problem.set(None);
                             },
                             "Keep the old one"
                         }
@@ -257,7 +297,10 @@ fn PurseRow(
                 } else {
                     Button {
                         variant: ButtonVariant::Secondary,
-                        onclick: move |_| replacing.set(true),
+                        onclick: move |_| {
+                            problem.set(None);
+                            replacing.set(true);
+                        },
                         "Replace"
                     }
                     // Muted until hovered, like every control that discards,
@@ -270,7 +313,15 @@ fn PurseRow(
                             aria_label: "{forgetting_says}",
                             onclick: move |_| {
                                 let identifier = identifier.clone();
-                                async move { onchanged.call(forget(identifier).await) }
+                                async move {
+                                    match forget(identifier).await {
+                                        Ok(fresh) => {
+                                            problem.set(None);
+                                            onchanged.call(fresh);
+                                        }
+                                        Err(why) => problem.set(Some(why)),
+                                    }
+                                }
                             },
                             {Icon::Remove.draw(16)}
                         }
@@ -312,6 +363,33 @@ fn AgentRow(agent: Agent, providers: Vec<ProviderView>) -> Element {
     }
 }
 
+/// Whether a press of Save is held back: nothing was pasted, or the provider
+/// is already being asked about what was.
+///
+/// Pure, with its table below, because the press it guards happens only in
+/// a page that is awake, where no test of a page reaches.
+fn held_back(pasted: &str, checking: bool) -> bool {
+    pasted.trim().is_empty() || checking
+}
+
+/// What a purse's row says, in the place of the line that says what the
+/// purse is for, when something tried on it did not work.
+///
+/// The rule alone where the refusal is about what was pasted, since the row
+/// already names the purse, and as a sentence, since a refusal's own words
+/// are a clause; anything else in the words it came with.
+fn row_says(failure: &DashboardError) -> String {
+    match failure {
+        DashboardError::Refused(
+            Refusal::PurseMisshapen { rule: why, .. } | Refusal::PurseRefused { why, .. },
+        ) => format!("Not kept: {why}."),
+        DashboardError::Refused(Refusal::PurseUnchecked { why, .. }) => {
+            format!("Not kept, because it could not be checked: {why}.")
+        }
+        other => other.to_string(),
+    }
+}
+
 /// The icon a purse's row is drawn with: what kind it is, where the card's
 /// title already says whose.
 const fn kind_icon(kind: PurseKind) -> Icon {
@@ -342,7 +420,10 @@ fn charges_of(agent: &Agent, providers: &[ProviderView]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Agent, Icon, ProviderView, PurseKind, PurseView, charges_of, kind_icon};
+    use super::{
+        Agent, DashboardError, Icon, ProviderView, PurseKind, PurseView, Refusal, charges_of,
+        held_back, kind_icon, row_says,
+    };
 
     /// Each kind of purse is drawn with its own icon, and neither with the
     /// other's.
@@ -350,6 +431,68 @@ mod tests {
     fn each_kind_of_purse_is_drawn_with_its_own_icon() {
         assert_eq!(kind_icon(PurseKind::Key), Icon::Key);
         assert_eq!(kind_icon(PurseKind::Subscription), Icon::Subscription);
+    }
+
+    /// A press of Save goes through only with something pasted and nothing
+    /// already being asked about: every case, and space alone counting as
+    /// nothing pasted.
+    #[test]
+    fn a_save_is_held_back_with_nothing_pasted_or_while_one_is_being_checked() {
+        assert!(!held_back("sk-ant-api03-a-key", false));
+        assert!(
+            held_back("sk-ant-api03-a-key", true),
+            "one is being checked"
+        );
+        assert!(held_back("", false), "nothing was pasted");
+        assert!(held_back("  \n", false), "space is nothing pasted");
+        assert!(held_back("", true));
+    }
+
+    /// What a purse's row says when a paste was not kept, asserted whole per
+    /// `docs/conventions.md` §4: the rule alone, since the row already names
+    /// the purse, and as a sentence. Anything else is said in the words it
+    /// came with.
+    #[test]
+    fn a_purses_row_says_the_rule_alone_and_as_a_sentence() {
+        let said = |refusal: Refusal| row_says(&DashboardError::Refused(refusal));
+
+        assert_eq!(
+            said(Refusal::PurseRefused {
+                purse: "Anthropic key".to_owned(),
+                why: "Anthropic does not accept it: API key is invalid".to_owned(),
+            }),
+            "Not kept: Anthropic does not accept it: API key is invalid."
+        );
+        assert_eq!(
+            said(Refusal::PurseMisshapen {
+                purse: "Anthropic key".to_owned(),
+                rule: "an Anthropic API key begins with sk-ant-api; a subscription's token goes \
+                       in the other box"
+                    .to_owned(),
+            }),
+            "Not kept: an Anthropic API key begins with sk-ant-api; a subscription's token goes \
+             in the other box."
+        );
+        assert_eq!(
+            said(Refusal::PurseUnchecked {
+                purse: "Anthropic subscription".to_owned(),
+                why: "Anthropic could not be reached: dns error".to_owned(),
+            }),
+            "Not kept, because it could not be checked: Anthropic could not be reached: dns \
+             error."
+        );
+        assert_eq!(
+            said(Refusal::PurseInUse {
+                purse: "Anthropic key".to_owned(),
+                by: vec!["the foreman of aviary".to_owned()],
+            }),
+            "Anthropic key is still charged by the foreman of aviary",
+            "a refusal that is not about a paste, in its own words"
+        );
+        assert_eq!(
+            row_says(&DashboardError::Failed),
+            "that did not work — the server log says why"
+        );
     }
 
     fn purse(id: &str, name: &str) -> PurseView {
@@ -403,5 +546,88 @@ mod tests {
             charges_of(&agent, &providers),
             vec!["Anthropic: API key or Subscription token".to_owned()]
         );
+    }
+
+    // On the daemon's half only, for the reason the icon tests give.
+    #[cfg(feature = "server")]
+    mod drawn {
+        use super::super::{PurseRow, PurseView};
+        use super::purse;
+        use dioxus::prelude::*;
+
+        /// A purse as a row is drawn from one: an Anthropic key Claude can
+        /// charge, held or not, charged by whatever is given.
+        fn a_key(held: bool, charged_by: &[&str]) -> PurseView {
+            PurseView {
+                note: "Metered per token.".to_owned(),
+                example: "sk-ant-api03-…".to_owned(),
+                held,
+                charged_by: charged_by.iter().map(|by| (*by).to_owned()).collect(),
+                agents: vec!["Claude".to_owned()],
+                ..purse("anthropic-key", "API key")
+            }
+        }
+
+        /// A page holding one row, so that its handler is made where a
+        /// handler can be: inside something being rendered.
+        #[component]
+        fn Page(purse: PurseView) -> Element {
+            rsx! {
+                PurseRow { provider: "anthropic", purse, onchanged: |_| {} }
+            }
+        }
+
+        fn drawn(purse: PurseView) -> String {
+            let mut dom = VirtualDom::new_with_props(Page, PageProps { purse });
+            dom.rebuild_in_place();
+            dioxus::ssr::render(&dom)
+        }
+
+        /// The attribute a control that refuses to be pressed carries, as
+        /// the server writes it: every button's classes say `disabled:` of
+        /// their own, so the word alone would match a control that is not.
+        const DISABLED: &str = "disabled=true";
+
+        /// A purse that is not held offers its box, showing what one of its
+        /// kind begins with, and a Save with nothing yet to save; its one
+        /// line says what it is for, and nothing on it is an alarm.
+        #[test]
+        fn a_purse_not_held_offers_its_box_and_says_what_it_is_for() {
+            let row = drawn(a_key(false, &[]));
+
+            assert!(row.contains("not held"), "{row}");
+            assert!(row.contains(r#"placeholder="sk-ant-api03-…""#), "{row}");
+            assert!(row.contains("Save"), "{row}");
+            assert!(row.contains(DISABLED), "nothing to save yet: {row}");
+            assert!(
+                row.contains("Metered per token. Charged by Claude."),
+                "{row}"
+            );
+            assert!(!row.contains(r#"role="alert""#), "{row}");
+            assert!(!row.contains("Checking…"), "{row}");
+            assert!(!row.contains("Replace"), "{row}");
+            assert!(!row.contains("Keep the old one"), "{row}");
+        }
+
+        /// A purse that is held offers replacing and forgetting in the
+        /// box's place, and forgetting is greyed, with what charges it,
+        /// while something does.
+        #[test]
+        fn a_purse_held_offers_replacing_and_forgetting_in_the_boxs_place() {
+            let free = drawn(a_key(true, &[]));
+            assert!(free.contains("Replace"), "{free}");
+            assert!(free.contains("Forget this purse"), "{free}");
+            assert!(!free.contains("placeholder"), "no box: {free}");
+            assert!(!free.contains("in use"), "{free}");
+            assert!(!free.contains(DISABLED), "{free}");
+
+            let charged = drawn(a_key(true, &["the foreman of aviary"]));
+            assert!(charged.contains("in use"), "{charged}");
+            assert!(
+                charged.contains("Charged by the foreman of aviary, so it cannot be forgotten"),
+                "{charged}"
+            );
+            assert!(charged.contains(DISABLED), "{charged}");
+        }
     }
 }

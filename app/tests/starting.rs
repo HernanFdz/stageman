@@ -1087,6 +1087,10 @@ fn nothing_served_carries_a_credential() {
         running.get("/"),
         running.get("/api/home"),
         running.get("/api/instance"),
+        // Where a purse is pasted, and so where one would be handed back
+        // first if anything did.
+        running.get("/api/agents"),
+        running.get("/agents"),
         running.get("/projects/00000000-0000-0000-0000-000000000000/settings"),
         running.get("/projects/00000000-0000-0000-0000-000000000000/jobs/00000000-0000-0000-0000-000000000007"),
     ] {
@@ -1266,22 +1270,38 @@ fn a_purse_a_project_still_charges_cannot_be_forgotten() {
     assert!(listing.contains(r#""held":true"#), "{listing}");
 }
 
-/// A credential is accepted, kept, and never handed back.
+/// A paste the route refuses is refused there, saying what the box takes
+/// and never what was pasted, and nothing is held afterwards.
+///
+/// The half of holding a purse the gate can ask of the binary. A purse is
+/// kept only once its provider has accepted it, per
+/// `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`, and nothing
+/// pasted here is one a provider would accept; a paste with the other box's
+/// shape is refused before anybody is asked, so this reaches no network. A
+/// real purse kept through the same route is `costs_a_credential`, at the
+/// foot of this file, and a purse already held is never handed back by
+/// `nothing_served_carries_a_credential`.
 #[test]
-fn a_credential_is_taken_once_and_never_returned() {
+fn a_paste_the_route_refuses_is_never_echoed_and_nothing_is_held() {
     let (_kept, snapshot) = scratch();
 
     let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
-    let saved = running.post(
+    let refused = running.post(
         "/api/purses/hold",
-        r#"{"purse":"anthropic-key","credential":"sk-ant-api03-not-a-real-key"}"#,
+        r#"{"purse":"anthropic-key","credential":"sk-ant-oat01-not-a-real-token"}"#,
     );
 
-    assert!(saved.contains(r#""held":true"#), "{saved}");
-    assert!(saved.contains(r#""ready":true"#), "{saved}");
-    for served in [saved, running.get("/api/agents"), running.get("/agents")] {
+    assert!(refused.contains("400 Bad Request"), "{refused}");
+    assert!(refused.contains("purse_misshapen"), "{refused}");
+    assert!(
+        refused.contains("begins with sk-ant-api"),
+        "it says what the box takes: {refused}"
+    );
+    let listing = running.get("/api/agents");
+    assert!(!listing.contains(r#""held":true"#), "{listing}");
+    for served in [refused, listing, running.get("/agents")] {
         assert!(
-            !served.contains("sk-ant-api03-not-a-real-key"),
+            !served.contains("sk-ant-oat01-not-a-real-token"),
             "a credential reached the browser: {served}"
         );
     }
@@ -1412,6 +1432,16 @@ fn a_job_has_a_page_of_its_own() {
 #[test]
 fn a_write_that_lands_is_told_to_an_open_page_as_a_tick() {
     let (_kept, snapshot) = scratch();
+    // Holding a purse nothing charges, so that forgetting it is a write this
+    // instance can make without asking anybody: holding one asks its
+    // provider first, and the gate holds none a provider would accept.
+    written(
+        &snapshot,
+        &State {
+            purses: purses_with("not-a-real-credential"),
+            ..State::default()
+        },
+    );
     let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
 
     let mut ticks = running.opened("/api/ticks");
@@ -1424,11 +1454,8 @@ fn a_write_that_lands_is_told_to_an_open_page_as_a_tick() {
         "a tick before any write: {opening}"
     );
 
-    let saved = running.post(
-        "/api/purses/hold",
-        r#"{"purse":"anthropic-key","credential":"sk-ant-api03-not-a-real-key"}"#,
-    );
-    assert!(saved.contains("200 OK"), "{saved}");
+    let forgotten = running.post("/api/purses/forget", r#"{"purse":"anthropic-key"}"#);
+    assert!(forgotten.contains("200 OK"), "{forgotten}");
 
     let heard = until(&mut ticks, "tick");
     assert!(
@@ -1976,4 +2003,105 @@ fn the_instance_page_lists_where_the_slack_app_is_installed() {
         !page.contains("xoxb-not-a-real-token"),
         "nothing of the bot token is on the page: {page}"
     );
+}
+
+/// What needs a real purse, because the provider asked is the real one: run
+/// by `just image-session`, which selects by this module's name, and never
+/// by the gate — see
+/// `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`.
+mod costs_a_credential {
+    use super::*;
+
+    /// The purse this project keeps for the tests that need one: which it
+    /// is, the identifier the route takes for the box it would be pasted
+    /// into, and what is in the gitignored file named for that box. The
+    /// subscription's is read first when both exist, as a form offers it
+    /// first.
+    ///
+    /// Panics rather than skipping when neither is there: a test that passes
+    /// because it could not run is worse than one that is honestly absent.
+    fn purse() -> (PurseName, &'static str, String) {
+        let local = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.local"));
+        let read = |name: &str| match std::fs::read_to_string(local.join(name)) {
+            Ok(raw) => Some(raw.trim().to_owned()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => panic!("{} could not be read: {error}", local.join(name).display()),
+        };
+        read("anthropic-subscription")
+            .map(|token| {
+                (
+                    PurseName::AnthropicSubscription,
+                    "anthropic-subscription",
+                    token,
+                )
+            })
+            .or_else(|| {
+                read("anthropic-key").map(|key| (PurseName::AnthropicKey, "anthropic-key", key))
+            })
+            .expect(
+                "write a subscription's token to .local/anthropic-subscription or an API key \
+                 to .local/anthropic-key (both are gitignored)",
+            )
+    }
+
+    /// A real purse pasted through the route is asked of its real provider,
+    /// with the request exactly as this build renders and sends it, and
+    /// kept; a made-up one of the same shape is then refused in the
+    /// provider's own words, and the file still holds the real one.
+    ///
+    /// The one place the whole path runs: the route, the held request, the
+    /// world's own client, the provider, and the write. Nothing here can
+    /// print the credential: what the route answers has nowhere to carry
+    /// one, and what the file holds is compared and never shown.
+    #[test]
+    #[ignore = "needs the network and a real purse; run `just image-session`"]
+    fn a_real_purse_is_kept_and_a_made_up_one_is_refused_in_the_providers_words() {
+        let (named, box_id, credential) = purse();
+        let (_kept, snapshot) = scratch();
+        let running = serving(&snapshot, &[("STAGEMAN_KEY", KEY)]);
+        let pasting = |pasted: &str| {
+            running.post(
+                "/api/purses/hold",
+                &serde_json::json!({ "purse": box_id, "credential": pasted }).to_string(),
+            )
+        };
+        let holds_the_real_one = || {
+            let bytes = std::fs::read(&snapshot).expect("the instance's file");
+            let sealed: stageman_core::Snapshot =
+                serde_json::from_slice(&bytes).expect("a snapshot");
+            let state = sealed.open(&key()).expect("it opens under the test key");
+            state
+                .purses
+                .get(named)
+                .is_some_and(|held| held.credential().expose() == credential)
+        };
+
+        let kept = pasting(&credential);
+        assert!(
+            kept.contains("200 OK"),
+            "the provider accepts a real purse: {kept}"
+        );
+        assert!(kept.contains(r#""held":true"#), "{kept}");
+        assert!(
+            !kept.contains(&credential),
+            "a credential reached the browser"
+        );
+        assert!(holds_the_real_one(), "the file holds what was pasted");
+
+        let made_up = match named {
+            PurseName::AnthropicKey => "sk-ant-api03-not-a-real-key",
+            PurseName::AnthropicSubscription => "sk-ant-oat01-not-a-real-token",
+        };
+        let refused = pasting(made_up);
+        assert!(refused.contains("400 Bad Request"), "{refused}");
+        assert!(refused.contains("purse_refused"), "{refused}");
+        assert!(
+            refused.contains("Anthropic does not accept it: "),
+            "in the provider's own words: {refused}"
+        );
+        assert!(
+            holds_the_real_one(),
+            "a replacement the provider refuses leaves the purse that was held"
+        );
+    }
 }

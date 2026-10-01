@@ -235,6 +235,7 @@ fn holding_a_purse_is_answered_once_the_credential_has_landed() {
 
 /// A paste that cannot be kept is refused and changes nothing: nothing
 /// empty, nothing of the other box's shape, and no purse nothing is called.
+/// Each is refused on its own, before its provider is asked anything.
 #[test]
 fn a_paste_that_cannot_be_kept_is_refused_and_writes_nothing() {
     let mut sim = Simulation::new();
@@ -251,6 +252,11 @@ fn a_paste_that_cannot_be_kept_is_refused_and_writes_nothing() {
         panic!("the agents screen");
     };
     let written = count(&sim, "-> Write");
+    assert_eq!(
+        sim.provider_calls().len(),
+        1,
+        "the one kept was asked about"
+    );
 
     assert_eq!(
         ask(
@@ -296,6 +302,25 @@ fn a_paste_that_cannot_be_kept_is_refused_and_writes_nothing() {
         Response::Refused(Refusal::UnknownPurse {
             name: "wallet".to_owned()
         })
+    );
+    assert_eq!(
+        ask(
+            &mut sim,
+            &mut instance,
+            5,
+            Request::HoldPurse {
+                purse: "wallet".to_owned(),
+                credential: "sk-ant-api03-a-key".to_owned(),
+            },
+        ),
+        Response::Refused(Refusal::UnknownPurse {
+            name: "wallet".to_owned()
+        })
+    );
+    assert_eq!(
+        sim.provider_calls().len(),
+        1,
+        "no provider was asked about a paste refused on its own"
     );
     assert_eq!(count(&sim, "-> Write"), written, "refusals write nothing");
     assert_eq!(

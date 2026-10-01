@@ -49,7 +49,9 @@ pub enum Request {
     Home,
     /// Every purse, held or not, and every agent.
     Agents,
-    /// Hold a purse, or replace the credential it holds — see
+    /// Hold a purse, or replace the credential it holds: held while its
+    /// provider is asked about it, and kept once the provider has accepted
+    /// it — see
     /// `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`.
     HoldPurse {
         /// The purse, by wire identifier: which box it was pasted into.
@@ -226,7 +228,7 @@ pub enum Request {
 
 impl fmt::Debug for Request {
     /// Names what was asked and never a credential. A draft redacts itself;
-    /// the one bare credential here is an agent's, and the one bare state
+    /// the one bare credential here is a purse's, and the one bare state
     /// is a workspace install's, which buys the workspace for whoever holds
     /// it.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -371,7 +373,8 @@ pub enum Response {
 impl Running {
     /// Answers a request, once whatever it changed is on the disk — or
     /// holds it while the credentials it carries are checked against their
-    /// platforms, and answers it once they have, per
+    /// platforms, or the purse it carries against its provider, and answers
+    /// it once they have, per
     /// `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`.
     pub fn requested(&mut self, id: RequestId, request: Request, effects: &mut Vec<Effect>) {
         // A listing is held on its own terms: nothing of it is checked or
@@ -496,25 +499,18 @@ impl Running {
         self.defer(AppEffect::Respond { id, response });
     }
 
-    /// Holds a purse, or replaces the credential it holds.
+    /// Holds a purse, or replaces the credential it holds, once its provider
+    /// has accepted it: the request was held while the provider was asked,
+    /// and is answered here only when it said yes.
     ///
     /// Replacing rather than refusing when one is already held, because
     /// rotating a credential is the ordinary reason to come back to this
     /// screen, and a replaced credential reaches every agent charging the
-    /// purse at its next turn. The kind is the box the credential was pasted
-    /// into, and text with the other box's shape is refused here, before
-    /// anything is kept — see
+    /// purse at its next turn. What is kept is what [`pasted`] resolves the
+    /// request to, which is what the provider was asked about — see
     /// `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`.
     fn hold_purse(&mut self, purse: &str, credential: &str) -> Result<Response, Refusal> {
-        let named = views::purse_named(purse)?;
-        let credential = credential.trim();
-        if credential.is_empty() {
-            return Err(Refusal::CredentialMissing);
-        }
-        stageman_provider::shaped(named, credential).map_err(|why| views::misshapen(&why))?;
-        self.state
-            .purses
-            .hold(Purse::new(named, Secret::new(credential.to_owned())));
+        self.state.purses.hold(pasted(purse, credential)?);
         self.dirty = true;
         Ok(Response::Agents(views::listed(&self.state)))
     }
@@ -1229,6 +1225,30 @@ pub fn binding(channel: &ChannelDraft) -> Result<BTreeMap<Channel, ChannelConfig
             listen_credential: Secret::new(listening.to_owned()),
         },
     )]))
+}
+
+/// The purse a paste would hold: named by the box it was pasted into, and
+/// holding what was pasted there, trimmed.
+///
+/// Everything a paste is refused for before its provider is asked is refused
+/// here, and this is the one place a paste is resolved: asking the provider
+/// and keeping the purse both read it through this, so nothing is sent for a
+/// paste that would be refused anyway, and what is kept is what was asked
+/// about. The kind is the box, and text with the other box's shape is
+/// refused — see `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`.
+///
+/// # Errors
+///
+/// Fails if nothing is called that, if nothing was pasted, or if what was
+/// pasted has the shape of the other box's.
+pub fn pasted(purse: &str, credential: &str) -> Result<Purse, Refusal> {
+    let named = views::purse_named(purse)?;
+    let credential = credential.trim();
+    if credential.is_empty() {
+        return Err(Refusal::CredentialMissing);
+    }
+    stageman_provider::shaped(named, credential).map_err(|why| views::misshapen(&why))?;
+    Ok(Purse::new(named, Secret::new(credential.to_owned())))
 }
 
 /// The repository, required, and read as an address: an owner and a name

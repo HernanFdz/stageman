@@ -25,6 +25,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# A provider's refusal is a JSON object and its own sentence is one field of
+# it: read here, and never rendered.
+serde_json = "1.0.151"
 stageman-core.workspace = true
 thiserror = "2.0.20"
 

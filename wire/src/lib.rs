@@ -1392,6 +1392,25 @@ pub enum Refusal {
         /// What a credential of that kind looks like.
         rule: String,
     },
+    /// The provider would not have the purse: checked before it is kept, as
+    /// a project's token is — see
+    /// `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`.
+    #[error("{purse} was not kept: {why}")]
+    PurseRefused {
+        /// The purse, as the screen names it.
+        purse: String,
+        /// What the provider said, as a clause for the purse's row.
+        why: String,
+    },
+    /// The provider could not be asked about the purse, so it was not kept:
+    /// not wrong, and not known to be right.
+    #[error("{purse} was not kept, because it could not be checked: {why}")]
+    PurseUnchecked {
+        /// The purse, as the screen names it.
+        purse: String,
+        /// What went wrong on the way there.
+        why: String,
+    },
     /// The current password typed to change it was not the current
     /// password — see
     /// `docs/decisions/0084-the-instance-authenticates-itself.md`.
@@ -1696,6 +1715,7 @@ impl Refusal {
             Self::WrongPassword => 403,
             Self::CredentialMissing
             | Self::PurseMisshapen { .. }
+            | Self::PurseRefused { .. }
             | Self::PasswordShort
             | Self::Incomplete { .. }
             | Self::RepositoryRefused { .. }
@@ -1720,10 +1740,11 @@ impl Refusal {
             | Self::NotReached { .. }
             | Self::InstallationRefused { .. }
             | Self::ChannelRefused { .. } => 400,
-            // The platform behind the credential could not be reached, which
-            // is what a bad gateway means: not the request's fault, and not
-            // this instance's.
-            Self::TokenUnchecked { .. }
+            // The platform or the provider behind the credential could not
+            // be reached, which is what a bad gateway means: not the
+            // request's fault, and not this instance's.
+            Self::PurseUnchecked { .. }
+            | Self::TokenUnchecked { .. }
             | Self::InstallationUnchecked { .. }
             | Self::ChannelUnchecked { .. } => 502,
             // The request is well formed and the instance is in a state that
@@ -1774,6 +1795,8 @@ impl Refusal {
             | Self::UnknownPurse { .. }
             | Self::CredentialMissing
             | Self::PurseMisshapen { .. }
+            | Self::PurseRefused { .. }
+            | Self::PurseUnchecked { .. }
             | Self::WrongPassword
             | Self::PasswordShort
             | Self::PurseInUse { .. }
@@ -2637,6 +2660,36 @@ mod tests {
             "the app-level token was not kept, because it could not be checked: Slack could \
              not be reached: dns error"
         );
+    }
+
+    /// A purse its provider would not have, and one the provider could not
+    /// be asked about: each sentence whole, the status its kind answers
+    /// with, and no box of the project form, since the Agents page says
+    /// either in the purse's own row.
+    #[test]
+    fn a_purse_not_kept_says_which_and_why_and_points_at_no_box_of_the_form() {
+        let refused = Refusal::PurseRefused {
+            purse: "Anthropic key".to_owned(),
+            why: "Anthropic does not accept it: API key is invalid".to_owned(),
+        };
+        assert_eq!(
+            refused.to_string(),
+            "Anthropic key was not kept: Anthropic does not accept it: API key is invalid"
+        );
+        assert_eq!(refused.status(), 400);
+        assert_eq!(refused.part(), None);
+
+        let unchecked = Refusal::PurseUnchecked {
+            purse: "Anthropic subscription".to_owned(),
+            why: "Anthropic could not be reached: dns error".to_owned(),
+        };
+        assert_eq!(
+            unchecked.to_string(),
+            "Anthropic subscription was not kept, because it could not be checked: Anthropic \
+             could not be reached: dns error"
+        );
+        assert_eq!(unchecked.status(), 502);
+        assert_eq!(unchecked.part(), None);
     }
 
     #[test]

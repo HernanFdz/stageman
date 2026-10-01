@@ -27,6 +27,7 @@ use stageman_instance::{
     AppEffect, AppEvent, Effect, Event, Instance, Request, RequestId, Response, Seed, Target,
 };
 use stageman_platform::Call as PlatformCall;
+use stageman_provider::Call as ProviderCall;
 use stageman_vocabulary::scenario::{Meta, Recorder};
 use stageman_vocabulary::{
     Answer as Answering, Arrival, Bytes, Disconnected, EffectId, Ended, Environment, Finished,
@@ -477,6 +478,15 @@ pub struct Simulation {
     /// Why the next reads of a repository get no answer at all, front
     /// first.
     platform_failures: VecDeque<String>,
+    /// Every question asked of a provider, as the provider crate reads it
+    /// back and where in the trace it was asked.
+    provider_calls: Vec<(usize, ProviderCall)>,
+    /// What the provider answers the next purses it is asked about, front
+    /// first: a status and a body, as scripted. Unscripted, a purse is
+    /// answered as the real provider was measured to answer one it accepts.
+    provider_answers: VecDeque<(u16, String)>,
+    /// Why the next purses asked about get no answer at all, front first.
+    provider_failures: VecDeque<String>,
     /// How many tokens the simulated App has minted, so each is named
     /// apart.
     tokens_minted: u32,
@@ -908,6 +918,9 @@ impl Simulation {
             platform_calls: Vec::new(),
             platform_answers: VecDeque::new(),
             platform_failures: VecDeque::new(),
+            provider_calls: Vec::new(),
+            provider_answers: VecDeque::new(),
+            provider_failures: VecDeque::new(),
             tokens_minted: 0,
             minted_for: BTreeMap::new(),
             coverage: BTreeMap::new(),
@@ -2459,6 +2472,22 @@ impl Simulation {
         {
             self.platform_calls.push((self.trace.len(), call));
         }
+        if let Effect::Request {
+            method,
+            url,
+            headers,
+            body,
+            ..
+        } = &effect
+            && let Some(call) = ProviderCall::parse(&stageman_provider::Request {
+                method: method.clone(),
+                url: url.clone(),
+                headers: headers.clone(),
+                body: body.as_ref().map(|bytes| bytes.as_slice().to_vec()),
+            })
+        {
+            self.provider_calls.push((self.trace.len(), call));
+        }
         if !self.quiet {
             self.trace.push(format!(
                 "{}: -> {}{}",
@@ -2590,17 +2619,10 @@ impl Simulation {
         headers: BTreeMap<String, String>,
         body: Option<Bytes>,
     ) {
-        // A platform's read before a channel's calls: the two crates read
-        // different requests, and a repository read is nobody's post.
-        if self.read_repository(
-            id,
-            &stageman_platform::Request {
-                method: method.clone(),
-                url: url.clone(),
-                headers: headers.clone(),
-                body: body.as_ref().map(|bytes| bytes.as_slice().to_vec()),
-            },
-        ) {
+        // A platform's read and a provider's listing before a channel's
+        // calls: the three crates read different requests, and neither a
+        // repository read nor a purse asked about is anybody's post.
+        if self.asked_beside_a_channel(id, &method, &url, &headers, body.as_ref()) {
             return;
         }
         let request = stageman_channel::Request {
@@ -2922,6 +2944,66 @@ impl Simulation {
             Responded::Answered {
                 status,
                 headers,
+                body: body.into(),
+            }
+        };
+        self.schedule(self.now, Event::Responded { id, responded });
+        true
+    }
+
+    /// Answers a request that is a platform's or a provider's, if it is
+    /// either, as each crate reads it back. False for one that is neither,
+    /// which is a channel's to answer.
+    fn asked_beside_a_channel(
+        &mut self,
+        id: EffectId,
+        method: &str,
+        url: &str,
+        headers: &BTreeMap<String, String>,
+        body: Option<&Bytes>,
+    ) -> bool {
+        let body = body.map(|bytes| bytes.as_slice().to_vec());
+        self.read_repository(
+            id,
+            &stageman_platform::Request {
+                method: method.to_owned(),
+                url: url.to_owned(),
+                headers: headers.clone(),
+                body: body.clone(),
+            },
+        ) || self.asked_a_provider(
+            id,
+            &stageman_provider::Request {
+                method: method.to_owned(),
+                url: url.to_owned(),
+                headers: headers.clone(),
+                body,
+            },
+        )
+    }
+
+    /// Answers a question about a purse, if the request is one: with the
+    /// status the real provider was measured to answer a purse it accepts,
+    /// unless the next answer was scripted otherwise, or scripted not to
+    /// come at all. The listing under that status is a stand-in in the
+    /// shape the provider documents: nothing of it is read, so nothing of
+    /// it is modelled. False for a request that is not a provider's.
+    fn asked_a_provider(&mut self, id: EffectId, request: &stageman_provider::Request) -> bool {
+        if ProviderCall::parse(request).is_none() {
+            return false;
+        }
+        let responded = if let Some(why) = self.provider_failures.pop_front() {
+            Responded::Failed(why)
+        } else {
+            let (status, body) = self.provider_answers.pop_front().unwrap_or_else(|| {
+                (
+                    200,
+                    r#"{"data":[],"has_more":false,"first_id":null,"last_id":null}"#.to_owned(),
+                )
+            });
+            Responded::Answered {
+                status,
+                headers: [("content-type".to_owned(), "application/json".to_owned())].into(),
                 body: body.into(),
             }
         };
@@ -3384,6 +3466,24 @@ impl Simulation {
     /// Scripts the next read of a repository to get no answer at all.
     pub fn next_platform_fails(&mut self, why: &str) {
         self.platform_failures.push_back(why.to_owned());
+    }
+
+    /// Scripts the provider's answer to the next purse it is asked about: a
+    /// status, and the body it came with, as the real provider was measured
+    /// to answer.
+    pub fn next_provider_answers(&mut self, status: u16, body: &str) {
+        self.provider_answers.push_back((status, body.to_owned()));
+    }
+
+    /// Scripts the next purse asked about to get no answer at all.
+    pub fn next_provider_fails(&mut self, why: &str) {
+        self.provider_failures.push_back(why.to_owned());
+    }
+
+    /// Every question asked of a provider, with where in the trace each was
+    /// asked.
+    pub fn provider_calls(&self) -> &[(usize, ProviderCall)] {
+        &self.provider_calls
     }
 
     /// Every request to a channel asked for, with where in the trace each

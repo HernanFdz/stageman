@@ -1,19 +1,35 @@
-//! The purse travels with every turn: a credential replaced between two
-//! turns, a container made before the purse travelled this way, and a job
-//! whose purse is not held — see
+//! A purse is checked against its provider before it is kept, and travels
+//! with every turn once it is — see
 //! `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`.
 //!
-//! What a container is made with and what its agent is run with on an
+//! The check: the request held while the provider is asked, kept once it
+//! has accepted, refused in the provider's own sentence, unchecked where
+//! the provider could not be asked, and a purse already held left as it was
+//! by a replacement that is not kept. A paste refused on its own asks no
+//! provider, which the dashboard's scenarios assert beside the refusals.
+//!
+//! The travelling: a credential replaced between two turns, a container
+//! made before the purse travelled this way, and a job whose purse is not
+//! held. What a container is made with and what its agent is run with on an
 //! ordinary turn are asserted where each is decided, in the foreman's and
 //! the credentials' scenarios.
 
 use std::collections::BTreeMap;
 
-use crate::dashboard::ask;
+use crate::dashboard::{ask, count, first, nth};
 use crate::simulation::{Simulation, charging, job, project, seed, watching_a_channel};
 use stageman_agent::Command;
 use stageman_core::{Agent, Kit, Progress, Purse, PurseName, Secret, Waiting};
-use stageman_instance::{Request, Response};
+use stageman_instance::{Instance, Request, Response};
+use stageman_provider::Call as ProviderCall;
+use stageman_wire::Refusal;
+
+/// What the provider answered a made-up key in the key's header, as
+/// measured.
+const KEY_REFUSED: &str = r#"{"type":"error","error":{"type":"authentication_error","message":"API key is invalid."},"request_id":null}"#;
+
+/// What it answered a made-up subscription token sent as a bearer.
+const TOKEN_REFUSED: &str = r#"{"type":"error","error":{"type":"authentication_error","message":"OAuth access token is invalid."},"request_id":null}"#;
 
 /// Claude as it comes, charging the subscription.
 fn subscribed() -> Kit {
@@ -27,23 +43,278 @@ fn one(name: &str, value: &str) -> BTreeMap<String, String> {
 }
 
 /// Holds a purse from the dashboard, as an operator replacing one does.
-fn hold(
+fn hold(world: &mut Simulation, instance: &mut Instance, purse: &str, credential: &str) {
+    let Response::Agents(_) = pasting(world, instance, 1, purse, credential) else {
+        panic!("the agents screen");
+    };
+}
+
+/// What pasting a credential into a purse's box and pressing Save is
+/// answered.
+fn pasting(
     world: &mut Simulation,
-    instance: &mut stageman_instance::Instance,
+    instance: &mut Instance,
+    id: u64,
     purse: &str,
     credential: &str,
-) {
-    let Response::Agents(_) = ask(
+) -> Response {
+    ask(
         world,
         instance,
-        1,
+        id,
         Request::HoldPurse {
             purse: purse.to_owned(),
             credential: credential.to_owned(),
         },
+    )
+}
+
+/// What the purse of that name holds on the disk, if one is held there.
+fn kept(world: &Simulation, purse: PurseName) -> Option<String> {
+    world.disk().and_then(|landed| {
+        landed
+            .purses
+            .get(purse)
+            .map(|held| held.credential().expose().to_owned())
+    })
+}
+
+/// A purse is asked about before it is kept, and answered after: the
+/// provider's listing goes out with the credential in the header its kind
+/// travels in, trimmed as it will be kept; the write follows the provider's
+/// yes; and the answer follows the write.
+#[test]
+fn a_purse_is_asked_of_its_provider_before_it_is_kept_and_answered_after() {
+    let mut world = Simulation::new();
+    let mut instance = world.wake(seed(1));
+    let requests_before = count(&world, "-> Request");
+    let writes_before = count(&world, "-> Write");
+
+    let Response::Agents(shown) = pasting(
+        &mut world,
+        &mut instance,
+        1,
+        "anthropic-key",
+        "  sk-ant-api03-a-new-key \n",
     ) else {
         panic!("the agents screen");
     };
+    assert!(
+        shown
+            .providers
+            .iter()
+            .flat_map(|provider| provider.purses.iter())
+            .any(|purse| purse.id == "anthropic-key" && purse.held),
+        "{shown:?}"
+    );
+
+    let asked = nth(&world, "-> Request", requests_before);
+    let line = &world.trace()[asked];
+    assert!(
+        line.contains("https://api.anthropic.com/v1/models?limit=1"),
+        "{line}"
+    );
+    assert!(
+        line.contains(r#""x-api-key":"sk-ant-api03-a-new-key""#),
+        "the key, in the key's header, trimmed: {line}"
+    );
+    let written = nth(&world, "-> Write", writes_before);
+    assert!(asked < written, "asked before kept: {asked} < {written}");
+    assert!(
+        written < first(&world, "-> Respond"),
+        "kept before answered"
+    );
+    assert_eq!(
+        kept(&world, PurseName::AnthropicKey).as_deref(),
+        Some("sk-ant-api03-a-new-key")
+    );
+
+    // The other kind is asked about as a bearer.
+    hold(
+        &mut world,
+        &mut instance,
+        "anthropic-subscription",
+        "sk-ant-oat01-a-new-token",
+    );
+    let asked = nth(&world, "-> Request", requests_before + 1);
+    let line = &world.trace()[asked];
+    assert!(
+        line.contains(r#""authorization":"Bearer sk-ant-oat01-a-new-token""#),
+        "the token, as a bearer: {line}"
+    );
+    assert_eq!(
+        world
+            .provider_calls()
+            .iter()
+            .map(|(_, call)| *call)
+            .collect::<Vec<_>>(),
+        vec![
+            ProviderCall::Check {
+                purse: PurseName::AnthropicKey
+            },
+            ProviderCall::Check {
+                purse: PurseName::AnthropicSubscription
+            },
+        ],
+        "one question a purse, and nothing else asked of the provider"
+    );
+}
+
+/// A purse its provider does not accept is refused in the provider's own
+/// sentence, whichever kind it is, and nothing is kept or written.
+#[test]
+fn a_purse_its_provider_refuses_is_not_kept_and_is_refused_in_the_providers_words() {
+    let mut world = Simulation::new();
+    let mut instance = world.wake(seed(1));
+    let written = count(&world, "-> Write");
+
+    world.next_provider_answers(401, KEY_REFUSED);
+    assert_eq!(
+        pasting(
+            &mut world,
+            &mut instance,
+            1,
+            "anthropic-key",
+            "sk-ant-api03-not-a-real-key",
+        ),
+        Response::Refused(Refusal::PurseRefused {
+            purse: "Anthropic key".to_owned(),
+            why: "Anthropic does not accept it: API key is invalid".to_owned(),
+        })
+    );
+    world.next_provider_answers(401, TOKEN_REFUSED);
+    assert_eq!(
+        pasting(
+            &mut world,
+            &mut instance,
+            2,
+            "anthropic-subscription",
+            "sk-ant-oat01-not-a-real-token",
+        ),
+        Response::Refused(Refusal::PurseRefused {
+            purse: "Anthropic subscription".to_owned(),
+            why: "Anthropic does not accept it: OAuth access token is invalid".to_owned(),
+        })
+    );
+
+    assert_eq!(world.provider_calls().len(), 2, "each was asked about");
+    assert!(instance.state().purses.is_empty(), "nothing was kept");
+    assert_eq!(count(&world, "-> Write"), written, "nothing was written");
+}
+
+/// A provider that cannot be asked keeps nothing either, and says the purse
+/// could not be checked rather than that it was wrong: no answer at all, and
+/// an answer that is a verdict on nothing. Pasting it again once the
+/// provider answers is the repair.
+#[test]
+fn a_provider_that_cannot_be_asked_keeps_nothing_and_says_the_purse_was_not_checked() {
+    let mut world = Simulation::new();
+    let mut instance = world.wake(seed(1));
+    let written = count(&world, "-> Write");
+
+    world.next_provider_fails("dns error");
+    assert_eq!(
+        pasting(
+            &mut world,
+            &mut instance,
+            1,
+            "anthropic-key",
+            "sk-ant-api03-a-good-key",
+        ),
+        Response::Refused(Refusal::PurseUnchecked {
+            purse: "Anthropic key".to_owned(),
+            why: "Anthropic could not be reached: dns error".to_owned(),
+        })
+    );
+    world.next_provider_answers(
+        529,
+        r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+    );
+    assert_eq!(
+        pasting(
+            &mut world,
+            &mut instance,
+            2,
+            "anthropic-key",
+            "sk-ant-api03-a-good-key",
+        ),
+        Response::Refused(Refusal::PurseUnchecked {
+            purse: "Anthropic key".to_owned(),
+            why: "Anthropic could not be reached: it answered 529".to_owned(),
+        })
+    );
+    assert!(instance.state().purses.is_empty(), "nothing was kept");
+    assert_eq!(count(&world, "-> Write"), written, "nothing was written");
+
+    let Response::Agents(_) = pasting(
+        &mut world,
+        &mut instance,
+        3,
+        "anthropic-key",
+        "sk-ant-api03-a-good-key",
+    ) else {
+        panic!("the agents screen");
+    };
+    assert_eq!(
+        kept(&world, PurseName::AnthropicKey).as_deref(),
+        Some("sk-ant-api03-a-good-key"),
+        "kept once the provider answered for it"
+    );
+}
+
+/// A replacement that is not kept — refused by the provider, or never
+/// checked — leaves the purse that was held exactly as it was, in memory and
+/// on the disk: nothing is written until the provider has accepted.
+#[test]
+fn a_replacement_that_is_not_kept_leaves_the_purse_that_was_held() {
+    let mut world = Simulation::new();
+    world.holding(&watching_a_channel(&[]));
+    let mut instance = world.wake(seed(1));
+    let written = count(&world, "-> Write");
+    let held = |instance: &Instance| {
+        instance
+            .state()
+            .purses
+            .get(PurseName::AnthropicKey)
+            .map(|purse| purse.credential().expose().to_owned())
+    };
+    assert_eq!(held(&instance).as_deref(), Some("agent-token"));
+
+    world.next_provider_answers(401, KEY_REFUSED);
+    assert_eq!(
+        pasting(
+            &mut world,
+            &mut instance,
+            1,
+            "anthropic-key",
+            "sk-ant-api03-a-wrong-one",
+        ),
+        Response::Refused(Refusal::PurseRefused {
+            purse: "Anthropic key".to_owned(),
+            why: "Anthropic does not accept it: API key is invalid".to_owned(),
+        })
+    );
+    world.next_provider_fails("operation timed out");
+    assert_eq!(
+        pasting(
+            &mut world,
+            &mut instance,
+            2,
+            "anthropic-key",
+            "sk-ant-api03-an-unchecked-one",
+        ),
+        Response::Refused(Refusal::PurseUnchecked {
+            purse: "Anthropic key".to_owned(),
+            why: "Anthropic could not be reached: operation timed out".to_owned(),
+        })
+    );
+
+    assert_eq!(held(&instance).as_deref(), Some("agent-token"));
+    assert_eq!(
+        kept(&world, PurseName::AnthropicKey).as_deref(),
+        Some("agent-token")
+    );
+    assert_eq!(count(&world, "-> Write"), written, "nothing was written");
 }
 
 /// A credential replaced between two messages reaches the foreman at the

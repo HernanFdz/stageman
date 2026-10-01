@@ -10,7 +10,7 @@ present. Extends `docs/decisions/0048-a-job-runs-on-a-kit.md`, which left the
 room this fills: a kit's variant now carries the purse it charges, and one
 credential is selected by it. Answers two questions from
 `docs/open-questions.md`: when credentials move from agents to providers,
-and, for a key, whether an agent's credential is checked before it is kept.
+and whether an agent's credential is checked before it is kept.
 Narrows `docs/decisions/0046-a-projects-variables-are-carried-never-read.md`
 by one clause: a container's environment is fixed at creation for a
 project's variables, and the purse is not among them. Adds a crate beside
@@ -77,9 +77,17 @@ nothing, which is exactly the shape 0076 checks a platform credential by.
 A real subscription token answers the same listing with `200` when sent as
 a bearer token, with or without the beta header the vendor's own client
 sends, and with the same `401` as a bogus key when sent in the key's
-header. So both kinds are checked by one read, differing only in the
-header the credential travels in, and the wrong box is refused by the
-provider as well as by the shape.
+header. A bogus token sent as a bearer is answered `401` and *OAuth access
+token is invalid.*, so a refusal of either kind arrives with a sentence of
+the provider's own. So both kinds are checked by one read, differing only
+in the header the credential travels in, and the wrong box is refused by
+the provider as well as by the shape. Both refusals, and a real token's
+`200`, were the same from a client that names itself in no header, which
+is how this daemon's own client asks, so the read carries the version
+header the provider requires of every request, the credential, and nothing
+else. What the provider answers when it is limiting requests or failing
+was not measured: the statuses its documentation gives for those are read,
+and nothing in their bodies is.
 
 ## Decision
 
@@ -161,6 +169,15 @@ Nine things follow, and each is the decision rather than a detail of it.
   read with the credential in the header its kind travels in, refused with
   the provider's own words, or unchecked when the provider could not be
   reached, and kept in neither case.
+
+  Refused is the provider saying no to the credential: unauthorised, or
+  forbidden. Unchecked is everything that is a verdict on nothing: no
+  answer within the ten seconds a person at a button is given, a limit
+  reached, the provider's own failure. Either is said in the purse's own
+  row, in the place of the line that says what the purse is for, as the
+  rule alone, since the row already names the purse; and a replacement
+  that fails either way leaves the purse that was held as it was, because
+  nothing is written until the provider has accepted.
 
 - **The names this project delivers are derived from the delivery table.**
   A project's variable may not claim a name any agent reads any purse from,
@@ -302,6 +319,15 @@ bullet in `docs/architecture.md` §1 and a clause in its dependency rule:
 **The wire grows**: the providers and their purses beside the agents, a
 purse on a fitted kit and on a shape, and refusals for a purse that is
 unknown, misshapen, refused, unchecked, still charged, or not held.
+
+**The gate holds no purse through the binary.** A purse is kept only once
+its provider has accepted it, and nothing the gate could paste is one a
+provider would accept. So what the binary's own tests ask of the route is
+what it does with a paste it refuses, a write that lands comes from
+forgetting a purse rather than from holding one, and the simulated
+provider is where a purse is kept, refused and left unchecked. A real
+purse kept through the binary, and a made-up one refused in the provider's
+own words, is a test that needs a credential, run with the others that do.
 
 **The query that says what depends on an agent becomes the query that says
 what charges a purse**, and it counts jobs that are not over. It stops being

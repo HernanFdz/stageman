@@ -610,7 +610,10 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`.
   What the box then takes is **checked** against its platform before it is
   kept — one read with the credential, on the operator's behalf, at the
-  form — and refused beside the box otherwise. Not a *wizard*, which would
+  form — and refused beside the box otherwise. A purse's box has both
+  since `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`: a
+  link to the provider's own page, and a check against the provider on
+  the same terms. Not a *wizard*, which would
   be a form of this project's own restating the platform's; not a *setup*,
   which names the whole of what a new operator does and would leave nothing
   to call the link; and not a *validation* for the check, which reads as
@@ -1634,8 +1637,8 @@ ignores rather than from the environment, so nothing inherits them by accident:
   Agents page, so that the file declares its kind as the box does and
   nothing sniffs it; the subscription's is read first when both exist, as a
   form offers it first. Needed by `just image-session`, which is the only
-  thing exercising session resumption and a job running end to end, and by
-  `just propose`.
+  thing exercising session resumption, a job running end to end, and a
+  purse checked against its real provider and kept, and by `just propose`.
 - **`github-token`** — needed by `just propose` alone. A fine-grained token
   scoped to this one repository, with contents and pull requests write, and
   nothing else.
