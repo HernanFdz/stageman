@@ -1442,6 +1442,15 @@ mod tests {
         );
         assert!(key.held);
         assert_eq!(
+            key.note,
+            "Metered per token, from the provider's own console."
+        );
+        assert_eq!(
+            anthropic.purses[1].note,
+            "Flat per month, from a plan only the vendor's own agent may charge; minted for a \
+             year by the claude setup-token command."
+        );
+        assert_eq!(
             key.charged_by.first().map(String::as_str),
             Some("the foreman of aviary")
         );

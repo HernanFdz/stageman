@@ -4376,9 +4376,14 @@ mod tests {
         assert_eq!(run.environment.len(), 1, "{run:?}");
         assert_eq!(run.environment[0].0, "CLAUDE_CODE_OAUTH_TOKEN");
         assert_eq!(run.environment[0].1.expose(), "sk-ant-oat01-secret-value");
+        let shown = format!("{run:?}");
         assert!(
-            !format!("{run:?}").contains("secret-value"),
-            "and what is valued is named, never shown: {run:?}"
+            !shown.contains("secret-value"),
+            "and what is valued is named, never shown: {shown}"
+        );
+        assert!(
+            shown.contains("AgentRun") && shown.contains("CLAUDE_CODE_OAUTH_TOKEN"),
+            "named, so that a line about a run still says what it was run with: {shown}"
         );
     }
 

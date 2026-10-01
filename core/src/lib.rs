@@ -385,7 +385,15 @@ impl Agent {
     }
 
     /// Whether a kit for this agent can charge a purse.
+    ///
+    /// Skipped by mutation testing, and equivalent rather than untested: the
+    /// one agent there is charges every purse there is, so this is `true`
+    /// for every input. **Delete this attribute in the commit that adds an
+    /// agent that cannot charge some purse** — the second agent is one,
+    /// since a subscription is the vendor's own agent's — and give the test
+    /// that pins this its refusal.
     #[must_use]
+    #[mutants::skip]
     pub fn charges(self, purse: PurseName) -> bool {
         self.purses().any(|accepted| accepted == purse)
     }
@@ -4770,6 +4778,7 @@ mod tests {
         let first = Purse::new(PurseName::AnthropicKey, Secret::new("first".to_owned()));
         assert_eq!(first.name(), PurseName::AnthropicKey);
         assert_eq!(purses.hold(first), None);
+        assert!(!purses.is_empty(), "one is held");
         assert!(purses.holds(PurseName::AnthropicKey));
         assert!(!purses.holds(PurseName::AnthropicSubscription));
 
@@ -4797,6 +4806,8 @@ mod tests {
             purses.names().collect::<Vec<_>>(),
             vec![PurseName::AnthropicSubscription]
         );
+        assert!(purses.forget(PurseName::AnthropicSubscription).is_some());
+        assert!(purses.is_empty(), "and nothing is, once the last has gone");
     }
 
     /// A purse names its provider and its kind, and every provider is
@@ -4820,8 +4831,8 @@ mod tests {
                     .any(|purse| purse.provider() == *provider),
                 "{provider:?} hands out no purse"
             );
-            assert!(!provider.name().is_empty());
         }
+        assert_eq!(Provider::Anthropic.name(), "Anthropic");
     }
 
     /// A kit charges a purse its agent can, and the purse is read back from
@@ -4833,6 +4844,17 @@ mod tests {
             let kit = Kit::defaults(Agent::Claude, *purse).expect("Claude charges both");
             assert_eq!(kit.purse(), *purse);
             assert_eq!(kit.agent(), Agent::Claude);
+        }
+        // Every agent there is charges every purse there is, which is what
+        // makes `Agent::charges` true for every input and its skip honest.
+        // This is the line that fails when an agent lands that cannot charge
+        // some purse: delete the attribute then, and assert the refusal here.
+        for agent in Agent::ALL {
+            assert_eq!(
+                agent.purses().collect::<BTreeSet<_>>(),
+                PurseName::ALL.iter().copied().collect::<BTreeSet<_>>(),
+                "{agent:?}"
+            );
         }
         // The subscription first: it is what a new kit charges when both are
         // held.
@@ -4856,7 +4878,7 @@ mod tests {
 
         assert!(!debugged.contains("real"), "{debugged}");
         assert!(debugged.contains("AnthropicSubscription"), "{debugged}");
-        assert!(!displayed.contains("real"), "{displayed}");
+        assert_eq!(displayed, "<redacted>");
         let mut purses = Purses::default();
         purses.hold(purse);
         assert!(!format!("{purses:?}").contains("real"));
