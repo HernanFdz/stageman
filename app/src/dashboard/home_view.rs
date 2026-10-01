@@ -17,7 +17,7 @@ use super::error::DashboardResult;
 use super::jobs_view::{JobRow, ROW, ROWS};
 use super::live::{Live, Reading, use_reading};
 use crate::ui::{
-    Badge, BadgeTone, Card, EmptyState, Icon, Mark, Reference, Skeleton, Tooltip, When,
+    Badge, BadgeTone, Card, EmptyState, Icon, Mark, Reference, Row, Rows, Skeleton, Tooltip, When,
 };
 
 pub use stageman_wire::{ExpiringToken, Home, Project, ProjectJob};
@@ -148,9 +148,10 @@ fn Overview(home: Home) -> Element {
                         },
                     }
                 } else {
-                    ul { class: "divide-y divide-border",
+                    Rows {
                         for project in home.projects {
-                            li { key: "{project.id}", Watched { project } }
+                            // Tighter than most rows: each is one line.
+                            Row { key: "{project.id}", class: "py-2", Watched { project } }
                         }
                     }
                 }
@@ -239,7 +240,7 @@ fn Placed(placed: ProjectJob) -> Element {
 #[component]
 fn Watched(project: Project) -> Element {
     rsx! {
-        div { class: "flex items-baseline gap-3 py-2 first:pt-0 last:pb-0",
+        div { class: "flex items-baseline gap-3",
             Link {
                 to: super::Route::ProjectJobsView { project: project.id.clone() },
                 class: "text-sm font-medium hover:underline",

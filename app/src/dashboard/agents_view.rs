@@ -23,11 +23,11 @@ use stageman_instance::{Request, Response};
 use super::error::{DashboardError, DashboardResult};
 use super::live::{Live, Reading, use_reading};
 use crate::ui::{
-    BESIDE, Badge, BadgeTone, Button, ButtonVariant, Card, EmptyState, Guide, Icon, Mark,
-    SecretBox, Skeleton, Tooltip,
+    BESIDE, Badge, BadgeTone, Button, ButtonVariant, Card, EmptyState, Guide, Icon, Mark, Row,
+    Rows, SecretBox, Skeleton, Tooltip,
 };
 
-pub use stageman_wire::{Agent, Agents, ProviderView, PurseView};
+pub use stageman_wire::{Agent, Agents, ProviderView, PurseKind, PurseView};
 
 /// Every purse, held or not, by provider, and every agent.
 ///
@@ -105,13 +105,16 @@ pub fn AgentsView() -> Element {
                                 rsx! {
                                     Card {
                                         key: "{provider.id}",
+                                        // Whose card it is, once, on its title: the
+                                        // rows under it say which kind each is.
+                                        mark: rsx! { Mark { agent: provider.id.clone(), size: 16 } },
                                         title: provider.name.clone(),
                                         note: "What a kit's work is charged to: a key, metered per token, or a \
                                                subscription, flat per month. Paste each into its own box.",
                                         badge: rsx! { Badge { "{held} of {total} held" } },
-                                        ul { class: "divide-y divide-border",
+                                        Rows {
                                             for purse in provider.purses.iter() {
-                                                li { key: "{purse.id}",
+                                                Row { key: "{purse.id}",
                                                     PurseRow {
                                                         provider: provider.id.clone(),
                                                         purse: purse.clone(),
@@ -143,9 +146,9 @@ pub fn AgentsView() -> Element {
                                            than something to configure.",
                                 }
                             } else {
-                                ul { class: "divide-y divide-border",
+                                Rows {
                                     for agent in shown.agents.iter() {
-                                        li { key: "{agent.id}",
+                                        Row { key: "{agent.id}",
                                             AgentRow { agent: agent.clone(), providers: shown.providers.clone() }
                                         }
                                     }
@@ -198,9 +201,9 @@ fn PurseRow(
     let pasting = !purse.held || replacing();
 
     rsx! {
-        div { class: "flex flex-col gap-2 py-3 first:pt-0 last:pb-0",
+        div { class: "flex flex-col gap-2",
             div { class: "flex items-center gap-3",
-                Mark { agent: provider.clone(), size: 14 }
+                {kind_icon(purse.kind).draw(14)}
                 span { class: "shrink-0 text-sm font-medium", "{purse.name}" }
                 if purse.held {
                     Badge { tone: BadgeTone::Idle, "held" }
@@ -293,7 +296,7 @@ fn AgentRow(agent: Agent, providers: Vec<ProviderView>) -> Element {
     let charging = charges_of(&agent, &providers).join("; ");
 
     rsx! {
-        div { class: "flex flex-col gap-1 py-3 first:pt-0 last:pb-0",
+        div { class: "flex flex-col gap-1",
             div { class: "flex items-center gap-3",
                 Mark { agent: agent.id.clone(), size: 14 }
                 span { class: "text-sm font-medium", "{agent.name}" }
@@ -306,6 +309,15 @@ fn AgentRow(agent: Agent, providers: Vec<ProviderView>) -> Element {
             p { class: "max-w-prose text-xs text-muted-foreground", "{agent.description}" }
             p { class: "max-w-prose text-xs text-muted-foreground", "Charges {charging}." }
         }
+    }
+}
+
+/// The icon a purse's row is drawn with: what kind it is, where the card's
+/// title already says whose.
+const fn kind_icon(kind: PurseKind) -> Icon {
+    match kind {
+        PurseKind::Key => Icon::Key,
+        PurseKind::Subscription => Icon::Subscription,
     }
 }
 
@@ -330,12 +342,21 @@ fn charges_of(agent: &Agent, providers: &[ProviderView]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Agent, ProviderView, PurseView, charges_of};
+    use super::{Agent, Icon, ProviderView, PurseKind, PurseView, charges_of, kind_icon};
+
+    /// Each kind of purse is drawn with its own icon, and neither with the
+    /// other's.
+    #[test]
+    fn each_kind_of_purse_is_drawn_with_its_own_icon() {
+        assert_eq!(kind_icon(PurseKind::Key), Icon::Key);
+        assert_eq!(kind_icon(PurseKind::Subscription), Icon::Subscription);
+    }
 
     fn purse(id: &str, name: &str) -> PurseView {
         PurseView {
             id: id.to_owned(),
             name: name.to_owned(),
+            kind: PurseKind::Key,
             note: String::new(),
             example: String::new(),
             guide: String::new(),

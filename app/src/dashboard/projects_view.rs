@@ -19,7 +19,8 @@ use super::agents_view::Agent;
 use super::error::DashboardResult;
 use super::live::{Live, Reading, use_reading};
 use crate::ui::{
-    Badge, BadgeTone, ButtonVariant, Card, EmptyState, Icon, KitChip, Reference, Skeleton, Tooltip,
+    Badge, BadgeTone, ButtonVariant, Card, EmptyState, Icon, KitChip, Reference, Row, Rows,
+    Skeleton, Tooltip,
 };
 
 pub use stageman_wire::{
@@ -202,9 +203,12 @@ pub fn ProjectsView() -> Element {
                                     },
                                 }
                             } else {
-                                ul { class: "divide-y divide-border",
+                                Rows {
                                     for project in watching.projects.iter().cloned() {
-                                        li { key: "{project.id}",
+                                        // Roomier than most rows, and deliberately: a
+                                        // project is three lines, and the usual padding
+                                        // reads as cramped around them.
+                                        Row { key: "{project.id}", class: "py-4",
                                             WatchedProject {
                                                 project,
                                                 available: watching.available.clone(),
@@ -313,15 +317,7 @@ fn WatchedProject(project: Project, available: Vec<Agent>, shapes: Vec<Shape>) -
     let counted = format!("{} variable(s)", project.variables.len());
 
     rsx! {
-        // Roomier than the rows on the agents screen, and deliberately: an
-        // agent is one line and a project is three, so the same padding reads
-        // as cramped here.
-        //
-        // The first and last shed their outer padding entirely, so the space
-        // above the first row and below the last are both the card's own and
-        // therefore equal. Anything else makes the top gap the sum of two
-        // paddings and the eye reads it as a mistake.
-        div { class: "flex flex-col gap-2 py-4 first:pt-0 last:pb-0",
+        div { class: "flex flex-col gap-2",
             div { class: "flex items-center gap-3",
                 Link {
                     to: super::Route::ProjectJobsView {

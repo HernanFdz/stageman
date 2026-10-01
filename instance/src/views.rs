@@ -93,6 +93,14 @@ const fn kind_note(kind: PurseKind) -> &'static str {
     }
 }
 
+/// A purse's kind as the wire carries it, for a page to draw its row by.
+const fn wire_kind(kind: PurseKind) -> stageman_wire::PurseKind {
+    match kind {
+        PurseKind::Key => stageman_wire::PurseKind::Key,
+        PurseKind::Subscription => stageman_wire::PurseKind::Subscription,
+    }
+}
+
 /// A purse's kind as a sentence names it, where the provider is known from
 /// the rest of the sentence.
 const fn kind_phrase(kind: PurseKind) -> &'static str {
@@ -603,6 +611,7 @@ pub fn listed(state: &State) -> stageman_wire::Agents {
                         stageman_wire::PurseView {
                             id: wire_purse(*purse).0.to_owned(),
                             name: kind_shown(purse.kind()).to_owned(),
+                            kind: wire_kind(purse.kind()),
                             note: kind_note(purse.kind()).to_owned(),
                             example: stageman_provider::example(*purse).to_owned(),
                             guide: guide.link.to_owned(),
@@ -1425,6 +1434,12 @@ mod tests {
         assert_eq!(anthropic.id, "anthropic");
         let key = anthropic.purses.first().expect("the key is listed");
         assert_eq!(key.name, "API key");
+        assert_eq!(key.kind, stageman_wire::PurseKind::Key);
+        assert_eq!(
+            anthropic.purses[1].kind,
+            stageman_wire::PurseKind::Subscription,
+            "each purse says which kind it is, for its row to be drawn by"
+        );
         assert!(key.held);
         assert_eq!(
             key.charged_by.first().map(String::as_str),

@@ -10,6 +10,11 @@ use super::Info;
 pub struct CardProps {
     /// What this region is about.
     pub title: String,
+    /// Whose region it is, where it is somebody's: their mark, before the
+    /// title, once — so that the rows inside can say what they are instead
+    /// of whose, per `docs/conventions.md` §3.
+    #[props(default)]
+    pub mark: Option<Element>,
     /// Something belonging to the title — a count, most often.
     ///
     /// Separate from `aside` because they answer different questions. This one
@@ -51,6 +56,9 @@ pub fn Card(props: CardProps) -> Element {
             header { class: "flex items-baseline justify-between gap-3 border-b border-border px-4 py-3",
                 div {
                     div { class: "flex items-center gap-2",
+                        if let Some(mark) = props.mark {
+                            {mark}
+                        }
                         h2 { class: "text-sm font-semibold text-foreground", "{props.title}" }
                         if let Some(info) = props.info {
                             Info { text: info }
@@ -72,5 +80,38 @@ pub fn Card(props: CardProps) -> Element {
             }
             div { class: "px-4 py-3", {props.children} }
         }
+    }
+}
+
+// On the daemon's half only, for the reason the icon tests give.
+#[cfg(all(test, feature = "server"))]
+mod tests {
+    use super::Card;
+    use dioxus::prelude::*;
+
+    /// A card that is somebody's draws their mark before its title, and one
+    /// that is nobody's draws none.
+    #[test]
+    fn a_card_that_is_somebodys_draws_their_mark_before_its_title() {
+        let drawn = dioxus::ssr::render_element(rsx! {
+            Card {
+                mark: rsx! {
+                    span { class: "whose", "A" }
+                },
+                title: "Anthropic",
+                "rows"
+            }
+        });
+        let mark = drawn
+            .find(r#"<span class="whose">"#)
+            .expect("the mark is drawn");
+        let title = drawn.find("<h2").expect("the title is drawn");
+        assert!(mark < title, "{drawn}");
+
+        let plain = dioxus::ssr::render_element(rsx! {
+            Card { title: "Agents", "rows" }
+        });
+        assert!(!plain.contains("whose"), "{plain}");
+        assert!(plain.contains("Agents"), "{plain}");
     }
 }

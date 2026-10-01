@@ -59,6 +59,19 @@ pub struct ProviderView {
     pub purses: Vec<PurseView>,
 }
 
+/// Which of the two kinds a purse is, for a page to draw its row by.
+///
+/// A closed set on the wire as it is in the domain, so that a page matches
+/// on it rather than on text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PurseKind {
+    /// An API key: metered per token.
+    Key,
+    /// A subscription's token: flat per month.
+    Subscription,
+}
+
 /// One purse, held or not, as much of it as a page may know.
 ///
 /// **A credential travels one way.** It is sent in and never sent back:
@@ -70,6 +83,8 @@ pub struct PurseView {
     pub id: String,
     /// What it is called on screen: the kind, in a person's words.
     pub name: String,
+    /// Which kind it is, for the icon its row is drawn with.
+    pub kind: PurseKind,
     /// One line on what it is for and who can charge it.
     pub note: String,
     /// What one looks like, for the box's placeholder: the shape the check

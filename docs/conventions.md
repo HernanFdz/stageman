@@ -589,9 +589,10 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   page makes to them, keyed the same way; and a provider's, on the Agents
   page, since
   `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`. A mark
-  says *whose*; an icon says *what*. Not a *logo*, which is a brand's full
-  lockup and belongs to nobody here; not an *icon*, which is reserved for
-  the one set §3 names.
+  says *whose*; an icon says *what*, which is why a card that is
+  somebody's carries the mark on its title and its rows carry icons. Not a
+  *logo*, which is a brand's full lockup and belongs to nobody here; not
+  an *icon*, which is reserved for the one set §3 names.
 
 - **tick** — what an open page is told when a write of the instance's file
   has landed: that something may have changed, and nothing else — see
@@ -1042,9 +1043,13 @@ justify is usually obsolete.
   their marks, per §2, vendored as inline drawings rather than fetched from
   anywhere: a brand's symbol is not the icon set's to draw, and a link that
   leaves the page says whose it goes to at a glance, where a word would take
-  a glance and a half. A reference that leaves the page is a mark or an
-  icon with the address a hover away, never the address written out — an
-  address is read character by character and a row of them is a wall.
+  a glance and a half. On a card that is somebody's — a provider's, a
+  platform's, a channel's — the mark stands on the title, once, and the
+  rows inside say what they are, with an icon, or nothing: a mark on every
+  row says whose it is as many times as there are rows. A reference that
+  leaves the page is a mark or an icon with the address a hover away,
+  never the address written out — an address is read character by
+  character and a row of them is a wall.
 
 - **A closed set is a control, never a dropdown.** Every set a form here
   chooses from has a handful of members — an agent, a model, an effort, a
@@ -1176,7 +1181,10 @@ justify is usually obsolete.
   list inside a section is rows parted by a hairline rather than boxes
   within the box: a shorter control reads as a misalignment, and a nested
   box pads its rows in from the edge every other control on the page sits
-  at.
+  at. Those rows are drawn through one pair of components, which owns the
+  list's item, because a row's padding has to be the item's: a first- or
+  last-child variant on a row's own root matches its only child every
+  time, which is how rows came to touch their hairlines.
 
 - **A box that takes a secret is not a password field.** Since
   `docs/decisions/0084-the-instance-authenticates-itself.md` the dashboard

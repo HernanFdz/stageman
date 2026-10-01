@@ -31,8 +31,8 @@ use super::instance_view::workspace_link;
 use super::live::{Live, Reading, use_reading};
 use super::projects_view::{amend, binds, create, forget, projects, reaches, workspace_arrival};
 use crate::ui::{
-    BESIDE, Button, ButtonVariant, Card, Combobox, ComboboxItem, FIELD, Field, Guide, Icon, Modal,
-    PageHeader, SecretBox, Segmented, Skeleton, TextArea, Tooltip, When,
+    BESIDE, Button, ButtonVariant, Card, Combobox, ComboboxItem, FIELD, Field, Guide, Icon, Mark,
+    Modal, PageHeader, Row, Rows, SecretBox, Segmented, Skeleton, TextArea, Tooltip, When,
 };
 
 pub use stageman_wire::{
@@ -1325,29 +1325,30 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
                                 }
                             }
                         },
-                        div { class: "flex flex-col divide-y divide-border",
+                        Rows {
                             for (position, row) in draft().kits.iter().enumerate() {
-                                Kit {
-                                    key: "{position}",
-                                    position,
-                                    row: row.clone(),
-                                    shapes: shapes.clone(),
-                                    available: available.clone(),
-                                    problem: saying(Part::Kit(position)),
-                                    onchange: move |changed: KitDraft| {
-                                        draft.with_mut(|draft| {
-                                            if let Some(row) = draft.kits.get_mut(position) {
-                                                *row = changed;
-                                            }
-                                        });
-                                    },
-                                    onremove: move |()| {
-                                        draft.with_mut(|draft| {
-                                            if position < draft.kits.len() {
-                                                draft.kits.remove(position);
-                                            }
-                                        });
-                                    },
+                                Row { key: "{position}",
+                                    Kit {
+                                        position,
+                                        row: row.clone(),
+                                        shapes: shapes.clone(),
+                                        available: available.clone(),
+                                        problem: saying(Part::Kit(position)),
+                                        onchange: move |changed: KitDraft| {
+                                            draft.with_mut(|draft| {
+                                                if let Some(row) = draft.kits.get_mut(position) {
+                                                    *row = changed;
+                                                }
+                                            });
+                                        },
+                                        onremove: move |()| {
+                                            draft.with_mut(|draft| {
+                                                if position < draft.kits.len() {
+                                                    draft.kits.remove(position);
+                                                }
+                                            });
+                                        },
+                                    }
                                 }
                             }
                         }
@@ -1381,6 +1382,7 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
             // closes itself when the platform brings it back, and the form
             // moves onto the App through the tick.
             Card {
+                mark: rsx! { Mark { agent: "github".to_owned(), size: 16 } },
                 title: "GitHub",
                 note: "How its jobs reach the repository, and which one.",
                 div { class: "flex flex-col gap-4",
@@ -1706,6 +1708,7 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
             // through the panel — see
             // `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
             Card {
+                mark: rsx! { Mark { agent: "slack".to_owned(), size: 16 } },
                 title: "Slack",
                 note: "How it talks on Slack: through the app this instance owns, on a workspace, or through an app of its own.",
                 Field {
@@ -1957,8 +1960,9 @@ fn Kit(
     rsx! {
         // A row parted from the next by a hairline rather than a box within
         // the box, so that its remove control stands on the same edge as
-        // every other control in the section — `docs/conventions.md` §3.
-        div { class: "flex flex-col gap-2 py-3 first:pt-0 last:pb-0",
+        // every other control in the section — `docs/conventions.md` §3. The
+        // row's padding is the list's item's, which the caller wraps this in.
+        div { class: "flex flex-col gap-2",
             div { class: "flex items-center gap-2",
                 input {
                     class: FIELD,
