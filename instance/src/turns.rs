@@ -44,8 +44,8 @@ use stageman_agent::{
 };
 use stageman_channel::Reaction;
 use stageman_core::{
-    Agent, Channel, JobId, Kit, Place, Platform, Progress, Project, ProjectId, Role, Secret,
-    Speaking, State, Waiting,
+    Agent, Channel, JobId, Kit, NotHeld, Place, Platform, Progress, Project, ProjectId, PurseName,
+    Role, Secret, Speaking, State, Waiting,
 };
 use stageman_foreman::Finding;
 use stageman_vocabulary::{Effect as Generic, EffectId, Ended, Finished};
@@ -62,12 +62,16 @@ const CANCEL_WITHIN: Duration = Duration::from_secs(30);
 /// Whether a turn begins a session or continues the one its container
 /// holds, and everything the container is started with.
 ///
-/// Everything an agent process is about to be handed, decided when the turn
-/// is and carried as plain data: the environment its container is given is
+/// Everything a container is about to be made with, decided when the turn is
+/// and carried as plain data: the environment its container is given is
 /// rendered from the handout by the instance, so that what a container sees
 /// is decided in the one place that decides. Credentials in the clear, for
 /// the reason `crate::vocabulary` gives, which is why this formats not at
 /// all.
+///
+/// The purse the kit charges is not here, on either variant. It is selected
+/// when the agent's process is run, on every turn, from what is held at that
+/// moment — see `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`.
 #[derive(Clone, PartialEq, Eq, serde::Serialize)]
 pub enum Run {
     /// Make the container and the session, and put the first question.
@@ -341,6 +345,20 @@ impl Turn {
             _ => None,
         }
     }
+}
+
+/// What a turn whose purse is not held ends as, and says: on a job's page
+/// and in its room, and in the thread of whoever asked a foreman.
+///
+/// Unreachable while forgetting a purse goes through the dashboard, which
+/// refuses while anything unfinished charges it; a file edited by hand can
+/// still arrive here, and says which purse rather than failing somewhere
+/// further from the cause.
+fn purse_not_held(purse: PurseName) -> String {
+    format!(
+        "its kit charges the {}, which is not held",
+        crate::views::wire_purse(purse).1
+    )
 }
 
 /// The image a role's agent runs in, by name.
@@ -844,7 +862,33 @@ impl Running {
 
     /// Runs the agent inside a turn's container and opens the conversation
     /// with it: the process, and the first line it is sent, in one step.
+    ///
+    /// The purse the kit charges is selected here, when the agent is run,
+    /// rather than when the turn was decided: on the first turn and on every
+    /// resume, from what is held at this moment, so that a replaced
+    /// credential is the one handed over and a container is never made with
+    /// one — see `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`.
+    /// A kit charging a purse that is not held ends the turn here, saying
+    /// which, the way every step that cannot be taken ends one: the
+    /// container stays, so holding the purse and saying something to the job
+    /// is the repair.
     fn open(&mut self, speaker: Speaker, effects: &mut Vec<Effect>) {
+        let Some(charged) = self
+            .turns
+            .get(&speaker)
+            .map(|turn| self.state.charged_purse(turn.run.kit()))
+        else {
+            return;
+        };
+        let purse = match charged {
+            Ok(purse) => purse,
+            Err(NotHeld(purse)) => {
+                let why = purse_not_held(purse);
+                tracing::warn!(?speaker, %why, "the agent cannot be run");
+                self.ended(&speaker, Err(why), effects);
+                return;
+            }
+        };
         let process = self.effect_id();
         let Some(turn) = self.turns.get_mut(&speaker) else {
             return;
@@ -856,14 +900,23 @@ impl Running {
             run.kit().clone(),
             run.question(),
         );
+        let running = stageman_agent::agent_run(run.container(), &purse);
+        // The runtime is given the purse in its environment and told by name
+        // to forward it, as it is a container's variables when one is made:
+        // a secret travels through an environment rather than a command
+        // line, and never appears in the process table.
+        let mut given = self.runtime_environment.clone();
+        given.extend(
+            running
+                .environment
+                .iter()
+                .map(|(name, value)| (name.clone(), value.expose().to_owned())),
+        );
         effects.push(Generic::Open {
             id: process,
             program: self.runtime.clone(),
-            arguments: Command::Exec {
-                name: run.container().to_owned(),
-            }
-            .arguments(),
-            environment: self.runtime_environment.clone(),
+            arguments: running.command.arguments(),
+            environment: given,
         });
         for line in lines {
             effects.push(Generic::Send { id: process, line });
@@ -1312,7 +1365,8 @@ fn said_about(job: &JobId, progress: &Progress) {
 #[cfg(test)]
 mod tests {
     use super::{
-        Run, Turn, because, build_failure, container_failure, image_of, outcome, speaking_for,
+        Run, Turn, because, build_failure, container_failure, image_of, outcome, purse_not_held,
+        speaking_for,
     };
     use stageman_agent::{Answer, StopReason};
     use stageman_core::{
@@ -1337,6 +1391,21 @@ mod tests {
     /// The kit above, described as Claude describes itself.
     fn a_kit_config() -> KitConfig {
         KitConfig::defaults(Agent::Claude, PurseName::AnthropicKey).expect("Claude charges a key")
+    }
+
+    /// What a turn with nothing to pay with says, whole: it is read on a
+    /// job's page, in its room, and in the thread of whoever asked a
+    /// foreman, so it is asserted as text.
+    #[test]
+    fn a_purse_that_is_not_held_is_said_by_name() {
+        assert_eq!(
+            purse_not_held(PurseName::AnthropicKey),
+            "its kit charges the Anthropic key, which is not held"
+        );
+        assert_eq!(
+            purse_not_held(PurseName::AnthropicSubscription),
+            "its kit charges the Anthropic subscription, which is not held"
+        );
     }
 
     fn answered(stop_reason: StopReason) -> Answer {

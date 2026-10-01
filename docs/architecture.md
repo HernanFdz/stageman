@@ -246,8 +246,8 @@ nobody is a wish.
   everything else, and the purse its kit charges — and nothing belonging to
   any other project, and nothing belonging to any other purse. *Defended by*
   construction, since everything a job is handed is selected from the
-  project it belongs to and built by the pure function
-  in **core**; by the escape test in `docs/conventions.md` §4; and, for the
+  project it belongs to, or by its kit's own name for its purse, and built
+  by the pure functions in **core**; by the escape test in `docs/conventions.md` §4; and, for the
   credential that is fetched rather than handed, by the container test the
   same section names, since
   `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.

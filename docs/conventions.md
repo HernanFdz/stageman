@@ -412,10 +412,10 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   agent alone — which is the vendors' rule, not this project's, and is
   written into which purses each agent's kit can name. The instance holds
   at most one of each kind per provider, keyed by the purse's own name; a
-  kit names one; the handout selects the credential by it; and it is
-  handed to the agent's process on every turn rather than to its container
-  once, so a replaced credential reaches a foreman at its next message and
-  the container never holds it. See
+  kit names one; the credential is selected by that name each time the
+  agent's process is run; and it is handed to that process on every turn
+  rather than to its container once, so a replaced credential reaches a
+  foreman at its next message and the container never holds it. See
   `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`. Not
   *account*, which is what an App is installed on and would make a sentence
   about GitHub say two things; not *plan*, which the protocol uses for what
@@ -480,12 +480,14 @@ Record the near-miss too: the term you rejected, and what it would have implied.
   and acting on anything else is not. See
   `docs/decisions/0027-a-channel-is-not-a-platform.md`, and
   `docs/decisions/0046-a-projects-variables-are-carried-never-read.md` for the
-  third. It is *decided* in the domain crate as a
-  pure function and *delivered* by an adapter — the purse with every turn,
-  the rest when the container is made, per
-  `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md` — because
-  which secrets a process may see is a question about configuration while
-  what they are called is knowledge about one agent. Not *environment*, and
+  third. It is *decided* in the domain crate, by pure functions, and
+  *delivered* by an adapter at two moments, per
+  `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`: the purse
+  with every turn, selected again each time the agent's process is run,
+  and the rest when the container is made, from a value with nowhere to
+  put a purse — because which secrets a process may see is a question
+  about configuration while what they are called is knowledge about one
+  agent. Not *environment*, and
   that near-miss is the whole reason this word exists: an environment names a delivery mechanism, and
   delivery is precisely the half that differs — a variable for one agent, a file
   at an expected path for another — so a word presuming variables would make the
@@ -737,13 +739,25 @@ justify is usually obsolete.
   purse's variables are named on the command that runs the agent inside
   the container and carried in the runtime's own environment, on the first
   turn and on every resume, so that a replaced credential reaches a foreman
-  at its next message and a job when it resumes, and the container's
-  inspectable configuration carries no credential at all. A project's
-  variables and a job's warrant are still given when the container is made
-  and fixed for its life, because they are part of what the job is. Measured
-  on Docker: a bare name on the run command forwards the variable from the
-  runtime's environment exactly as it does on creation, so a secret still
-  never travels in an argument list.
+  at its next message and a job when it resumes, and a container made
+  since carries no credential in its inspectable configuration at all. A
+  project's variables and a job's warrant are still given when the
+  container is made and fixed for its life, because they are part of what
+  the job is. Measured on Docker and on Podman: a bare name on the run
+  command forwards the variable from the runtime's environment exactly as
+  it does on creation, so a secret still never travels in an argument
+  list.
+
+  **And the same command clears every other variable that agent could read
+  a purse from.** A container made before the purse travelled this way
+  holds the one it was created with, for its life, and everything run in
+  it inherits that: measured, a process forwarded one purse in such a
+  container sees both, and an agent that prefers a key charges it. So a
+  foreman moved from the key to the subscription would go on charging the
+  key — the failure of the paragraph above, arriving from the past rather
+  than from a shell. A runtime can set a variable for what it runs and
+  cannot unset one, so the clearing is `env` in front of the program, done
+  always rather than asked about.
 
   **A job's process is handed no platform credential at all**, since
   `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`:

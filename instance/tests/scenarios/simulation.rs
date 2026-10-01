@@ -228,6 +228,11 @@ pub struct Talk {
     pub steered: Vec<String>,
     /// Whether the prompt was cancelled, which ends it as cancelled.
     pub cancelled: bool,
+    /// What the agent's process could see of an environment when it was
+    /// run, as the runtime was measured to arrange it: what its container
+    /// was made with, with what was forwarded when it was run laid over
+    /// that, less what was cleared for it.
+    pub given: BTreeMap<String, String>,
 }
 
 impl Talk {
@@ -654,6 +659,18 @@ pub fn without_a_warrant(job: &Job) -> Job {
     sealed
         .open(&key(), None)
         .expect("and opens without one, its kit naming its purse")
+}
+
+/// The same job on another kit, and so charging that kit's purse. Made
+/// through the sealed form, as a file edited by hand would be: a job's kit
+/// is its own record, and nothing checks it against what is held.
+pub fn charging(job: &Job, kit: &Kit) -> Job {
+    let mut nonces = || [7; NONCE_LEN];
+    let mut sealed = job.seal(&key(), &mut nonces).expect("a job seals");
+    sealed.kit = stageman_core::WrittenKit::from(kit);
+    sealed
+        .open(&key(), None)
+        .expect("and opens on the kit it now names")
 }
 
 /// Gives the project a pasted token for its repository's platform.
@@ -1750,8 +1767,13 @@ impl Simulation {
 
     /// Keeps an agent process open: the adapter's half of a conversation,
     /// in a container that has to be up.
-    fn opened(&mut self, id: EffectId, arguments: &[String]) {
-        let Some(Command::Exec { name }) = Command::parse(arguments) else {
+    fn opened(&mut self, id: EffectId, arguments: &[String], environment: &Environment) {
+        let Some(Command::Exec {
+            name,
+            forwarded,
+            cleared,
+        }) = Command::parse(arguments)
+        else {
             self.schedule(
                 self.now,
                 Event::Ended {
@@ -1784,6 +1806,23 @@ impl Simulation {
                 reported: BTreeMap::new(),
             })
         });
+        // What a process run in a container sees, as measured: everything
+        // the container was made with; over that, each name forwarded,
+        // valued from the environment the runtime was given; and none of
+        // what was cleared in front of the program.
+        let mut given = self
+            .containers
+            .get(&name)
+            .map(|held| held.environment.clone())
+            .unwrap_or_default();
+        for variable in &forwarded {
+            if let Some(value) = environment.get(variable) {
+                given.insert(variable.clone(), value.clone());
+            }
+        }
+        for variable in &cleared {
+            given.remove(variable);
+        }
         self.talks.push(Talk {
             container: name.clone(),
             fresh: None,
@@ -1793,6 +1832,7 @@ impl Simulation {
             ended_at: None,
             steered: Vec::new(),
             cancelled: false,
+            given,
         });
         let talk = self.talks.len() - 1;
         self.talking.insert(id, talk);
@@ -3490,7 +3530,12 @@ impl Simulation {
             }
             Effect::Print { text } => self.printed.push(text),
             Effect::Exit { message } => self.exited = Some(message),
-            Effect::Open { id, arguments, .. } => self.opened(id, &arguments),
+            Effect::Open {
+                id,
+                arguments,
+                environment,
+                ..
+            } => self.opened(id, &arguments, &environment),
             Effect::Send { id, line } => self.sent(id, &line),
             Effect::Close { id } => self.closed(id),
             Effect::App(effect) => return Some(effect),

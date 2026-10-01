@@ -4111,6 +4111,16 @@ impl Role {
 /// holds credentials for its own project and no other — holds by construction
 /// rather than by review.
 ///
+/// **The purse is not here.** A handout is what a container is made with,
+/// fixed for the container's life, and the purse its kit charges is the one
+/// thing an agent's process is handed that a container is not made with: it
+/// travels with every turn, as a [`ChargedPurse`], selected again each time
+/// the agent is run. So this type has nowhere to put one, and a container
+/// holding the purse is not a state to check for — see
+/// `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`. The kit is
+/// here, because an image and a session are chosen by it, and it names the
+/// purse without holding it.
+///
 /// It carries credentials, so like [`Secret`] it redacts when formatted and
 /// deliberately implements no serialisation: a handout is what a process is
 /// about to be handed, never state, and nothing should be able to write one to
@@ -4125,10 +4135,6 @@ pub struct Handout {
     // must have nothing to check out; see
     // `docs/decisions/0050-the-repository-is-checked-out-before-the-first-turn.md`.
     repository: Option<String>,
-    // The credential of the purse the kit charges, and no other purse's:
-    // selected by the kit's own name for it, which is the whole of what
-    // `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md` moves.
-    purse: Secret,
     // Which platforms the job reaches, and never a credential for one: since
     // `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`
     // a job fetches its project's credential with the warrant below when a
@@ -4145,9 +4151,9 @@ pub struct Handout {
 }
 
 impl Handout {
-    /// What the agent a project's foreman thinks with is handed.
+    /// What the container a project's foreman thinks in is made with.
     ///
-    /// The purse its kit charges, and no platform credential at all: a foreman judges
+    /// No platform credential at all: a foreman judges
     /// signals rather than acting on them, so it has no repository to reach and
     /// nothing to authenticate against — see
     /// `docs/decisions/0012-agents-run-in-containers.md`.
@@ -4167,22 +4173,12 @@ impl Handout {
     ///
     /// # Errors
     ///
-    /// Fails if the project is not one this instance watches, or if the
-    /// purse its foreman's kit charges is not held — which the invariant in
-    /// `docs/decisions/0021-an-instance-starts-empty.md` says cannot happen,
-    /// since it holds at construction and is checked again on the way in and
-    /// out of a snapshot.
-    ///
-    /// The signature admits it anyway, and deliberately: the alternative is a
-    /// total function substituting an empty credential for a missing one, which
-    /// turns a state that cannot occur into an authentication failure somewhere
-    /// else entirely. `.quality/gate-reference.md` forbids exactly that trade.
+    /// Fails if the project is not one this instance watches.
     pub fn for_foreman(state: &State, project: ProjectId) -> Result<Self, HandoutError> {
         let watching = state
             .projects
             .get(&project)
             .ok_or(HandoutError::UnknownProject(project))?;
-        let purse = charged(state, &watching.foreman_kit)?;
         Ok(Self {
             kit: watching.foreman_kit.clone(),
             role: Role::Foreman,
@@ -4191,7 +4187,6 @@ impl Handout {
             // could check anything out into one — see
             // `docs/decisions/0036-a-foremans-image-is-not-a-jobs.md`.
             repository: None,
-            purse,
             platforms: BTreeSet::new(),
             // A foreman fetches nothing, so it is given nothing to fetch
             // with.
@@ -4208,9 +4203,10 @@ impl Handout {
         })
     }
 
-    /// What a job's agent is handed: the purse its kit charges, the job's
-    /// own warrant, and the variables and channel bindings of the one project
-    /// the job belongs to.
+    /// What a job's container is made with: the job's own warrant, and the
+    /// variables and channel bindings of the one project the job belongs to.
+    /// The purse its kit charges is handed to its agent with every turn
+    /// instead, as a [`ChargedPurse`].
     ///
     /// No platform credential, since
     /// `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`:
@@ -4226,18 +4222,15 @@ impl Handout {
     ///
     /// # Errors
     ///
-    /// Fails if the project is not one this instance watches, or if the purse
-    /// the kit charges is not held. Both are refusals rather than empty
-    /// handouts: a process started with nothing to authenticate with fails
-    /// later, further from the cause, and `docs/conventions.md` §3 would
-    /// rather that be a visible job failure than a mystery.
+    /// Fails if the project is not one this instance watches: a refusal
+    /// rather than an empty handout, since a container made with nothing of
+    /// its project's fails later, further from the cause.
     pub fn for_job(
         state: &State,
         kit: Kit,
         project: ProjectId,
         warrant: Secret,
     ) -> Result<Self, HandoutError> {
-        let purse = charged(state, &kit)?;
         let watched = state
             .projects
             .get(&project)
@@ -4246,7 +4239,6 @@ impl Handout {
             kit,
             role: Role::Job,
             repository: Some(watched.repository.https()),
-            purse,
             platforms: watched.access.keys().copied().collect(),
             warrant: Some(warrant),
             variables: watched.variables.clone(),
@@ -4282,13 +4274,6 @@ impl Handout {
     #[must_use]
     pub const fn role(&self) -> Role {
         self.role
-    }
-
-    /// The credential of the purse the kit charges, which is what the agent
-    /// authenticates with. Which purse it is, the kit says.
-    #[must_use]
-    pub const fn purse(&self) -> &Secret {
-        &self.purse
     }
 
     /// Where the repository this job works on lives, or nothing for a foreman.
@@ -4405,7 +4390,6 @@ impl fmt::Debug for Handout {
             .field("role", &self.role)
             // A URL rather than a secret, and every kickoff embeds it already.
             .field("repository", &self.repository)
-            .field("purse", &"<redacted>")
             .field("platforms", &self.platforms)
             .field("warrant", &self.warrant.as_ref().map(|_| "<redacted>"))
             // Names, never values. A name is not a credential — the operator
@@ -4432,22 +4416,88 @@ fn speaking(state: &State, project: ProjectId) -> BTreeMap<Channel, Speaking> {
         .collect()
 }
 
-/// The credential of the purse a kit charges, from what the instance holds.
-fn charged(state: &State, kit: &Kit) -> Result<Secret, HandoutError> {
-    let name = kit.purse();
-    state
-        .purses
-        .get(name)
-        .map(|purse| purse.credential().clone())
-        .ok_or(HandoutError::NoPurse(name))
+/// The purse one kit charges, in hand: the kit, and the credential this
+/// instance holds for the purse the kit names.
+///
+/// What an agent's process is handed to pay with, and the one thing it is
+/// handed that a [`Handout`] has nowhere to put. It travels with every turn
+/// rather than with the container: selected again each time the agent is
+/// run, so that the credential handed over is the one held at that moment —
+/// a replaced one reaches a foreman at its next message and a job when it
+/// resumes — and so that a container never holds one. See
+/// `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`.
+///
+/// Built by [`State::charged_purse`] and by nothing else, which selects by
+/// the kit's own name for its purse. The pairing an adapter delivers by —
+/// this credential, under the variable that kit's agent reads that purse
+/// from — is therefore made in one place, and a credential handed under
+/// another purse's variable is not a state to check for but one that cannot
+/// be built. The failure it rules out is the one
+/// `docs/decisions/0008-one-credential-per-agent.md` exists for: no error,
+/// no log line, and somebody else's purse paying.
+///
+/// It carries a credential, so like [`Secret`] it redacts when formatted and
+/// deliberately implements no serialisation.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ChargedPurse {
+    kit: Kit,
+    credential: Secret,
+}
+
+impl ChargedPurse {
+    /// The kit that charges it: which agent, and which of the purses that
+    /// agent can charge, which is what an adapter chooses the variable by.
+    #[must_use]
+    pub const fn kit(&self) -> &Kit {
+        &self.kit
+    }
+
+    /// The credential itself.
+    #[must_use]
+    pub const fn credential(&self) -> &Secret {
+        &self.credential
+    }
+}
+
+impl fmt::Debug for ChargedPurse {
+    /// Names the purse and never its contents.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ChargedPurse({:?}, <redacted>)", self.kit.purse())
+    }
+}
+
+/// A kit charges a purse this instance does not hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("the purse {0:?} is not held")]
+pub struct NotHeld(pub PurseName);
+
+impl State {
+    /// The purse a kit charges, as this instance holds it now.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the purse is not held. [`State::check`] makes that
+    /// unreachable for a foreman's kit and an offered one, and
+    /// [`State::charged_by`] for an unfinished job's while forgetting goes
+    /// through it; a file edited by hand can still say so. The signature
+    /// admits it, and deliberately: the alternative is a total function
+    /// substituting an empty credential for a missing one, which turns a
+    /// state that should not occur into an authentication failure somewhere
+    /// else entirely. `.quality/gate-reference.md` forbids exactly that
+    /// trade, and the turn that finds out fails saying which purse.
+    pub fn charged_purse(&self, kit: &Kit) -> Result<ChargedPurse, NotHeld> {
+        let name = kit.purse();
+        let held = self.purses.get(name).ok_or(NotHeld(name))?;
+        Ok(ChargedPurse {
+            kit: kit.clone(),
+            credential: held.credential().clone(),
+        })
+    }
 }
 
 /// A handout could not be decided.
 #[derive(Debug, thiserror::Error)]
 pub enum HandoutError {
-    /// The purse the kit charges is not held by this instance.
-    #[error("the purse {0:?} is not held by this instance")]
-    NoPurse(PurseName),
     /// The project is not one this instance watches.
     #[error("no project {0} in this instance")]
     UnknownProject(ProjectId),
@@ -4459,11 +4509,12 @@ mod tests {
         Access, Agent, Arriving, Attending, BASE64, Binding, Channel, ChannelApp, ChannelConfig,
         Charge, ClaudeEffort, ClaudeModel, ClaudePurse, Errand, Handout, HandoutError, Inbox,
         Inconsistent, Installation, Job, JobId, Key, Kit, KitConfig, KitName, KitNameError,
-        NONCE_LEN, Nonce, OpenError, Outcome, Place, Platform, PlatformApp, Progress, Project,
-        ProjectId, Provider, Purse, PurseKind, PurseName, Purses, Recipient, RepositoryAddress,
-        RepositoryError, Room, SealedAccess, SealedBinding, SealedChannelApp, SealedJob,
-        SealedPlatformApp, SealedPurse, Secret, Snapshot, State, Taken, Thread, Variable,
-        VariableName, VariableNameError, Waiting, Workspace, WrittenKit, WrittenKitConfig,
+        NONCE_LEN, Nonce, NotHeld, OpenError, Outcome, Place, Platform, PlatformApp, Progress,
+        Project, ProjectId, Provider, Purse, PurseKind, PurseName, Purses, Recipient,
+        RepositoryAddress, RepositoryError, Room, SealedAccess, SealedBinding, SealedChannelApp,
+        SealedJob, SealedPlatformApp, SealedPurse, Secret, Snapshot, State, Taken, Thread,
+        Variable, VariableName, VariableNameError, Waiting, Workspace, WrittenKit,
+        WrittenKitConfig,
     };
     use base64::Engine as _;
     use jiff::Timestamp;
@@ -6626,13 +6677,16 @@ mod tests {
     }
 
     #[test]
-    fn a_foreman_is_handed_its_purse_and_no_platform_at_all() {
+    fn a_foreman_is_handed_no_platform_at_all() {
         let (state, mine, _) = two_projects();
         let handout = Handout::for_foreman(&state, mine).expect("a watched project");
 
         assert_eq!(handout.agent(), Agent::Claude);
-        assert_eq!(handout.kit().purse(), PurseName::AnthropicKey);
-        assert_eq!(handout.purse().expose(), "agent-token");
+        assert_eq!(
+            handout.kit().purse(),
+            PurseName::AnthropicKey,
+            "its kit names the purse, which the handout does not hold"
+        );
         assert_eq!(handout.platforms().count(), 0);
         assert!(!handout.reaches(Platform::GitHub));
         assert!(
@@ -6670,7 +6724,6 @@ mod tests {
         let handout =
             Handout::for_job(&state, a_kit(), mine, warrant()).expect("a watched project");
 
-        assert_eq!(handout.purse().expose(), "agent-token");
         assert!(handout.reaches(Platform::GitHub));
         assert_eq!(handout.platforms().collect::<Vec<_>>(), [Platform::GitHub]);
         assert_eq!(handout.warrant().map(Secret::expose), Some(WARRANT));
@@ -6992,34 +7045,72 @@ mod tests {
         assert!(matches!(refused, Err(HandoutError::UnknownProject(id)) if id == stranger));
     }
 
-    /// A kit charging a purse the instance does not hold is refused, and a
-    /// kit charging the other purse is handed that one: the selection is by
-    /// the kit's purse and not by its agent.
+    /// The purse handed to a turn is the one its kit names, selected by that
+    /// name and by nothing else: with both held, each kit is handed its own
+    /// and never the other's, and a kit charging one that is not held is
+    /// refused rather than handed nothing.
     #[test]
-    fn a_handout_for_a_kit_charging_a_purse_not_held_is_refused() {
-        let (mut state, mine, _) = two_projects();
-        state.purses = Purses::default();
-
-        let refused = Handout::for_job(&state, a_kit(), mine, warrant());
-
-        assert!(matches!(
-            refused,
-            Err(HandoutError::NoPurse(PurseName::AnthropicKey))
-        ));
-        assert!(Handout::for_foreman(&state, mine).is_err());
-
+    fn a_kits_purse_is_selected_by_the_kits_own_name_for_it() {
+        let (mut state, _, _) = two_projects();
         state.purses.hold(Purse::AnthropicSubscription(Secret::new(
             "sk-ant-oat01-the-subscription".to_owned(),
         )));
         let subscribed = Kit::defaults(Agent::Claude, PurseName::AnthropicSubscription)
             .expect("Claude charges a subscription");
-        let handout = Handout::for_job(&state, subscribed, mine, warrant())
-            .expect("the purse it charges is held");
-        assert_eq!(handout.purse().expose(), "sk-ant-oat01-the-subscription");
-        assert!(
-            Handout::for_job(&state, a_kit(), mine, warrant()).is_err(),
-            "and the key is still not held"
+
+        let key = state.charged_purse(&a_kit()).expect("the key is held");
+        assert_eq!(key.credential().expose(), "agent-token");
+        assert_eq!(key.kit(), &a_kit());
+        let subscription = state
+            .charged_purse(&subscribed)
+            .expect("the subscription is held");
+        assert_eq!(
+            subscription.credential().expose(),
+            "sk-ant-oat01-the-subscription"
         );
+        assert_eq!(subscription.kit(), &subscribed);
+
+        state.purses.forget(PurseName::AnthropicKey);
+        assert_eq!(
+            state.charged_purse(&a_kit()),
+            Err(NotHeld(PurseName::AnthropicKey))
+        );
+        assert!(
+            state.charged_purse(&subscribed).is_ok(),
+            "and the other is still held"
+        );
+    }
+
+    /// A handout is decided whatever purses are held, because it has nowhere
+    /// to put one: what a container is made with is its project's, and the
+    /// purse is its turn's.
+    #[test]
+    fn a_handout_is_decided_without_a_purse_and_holds_none() {
+        let (mut state, mine, _) = two_projects();
+        state.purses = Purses::default();
+
+        let job = Handout::for_job(&state, a_kit(), mine, warrant()).expect("a watched project");
+        let foreman = Handout::for_foreman(&state, mine).expect("a watched project");
+
+        assert_eq!(
+            job.kit().purse(),
+            PurseName::AnthropicKey,
+            "named, and not held"
+        );
+        assert_eq!(foreman.kit().purse(), PurseName::AnthropicKey);
+    }
+
+    /// The credential inside a charged purse is never formatted, on the
+    /// terms a secret's is not.
+    #[test]
+    fn a_charged_purse_does_not_leak_when_formatted() {
+        let (state, _, _) = two_projects();
+        let charged = state.charged_purse(&a_kit()).expect("the key is held");
+
+        let shown = format!("{charged:?}");
+
+        assert!(!shown.contains("agent-token"), "{shown}");
+        assert!(shown.contains("AnthropicKey"), "{shown}");
     }
 
     #[test]

@@ -86,6 +86,10 @@ fn a_first_message_opens_a_session_and_is_acknowledged_first() {
 /// the decision about which credential is this instance's, and a turn that
 /// began with an empty environment would run an agent authenticating as
 /// whoever started the daemon — no error, no log line, and a bill.
+///
+/// The purse is handed to the agent's process when it is run, and the
+/// container is made without it — see
+/// `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`.
 #[test]
 fn what_a_containers_agent_may_see_is_decided_here() {
     let mut world = Simulation::new();
@@ -96,16 +100,24 @@ fn what_a_containers_agent_may_see_is_decided_here() {
     world.run_until(&mut instance, 5_000);
 
     let container = stageman_foreman::container(project());
-    assert_eq!(runs(&world).len(), 1);
-    let given = world
+    let runs = runs(&world);
+    assert_eq!(runs.len(), 1);
+    let made_with = world
         .environment_of(&container)
         .expect("the container was made here");
-    assert_eq!(
-        given.get("ANTHROPIC_API_KEY").map(String::as_str),
-        Some("agent-token"),
-        "the agent's own credential, in the variable its adapter reads: {given:?}"
+    assert!(
+        made_with.is_empty(),
+        "a foreman's container is made with nothing, a purse least of all: {made_with:?}"
     );
-    assert_eq!(given.len(), 1, "and nothing else: {given:?}");
+    assert_eq!(
+        runs[0].given,
+        std::collections::BTreeMap::from([(
+            "ANTHROPIC_API_KEY".to_owned(),
+            "agent-token".to_owned()
+        )]),
+        "its agent is run with the purse its kit charges, in the variable its adapter reads, \
+         and nothing else"
+    );
 }
 
 /// A foreman with a container continues its session rather than opening one.

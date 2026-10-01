@@ -26,6 +26,7 @@ mod installations;
 mod listening;
 mod login;
 mod notices;
+mod purses;
 mod replies;
 mod shared_app;
 mod signals;

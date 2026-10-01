@@ -1114,7 +1114,7 @@ pub fn resolved(
                 position,
                 rule: rule.to_string(),
             })?;
-        if stageman_agent::RESERVED.contains(&name.as_str()) {
+        if stageman_agent::reserved().contains(&name.as_str()) {
             return Err(Refusal::VariableReserved {
                 name: name.to_string(),
             });
@@ -1928,11 +1928,16 @@ mod tests {
         ));
         assert!(!format!("{refused}").contains("oops"));
 
-        for claimed in stageman_agent::RESERVED {
+        let reserved = stageman_agent::reserved();
+        assert!(
+            !reserved.is_empty(),
+            "a list that refused nothing would pass below"
+        );
+        for claimed in reserved {
             assert_eq!(
                 resolved(&BTreeMap::new(), &[row(claimed, "somebody-elses-account")]),
                 Err(Refusal::VariableReserved {
-                    name: (*claimed).to_owned()
+                    name: claimed.to_owned()
                 })
             );
         }

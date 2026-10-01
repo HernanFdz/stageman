@@ -7,8 +7,8 @@ letter — one credential per configured *agent* — becomes one purse per kind
 per *provider*, and every line of its reasoning stands: what a process is
 handed is constructed, never inherited, and exactly one credential is ever
 present. Extends `docs/decisions/0048-a-job-runs-on-a-kit.md`, which left the
-room this fills: a kit's variant now carries the purse it charges, and the
-handout selects one credential by it. Answers two questions from
+room this fills: a kit's variant now carries the purse it charges, and one
+credential is selected by it. Answers two questions from
 `docs/open-questions.md`: when credentials move from agents to providers,
 and, for a key, whether an agent's credential is checked before it is kept.
 Narrows `docs/decisions/0046-a-projects-variables-are-carried-never-read.md`
@@ -57,13 +57,18 @@ key pasted where a subscription token was meant is not refused, it is
 delivered under the wrong name and hangs, which is the least visible
 failure there is.
 
-Two measurements decide the delivery. On Docker 29.4.1, a bare `--env NAME`
-on `exec` forwards the variable from the client's environment exactly as it
-does on `create`, and `inspect` shows only what the container was created
-with. So a credential can be given to the agent's process on every turn
-rather than to the container once, and never appear in the container's
-configuration. Podman documents the same semantics for both verbs and was
-not measured, which the container test that pins this must do on both.
+Five measurements decide the delivery. Four were made on Docker 29.4.1 and
+are pinned by a container test that passes on Podman 6.1.0 as well. A bare
+`--env NAME` on `exec` forwards the variable from the client's environment
+exactly as it does on `create`, and `inspect` shows only what the container
+was created with: so a credential can be given to the agent's process on
+every turn rather than to the container once, and never appear in the
+container's configuration. A name forwarded on `exec` takes the place of
+one the container was created with. And `env` in front of the program,
+inside the container, keeps a name the container was created with from
+the program it runs, which a runtime has no flag for. The fifth was made
+on Docker alone: without that clearing, a process forwarded one purse in a
+container made with the other sees both.
 
 One measurement decides the check. Anthropic's models listing answers a
 bogus key with `401` and *API key is invalid.*, and no key with `401` and
@@ -83,8 +88,8 @@ the shape that provider hands out, of one kind: a key, metered per token
 and honoured by every agent that speaks the provider, or a subscription,
 flat per month and honoured by the vendor's own agent alone. The instance
 holds at most one purse per kind per provider. A kit names the purse its
-work is charged to, from the subset its agent can charge, and the handout
-selects the credential by it.**
+work is charged to, from the subset its agent can charge, and the
+credential handed to its agent is selected by it.**
 
 Nine things follow, and each is the decision rather than a detail of it.
 
@@ -123,7 +128,10 @@ Nine things follow, and each is the decision rather than a detail of it.
   The purse's variables are named on the command that runs the agent
   inside the container and carried in the runtime's own environment, on
   the first turn and on every resume, so that the agent's process has them
-  and the container's configuration does not. The project's variables and
+  and the container's configuration does not. The purse is selected when
+  that command is asked, by the kit's own name for it, from what is held
+  at that moment; what a container is made with is decided without it, in
+  a type with nowhere to put one. The project's variables and
   the job's warrant stay where 0046 put them, given at creation and fixed
   for the job's life, because they are part of what the job *is*. A purse
   is not: it is who pays, and a replaced key reaches a foreman at its next
@@ -131,6 +139,18 @@ Nine things follow, and each is the decision rather than a detail of it.
   the answer to a credential that expires while nobody is watching. A
   foreman's container is kept across a change of purse for the same reason
   it is kept across a change of model.
+
+  The same command clears every other variable that agent could read a
+  purse from, so that its process sees one purse whatever its container
+  was made with. A container made before this record holds the credential
+  it was created with, for its life, and an agent that finds a key beside
+  a subscription's token charges the key: without the clearing, a foreman
+  moved from one purse to the other would go on charging the first, which
+  is 0008's failure arriving from the past rather than from a shell.
+
+  A kit whose purse is not held ends its turn failed, saying which, where
+  the agent would have been run: after its container exists, so that
+  holding the purse and saying something to the job is the whole repair.
 
 - **The kind is declared, the shape is refused before anything is asked,
   and both kinds are checked before they are kept.** The Agents page takes
@@ -211,6 +231,24 @@ costs a container, and a foreman's container is its session; and every
 credential sits in the container's inspectable configuration for the
 container's life.
 
+Rejected: **selecting the purse when a turn is decided, and carrying it to
+where the agent is run.** A turn that resumes is decided in several places
+and run in one, and a place that found the purse missing would have to
+fail a job before its turn existed, settling its inbox by hand; where the
+agent is run, a missing purse is one more step that could not be taken,
+and ends the turn as every such step does. The later moment also hands
+over a credential replaced while an image was building, which the earlier
+one would not.
+
+Rejected: **making again the containers that were made with a purse.** It
+would cost a foreman its session for a change this record says keeps it,
+and the clearing leaves what such a container holds unread.
+
+Rejected: **emptying the other purse's variable rather than clearing it.**
+A runtime can set a variable to nothing on the command it runs, and
+whether an agent reads an empty key as no key was not measured; `env`
+removing it needs no measurement.
+
 Rejected: **delivering the purse through the protocol's own providers
 extension**, which the pinned adapter implements and which would carry a
 credential per session in a header. It is a draft the specification may
@@ -238,9 +276,23 @@ rather than replaced.
 
 **The adapter's one environment function becomes two**, one for what a
 container is created with and one for what a turn is run with, and the
-command that runs the agent names the purse's variables. The replays
-re-record, because an effect's argument list changed, and the diff is
-reviewed as behaviour.
+command that runs the agent names the purse's variables and the ones it
+clears. No recorded flow runs a turn, so the replays stand as they are:
+the scenarios pin what a container is made with and what its agent's
+process is given, and a container test pins what a runtime does with the
+command, on each runtime the machine it runs on has.
+
+**A handout has nowhere to put a purse.** What a container is made with
+and what a turn is run with are decided by two functions and carried in
+two types, so that a container holding the purse is not a state to check
+for; and the names an operator may not claim are derived from the table
+both deliveries read.
+
+**A container made before this record keeps the credential it was made
+with**, in its own configuration, for as long as it lives. Nothing run in
+it reads that any more, and nothing here removes it: a job's container
+goes when the job is retired, and a foreman's when its project is
+forgotten or its agent changes.
 
 **One more crate**, **provider**, with the read that checks a key and the
 rule that refuses a shape, a line in the browser pass's exclusion list, a
@@ -276,8 +328,10 @@ provider's shape has several fields, as a cloud backend's does, which is
 the same trigger from the other side; if an operator wants two keys at one
 provider, which is the attribution question arriving as a credential
 question; if spend ever becomes a decision the instance makes, which is
-when a purse needs a budget beside its secret; if Podman's exec is measured
-to differ, which is when the per-turn delivery needs a second path; or if
+when a purse needs a budget beside its secret; if a runtime's exec stops
+forwarding a bare name, or an image comes without an `env` that clears
+one, which the container test says and which is when the per-turn
+delivery needs a second path; or if
 the protocol's providers extension stabilises and a second adapter
 implements it, which is when delivering a purse per session in a header
 becomes the smaller thing.
