@@ -19,7 +19,8 @@ use super::agents_view::Agent;
 use super::error::DashboardResult;
 use super::live::{Live, Reading, use_reading};
 use crate::ui::{
-    Badge, BadgeTone, ButtonVariant, Card, EmptyState, Icon, KitChip, Reference, Skeleton, Tooltip,
+    Badge, BadgeTone, ButtonVariant, Card, EmptyState, Icon, KitChip, Reference, Row, Rows,
+    Skeleton, Tooltip,
 };
 
 pub use stageman_wire::{
@@ -202,9 +203,12 @@ pub fn ProjectsView() -> Element {
                                     },
                                 }
                             } else {
-                                ul { class: "divide-y divide-border",
+                                Rows {
                                     for project in watching.projects.iter().cloned() {
-                                        li { key: "{project.id}",
+                                        // Roomier than most rows, and deliberately: a
+                                        // project is three lines, and the usual padding
+                                        // reads as cramped around them.
+                                        Row { key: "{project.id}", class: "py-4",
                                             WatchedProject {
                                                 project,
                                                 available: watching.available.clone(),
@@ -243,6 +247,16 @@ fn shown_as(available: &[Agent], identifier: &str) -> String {
         .iter()
         .find(|agent| agent.id == identifier)
         .map_or_else(|| identifier.to_owned(), |agent| agent.name.clone())
+}
+
+/// What a fitted agent's purse reads as: its name from the shape the server
+/// sent, or the identifier as it stands where it sent none.
+pub(super) fn purse_as(shapes: &[Shape], fitted: &Fitted) -> String {
+    shapes
+        .iter()
+        .find(|shape| shape.agent == fitted.agent)
+        .and_then(|shape| shape.purses.iter().find(|purse| purse.id == fitted.purse))
+        .map_or_else(|| fitted.purse.clone(), |purse| purse.name.clone())
 }
 
 /// What a fitted agent reads as: the model's name, and the effort's
@@ -303,15 +317,7 @@ fn WatchedProject(project: Project, available: Vec<Agent>, shapes: Vec<Shape>) -
     let counted = format!("{} variable(s)", project.variables.len());
 
     rsx! {
-        // Roomier than the rows on the agents screen, and deliberately: an
-        // agent is one line and a project is three, so the same padding reads
-        // as cramped here.
-        //
-        // The first and last shed their outer padding entirely, so the space
-        // above the first row and below the last are both the card's own and
-        // therefore equal. Anything else makes the top gap the sum of two
-        // paddings and the eye reads it as a mistake.
-        div { class: "flex flex-col gap-2 py-4 first:pt-0 last:pb-0",
+        div { class: "flex flex-col gap-2",
             div { class: "flex items-center gap-3",
                 Link {
                     to: super::Route::ProjectJobsView {
@@ -386,6 +392,7 @@ fn WatchedProject(project: Project, available: Vec<Agent>, shapes: Vec<Shape>) -
                 KitChip {
                     agent: project.foreman.agent.clone(),
                     agent_name: shown_as(&available, &project.foreman.agent),
+                    purse: purse_as(&shapes, &project.foreman),
                     model: foreman_model,
                     effort: foreman_effort,
                 }
@@ -402,6 +409,7 @@ fn WatchedProject(project: Project, available: Vec<Agent>, shapes: Vec<Shape>) -
                                 name: kit.name.clone(),
                                 agent: kit.fitted.agent.clone(),
                                 agent_name: shown_as(&available, &kit.fitted.agent),
+                                purse: purse_as(&shapes, &kit.fitted),
                                 model,
                                 effort,
                             }
@@ -465,7 +473,7 @@ mod tests {
         assert_eq!(super::noted(&watching), "watching C1");
     }
     use super::super::agents_view::Agent;
-    use super::{Choice, Fitted, ModelChoice, Shape, read_as, shown_as};
+    use super::{Choice, Fitted, ModelChoice, Shape, purse_as, read_as, shown_as};
 
     /// A project carries identifiers and a row shows names, so something has
     /// to map one to the other — and nothing else would notice if it stopped.
@@ -479,8 +487,8 @@ mod tests {
             id: "claude".to_owned(),
             name: "Claude".to_owned(),
             description: "does the work".to_owned(),
-            configured: true,
-            used_by: Vec::new(),
+            ready: true,
+            purses: vec!["anthropic-key".to_owned()],
         }];
 
         assert_eq!(shown_as(&available, "claude"), "Claude");
@@ -502,6 +510,10 @@ mod tests {
     fn a_fitted_agent_reads_as_names_where_the_shape_has_them() {
         let shape = Shape {
             agent: "claude".to_owned(),
+            purses: vec![Choice {
+                id: "anthropic-key".to_owned(),
+                name: "Anthropic key".to_owned(),
+            }],
             models: vec![ModelChoice {
                 id: "opus".to_owned(),
                 name: "Opus".to_owned(),
@@ -514,9 +526,15 @@ mod tests {
         };
         let fitted = Fitted {
             agent: "claude".to_owned(),
+            purse: "anthropic-key".to_owned(),
             model: "opus".to_owned(),
             effort: "xhigh".to_owned(),
         };
+        assert_eq!(
+            purse_as(std::slice::from_ref(&shape), &fitted),
+            "Anthropic key"
+        );
+        assert_eq!(purse_as(&[], &fitted), "anthropic-key");
         assert_eq!(
             read_as(std::slice::from_ref(&shape), &fitted),
             (

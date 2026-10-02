@@ -36,7 +36,7 @@ use super::error::{DashboardError, DashboardResult};
 use super::live::{Live, Reading, use_reading};
 use crate::ui::{
     BESIDE, Button, ButtonVariant, Card, EmptyState, FIELD, Field, Guide, Icon, Mark, Modal,
-    Reference, Segmented, Skeleton, Tooltip,
+    Reference, Row, Rows, SecretBox, Segmented, Skeleton, Tooltip,
 };
 
 pub use stageman_wire::{
@@ -379,6 +379,9 @@ fn GitHubApp(
 
     rsx! {
         Card {
+            // Whose card it is, once, on its title: the rows under it are
+            // accounts, and say so by their names.
+            mark: rsx! { Mark { agent: "github".to_owned(), size: 16 } },
             title: "GitHub App",
             note: "One App this instance owns, which a project installs on its repository \
                    instead of pasting a token.",
@@ -472,9 +475,10 @@ fn GitHubApp(
                                     "Nowhere yet."
                                 }
                             } else {
-                                ul { class: "divide-y divide-border",
+                                Rows {
                                     for installation in app.installations.iter().cloned() {
-                                        li { key: "{installation.id}",
+                                        // Tighter than most rows: each is one line.
+                                        Row { key: "{installation.id}", class: "py-2",
                                             Installed { installation, onchanged }
                                         }
                                     }
@@ -536,8 +540,7 @@ fn Installed(
     };
 
     rsx! {
-        div { class: "flex items-center gap-3 py-2 first:pt-0 last:pb-0",
-            Mark { agent: "github".to_owned(), size: 16 }
+        div { class: "flex items-center gap-3",
             span { class: "text-sm font-medium", "{installation.account}" }
             span { class: "text-xs text-muted-foreground", "{covers}" }
             if in_use {
@@ -632,6 +635,9 @@ fn SlackApp(
 
     rsx! {
         Card {
+            // Whose card it is, once, on its title: the rows under it are
+            // workspaces, and say so by their names.
+            mark: rsx! { Mark { agent: "slack".to_owned(), size: 16 } },
             title: "Slack app",
             note: "One app this instance owns, which a workspace installs so that a project can \
                    talk there without an app of its own.",
@@ -645,7 +651,6 @@ fn SlackApp(
                 Some(app) => rsx! {
                     div { class: "flex flex-col gap-4",
                         div { class: "flex items-center gap-3",
-                            Mark { agent: "slack".to_owned(), size: 16 }
                             span { class: "text-sm text-muted-foreground", "Client ID" }
                             span { class: "font-mono text-sm", "{app.client_id}" }
                             span { class: "ml-auto flex items-center gap-2",
@@ -715,9 +720,10 @@ fn SlackApp(
                                     "Nowhere yet."
                                 }
                             } else {
-                                ul { class: "divide-y divide-border",
+                                Rows {
                                     for workspace in app.workspaces.iter().cloned() {
-                                        li { key: "{workspace.id}",
+                                        // Tighter than most rows: each is one line.
+                                        Row { key: "{workspace.id}", class: "py-2",
                                             InstalledOn { workspace, onchanged }
                                         }
                                     }
@@ -773,8 +779,7 @@ fn InstalledOn(
     };
 
     rsx! {
-        div { class: "flex items-center gap-3 py-2 first:pt-0 last:pb-0",
-            Mark { agent: "slack".to_owned(), size: 16 }
+        div { class: "flex items-center gap-3",
             span { class: "text-sm font-medium", "{workspace.name}" }
             span { class: "font-mono text-xs text-muted-foreground", "{workspace.id}" }
             if in_use {
@@ -842,12 +847,10 @@ fn RegisteringSlack(form: String, onchanged: EventHandler<DashboardResult<Apps>>
             Field {
                 label: "Client secret",
                 note: "Beside the client ID. Kept sealed, and checked by the first install.",
-                input {
-                    r#type: "password",
-                    class: "{FIELD} font-mono",
+                SecretBox {
                     placeholder: "…",
-                    value: "{client_secret}",
-                    oninput: move |event| client_secret.set(event.value()),
+                    value: client_secret(),
+                    oninput: move |event: FormEvent| client_secret.set(event.value()),
                 }
             }
             Field {
@@ -855,12 +858,10 @@ fn RegisteringSlack(form: String, onchanged: EventHandler<DashboardResult<Apps>>
                 note: "What listens. Starts with xapp, with the connections:write scope; checked \
                        against Slack before it is kept.",
                 problem: beside_token,
-                input {
-                    r#type: "password",
-                    class: "{FIELD} font-mono",
+                SecretBox {
                     placeholder: "xapp-…",
-                    value: "{app_token}",
-                    oninput: move |event| app_token.set(event.value()),
+                    value: app_token(),
+                    oninput: move |event: FormEvent| app_token.set(event.value()),
                 }
             }
             div {

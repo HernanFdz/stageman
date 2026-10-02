@@ -3,7 +3,7 @@
 
 use stageman_agent::Command;
 use stageman_channel::Call;
-use stageman_core::{Agent, JobId, Outcome, Progress, ProjectId, Timestamp, Uuid, Waiting};
+use stageman_core::{JobId, Outcome, Progress, ProjectId, PurseName, Timestamp, Uuid, Waiting};
 use stageman_instance::{Instance, Request, Response};
 use stageman_platform::Call as PlatformCall;
 use stageman_wire::{
@@ -38,6 +38,7 @@ pub fn ask(sim: &mut Simulation, instance: &mut Instance, id: u64, asked: Reques
 fn as_it_comes() -> Fitted {
     Fitted {
         agent: "claude".to_owned(),
+        purse: "anthropic-key".to_owned(),
         model: "default".to_owned(),
         effort: "default".to_owned(),
     }
@@ -168,9 +169,10 @@ fn the_instance_screen_counts_what_it_may_and_never_a_credential() {
     assert_eq!(count(&sim, "-> Write"), written, "a read writes nothing");
 }
 
-/// The answer follows the write, and a refusal changes nothing.
+/// The answer follows the write: holding a purse is answered once the
+/// credential has landed, and forgetting it once it has gone.
 #[test]
-fn configuring_an_agent_is_answered_once_the_credential_has_landed() {
+fn holding_a_purse_is_answered_once_the_credential_has_landed() {
     let mut sim = Simulation::new();
     let mut instance = sim.wake(seed(1));
     assert!(sim.disk().is_none(), "an instance starts empty");
@@ -179,72 +181,161 @@ fn configuring_an_agent_is_answered_once_the_credential_has_landed() {
         &mut sim,
         &mut instance,
         1,
-        Request::Configure {
-            agent: "claude".to_owned(),
-            credential: " a-new-token ".to_owned(),
+        Request::HoldPurse {
+            purse: "anthropic-key".to_owned(),
+            credential: " sk-ant-api03-a-new-key ".to_owned(),
         },
     ) else {
         panic!("the agents screen");
     };
     assert!(
         agents
+            .providers
             .iter()
-            .any(|agent| agent.id == "claude" && agent.configured)
+            .flat_map(|provider| provider.purses.iter())
+            .any(|purse| purse.id == "anthropic-key" && purse.held)
+    );
+    assert!(
+        agents
+            .agents
+            .iter()
+            .any(|agent| agent.id == "claude" && agent.ready),
+        "an agent is ready once a purse it can charge is held"
     );
     assert!(first(&sim, "-> Write") < first(&sim, "-> Respond"));
     let landed = sim.disk().expect("the write landed");
     assert_eq!(
         landed
-            .agents
-            .get(&Agent::Claude)
-            .map(|config| config.auth_token.expose()),
-        Some("a-new-token")
+            .purses
+            .get(PurseName::AnthropicKey)
+            .map(|purse| purse.credential().expose()),
+        Some("sk-ant-api03-a-new-key")
     );
 
+    let Response::Agents(agents) = ask(
+        &mut sim,
+        &mut instance,
+        2,
+        Request::ForgetPurse {
+            purse: "anthropic-key".to_owned(),
+        },
+    ) else {
+        panic!("the agents screen");
+    };
+    assert!(
+        agents
+            .providers
+            .iter()
+            .flat_map(|provider| provider.purses.iter())
+            .all(|purse| !purse.held)
+    );
+    assert!(agents.agents.iter().all(|agent| !agent.ready));
+    assert!(sim.disk().expect("landed").purses.is_empty());
+}
+
+/// A paste that cannot be kept is refused and changes nothing: nothing
+/// empty, nothing of the other box's shape, and no purse nothing is called.
+/// Each is refused on its own, before its provider is asked anything.
+#[test]
+fn a_paste_that_cannot_be_kept_is_refused_and_writes_nothing() {
+    let mut sim = Simulation::new();
+    let mut instance = sim.wake(seed(1));
+    let Response::Agents(_) = ask(
+        &mut sim,
+        &mut instance,
+        1,
+        Request::HoldPurse {
+            purse: "anthropic-key".to_owned(),
+            credential: "sk-ant-api03-a-key".to_owned(),
+        },
+    ) else {
+        panic!("the agents screen");
+    };
     let written = count(&sim, "-> Write");
+    assert_eq!(
+        sim.provider_calls().len(),
+        1,
+        "the one kept was asked about"
+    );
+
     assert_eq!(
         ask(
             &mut sim,
             &mut instance,
             2,
-            Request::Configure {
-                agent: "claude".to_owned(),
+            Request::HoldPurse {
+                purse: "anthropic-key".to_owned(),
                 credential: "   ".to_owned(),
             },
         ),
         Response::Refused(Refusal::CredentialMissing)
     );
+    // A subscription's token in the key's box is refused by its shape,
+    // said with where the paste belongs, without being echoed, and before
+    // anything is kept.
     assert_eq!(
         ask(
             &mut sim,
             &mut instance,
             3,
-            Request::ForgetAgent {
-                agent: "gpt".to_owned(),
+            Request::HoldPurse {
+                purse: "anthropic-key".to_owned(),
+                credential: "sk-ant-oat01-a-subscription".to_owned(),
             },
         ),
-        Response::Refused(Refusal::UnknownAgent {
-            name: "gpt".to_owned()
+        Response::Refused(Refusal::PurseMisshapen {
+            purse: "Anthropic key".to_owned(),
+            rule: "an Anthropic API key begins with sk-ant-api; a subscription's token goes in \
+                   the other box"
+                .to_owned(),
         })
     );
+    assert_eq!(
+        ask(
+            &mut sim,
+            &mut instance,
+            4,
+            Request::ForgetPurse {
+                purse: "wallet".to_owned(),
+            },
+        ),
+        Response::Refused(Refusal::UnknownPurse {
+            name: "wallet".to_owned()
+        })
+    );
+    assert_eq!(
+        ask(
+            &mut sim,
+            &mut instance,
+            5,
+            Request::HoldPurse {
+                purse: "wallet".to_owned(),
+                credential: "sk-ant-api03-a-key".to_owned(),
+            },
+        ),
+        Response::Refused(Refusal::UnknownPurse {
+            name: "wallet".to_owned()
+        })
+    );
+    assert_eq!(
+        sim.provider_calls().len(),
+        1,
+        "no provider was asked about a paste refused on its own"
+    );
     assert_eq!(count(&sim, "-> Write"), written, "refusals write nothing");
-
-    let Response::Agents(agents) = ask(
-        &mut sim,
-        &mut instance,
-        4,
-        Request::ForgetAgent {
-            agent: "claude".to_owned(),
-        },
-    ) else {
-        panic!("the agents screen");
-    };
-    assert!(agents.iter().all(|agent| !agent.configured));
-    assert!(sim.disk().expect("landed").agents.is_empty());
+    assert_eq!(
+        sim.disk()
+            .expect("the first hold landed")
+            .purses
+            .get(PurseName::AnthropicKey)
+            .map(|purse| purse.credential().expose()),
+        Some("sk-ant-api03-a-key"),
+        "and what was held stays held, unchanged"
+    );
 }
 
 #[test]
-fn an_agent_a_project_names_cannot_be_forgotten() {
+fn a_purse_a_project_charges_cannot_be_forgotten() {
     let mut sim = Simulation::new();
     sim.holding(&watching(&[]));
     let mut instance = sim.wake(seed(1));
@@ -254,16 +345,19 @@ fn an_agent_a_project_names_cannot_be_forgotten() {
             &mut sim,
             &mut instance,
             1,
-            Request::ForgetAgent {
-                agent: "claude".to_owned(),
+            Request::ForgetPurse {
+                purse: "anthropic-key".to_owned(),
             },
         ),
-        Response::Refused(Refusal::AgentInUse {
-            agent: "claude".to_owned(),
-            projects: vec!["example".to_owned()],
+        Response::Refused(Refusal::PurseInUse {
+            purse: "Anthropic key".to_owned(),
+            by: vec![
+                "the foreman of example".to_owned(),
+                "the kit Claude of example".to_owned(),
+            ],
         })
     );
-    assert!(instance.state().agents.contains_key(&Agent::Claude));
+    assert!(instance.state().purses.holds(PurseName::AnthropicKey));
 }
 
 /// A project bound to a channel is listened on from the moment its record

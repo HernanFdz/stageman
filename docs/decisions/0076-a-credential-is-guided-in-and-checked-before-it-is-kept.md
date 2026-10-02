@@ -18,7 +18,12 @@ decided below, against a repository chosen from that listing rather than
 typed. Extended by
 `docs/decisions/0080-a-tokens-owner-and-expiry-are-kept-beside-it.md`: the
 check reads whose the token is as well, and keeps that and the token's
-expiry beside it.
+expiry beside it. Extended by
+`docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`, which takes
+up the last of the triggers this record ends on: the agent's credential
+became a purse, a read that costs nothing was measured to answer for both
+kinds of one, and the Agents page joined the rule, with the provider's
+shape in a crate of its own beside this record's.
 
 The Slack app the context looks ahead to is `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`, which found the redirect
 half of the flow reaching a laptop and the two pastes the context names

@@ -1,0 +1,35 @@
+# The contract every provider is asked on by this daemon, and the adapters
+# that implement it: what a purse is checked with, what the answer means,
+# the shape a credential of each kind has, and where each is minted, as pure
+# functions the instance renders and reads. Beside `stageman-platform` for
+# the reason that crate is beside `stageman-channel` — reaching a provider
+# needs code, and code that knows one provider's shape belongs in one place,
+# on that provider's release cadence rather than this project's. See
+# `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`.
+#
+# What an agent reads a purse *from* is not here: the variable is the
+# agent's, and stays in `stageman-agent`.
+#
+# May name the domain and nothing that performs an effect: no async runtime,
+# nothing that opens a socket. What it renders is carried by the world, and
+# what it reads was carried back.
+
+[package]
+name = "stageman-provider"
+description = "What stageman asks a provider about a purse and what the provider says back, as pure functions. Internal to the workspace."
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# A provider's refusal is a JSON object and its own sentence is one field of
+# it: read here, and never rendered.
+serde_json = "1.0.151"
+stageman-core.workspace = true
+thiserror = "2.0.20"
+
+[lints]
+workspace = true

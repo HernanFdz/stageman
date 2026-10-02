@@ -3964,6 +3964,7 @@ dependencies = [
  "stageman-foreman",
  "stageman-job",
  "stageman-platform",
+ "stageman-provider",
  "stageman-vocabulary",
  "stageman-wire",
  "thiserror 2.0.20",
@@ -3989,6 +3990,15 @@ dependencies = [
  "percent-encoding",
  "ring",
  "serde",
+ "serde_json",
+ "stageman-core",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "stageman-provider"
+version = "0.0.0"
+dependencies = [
  "serde_json",
  "stageman-core",
  "thiserror 2.0.20",

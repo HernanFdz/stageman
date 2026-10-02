@@ -462,10 +462,27 @@ impl Running {
 mod tests {
     use super::{Accepted, accepting};
     use stageman_core::{
-        Agent, AgentConfig, Channel, Errand, Job, JobId, Kit, KitConfig, KitName, Outcome,
-        Progress, Project, ProjectId, Secret, State, Thread, Timestamp, Uuid, Waiting,
+        Agent, Channel, Errand, Job, JobId, Kit, KitConfig, KitName, Outcome, Progress, Project,
+        ProjectId, Purse, PurseName, Purses, Secret, State, Thread, Timestamp, Uuid, Waiting,
     };
     use std::collections::BTreeMap;
+
+    /// An instance's purses: the Anthropic key, holding this credential.
+    fn purses_with(credential: Secret) -> Purses {
+        let mut purses = Purses::default();
+        purses.hold(Purse::AnthropicKey(credential));
+        purses
+    }
+
+    /// Claude as it comes, charging the key.
+    fn a_kit() -> Kit {
+        Kit::defaults(Agent::Claude, PurseName::AnthropicKey).expect("Claude charges a key")
+    }
+
+    /// The kit above, described as Claude describes itself.
+    fn a_kit_config() -> KitConfig {
+        KitConfig::defaults(Agent::Claude, PurseName::AnthropicKey).expect("Claude charges a key")
+    }
 
     /// A message for a job, at the root of its room.
     fn said(text: &str) -> Errand {
@@ -488,12 +505,7 @@ mod tests {
             apps: std::collections::BTreeMap::new(),
             channel_apps: std::collections::BTreeMap::new(),
             password: None,
-            agents: BTreeMap::from([(
-                Agent::Claude,
-                AgentConfig {
-                    auth_token: Secret::new("agent-token".to_owned()),
-                },
-            )]),
+            purses: purses_with(Secret::new("agent-token".to_owned())),
             ..State::default()
         };
         state.projects.insert(
@@ -502,17 +514,14 @@ mod tests {
                 name: "example".to_owned(),
                 repository: stageman_core::RepositoryAddress::new("example", "repo")
                     .expect("an address"),
-                foreman_kit: Kit::defaults(Agent::Claude),
-                kits: BTreeMap::from([(
-                    KitName::new("Claude").expect("a name"),
-                    KitConfig::defaults(Agent::Claude),
-                )]),
+                foreman_kit: a_kit(),
+                kits: BTreeMap::from([(KitName::new("Claude").expect("a name"), a_kit_config())]),
                 access: BTreeMap::new(),
                 channels: BTreeMap::new(),
                 jobs: BTreeMap::from([(
                     job.clone(),
                     Job::new(
-                        Kit::defaults(Agent::Claude),
+                        a_kit(),
                         "started by hand".to_owned(),
                         "do the thing".to_owned(),
                         Timestamp::UNIX_EPOCH,

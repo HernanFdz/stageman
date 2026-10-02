@@ -113,16 +113,19 @@ mod tests {
     /// keeps the status the instance gave it.
     #[test]
     fn a_refusal_keeps_its_own_status_and_its_own_words() {
-        let refused = DashboardError::from(Refusal::AgentInUse {
-            agent: "claude".to_owned(),
-            projects: vec!["aviary".to_owned(), "burrow".to_owned()],
+        let refused = DashboardError::from(Refusal::PurseInUse {
+            purse: "Anthropic key".to_owned(),
+            by: vec![
+                "the foreman of aviary".to_owned(),
+                "the kit deep of burrow".to_owned(),
+            ],
         });
 
         assert_eq!(refused.status(), StatusCode::CONFLICT);
         assert!(!refused.status().is_server_error());
         assert_eq!(
             refused.to_string(),
-            "claude is still used by aviary, burrow"
+            "Anthropic key is still charged by the foreman of aviary, the kit deep of burrow"
         );
 
         assert_eq!(

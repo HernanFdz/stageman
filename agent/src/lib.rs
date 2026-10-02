@@ -35,6 +35,7 @@
 mod conversation;
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -48,7 +49,8 @@ use sha2::{Digest as _, Sha256};
 #[cfg(test)]
 use stageman_core::Channel;
 use stageman_core::{
-    Agent, ClaudeEffort, ClaudeModel, Handout, InstanceId, Kit, Platform, Role, Secret, Uuid,
+    Agent, ChargedPurse, ClaudeEffort, ClaudeModel, ClaudePurse, Handout, InstanceId, Kit,
+    Platform, Role, Secret, Uuid,
 };
 use tokio::io::AsyncWriteExt as _;
 
@@ -742,20 +744,24 @@ pub enum AgentError {
 /// makes this its working directory.
 pub(crate) const WORKSPACE: &str = "/workspace";
 
-/// The variables one agent's container is started with, and their values.
+/// The variables one agent's container is made with, and their values.
 ///
 /// This is *delivery*, and the counterpart to the deciding that
 /// [`stageman_core::Handout`] does. Which credentials a process may see is a
 /// pure question about configuration and lives in the domain crate; what they
 /// are called here is knowledge about one agent and lives in its adapter. See
 /// `docs/conventions.md` §3.
-/// Exactly the environment a container running this handout is given, in the
-/// order it is set: the agent's own credential under the variable its
-/// adapter reads, a job's warrant under the variable its wrapper reads, and
-/// the project's variables last, refused on collision. No platform
+///
+/// Exactly the environment a container made from this handout is given, in
+/// the order it is set: a job's warrant under the variable its wrapper reads,
+/// and the project's variables after it, refused on collision. No platform
 /// credential, since
 /// `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`:
-/// the wrapper fetches one with the warrant when a command needs it.
+/// the wrapper fetches one with the warrant when a command needs it. And no
+/// purse, since
+/// `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`: a handout
+/// has nowhere to put one, and what an agent's process is run with is
+/// [`agent_run`]. A foreman's container is therefore made with nothing at all.
 ///
 /// Pure, so that whoever decides what a process is handed can decide this
 /// too, and the world only sets it.
@@ -765,12 +771,7 @@ pub(crate) const WORKSPACE: &str = "/workspace";
 /// Fails if a project's variable claims a name this project delivers itself,
 /// which would change who pays — `docs/decisions/0008-one-credential-per-agent.md`.
 pub fn environment(handout: &Handout) -> Result<Vec<(String, Secret)>, AgentError> {
-    let mut set: Vec<(String, Secret)> = vec![match handout.agent() {
-        Agent::Claude => (
-            claude_credential_variable(handout.agent_credential()).to_owned(),
-            handout.agent_credential().clone(),
-        ),
-    }];
+    let mut set: Vec<(String, Secret)> = Vec::new();
 
     // What the wrapper written into a job's container presents to fetch its
     // project's platform credential with. The credential itself used to
@@ -792,8 +793,9 @@ pub fn environment(handout: &Handout) -> Result<Vec<(String, Secret)>, AgentErro
     // a snapshot that was hand-edited. Failing the job loudly is what
     // `docs/conventions.md` §3 asks for in that case: an operator can act on
     // it, and nothing else about the instance is broken.
+    let reserved = reserved();
     for (name, value) in handout.variables() {
-        if RESERVED.contains(&name.as_str()) {
+        if reserved.contains(&name.as_str()) {
             return Err(AgentError::ReservedVariable {
                 name: name.to_string(),
             });
@@ -814,6 +816,101 @@ pub fn environment(handout: &Handout) -> Result<Vec<(String, Secret)>, AgentErro
     Ok(set)
 }
 
+/// What one turn's agent is run with: the command that runs it, and the
+/// purse's variables with their values.
+///
+/// The names are on the command and the values go in the environment the
+/// runtime is given, as a container's are when it is made, so a secret is
+/// never in an argument list. Made together by [`agent_run`], so that what is
+/// named and what is valued cannot disagree.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AgentRun {
+    /// The command: [`Command::Exec`], naming what it forwards and what it
+    /// clears.
+    pub command: Command,
+    /// The purse's variables, valued, for the environment the runtime is
+    /// given.
+    pub environment: Vec<(String, Secret)>,
+}
+
+impl fmt::Debug for AgentRun {
+    /// The command, which holds names only, and the names of what is valued.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AgentRun")
+            .field("command", &self.command)
+            .field(
+                "environment",
+                &self
+                    .environment
+                    .iter()
+                    .map(|(name, _)| name)
+                    .collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
+/// What a turn's agent is run with in a container that is up: the purse its
+/// kit charges, under the variable that agent reads that purse from, and
+/// nothing of any other purse.
+///
+/// On every turn, the first and every resume, rather than when the container
+/// is made — see `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`
+/// and `docs/conventions.md` §3. The credential is therefore the one held when
+/// the agent is run, and a container never holds one.
+///
+/// **Every other variable this agent could read a purse from is cleared for
+/// its process.** A container made before the purse travelled this way holds
+/// the one it was created with, for its life, and everything run in it
+/// inherits that; measured, a process forwarded one purse in such a container
+/// sees both, and the agent prefers a key when it finds one — so a foreman
+/// moved from the key to the subscription would go on charging the key, with
+/// no error and no log line. The runtime can set a variable for what it runs
+/// and cannot unset one, which is why the clearing is done by `env` inside the
+/// container, in front of the program. Clearing a name that was never set
+/// does nothing, so it is done always rather than asked about.
+///
+/// Pure, for the reason [`environment`] is.
+#[must_use]
+pub fn agent_run(container: &str, purse: &ChargedPurse) -> AgentRun {
+    let environment: Vec<(String, Secret)> = match purse.kit() {
+        Kit::Claude { purse: charged, .. } => vec![(
+            claude_purse_variable(*charged).to_owned(),
+            purse.credential().clone(),
+        )],
+    };
+    let forwarded: Vec<String> = environment.iter().map(|(name, _)| name.clone()).collect();
+    let cleared = purse_variables(purse.kit().agent())
+        .filter(|name| !forwarded.iter().any(|kept| kept == name))
+        .map(str::to_owned)
+        .collect();
+    AgentRun {
+        command: Command::Exec {
+            name: container.to_owned(),
+            forwarded,
+            cleared,
+        },
+        environment,
+    }
+}
+
+/// Every variable an agent could read a purse from, whichever purse it is:
+/// the names in its column of the delivery table.
+fn purse_variables(agent: Agent) -> impl Iterator<Item = &'static str> {
+    match agent {
+        Agent::Claude => ClaudePurse::ALL
+            .iter()
+            .map(|purse| claude_purse_variable(*purse)),
+    }
+}
+
+/// The variable the platform's tool reads its credential from.
+///
+/// Nothing delivers it into an environment: the wrapper sets it for the
+/// tool's own process, one command at a time. Named here because it is
+/// reserved all the same — see [`reserved`].
+const PLATFORM_TOOL_VARIABLE: &str = "GH_TOKEN";
+
 /// Every name this project may deliver on its own account.
 ///
 /// A project's variables may not claim one of these — see
@@ -822,28 +919,36 @@ pub fn environment(handout: &Handout) -> Result<Vec<(String, Secret)>, AgentErro
 /// is knowledge about one agent, which is the rule `docs/conventions.md` §3
 /// states; **app** is the crate allowed to see both halves and is what asks.
 ///
-/// It names every variable any compiled-in adapter *could* deliver rather than
-/// the ones a given handout will, and the difference matters: an agent added to
-/// a project later must not turn a name that was accepted into a collision.
-/// Both of Claude's are here for the same reason — which one is used depends on
-/// the shape of the credential, so reserving only the one in force would make
-/// the rule depend on a token an operator has not supplied yet.
+/// Derived from the delivery table rather than listed beside it, per
+/// `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`: every
+/// variable any compiled-in agent could read any purse from, held or not,
+/// rather than the ones a given turn will be run with. The difference
+/// matters: a purse held later, or a kit moved to another, must not turn a
+/// name that was accepted into a collision, so the rule cannot depend on what
+/// an operator has supplied so far. An agent added to the table is reserved
+/// by being added, with nothing to remember.
 ///
-/// The platform's variable stays here although nothing delivers it into an
+/// The platform's variable is here although nothing delivers it into an
 /// environment any more: the wrapper sets it for the tool's own process, so
 /// an operator's variable under that name would be overridden for every
 /// command that reaches the platform and honoured by nothing else, which is
-/// a name better refused than explained.
-///
-/// Adding an agent means adding its names here. Nothing makes that automatic,
-/// and the test below is what notices: it asserts that everything a real
-/// handout delivers is in this list.
-pub const RESERVED: &[&str] = &[
-    "CLAUDE_CODE_OAUTH_TOKEN",
-    "ANTHROPIC_API_KEY",
-    "GH_TOKEN",
-    WARRANT_VARIABLE,
-];
+/// a name better refused than explained. The warrant's is here because a
+/// job's container is made with it.
+#[must_use]
+pub fn reserved() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = Vec::new();
+    let ours = Agent::ALL
+        .iter()
+        .flat_map(|agent| purse_variables(*agent))
+        .chain([PLATFORM_TOOL_VARIABLE, WARRANT_VARIABLE]);
+    for name in ours {
+        // Two agents that speak one provider read its key from one name.
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
 
 /// The variable a job's warrant is delivered in, which the wrapper reads.
 ///
@@ -852,24 +957,23 @@ pub const RESERVED: &[&str] = &[
 /// minted once, with the job, rather than per turn.
 pub const WARRANT_VARIABLE: &str = "STAGEMAN_WARRANT";
 
-/// Which variable this agent's credential belongs in.
+/// Which variable Claude reads each purse from.
 ///
 /// Two exist and they are not interchangeable, which was measured rather than
-/// assumed: an OAuth token placed in the API-key variable does not fail, it
-/// *hangs* — no error, no refusal, just a turn that never ends. A wrong answer
-/// that announces itself is cheap; this one costs however long you wait before
-/// suspecting the variable name.
+/// assumed: a subscription's token placed in the key's variable does not
+/// fail, it *hangs* — no error, no refusal, just a turn that never ends. A
+/// wrong answer that announces itself is cheap; this one costs however long
+/// you wait before suspecting the variable name.
 ///
-/// Sniffing the prefix rather than asking an operator which kind they have:
-/// the prefix is unambiguous, and
-/// `docs/decisions/0013-an-instance-is-configured-before-it-exists.md` already
-/// asks them for a credential on first run, where a second question about its
-/// species is friction with no better answer behind it.
-fn claude_credential_variable(credential: &Secret) -> &'static str {
-    if credential.expose().starts_with("sk-ant-oat") {
-        "CLAUDE_CODE_OAUTH_TOKEN"
-    } else {
-        "ANTHROPIC_API_KEY"
+/// Decided by which purse the kit charges rather than by the credential's
+/// first characters, since
+/// `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`: the kind is
+/// what the operator pasted into, and a credential whose shape belongs in
+/// the other box is refused where it was typed, before anything is kept.
+const fn claude_purse_variable(purse: ClaudePurse) -> &'static str {
+    match purse {
+        ClaudePurse::Key => "ANTHROPIC_API_KEY",
+        ClaudePurse::Subscription => "CLAUDE_CODE_OAUTH_TOKEN",
     }
 }
 
@@ -900,7 +1004,7 @@ const MODE_OPTION: (&str, &str) = ("mode", "default");
 pub(crate) fn wired(kit: &Kit) -> Vec<(&'static str, &'static str)> {
     let mut set = vec![MODE_OPTION];
     match kit {
-        Kit::Claude { model } => {
+        Kit::Claude { model, .. } => {
             set.push(("model", claude_model(*model)));
             if let Some(effort) = model.effort() {
                 set.push(("effort", claude_effort(effort)));
@@ -1289,21 +1393,6 @@ fn holding_arguments(name: &str) -> Vec<String> {
     .arguments()
 }
 
-/// What runs the agent inside a container that is already up.
-///
-/// The pipes belong to this process rather than to the container, which is the
-/// whole change: the end of a turn closes them and ends the agent, and the
-/// container carries on. Nothing is forwarded with `--env`, because the
-/// variables were named when the container was created and everything run
-/// inside it inherits them.
-#[cfg(test)]
-fn agent_arguments(name: &str) -> Vec<String> {
-    Command::Exec {
-        name: name.to_owned(),
-    }
-    .arguments()
-}
-
 /// The variable the checkout step reads the repository from.
 ///
 /// Not a secret, and not forwarded from this process the way credentials are:
@@ -1672,9 +1761,21 @@ pub enum Command {
     /// Run the agent inside a container that is up, with its standard
     /// streams piped to this process: the pipes are what a turn holds, and
     /// closing them ends the agent while the container carries on.
+    ///
+    /// Handed the purse its kit charges, and no other: see [`agent_run`],
+    /// which is what makes one.
     Exec {
         /// The container.
         name: String,
+        /// The purse's variables, forwarded into the agent's process by
+        /// name from the environment the runtime is given. Never valued
+        /// here, for the reason a container's are not.
+        forwarded: Vec<String>,
+        /// The variables cleared for the agent's process, by `env` inside
+        /// the container: every other one this agent could read a purse
+        /// from, which a container made before the purse travelled with
+        /// the turn still holds.
+        cleared: Vec<String>,
     },
 }
 
@@ -1778,6 +1879,30 @@ fn create_arguments(
     arguments
 }
 
+/// The arguments that run the agent inside a container that is up: what is
+/// forwarded into its process by name, the container, what is cleared for
+/// it, and the program.
+fn exec_arguments(name: &str, forwarded: &[String], cleared: &[String]) -> Vec<String> {
+    let mut arguments = vec!["exec".to_owned(), "--interactive".to_owned()];
+    for variable in forwarded {
+        arguments.push("--env".to_owned());
+        arguments.push(variable.clone());
+    }
+    arguments.push(name.to_owned());
+    // Cleared inside the container, in front of the program: the runtime can
+    // set a variable for what it runs and has no way to unset one the
+    // container was made with.
+    if !cleared.is_empty() {
+        arguments.push("env".to_owned());
+        for variable in cleared {
+            arguments.push("-u".to_owned());
+            arguments.push(variable.clone());
+        }
+    }
+    arguments.push(AGENT_PROGRAM.to_owned());
+    arguments
+}
+
 impl Command {
     /// The arguments that ask it, which both runtimes take.
     #[must_use]
@@ -1863,12 +1988,11 @@ impl Command {
                 ]);
                 arguments
             }
-            Self::Exec { name } => vec![
-                "exec".to_owned(),
-                "--interactive".to_owned(),
-                name.clone(),
-                AGENT_PROGRAM.to_owned(),
-            ],
+            Self::Exec {
+                name,
+                forwarded,
+                cleared,
+            } => exec_arguments(name, forwarded, cleared),
         }
     }
 
@@ -2000,14 +2124,46 @@ impl Command {
                     name: (*name).to_owned(),
                 })
             }
-            ["exec", "--interactive", name, program] if *program == AGENT_PROGRAM => {
-                Some(Self::Exec {
-                    name: (*name).to_owned(),
-                })
-            }
+            ["exec", "--interactive", rest @ ..] => exec_parsed(rest),
             _ => None,
         }
     }
+}
+
+/// The agent's run read back from what follows `exec --interactive`: the
+/// variables forwarded, the container, the variables cleared, and the
+/// program, which has to be the agent's.
+fn exec_parsed(words: &[&str]) -> Option<Command> {
+    let mut words = words;
+    let mut forwarded = Vec::new();
+    while let ["--env", variable, rest @ ..] = words {
+        forwarded.push((*variable).to_owned());
+        words = rest;
+    }
+    let [name, rest @ ..] = words else {
+        return None;
+    };
+    let mut words = rest;
+    let mut cleared = Vec::new();
+    if let ["env", rest @ ..] = words {
+        words = rest;
+        while let ["-u", variable, rest @ ..] = words {
+            cleared.push((*variable).to_owned());
+            words = rest;
+        }
+        // `env` with nothing to clear is not something this build renders.
+        if cleared.is_empty() {
+            return None;
+        }
+    }
+    let [program] = words else {
+        return None;
+    };
+    (*program == AGENT_PROGRAM).then(|| Command::Exec {
+        name: (*name).to_owned(),
+        forwarded,
+        cleared,
+    })
 }
 
 /// A checkout read back from its arguments: the repository from its
@@ -2276,6 +2432,7 @@ mod tests {
     fn a_kit_is_spelled_mode_first_and_effort_only_where_there_is_one() {
         assert_eq!(
             wired(&Kit::Claude {
+                purse: ClaudePurse::Key,
                 model: ClaudeModel::Opus {
                     effort: ClaudeEffort::XHigh,
                 },
@@ -2284,12 +2441,13 @@ mod tests {
         );
         assert_eq!(
             wired(&Kit::Claude {
+                purse: ClaudePurse::Key,
                 model: ClaudeModel::Haiku
             }),
             vec![("mode", "default"), ("model", "haiku")],
         );
         assert_eq!(
-            wired(&Kit::defaults(Agent::Claude)),
+            wired(&a_kit()),
             vec![
                 ("mode", "default"),
                 ("model", "default"),
@@ -2413,10 +2571,7 @@ mod tests {
                 image: "stageman:0123".to_owned(),
                 agent: Agent::Claude,
                 instance: an_instance(),
-                variables: vec![
-                    "ANTHROPIC_API_KEY".to_owned(),
-                    "STAGEMAN_WARRANT".to_owned(),
-                ],
+                variables: vec!["STAGEMAN_WARRANT".to_owned(), "STRIPE_API_KEY".to_owned()],
             },
             Command::Wrap {
                 name: "stageman-job-1".to_owned(),
@@ -2449,8 +2604,28 @@ mod tests {
                 platform: None,
                 actor: None,
             },
+            // As the agent is run: one purse forwarded, the other cleared.
             Command::Exec {
                 name: "stageman-job-1".to_owned(),
+                forwarded: vec!["CLAUDE_CODE_OAUTH_TOKEN".to_owned()],
+                cleared: vec!["ANTHROPIC_API_KEY".to_owned()],
+            },
+            // And the shapes an agent with one variable, or with several,
+            // would be run in.
+            Command::Exec {
+                name: "stageman-job-1".to_owned(),
+                forwarded: vec!["ONE".to_owned(), "TWO".to_owned()],
+                cleared: Vec::new(),
+            },
+            Command::Exec {
+                name: "stageman-job-1".to_owned(),
+                forwarded: Vec::new(),
+                cleared: vec!["ONE".to_owned(), "TWO".to_owned()],
+            },
+            Command::Exec {
+                name: "stageman-job-1".to_owned(),
+                forwarded: Vec::new(),
+                cleared: Vec::new(),
             },
         ];
         for command in every {
@@ -2459,6 +2634,35 @@ mod tests {
                 Some(command.clone()),
                 "{command:?}"
             );
+        }
+    }
+
+    /// The agent's run, asked another way, is not this build's question:
+    /// `env` with nothing to clear, a clearing that names nothing, a
+    /// forwarding that names nothing, and no container at all.
+    #[test]
+    fn the_agents_run_asked_another_way_is_not_this_builds_question() {
+        for words in [
+            vec![
+                "exec",
+                "--interactive",
+                "stageman-job-1",
+                "env",
+                AGENT_PROGRAM,
+            ],
+            vec![
+                "exec",
+                "--interactive",
+                "stageman-job-1",
+                "env",
+                "-u",
+                AGENT_PROGRAM,
+            ],
+            vec!["exec", "--interactive", "--env", AGENT_PROGRAM],
+            vec!["exec", "--interactive"],
+        ] {
+            let asked: Vec<String> = words.iter().map(|word| (*word).to_owned()).collect();
+            assert_eq!(Command::parse(&asked), None, "{asked:?}");
         }
     }
 
@@ -2668,6 +2872,7 @@ mod tests {
     /// Every kit the domain can spell for Claude.
     fn every_claude_kit() -> Vec<Kit> {
         let mut kits = vec![Kit::Claude {
+            purse: ClaudePurse::Key,
             model: ClaudeModel::Haiku,
         }];
         for effort in ClaudeEffort::ALL.iter().copied() {
@@ -2676,7 +2881,10 @@ mod tests {
                 ClaudeModel::Sonnet { effort },
                 ClaudeModel::Opus { effort },
             ] {
-                kits.push(Kit::Claude { model });
+                kits.push(Kit::Claude {
+                    purse: ClaudePurse::Key,
+                    model,
+                });
             }
         }
         kits
@@ -2811,9 +3019,24 @@ mod tests {
     impl Pump {
         /// Starts the runtime with `arguments` and pipes its three streams.
         fn start(runtime: &ContainerRuntime, arguments: &[String]) -> Self {
+            Self::start_given(runtime, arguments, &[])
+        }
+
+        /// The same, with variables added to the environment the runtime is
+        /// given: what it forwards by name has to be there to forward.
+        fn start_given(
+            runtime: &ContainerRuntime,
+            arguments: &[String],
+            environment: &[(String, Secret)],
+        ) -> Self {
             use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _};
             let mut child = tokio::process::Command::new(runtime.path())
                 .args(arguments)
+                .envs(
+                    environment
+                        .iter()
+                        .map(|(named, value)| (named.clone(), value.expose().to_owned())),
+                )
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -3293,6 +3516,36 @@ mod tests {
         ContainerRuntime::new(PathBuf::from(path.trim()))
     }
 
+    /// Every container runtime found on this machine that answers, under the
+    /// names this project knows one by: for a test that pins what a runtime
+    /// does rather than what this project does with one, which has to hold
+    /// on each of them. One that is installed and does not answer — a machine
+    /// never started — is said and passed over.
+    fn answering_runtimes() -> Vec<(&'static str, ContainerRuntime)> {
+        let mut found = Vec::new();
+        for called in ["docker", "podman"] {
+            let located = std::process::Command::new("sh")
+                .args(["-c", &format!("command -v {called}")])
+                .output()
+                .expect("looking for a container runtime");
+            let path = String::from_utf8(located.stdout).expect("a runtime path is text");
+            if path.trim().is_empty() {
+                continue;
+            }
+            let runtime = ContainerRuntime::new(PathBuf::from(path.trim()));
+            let answers = std::process::Command::new(runtime.path())
+                .arg("version")
+                .output()
+                .is_ok_and(|asked| asked.status.success());
+            if answers {
+                found.push((called, runtime));
+            } else {
+                eprintln!("{called} is installed and does not answer; passed over");
+            }
+        }
+        found
+    }
+
     /// Drives a real container, so it needs a runtime and a network.
     ///
     /// Ignored by default rather than absent: `just check` stays a gate you can
@@ -3376,30 +3629,39 @@ mod tests {
         }
     }
 
-    use stageman_core::{AgentConfig, Handout, Job, Project, ProjectId, State, Uuid};
+    use stageman_core::{
+        ClaudePurse, Handout, Job, Project, ProjectId, Purse, PurseName, State, Uuid,
+    };
     use std::collections::BTreeMap;
 
-    /// An instance configured with one agent and nothing else.
-    /// An instance with one agent configured and nothing else.
+    /// An instance holding one purse, the Anthropic key, and nothing else.
     fn instance(credential: &str) -> State {
+        holding(Purse::AnthropicKey(Secret::new(credential.to_owned())))
+    }
+
+    /// An instance holding one purse and nothing else.
+    fn holding(purse: Purse) -> State {
+        let mut purses = stageman_core::Purses::default();
+        purses.hold(purse);
         State {
             apps: std::collections::BTreeMap::new(),
             channel_apps: std::collections::BTreeMap::new(),
-            agents: BTreeMap::from([(
-                Agent::Claude,
-                AgentConfig {
-                    auth_token: Secret::new(credential.to_owned()),
-                },
-            )]),
+            purses,
             ..State::default()
         }
+    }
+
+    /// Claude as it comes, charging the key.
+    fn a_kit() -> Kit {
+        Kit::defaults(Agent::Claude, PurseName::AnthropicKey).expect("Claude charges a key")
     }
 
     fn only_claude() -> std::collections::BTreeMap<stageman_core::KitName, stageman_core::KitConfig>
     {
         std::collections::BTreeMap::from([(
             stageman_core::KitName::new("Claude").expect("a name"),
-            stageman_core::KitConfig::defaults(Agent::Claude),
+            stageman_core::KitConfig::defaults(Agent::Claude, PurseName::AnthropicKey)
+                .expect("Claude charges a key"),
         )])
     }
 
@@ -3423,7 +3685,7 @@ mod tests {
                 name: "example".to_owned(),
                 repository: stageman_core::RepositoryAddress::new("example", "repo")
                     .expect("an address"),
-                foreman_kit: Kit::defaults(Agent::Claude),
+                foreman_kit: a_kit(),
                 kits: only_claude(),
                 access,
                 channels: BTreeMap::new(),
@@ -3490,8 +3752,8 @@ mod tests {
 
     #[test]
     fn a_thread_is_never_delivered_as_a_variable() {
-        let (state, project) = instance_with_a_channel("sk-ant-oat01-xyz");
-        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project, warrant())
+        let (state, project) = instance_with_a_channel("sk-ant-api03-xyz");
+        let handout = Handout::for_job(&state, a_kit(), project, warrant())
             .expect("a watched project")
             .speaking_in(stageman_core::Place::from(stageman_core::Thread {
                 channel: Channel::Slack,
@@ -3536,12 +3798,11 @@ mod tests {
     /// anywhere.
     #[test]
     fn a_container_is_given_no_credential_it_has_no_use_for() {
-        let (state, project) = instance_with_a_channel("sk-ant-oat01-xyz");
+        let (state, project) = instance_with_a_channel("sk-ant-api03-xyz");
 
         for handout in [
             Handout::for_foreman(&state, project).expect("a watched project"),
-            Handout::for_job(&state, Kit::defaults(Agent::Claude), project, warrant())
-                .expect("a watched project"),
+            Handout::for_job(&state, a_kit(), project, warrant()).expect("a watched project"),
         ] {
             let named = names_of(&handout);
             assert!(
@@ -3571,9 +3832,9 @@ mod tests {
     /// an unbound project from a broken one.
     #[test]
     fn a_job_with_no_channel_is_delivered_no_channel_variables() {
-        let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
-        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project, warrant())
-            .expect("a watched project");
+        let (state, project) = instance_with_a_project("sk-ant-api03-xyz");
+        let handout =
+            Handout::for_job(&state, a_kit(), project, warrant()).expect("a watched project");
 
         let named = names_of(&handout);
 
@@ -3583,28 +3844,67 @@ mod tests {
         );
     }
 
+    /// The purse the kit charges decides the variable, and nothing about the
+    /// credential's text does: the same text is handed over under whichever
+    /// name the kit's purse takes, and the other name is cleared.
     #[test]
-    fn an_oauth_token_and_an_api_key_go_to_different_variables() {
+    fn the_subscription_and_the_key_go_to_different_variables_by_the_kits_purse() {
         assert_eq!(
-            claude_credential_variable(&Secret::new("sk-ant-oat01-xyz".to_owned())),
+            claude_purse_variable(ClaudePurse::Subscription),
             "CLAUDE_CODE_OAUTH_TOKEN"
         );
-        assert_eq!(
-            claude_credential_variable(&Secret::new("sk-ant-api03-xyz".to_owned())),
-            "ANTHROPIC_API_KEY"
-        );
+        assert_eq!(claude_purse_variable(ClaudePurse::Key), "ANTHROPIC_API_KEY");
+
+        let mut state = holding(Purse::AnthropicSubscription(Secret::new(
+            "the-same-text".to_owned(),
+        )));
+        state
+            .purses
+            .hold(Purse::AnthropicKey(Secret::new("the-same-text".to_owned())));
+        for (purse, variable, other) in [
+            (
+                PurseName::AnthropicSubscription,
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                "ANTHROPIC_API_KEY",
+            ),
+            (
+                PurseName::AnthropicKey,
+                "ANTHROPIC_API_KEY",
+                "CLAUDE_CODE_OAUTH_TOKEN",
+            ),
+        ] {
+            let kit = Kit::defaults(Agent::Claude, purse).expect("Claude charges both");
+            let charged = state.charged_purse(&kit).expect("both are held");
+            let run = agent_run("stageman-job-abc", &charged);
+
+            let handed: Vec<(&str, &str)> = run
+                .environment
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.expose()))
+                .collect();
+            assert_eq!(handed, [(variable, "the-same-text")], "{purse:?}");
+            assert_eq!(
+                run.command,
+                Command::Exec {
+                    name: "stageman-job-abc".to_owned(),
+                    forwarded: vec![variable.to_owned()],
+                    cleared: vec![other.to_owned()],
+                },
+                "{purse:?} is forwarded as {variable}, and {other} is cleared"
+            );
+        }
     }
 
+    /// A foreman's container is made with nothing at all: it has no warrant
+    /// and none of its project's variables, and the purse is its turns'.
     #[test]
-    fn a_foreman_is_delivered_its_credential_and_nothing_else() {
-        let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
+    fn a_foremans_container_is_made_with_nothing() {
+        let (state, project) = instance_with_a_project("sk-ant-api03-xyz");
         let handout = Handout::for_foreman(&state, project).expect("a watched project");
 
         let delivered = environment(&handout).expect("a handout with no reserved name");
 
-        assert_eq!(delivered.len(), 1, "{delivered:?}");
-        assert_eq!(delivered[0].0, "CLAUDE_CODE_OAUTH_TOKEN");
-        assert_eq!(delivered[0].1.expose(), "sk-ant-oat01-xyz");
+        assert!(delivered.is_empty(), "{:?}", names_of(&handout));
     }
 
     /// A job's container is given its warrant, and never the platform
@@ -3613,17 +3913,19 @@ mod tests {
     /// `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.
     #[test]
     fn a_job_is_delivered_its_warrant_and_no_platform_credential() {
-        let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
-        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project, warrant())
-            .expect("a watched project");
+        let (state, project) = instance_with_a_project("sk-ant-api03-xyz");
+        let handout =
+            Handout::for_job(&state, a_kit(), project, warrant()).expect("a watched project");
 
         let delivering = environment(&handout).expect("a handout with no reserved name");
         let named = names_of(&handout);
 
-        assert!(
-            named.iter().any(|name| name == "CLAUDE_CODE_OAUTH_TOKEN"),
-            "{named:?}"
-        );
+        for variable in purse_variables(Agent::Claude) {
+            assert!(
+                !named.iter().any(|name| name == variable),
+                "the purse travels with the turn, and a container is made without it: {named:?}"
+            );
+        }
         assert!(!named.iter().any(|name| name == "GH_TOKEN"), "{named:?}");
         let found = delivering
             .iter()
@@ -3644,7 +3946,7 @@ mod tests {
     /// The whole of what the feature does, from the delivery side.
     #[test]
     fn a_job_is_delivered_its_projects_variables() {
-        let (mut state, project) = instance_with_a_project("sk-ant-oat01-xyz");
+        let (mut state, project) = instance_with_a_project("sk-ant-api03-xyz");
         state
             .projects
             .get_mut(&project)
@@ -3656,8 +3958,8 @@ mod tests {
                     "sk-test-not-a-real-key".to_owned(),
                 )),
             );
-        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project, warrant())
-            .expect("a watched project");
+        let handout =
+            Handout::for_job(&state, a_kit(), project, warrant()).expect("a watched project");
 
         let delivering = environment(&handout).expect("no reserved name here");
         let found = delivering
@@ -3671,7 +3973,7 @@ mod tests {
     /// And a foreman's container is given none of them.
     #[test]
     fn a_foreman_is_delivered_no_variable_of_its_projects() {
-        let (mut state, project) = instance_with_a_project("sk-ant-oat01-xyz");
+        let (mut state, project) = instance_with_a_project("sk-ant-api03-xyz");
         state
             .projects
             .get_mut(&project)
@@ -3702,22 +4004,21 @@ mod tests {
     /// what a hand-edited snapshot meets.
     #[test]
     fn a_variable_claiming_a_name_this_project_delivers_is_refused() {
-        for claimed in RESERVED {
-            let (mut state, project) = instance_with_a_project("sk-ant-oat01-xyz");
+        for claimed in reserved() {
+            let (mut state, project) = instance_with_a_project("sk-ant-api03-xyz");
             state
                 .projects
                 .get_mut(&project)
                 .expect("the project")
                 .variables
                 .insert(
-                    stageman_core::VariableName::new(*claimed).expect("a deliverable name"),
+                    stageman_core::VariableName::new(claimed).expect("a deliverable name"),
                     stageman_core::Variable::unexplained(Secret::new(
                         "somebody-elses-account".to_owned(),
                     )),
                 );
             let handout =
-                Handout::for_job(&state, Kit::defaults(Agent::Claude), project, warrant())
-                    .expect("a watched project");
+                Handout::for_job(&state, a_kit(), project, warrant()).expect("a watched project");
 
             let refused = environment(&handout).expect_err("that name is ours");
 
@@ -3728,32 +4029,57 @@ mod tests {
         }
     }
 
-    /// What keeps [`RESERVED`] honest as agents are added.
+    /// What ties the reserved names to what is delivered: everything a
+    /// container is made with on this project's own account, and everything
+    /// a turn is run with or has cleared, is a name an operator may not
+    /// claim.
     ///
-    /// The list is written by hand, so nothing makes it follow the adapters it
-    /// describes. This is what notices: everything a real handout delivers on
-    /// this project's own account has to be in it, so an agent whose credential
-    /// goes in a new variable fails here until somebody adds it — rather than
-    /// silently letting an operator claim that name.
-    ///
-    /// Both of Claude's credential variables are covered because the two
-    /// fixtures below differ in the shape of the token, which is what chooses
-    /// between them.
+    /// The purses' names are reserved by derivation, from the table that
+    /// delivers them, so this walks every purse every agent can charge: a
+    /// delivery made some other way than through the table fails here. And
+    /// the names are said whole, in the order the table gives them, because
+    /// a list that came back empty would refuse nothing and fail nowhere.
     #[test]
     fn every_name_this_project_delivers_is_one_it_reserves() {
-        for credential in ["sk-ant-oat01-xyz", "sk-ant-api03-xyz"] {
-            let (state, project) = instance_with_a_project(credential);
-            let handout =
-                Handout::for_job(&state, Kit::defaults(Agent::Claude), project, warrant())
+        let reserved = reserved();
+        for agent in Agent::ALL {
+            for purse in agent.purses() {
+                let (mut state, project) = instance_with_a_project("sk-ant-api03-xyz");
+                state
+                    .purses
+                    .hold(Purse::new(purse, Secret::new("a-credential".to_owned())));
+                let kit = Kit::defaults(*agent, purse).expect("the agent charges its own purses");
+                let handout = Handout::for_job(&state, kit.clone(), project, warrant())
                     .expect("a watched project");
+                let charged = state.charged_purse(&kit).expect("held above");
+                let Command::Exec {
+                    forwarded, cleared, ..
+                } = agent_run("stageman-job-abc", &charged).command
+                else {
+                    panic!("the agent is run by an exec");
+                };
 
-            for name in names_of(&handout) {
-                assert!(
-                    RESERVED.contains(&name.as_str()),
-                    "{name} is delivered but not reserved, so an operator could claim it",
-                );
+                for name in names_of(&handout)
+                    .into_iter()
+                    .chain(forwarded)
+                    .chain(cleared)
+                {
+                    assert!(
+                        reserved.contains(&name.as_str()),
+                        "{name} is delivered but not reserved, so an operator could claim it",
+                    );
+                }
             }
         }
+        assert_eq!(
+            reserved,
+            [
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                "ANTHROPIC_API_KEY",
+                "GH_TOKEN",
+                "STAGEMAN_WARRANT"
+            ]
+        );
     }
 
     /// The one that matters most in this module. A secret on a command line is
@@ -3761,9 +4087,9 @@ mod tests {
     /// arguments must *name* each variable and never carry its value.
     #[test]
     fn no_credential_ever_appears_in_a_containers_arguments() {
-        let (state, project) = instance_with_a_channel("sk-ant-oat01-secret-value");
-        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project, warrant())
-            .expect("a watched project");
+        let (state, project) = instance_with_a_channel("sk-ant-api03-secret-value");
+        let handout =
+            Handout::for_job(&state, a_kit(), project, warrant()).expect("a watched project");
 
         let arguments = retained_arguments(
             "stageman-job-abc",
@@ -3774,14 +4100,17 @@ mod tests {
         );
         let line = arguments.join(" ");
 
-        assert!(!line.contains("sk-ant-oat01-secret-value"), "{line}");
+        assert!(!line.contains("sk-ant-api03-secret-value"), "{line}");
         assert!(!line.contains("gh-not-a-real-token"), "{line}");
         assert!(!line.contains(WARRANT), "{line}");
         // The newest credential, and the one a reviewer would not think to
         // check: a channel binding arrived through a different map and a
         // different loop, so it is a second chance to make the same mistake.
         assert!(!line.contains("xoxb-not-a-real-token"), "{line}");
-        assert!(line.contains("--env CLAUDE_CODE_OAUTH_TOKEN"), "{line}");
+        assert!(
+            !line.contains("ANTHROPIC_API_KEY") && !line.contains("CLAUDE_CODE_OAUTH_TOKEN"),
+            "the purse is not a container's, by name or by value: {line}"
+        );
         assert!(line.contains("--env STAGEMAN_WARRANT"), "{line}");
         assert!(!line.contains("GH_TOKEN"), "{line}");
         // No channel credential is named at all since 0034, because none is
@@ -3793,7 +4122,7 @@ mod tests {
     /// agent: it holds itself open, and the agent is run inside it.
     #[test]
     fn a_retained_container_is_not_cut_off_from_the_network_and_is_not_the_agent() {
-        let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
+        let (state, project) = instance_with_a_project("sk-ant-api03-xyz");
         let handout = Handout::for_foreman(&state, project).expect("a watched project");
 
         let arguments = retained_arguments(
@@ -3818,7 +4147,7 @@ mod tests {
 
     #[test]
     fn a_retained_container_is_named_labelled_and_survives_its_own_exit() {
-        let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
+        let (state, project) = instance_with_a_project("sk-ant-api03-xyz");
         let handout = Handout::for_foreman(&state, project).expect("a watched project");
 
         let arguments = retained_arguments(
@@ -3862,7 +4191,7 @@ mod tests {
     /// empty host port this would be picking one itself, which is a race.
     #[test]
     fn a_retained_container_publishes_its_tunnel_on_loopback() {
-        let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
+        let (state, project) = instance_with_a_project("sk-ant-api03-xyz");
         let handout = Handout::for_foreman(&state, project).expect("a watched project");
 
         let arguments = retained_arguments(
@@ -3887,9 +4216,9 @@ mod tests {
     /// like this instance's own abandoned work.
     #[test]
     fn a_retained_container_says_which_instance_started_it() {
-        let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
-        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), project, warrant())
-            .expect("a watched project");
+        let (state, project) = instance_with_a_project("sk-ant-api03-xyz");
+        let handout =
+            Handout::for_job(&state, a_kit(), project, warrant()).expect("a watched project");
 
         let arguments = retained_arguments(
             "stageman-job-abc",
@@ -4011,21 +4340,50 @@ mod tests {
         );
     }
 
-    /// The agent is run inside the container, over pipes this process owns.
+    /// The agent is run inside the container, over pipes this process owns,
+    /// handed the purse its kit charges by name and cleared of the other.
     ///
     /// `--interactive` moved here, and it is the only thing between a running
     /// container and a conversation: without it the agent gets no standard
-    /// input, which reads as an agent that will not speak.
+    /// input, which reads as an agent that will not speak. The purse's value
+    /// is in the environment the runtime is given and never on this line,
+    /// for the reason a container's variables are not.
     #[test]
-    fn the_agent_runs_inside_the_container_with_a_pipe_of_its_own() {
+    fn the_agent_runs_inside_the_container_with_a_pipe_of_its_own_and_one_purse() {
+        let state = holding(Purse::AnthropicSubscription(Secret::new(
+            "sk-ant-oat01-secret-value".to_owned(),
+        )));
+        let kit = Kit::defaults(Agent::Claude, PurseName::AnthropicSubscription)
+            .expect("Claude charges a subscription");
+        let charged = state.charged_purse(&kit).expect("the purse is held");
+
+        let run = agent_run("stageman-job-abc", &charged);
+
         assert_eq!(
-            agent_arguments("stageman-job-abc"),
+            run.command.arguments(),
             vec![
                 "exec".to_owned(),
                 "--interactive".to_owned(),
+                "--env".to_owned(),
+                "CLAUDE_CODE_OAUTH_TOKEN".to_owned(),
                 "stageman-job-abc".to_owned(),
+                "env".to_owned(),
+                "-u".to_owned(),
+                "ANTHROPIC_API_KEY".to_owned(),
                 AGENT_PROGRAM.to_owned(),
             ],
+        );
+        assert_eq!(run.environment.len(), 1, "{run:?}");
+        assert_eq!(run.environment[0].0, "CLAUDE_CODE_OAUTH_TOKEN");
+        assert_eq!(run.environment[0].1.expose(), "sk-ant-oat01-secret-value");
+        let shown = format!("{run:?}");
+        assert!(
+            !shown.contains("secret-value"),
+            "and what is valued is named, never shown: {shown}"
+        );
+        assert!(
+            shown.contains("AgentRun") && shown.contains("CLAUDE_CODE_OAUTH_TOKEN"),
+            "named, so that a line about a run still says what it was run with: {shown}"
         );
     }
 
@@ -4037,7 +4395,7 @@ mod tests {
     /// every stop waits for a timeout first.
     #[test]
     fn a_retained_container_is_created_with_an_init() {
-        let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
+        let (state, project) = instance_with_a_project("sk-ant-api03-xyz");
         let handout = Handout::for_foreman(&state, project).expect("a watched project");
 
         let arguments = retained_arguments(
@@ -4234,7 +4592,7 @@ mod tests {
         let name = "stageman-job-lifetime-probe";
         discard(&runtime, name).await.expect("a clean slate");
 
-        let (state, project) = instance_with_a_project("sk-ant-oat01-xyz");
+        let (state, project) = instance_with_a_project("sk-ant-api03-xyz");
         let handout = Handout::for_foreman(&state, project).expect("a watched project");
         let delivering = environment(&handout).expect("a handout with no reserved name");
         let image = build(&runtime, Agent::Claude, Role::Foreman)
@@ -4311,6 +4669,138 @@ mod tests {
         );
 
         discard(&runtime, name).await.expect("it is removable");
+    }
+
+    /// What a process run in the container sees of the two purses, with the
+    /// arguments the instance would run an agent with and a shell saying so
+    /// in the agent's place.
+    async fn seen_by_a_process_run_with(
+        runtime: &ContainerRuntime,
+        container: &str,
+        purse: Purse,
+    ) -> String {
+        let charging = purse.name();
+        let state = holding(purse);
+        let kit = Kit::defaults(Agent::Claude, charging).expect("Claude charges both");
+        let charged = state.charged_purse(&kit).expect("the purse is held");
+        let run = agent_run(container, &charged);
+        let mut arguments = run.command.arguments();
+        assert_eq!(arguments.pop().as_deref(), Some(AGENT_PROGRAM));
+        arguments.extend([
+            "sh".to_owned(),
+            "-c".to_owned(),
+            "echo \"token=${CLAUDE_CODE_OAUTH_TOKEN-unset} key=${ANTHROPIC_API_KEY-unset}\""
+                .to_owned(),
+        ]);
+        let ran = tokio::process::Command::new(runtime.path())
+            .args(&arguments)
+            .envs(
+                run.environment
+                    .iter()
+                    .map(|(named, value)| (named.clone(), value.expose().to_owned())),
+            )
+            .output()
+            .await
+            .expect("the runtime runs");
+        assert!(
+            ran.status.success(),
+            "{}",
+            String::from_utf8_lossy(&ran.stderr)
+        );
+        String::from_utf8_lossy(&ran.stdout).trim().to_owned()
+    }
+
+    /// The measurement
+    /// `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md` rests
+    /// on, as a test, on every runtime here that answers. A variable named on
+    /// the command that runs the agent reaches the process it runs and never
+    /// the container; one forwarded takes the place of one the container was
+    /// made with; one cleared is not seen by the process, though the
+    /// container still holds it; and the container's own configuration says
+    /// only what it was made with.
+    ///
+    /// The container is made holding a key, as one was before the purse
+    /// travelled with the turn, because that is the case the clearing exists
+    /// for. And a shell runs in the agent's place: what is asserted is what
+    /// the runtime does with these arguments, and the agent would only make
+    /// the process more interesting.
+    #[tokio::test]
+    #[ignore = "needs a container runtime and the network; run `just image-handshake`"]
+    async fn the_purse_reaches_the_agents_process_and_never_its_container() {
+        let runtimes = answering_runtimes();
+        assert!(!runtimes.is_empty(), "no container runtime answers here");
+        for (called, runtime) in runtimes {
+            let name = "stageman-job-purse-probe";
+            discard(&runtime, name).await.expect("a clean slate");
+            let image = build(&runtime, Agent::Claude, Role::Foreman)
+                .await
+                .expect("the image builds");
+            let baked = vec![(
+                "ANTHROPIC_API_KEY".to_owned(),
+                Secret::new("the-key-it-was-made-with".to_owned()),
+            )];
+            let created = tokio::process::Command::new(runtime.path())
+                .args(retained_arguments(
+                    name,
+                    &image,
+                    Agent::Claude,
+                    an_instance(),
+                    &baked,
+                ))
+                .envs(
+                    baked
+                        .iter()
+                        .map(|(named, value)| (named.clone(), value.expose().to_owned())),
+                )
+                .output()
+                .await
+                .expect("the runtime runs");
+            assert!(
+                created.status.success(),
+                "{called}: {}",
+                String::from_utf8_lossy(&created.stderr)
+            );
+            hold(&runtime, name).await.expect("it starts");
+
+            assert_eq!(
+                seen_by_a_process_run_with(
+                    &runtime,
+                    name,
+                    Purse::AnthropicSubscription(Secret::new("the-token-held-now".to_owned())),
+                )
+                .await,
+                "token=the-token-held-now key=unset",
+                "{called}: the purse its kit charges, and not the one its container was made with"
+            );
+            assert_eq!(
+                seen_by_a_process_run_with(
+                    &runtime,
+                    name,
+                    Purse::AnthropicKey(Secret::new("the-key-held-now".to_owned())),
+                )
+                .await,
+                "token=unset key=the-key-held-now",
+                "{called}: what is forwarded takes the place of what the container was made with"
+            );
+
+            let inspected = tokio::process::Command::new(runtime.path())
+                .args(["inspect", "--format", "{{.Config.Env}}", name])
+                .output()
+                .await
+                .expect("the runtime runs");
+            let configured = String::from_utf8_lossy(&inspected.stdout).into_owned();
+            assert!(
+                configured.contains("ANTHROPIC_API_KEY=the-key-it-was-made-with"),
+                "{called}: {configured}"
+            );
+            assert!(
+                !configured.contains("held-now") && !configured.contains("CLAUDE_CODE_OAUTH_TOKEN"),
+                "{called}: nothing a turn was run with rests in the container: {configured}"
+            );
+
+            discard(&runtime, name).await.expect("it is removable");
+            eprintln!("pinned on {called}");
+        }
     }
 
     /// Asserted whole, the way a kickoff is: this is the one place the
@@ -4629,27 +5119,38 @@ mod tests {
     mod costs_a_credential {
         use super::*;
 
-        /// The credential, from the gitignored file this project keeps it in.
+        /// The purse, from whichever of the two gitignored files this project
+        /// keeps one in. Each is named for the box it would be pasted into on
+        /// the Agents page, so the file declares its kind as the box does and
+        /// nothing here sniffs it; the subscription's is read first when both
+        /// exist, as a form offers it first.
         ///
-        /// Panics rather than skipping when it is absent. A test that quietly
-        /// passes because it could not run is the failure mode the ignored
-        /// tests above are arranged to avoid, and it would be perverse to
-        /// reintroduce it here.
-        fn credential() -> Secret {
-            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../.local/anthropic-token");
-            let raw = std::fs::read_to_string(path)
-                .expect("write an agent credential to .local/anthropic-token (it is gitignored)");
-            Secret::new(raw.trim().to_owned())
+        /// Panics rather than skipping when neither is there. A test that
+        /// quietly passes because it could not run is the failure mode the
+        /// ignored tests above are arranged to avoid, and it would be perverse
+        /// to reintroduce it here.
+        fn purse() -> Purse {
+            let local = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.local"));
+            let read = |name: &str| match std::fs::read_to_string(local.join(name)) {
+                Ok(raw) => Some(Secret::new(raw.trim().to_owned())),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => panic!("{} could not be read: {error}", local.join(name).display()),
+            };
+            read("anthropic-subscription")
+                .map(Purse::AnthropicSubscription)
+                .or_else(|| read("anthropic-key").map(Purse::AnthropicKey))
+                .expect(
+                    "write a subscription's token to .local/anthropic-subscription or an API \
+                     key to .local/anthropic-key (both are gitignored)",
+                )
         }
 
         fn handout_of() -> (State, Handout) {
             let mut state = State::default();
-            state.agents.insert(
-                Agent::Claude,
-                AgentConfig {
-                    auth_token: credential(),
-                },
-            );
+            let purse = purse();
+            let charging = purse.name();
+            state.purses.hold(purse);
+            let kit = Kit::defaults(Agent::Claude, charging).expect("Claude charges both");
             let project = ProjectId::from_uuid(Uuid::from_u128(3));
             state.projects.insert(
                 project,
@@ -4657,8 +5158,14 @@ mod tests {
                     name: "probe".to_owned(),
                     repository: stageman_core::RepositoryAddress::new("example", "repo")
                         .expect("an address"),
-                    foreman_kit: Kit::defaults(Agent::Claude),
-                    kits: only_claude(),
+                    foreman_kit: kit.clone(),
+                    kits: std::collections::BTreeMap::from([(
+                        stageman_core::KitName::new("Claude").expect("a name"),
+                        stageman_core::KitConfig {
+                            description: "the probe's".to_owned(),
+                            kit,
+                        },
+                    )]),
                     access: BTreeMap::new(),
                     channels: BTreeMap::new(),
                     variables: BTreeMap::new(),
@@ -4674,7 +5181,8 @@ mod tests {
         }
 
         /// A container for a foreman's handout, made and started the way
-        /// the instance makes and starts one, with the credential forwarded.
+        /// the instance makes and starts one: with nothing of the purse,
+        /// which is handed to the agent each time it is run.
         async fn made(runtime: &ContainerRuntime, name: &str, handout: &Handout) {
             discard(runtime, name).await.expect("a clean slate");
             let delivering = environment(handout).expect("a handout with no reserved name");
@@ -4706,16 +5214,22 @@ mod tests {
         }
 
         /// One conversation with the agent in a container that is up, driven
-        /// as the instance drives one.
+        /// as the instance drives one: the purse the kit charges is selected
+        /// from what is held and handed to the agent's process as it is run.
         async fn talk(
             runtime: &ContainerRuntime,
+            state: &State,
             name: &str,
             opening: Opening,
             kit: &Kit,
             question: &str,
         ) -> Result<Answer, AgentError> {
             let (conversation, first) = Conversation::begin(opening, None, kit.clone(), question);
-            let mut agent = Pump::start(runtime, &agent_arguments(name));
+            let charged = state
+                .charged_purse(kit)
+                .expect("the purse the kit charges is held");
+            let run = agent_run(name, &charged);
+            let mut agent = Pump::start_given(runtime, &run.command.arguments(), &run.environment);
             agent.talk(conversation, first).await
         }
 
@@ -4723,12 +5237,13 @@ mod tests {
         #[ignore = "needs a container runtime, a built image and a credential; run `just image-session`"]
         async fn an_agent_answers_a_question() {
             let runtime = located_runtime();
-            let (_state, handout) = handout_of();
+            let (state, handout) = handout_of();
             let name = "stageman-job-question-probe";
             made(&runtime, name, &handout).await;
 
             let answer = talk(
                 &runtime,
+                &state,
                 name,
                 Opening::Fresh,
                 handout.kit(),
@@ -4759,12 +5274,13 @@ mod tests {
         #[ignore = "needs a container runtime, a built image and a credential; run `just image-session`"]
         async fn a_session_outlives_the_container_stopping() {
             let runtime = located_runtime();
-            let (_state, handout) = handout_of();
+            let (state, handout) = handout_of();
             let name = "stageman-job-resume-probe";
             made(&runtime, name, &handout).await;
 
             let first = talk(
                 &runtime,
+                &state,
                 name,
                 Opening::Fresh,
                 handout.kit(),
@@ -4787,6 +5303,7 @@ mod tests {
 
             let second = talk(
                 &runtime,
+                &state,
                 name,
                 Opening::Resumed,
                 handout.kit(),
@@ -4810,25 +5327,35 @@ mod tests {
         #[ignore = "needs a container runtime, a built image and a credential; run `just image-session`"]
         async fn a_turn_cut_off_partway_can_still_be_picked_up() {
             let runtime = located_runtime();
-            let (_state, handout) = handout_of();
+            let (state, handout) = handout_of();
             let name = "stageman-job-midturn-probe";
             made(&runtime, name, &handout).await;
 
+            // Long by how much it has to write rather than by being asked to
+            // wait: an agent asked to pause between lines was measured to
+            // answer at once that it cannot, which ends the turn inside the
+            // window and leaves nothing to cut off.
             let cut_short = tokio::time::timeout(
                 std::time::Duration::from_secs(6),
                 talk(
                     &runtime,
+                    &state,
                     name,
                     Opening::Fresh,
                     handout.kit(),
-                    "Count from 1 to 40, one number per line, pausing two seconds between each.",
+                    "Write a detailed explanation, of at least 1500 words, of how insertion \
+                     into a B-tree works, with a worked example.",
                 ),
             )
             .await;
-            assert!(cut_short.is_err(), "it should not have finished in time");
+            assert!(
+                cut_short.is_err(),
+                "it should not have finished in time: {cut_short:?}"
+            );
 
             let picked_up = talk(
                 &runtime,
+                &state,
                 name,
                 Opening::Resumed,
                 handout.kit(),

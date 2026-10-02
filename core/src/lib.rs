@@ -370,22 +370,307 @@ impl Agent {
             }
         }
     }
+
+    /// The purses a kit for this agent can charge, in the order a form
+    /// offers them.
+    ///
+    /// Derived from the kit's own payload rather than listed beside it, so
+    /// that the answer here and the sentences [`Kit`] can write cannot
+    /// disagree — see
+    /// `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`.
+    pub fn purses(self) -> impl Iterator<Item = PurseName> {
+        match self {
+            Self::Claude => ClaudePurse::ALL.iter().map(|purse| purse.name()),
+        }
+    }
+
+    /// Whether a kit for this agent can charge a purse.
+    ///
+    /// Skipped by mutation testing, and equivalent rather than untested: the
+    /// one agent there is charges every purse there is, so this is `true`
+    /// for every input. **Delete this attribute in the commit that adds an
+    /// agent that cannot charge some purse** — the second agent is one,
+    /// since a subscription is the vendor's own agent's — and give the test
+    /// that pins this its refusal.
+    #[must_use]
+    #[mutants::skip]
+    pub fn charges(self, purse: PurseName) -> bool {
+        self.purses().any(|accepted| accepted == purse)
+    }
 }
 
-/// What an operator supplies in order to run an agent.
+/// Who serves a model and bills for it.
 ///
-/// A credential and nothing else. There is deliberately no path here: agents
-/// run in containers built with them already installed, so where the program
-/// lives is decided by an image rather than by the machine this happens to run
-/// on — see `docs/decisions/0012-agents-run-in-containers.md`.
-#[derive(Debug, Clone)]
-pub struct AgentConfig {
-    /// What the agent authenticates with.
+/// A closed set, for the reason [`Platform`] and [`Channel`] are: delivering
+/// a credential to an agent is code — the variable it is read from, the
+/// check it is checked by, the mark it is drawn with — so a provider an
+/// operator could invent would only postpone the failure to a job. Its only
+/// member is the one the one agent charges; the next lands with the agent
+/// that needs it, because a provider nobody can charge is dead code with a
+/// mark. See `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum Provider {
+    /// Anthropic, which serves Claude.
+    Anthropic,
+}
+
+impl Provider {
+    /// Every provider there is, in the order a page lists them.
     ///
-    /// One credential per agent, never one per role — the foreman and a
-    /// job running the same agent use the same one. See
-    /// `docs/decisions/0008-one-credential-per-agent.md`.
-    pub auth_token: Secret,
+    /// A list rather than a derive, for the reason [`Agent::ALL`] gives.
+    pub const ALL: &'static [Self] = &[Self::Anthropic];
+
+    /// What to call this provider, for a person.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Anthropic => "Anthropic",
+        }
+    }
+}
+
+/// The two kinds of purse a provider hands out.
+///
+/// A key is metered per token and honoured by every agent that speaks the
+/// provider; a subscription is flat per month and honoured by the vendor's
+/// own agent alone. The second is the vendors' rule rather than this
+/// project's, and it is written into which purses each agent's kit can name
+/// rather than checked anywhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum PurseKind {
+    /// An API key: metered, and any agent's.
+    Key,
+    /// A subscription's token: flat, and the vendor's own agent's.
+    Subscription,
+}
+
+/// Which purse: one provider, one kind.
+///
+/// What a kit names and what the instance's purses are keyed by, and never
+/// the credential itself — that is a [`Purse`]. One variant per purse a
+/// provider hands out, rather than a pair of a provider and a kind, because
+/// not every provider hands out both kinds and a pair would let a purse that
+/// does not exist be named.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum PurseName {
+    /// An Anthropic API key.
+    AnthropicKey,
+    /// A Claude subscription's token, minted by `claude setup-token`.
+    AnthropicSubscription,
+}
+
+impl PurseName {
+    /// Every purse a provider hands out, in the order a page lists them.
+    ///
+    /// A list rather than a derive, for the reason [`Agent::ALL`] gives: a
+    /// purse forgotten here is a purse missing from a page, which is the
+    /// cheapest failure available.
+    pub const ALL: &'static [Self] = &[Self::AnthropicKey, Self::AnthropicSubscription];
+
+    /// Whose purse this is.
+    #[must_use]
+    pub const fn provider(self) -> Provider {
+        match self {
+            Self::AnthropicKey | Self::AnthropicSubscription => Provider::Anthropic,
+        }
+    }
+
+    /// Which kind of purse this is.
+    #[must_use]
+    pub const fn kind(self) -> PurseKind {
+        match self {
+            Self::AnthropicKey => PurseKind::Key,
+            Self::AnthropicSubscription => PurseKind::Subscription,
+        }
+    }
+}
+
+/// One purse: the credential, in the shape its provider hands out.
+///
+/// The variants are the purses and each payload is that purse's credential,
+/// so a purse filed under another purse's name is not a state to check for
+/// but a sentence that cannot be written: [`Purse::name`] is derived from
+/// the variant, and [`Purses`] keys on it. Every shape is a token today; a
+/// purse that is a file rather than a variable is the trigger
+/// `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md` names.
+///
+/// Redacted when formatted, and deliberately without serialisation, on the
+/// terms [`Secret`] sets: what goes to disk is a [`SealedPurse`].
+#[derive(Clone, PartialEq, Eq)]
+pub enum Purse {
+    /// An Anthropic API key.
+    AnthropicKey(Secret),
+    /// A Claude subscription's token.
+    AnthropicSubscription(Secret),
+}
+
+impl Purse {
+    /// A purse from the box it was pasted into and what was pasted.
+    ///
+    /// The kind is the box, never the shape of the text: which box a
+    /// credential belongs in is what the provider crate checks, before
+    /// anything is kept.
+    #[must_use]
+    pub const fn new(name: PurseName, credential: Secret) -> Self {
+        match name {
+            PurseName::AnthropicKey => Self::AnthropicKey(credential),
+            PurseName::AnthropicSubscription => Self::AnthropicSubscription(credential),
+        }
+    }
+
+    /// Which purse this is.
+    #[must_use]
+    pub const fn name(&self) -> PurseName {
+        match self {
+            Self::AnthropicKey(_) => PurseName::AnthropicKey,
+            Self::AnthropicSubscription(_) => PurseName::AnthropicSubscription,
+        }
+    }
+
+    /// The credential itself.
+    #[must_use]
+    pub const fn credential(&self) -> &Secret {
+        match self {
+            Self::AnthropicKey(credential) | Self::AnthropicSubscription(credential) => credential,
+        }
+    }
+}
+
+impl fmt::Debug for Purse {
+    /// Names the purse and never its contents.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Purse({:?}, <redacted>)", self.name())
+    }
+}
+
+impl fmt::Display for Purse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
+/// The purses an instance holds: at most one of each.
+///
+/// Keyed by each purse's own name, and the key is derived from the purse by
+/// the one method that inserts, so a purse under another purse's name is
+/// unrepresentable rather than checked. May be empty — an instance with no
+/// projects needs nothing to pay with, which is what lets one start with
+/// nothing configured at all, per
+/// `docs/decisions/0021-an-instance-starts-empty.md`.
+///
+/// A purse may not be forgotten while something charges it. Nothing here
+/// prevents that directly. [`State::charged_by`] is the query a caller
+/// consults first, and [`State::check`] refuses a foreman's kit or an
+/// offered kit charging a purse that is not held, on the way into a
+/// snapshot and out of one. A job's kit is a record rather than a reference
+/// and the check leaves it alone, because a file must not fail to open over
+/// a job — `docs/conventions.md` §4 — so an unfinished job whose purse has
+/// gone fails at its next turn instead, where its handout is refused.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Purses(BTreeMap<PurseName, Purse>);
+
+impl Purses {
+    /// Holds a purse, replacing the one of the same name if there is one.
+    ///
+    /// Replacing rather than refusing, because rotating a credential is the
+    /// ordinary reason to come back with one, and the name is the purse's
+    /// own, so nothing else could be replaced by mistake.
+    pub fn hold(&mut self, purse: Purse) -> Option<Purse> {
+        self.0.insert(purse.name(), purse)
+    }
+
+    /// Lets a purse go, yielding it if it was held.
+    pub fn forget(&mut self, name: PurseName) -> Option<Purse> {
+        self.0.remove(&name)
+    }
+
+    /// The purse of that name, if it is held.
+    #[must_use]
+    pub fn get(&self, name: PurseName) -> Option<&Purse> {
+        self.0.get(&name)
+    }
+
+    /// Whether a purse of that name is held.
+    #[must_use]
+    pub fn holds(&self, name: PurseName) -> bool {
+        self.0.contains_key(&name)
+    }
+
+    /// Every purse held, in the order of their names.
+    pub fn iter(&self) -> impl Iterator<Item = &Purse> {
+        self.0.values()
+    }
+
+    /// The names of every purse held, in order.
+    pub fn names(&self) -> impl Iterator<Item = PurseName> + '_ {
+        self.0.keys().copied()
+    }
+
+    /// Whether nothing is held.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// Which purse a kit for Claude charges: the two Anthropic hands out.
+///
+/// The subset of [`PurseName`] Claude can charge, as a type of its own, so
+/// that a kit for Claude charging anything else cannot be written — see
+/// `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`. Both kinds
+/// are here because Claude Code is Anthropic's own agent, which is the one
+/// place a subscription is honoured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum ClaudePurse {
+    /// The Anthropic API key.
+    Key,
+    /// The Claude subscription's token.
+    Subscription,
+}
+
+impl ClaudePurse {
+    /// Every purse Claude can charge, in the order a form offers them, which
+    /// is the order Claude prefers them: a new kit charges the first of these
+    /// that is held. The subscription comes first because an operator who
+    /// holds both added the flat one for this agent alone — the vendor's own
+    /// agent is the only one that can charge it — so a kit for it starting on
+    /// the key would be the surprise. See
+    /// `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`.
+    pub const ALL: &'static [Self] = &[Self::Subscription, Self::Key];
+
+    /// The purse this names, among every purse there is.
+    #[must_use]
+    pub const fn name(self) -> PurseName {
+        match self {
+            Self::Key => PurseName::AnthropicKey,
+            Self::Subscription => PurseName::AnthropicSubscription,
+        }
+    }
+
+    /// The purse of that name as Claude charges it, if Claude can.
+    #[must_use]
+    pub const fn of(name: PurseName) -> Option<Self> {
+        match name {
+            PurseName::AnthropicKey => Some(Self::Key),
+            PurseName::AnthropicSubscription => Some(Self::Subscription),
+        }
+    }
+}
+
+impl From<ClaudePurse> for PurseName {
+    fn from(purse: ClaudePurse) -> Self {
+        purse.name()
+    }
+}
+
+/// A kit was asked for on a purse its agent cannot charge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("{agent:?} cannot charge {purse:?}")]
+pub struct Unchargeable {
+    /// The agent.
+    pub agent: Agent,
+    /// The purse it cannot charge.
+    pub purse: PurseName,
 }
 
 /// One agent, set the way one job runs it.
@@ -407,32 +692,47 @@ pub struct AgentConfig {
 /// that runs a container, so a pin bump that removes or renames a value fails
 /// there instead of rotting.
 ///
-/// Read back through [`Job`], which also accepts the bare agent name every job
-/// recorded before kits existed was written with.
+/// Each payload also names the purse the kit's work is charged to, from the
+/// purses that agent can charge and no other, so a kit charging a purse its
+/// agent cannot is unwritable rather than checked — see
+/// `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`. Written to
+/// the file as a [`WrittenKit`], which is what reads a kit the last release
+/// wrote without one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Kit {
-    /// Anthropic's coding agent, on one of the models its adapter offers.
+    /// Anthropic's coding agent, charging one of the purses Anthropic hands
+    /// out, on one of the models its adapter offers.
     Claude {
+        /// Which purse its work is charged to.
+        purse: ClaudePurse,
         /// Which model, and — where the model has one — how hard it thinks.
         model: ClaudeModel,
     },
 }
 
 impl Kit {
-    /// An agent exactly as it comes: every setting left to the agent's own
-    /// default.
+    /// An agent exactly as it comes, charging one purse: every setting left
+    /// to the agent's own default.
     ///
     /// What every job ran on before kits existed, which is why reading an
     /// older record produces this rather than a guess — a job written with a
     /// bare agent name genuinely ran on that agent's defaults, so this is the
     /// true answer, per `docs/conventions.md` §4.
-    #[must_use]
-    pub const fn defaults(agent: Agent) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Fails if the agent cannot charge that purse, which is the one thing
+    /// about a kit the type cannot say from an agent and a purse named apart.
+    pub const fn defaults(agent: Agent, purse: PurseName) -> Result<Self, Unchargeable> {
         match agent {
-            Agent::Claude => Self::Claude {
-                model: ClaudeModel::Default {
-                    effort: ClaudeEffort::Default,
-                },
+            Agent::Claude => match ClaudePurse::of(purse) {
+                Some(purse) => Ok(Self::Claude {
+                    purse,
+                    model: ClaudeModel::Default {
+                        effort: ClaudeEffort::Default,
+                    },
+                }),
+                None => Err(Unchargeable { agent, purse }),
             },
         }
     }
@@ -445,6 +745,17 @@ impl Kit {
     pub const fn agent(&self) -> Agent {
         match self {
             Self::Claude { .. } => Agent::Claude,
+        }
+    }
+
+    /// Which purse this kit's work is charged to.
+    ///
+    /// Derived from the payload, for the reason the agent is: the payload
+    /// can only name a purse its agent can charge.
+    #[must_use]
+    pub const fn purse(&self) -> PurseName {
+        match self {
+            Self::Claude { purse, .. } => purse.name(),
         }
     }
 }
@@ -597,9 +908,10 @@ pub enum KitNameError {
 /// what the foreman reasons over when it chooses a kit — see
 /// `docs/decisions/0048-a-job-runs-on-a-kit.md`.
 ///
-/// Holds no credential, so it crosses the snapshot boundary as itself, the way
-/// a [`Job`] does.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Holds no credential, and crosses the snapshot boundary as a
+/// [`WrittenKitConfig`], for the one reason a kit does: a file the last
+/// release wrote names no purse.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KitConfig {
     /// What this project wants the kit for, in the operator's words.
     pub description: String,
@@ -608,18 +920,22 @@ pub struct KitConfig {
 }
 
 impl KitConfig {
-    /// An agent's defaults, described as the agent describes itself.
+    /// An agent's defaults on one purse, described as the agent describes
+    /// itself.
     ///
     /// What a project written before kits existed is read as offering, one per
     /// agent it named — the default that is the true answer, per
     /// `docs/conventions.md` §4, since nothing else existed to run on — and
     /// what a project offers for an agent nobody has yet written a kit for.
-    #[must_use]
-    pub fn defaults(agent: Agent) -> Self {
-        Self {
+    ///
+    /// # Errors
+    ///
+    /// Fails if the agent cannot charge that purse.
+    pub fn defaults(agent: Agent, purse: PurseName) -> Result<Self, Unchargeable> {
+        Ok(Self {
             description: agent.description().to_owned(),
-            kit: Kit::defaults(agent),
-        }
+            kit: Kit::defaults(agent, purse)?,
+        })
     }
 }
 
@@ -1183,14 +1499,13 @@ pub struct Job {
     /// this type is written to as the job goes; this is read through
     /// [`Job::kit`] and set only by [`Job::new`].
     ///
-    /// Stored by value, so this stays true after an operator removes that
-    /// agent's configuration.
+    /// Stored by value, so this stays true after an operator forgets the
+    /// purse it charges.
     ///
-    /// Written as `kit`, and read as the bare agent name too. Every job
-    /// recorded before kits existed says `"agent": "Claude"`, and such a job
-    /// genuinely ran on that agent's defaults, so that is what it reads as —
-    /// the default that is the true answer, per `docs/conventions.md` §4,
-    /// rather than the substituted one it forbids.
+    /// Written as `kit`, through [`WrittenKit`], which also reads the kit a
+    /// job the last release wrote: one naming no purse, which charged the
+    /// one credential that release held, so that is what it reads as — the
+    /// true answer, per `docs/conventions.md` §4, rather than a substitute.
     kit: Kit,
     /// Why the foreman started it, in prose.
     ///
@@ -1905,17 +2220,16 @@ pub struct Project {
 /// `docs/decisions/0013-an-instance-is-configured-before-it-exists.md`.
 #[derive(Debug, Clone, Default)]
 pub struct State {
-    /// The agents this instance can run, and what each authenticates with.
+    /// The purses this instance holds: what a kit's work is charged to, and
+    /// so what any agent authenticates with — see
+    /// `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`.
     ///
-    /// May be empty. An instance with no projects needs nothing to think with,
+    /// May be empty. An instance with no projects needs nothing to pay with,
     /// which is what lets one start with nothing configured at all — see
-    /// `docs/decisions/0021-an-instance-starts-empty.md`.
-    ///
-    /// An agent may not be removed while a project names it. Nothing here
-    /// prevents that directly, and three things catch it: [`State::used_by`]
-    /// is the query a caller consults first, sealing refuses a state that has
-    /// broken the rule, and opening refuses a file that has.
-    pub agents: BTreeMap<Agent, AgentConfig>,
+    /// `docs/decisions/0021-an-instance-starts-empty.md`. What may not
+    /// happen is a kit charging a purse that is not held, which
+    /// [`State::check`] refuses and [`State::charged_by`] is the query for.
+    pub purses: Purses,
     /// The projects it watches.
     pub projects: BTreeMap<ProjectId, Project>,
     /// The Apps it owns on each platform, at most one per platform. May be
@@ -1945,37 +2259,57 @@ pub struct State {
 // a recorded absolute path is the one thing in it that a different machine
 // makes wrong.
 
+/// Something that charges a purse: what would break if the purse were
+/// forgotten, named precisely enough for a page to say so.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Charge {
+    /// A project's foreman thinks on it.
+    Foreman(ProjectId),
+    /// A project offers a kit on it, under this name.
+    Kit(ProjectId, KitName),
+    /// A job that is not over runs on it, and would fail at its next turn.
+    Job(ProjectId, JobId),
+}
+
+impl Charge {
+    /// Whose it is.
+    #[must_use]
+    pub const fn project(&self) -> ProjectId {
+        match self {
+            Self::Foreman(project) | Self::Kit(project, _) | Self::Job(project, _) => *project,
+        }
+    }
+}
+
 impl State {
-    /// Which projects depend on an agent's configuration.
+    /// What charges a purse, project by project: its foreman, then the kits
+    /// it offers, then its jobs that are not over.
     ///
-    /// The query to consult before removing one. Empty means the agent can go;
-    /// anything else names what would break, which is what a dashboard needs in
-    /// order to say *why* rather than merely refusing.
+    /// The query to consult before forgetting one. Empty means the purse can
+    /// go; anything else names what would break, which is what a dashboard
+    /// needs in order to say *why* rather than merely refusing.
     ///
-    /// A project's *past* jobs are not considered and must not be: a job stores
-    /// its agent by value precisely so that removing a configuration cannot
+    /// A project's *finished* jobs are not considered and must not be: a job
+    /// stores its kit by value precisely so that forgetting a purse cannot
     /// rewrite the record of work already done — `docs/conventions.md` §2.
-    ///
-    /// Skipped by mutation testing, and equivalent rather than untested:
-    /// [`Agent`] has one member and a project's job agents are never empty, so
-    /// both sides of this condition are true for every project. Inverting the
-    /// comparison or replacing the `or` with an `and` changes nothing any test
-    /// could observe. **Delete this attribute in the commit that adds a second
-    /// agent** — a project naming one agent for its foreman and another for its jobs
-    /// is what makes this falsifiable, and it is the first thing that will
-    /// exist once there are two.
-    #[mutants::skip]
-    pub fn used_by(&self, agent: Agent) -> impl Iterator<Item = ProjectId> + '_ {
-        self.projects
-            .iter()
-            .filter(move |(_, project)| {
-                project.foreman_kit.agent() == agent
-                    || project
-                        .kits
-                        .values()
-                        .any(|offered| offered.kit.agent() == agent)
-            })
-            .map(|(id, _)| *id)
+    /// Its unfinished jobs are, because each would fail at its next turn,
+    /// which is as much a dependent as a kit that would fail at its next
+    /// start.
+    pub fn charged_by(&self, purse: PurseName) -> impl Iterator<Item = Charge> + '_ {
+        self.projects.iter().flat_map(move |(id, project)| {
+            let foreman = (project.foreman_kit.purse() == purse).then_some(Charge::Foreman(*id));
+            let kits = project
+                .kits
+                .iter()
+                .filter(move |(_, offered)| offered.kit.purse() == purse)
+                .map(move |(name, _)| Charge::Kit(*id, name.clone()));
+            let jobs = project
+                .jobs
+                .iter()
+                .filter(move |(_, job)| !job.progress.is_retired() && job.kit().purse() == purse)
+                .map(move |(job, _)| Charge::Job(*id, job.clone()));
+            foreman.into_iter().chain(kits).chain(jobs)
+        })
     }
 
     /// The credential that speaks for a project on a channel, whichever
@@ -2042,13 +2376,13 @@ impl State {
             if project.kits.is_empty() {
                 return Err(Inconsistent::NoKits(*id));
             }
-            for named in std::iter::once(project.foreman_kit.agent())
-                .chain(project.kits.values().map(|offered| offered.kit.agent()))
+            for charged in std::iter::once(project.foreman_kit.purse())
+                .chain(project.kits.values().map(|offered| offered.kit.purse()))
             {
-                if !self.agents.contains_key(&named) {
-                    return Err(Inconsistent::UnconfiguredProjectAgent {
+                if !self.purses.holds(charged) {
+                    return Err(Inconsistent::PurseNotHeld {
                         project: *id,
-                        agent: named,
+                        purse: charged,
                     });
                 }
             }
@@ -2302,18 +2636,11 @@ impl State {
         key: &Key,
         nonces: &mut impl FnMut() -> Nonce,
     ) -> Result<Snapshot, SealError> {
-        let agents = self
-            .agents
+        let purses = self
+            .purses
             .iter()
-            .map(|(agent, config)| {
-                Ok((
-                    *agent,
-                    SealedAgentConfig {
-                        auth_token: config.auth_token.seal(key, nonces())?,
-                    },
-                ))
-            })
-            .collect::<Result<BTreeMap<_, _>, SealError>>()?;
+            .map(|purse| purse.seal(key, nonces()))
+            .collect::<Result<Vec<_>, SealError>>()?;
 
         let apps = sealed_apps(&self.apps, key, nonces)?;
 
@@ -2373,14 +2700,16 @@ impl State {
                     SealedProject {
                         name: project.name.clone(),
                         repository: project.repository.https(),
-                        foreman_kit: project.foreman_kit.clone(),
+                        foreman_kit: WrittenKit::from(&project.foreman_kit),
                         // Names in the clear beside their kits, on the terms a
                         // variable's name travels: a name is not a credential,
                         // and the operator typed it in order to read it back.
                         kits: project
                             .kits
                             .iter()
-                            .map(|(name, offered)| (name.to_string(), offered.clone()))
+                            .map(|(name, offered)| {
+                                (name.to_string(), WrittenKitConfig::from(offered))
+                            })
                             .collect(),
                         credentials,
                         channels,
@@ -2407,7 +2736,10 @@ impl State {
             // field itself gives: this crate has no identity of its own to
             // write here, and inventing one would need randomness.
             instance: None,
-            agents,
+            purses,
+            // Never written again: what the last release kept here is read
+            // as a purse, and the field goes with the one-tag window.
+            agents: BTreeMap::new(),
             projects,
             apps,
             channel_apps,
@@ -2514,13 +2846,13 @@ pub enum Inconsistent {
     /// for, which is why this is a broken instance rather than an unusual one.
     #[error("project {0} has no kit its jobs can run on")]
     NoKits(ProjectId),
-    /// A project names an agent this instance does not configure.
-    #[error("project {project} names agent {agent:?}, which is not configured")]
-    UnconfiguredProjectAgent {
+    /// A project charges a purse this instance does not hold.
+    #[error("project {project} charges {purse:?}, which is not held")]
+    PurseNotHeld {
         /// The project holding the dangling reference.
         project: ProjectId,
-        /// The agent it names.
-        agent: Agent,
+        /// The purse it charges.
+        purse: PurseName,
     },
     /// A project reaches its repository through an installation the App
     /// does not hold — or holds no App at all.
@@ -2595,6 +2927,22 @@ pub enum OpenError {
     /// as the file is opened, because a file may have been edited by hand.
     #[error("the snapshot names a kit under a name that is not one")]
     KitName(#[source] KitNameError),
+    /// The file holds two purses of one name.
+    ///
+    /// The list a file holds is self-describing, so a name that appears twice
+    /// is a file that was edited by hand, and the second cannot be believed
+    /// over the first.
+    #[error("the snapshot holds the purse {0:?} twice")]
+    PurseRepeated(PurseName),
+    /// A kit in the file charges no purse, and the file holds nothing to
+    /// read one from.
+    ///
+    /// A file the last release wrote names no purse on any kit and holds the
+    /// one credential every kit charged, which opening reads as the purse
+    /// they charge; a file that names none and holds no such credential was
+    /// never written by any release.
+    #[error("the snapshot holds a kit that charges no purse")]
+    KitWithoutPurse,
 }
 
 /// One of a project's variables: its value, and what it is for.
@@ -2724,6 +3072,63 @@ impl SealedSecret {
     }
 }
 
+/// A purse as it appears on disk: which purse, and its credential sealed.
+///
+/// One variant per purse, tagged by its name, so that a file lists what it
+/// holds and a purse under another purse's name has no spelling. Read into
+/// [`Purses`] with a repeated name refused.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SealedPurse {
+    /// An Anthropic API key, sealed.
+    AnthropicKey(SealedSecret),
+    /// A Claude subscription's token, sealed.
+    AnthropicSubscription(SealedSecret),
+}
+
+impl Purse {
+    /// Seals this purse for storage.
+    ///
+    /// # Errors
+    ///
+    /// Fails only if the cipher rejects the input.
+    pub fn seal(&self, key: &Key, nonce: Nonce) -> Result<SealedPurse, SealError> {
+        let sealed = self.credential().seal(key, nonce)?;
+        Ok(match self.name() {
+            PurseName::AnthropicKey => SealedPurse::AnthropicKey(sealed),
+            PurseName::AnthropicSubscription => SealedPurse::AnthropicSubscription(sealed),
+        })
+    }
+}
+
+impl SealedPurse {
+    /// Which purse this is, read from the tag alone.
+    #[must_use]
+    pub const fn name(&self) -> PurseName {
+        match self {
+            Self::AnthropicKey(_) => PurseName::AnthropicKey,
+            Self::AnthropicSubscription(_) => PurseName::AnthropicSubscription,
+        }
+    }
+
+    /// The credential, still sealed.
+    #[must_use]
+    pub const fn sealed(&self) -> &SealedSecret {
+        match self {
+            Self::AnthropicKey(sealed) | Self::AnthropicSubscription(sealed) => sealed,
+        }
+    }
+
+    /// Recovers the purse.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the credential cannot be recovered, on [`SealedSecret::open`]'s
+    /// terms.
+    pub fn open(&self, key: &Key) -> Result<Purse, OpenError> {
+        Ok(Purse::new(self.name(), self.sealed().open(key)?))
+    }
+}
+
 /// How a project reaches a platform, as it appears on disk: a token
 /// sealed, or an installation by identifier.
 ///
@@ -2812,7 +3217,12 @@ impl SealedAccess {
     }
 }
 
-/// An agent's configuration as it appears on disk.
+/// An agent's configuration as the last release wrote it: read, and never
+/// written again.
+///
+/// The one credential a file of that release holds under the agent's name is
+/// read as the purse it was delivered as — see [`Snapshot::open`] — and this
+/// type goes with the one-tag window `docs/conventions.md` §4 sets.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SealedAgentConfig {
     /// The sealed credential.
@@ -2914,6 +3324,89 @@ pub struct SealedChannelConfig {
     pub listen_credential: Option<SealedSecret>,
 }
 
+/// A kit as it appears on disk.
+///
+/// The one shape a kit is written in and read from, and it differs from
+/// [`Kit`] by one thing: the purse is optional on the way in, because a file
+/// the last release wrote names none. Every kit that file wrote charged the
+/// one credential the file held under the agent's name, and that is what
+/// such a kit is read as charging — the true answer rather than a guess, per
+/// `docs/conventions.md` §4. On the way out the purse is always written, so
+/// a file upgrades itself on its first change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WrittenKit {
+    /// A kit for Claude.
+    Claude {
+        /// Which purse, or none in a file the last release wrote.
+        #[serde(default)]
+        purse: Option<ClaudePurse>,
+        /// Which model, and how hard it thinks where that is a choice.
+        model: ClaudeModel,
+    },
+}
+
+impl From<&Kit> for WrittenKit {
+    fn from(kit: &Kit) -> Self {
+        match kit {
+            Kit::Claude { purse, model } => Self::Claude {
+                purse: Some(*purse),
+                model: *model,
+            },
+        }
+    }
+}
+
+impl WrittenKit {
+    /// The kit this spells, charging the purse it names or, where it names
+    /// none, the one the file's older credential became.
+    ///
+    /// # Errors
+    ///
+    /// Fails if it names no purse and the file held no credential to read
+    /// one from, which no release ever wrote.
+    pub fn read(self, bridged: Option<ClaudePurse>) -> Result<Kit, OpenError> {
+        match self {
+            Self::Claude { purse, model } => Ok(Kit::Claude {
+                purse: purse.or(bridged).ok_or(OpenError::KitWithoutPurse)?,
+                model,
+            }),
+        }
+    }
+}
+
+/// A kit a project offers, as it appears on disk: the operator's description
+/// in the clear beside the kit as written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WrittenKitConfig {
+    /// What the project wants the kit for, in the operator's words.
+    pub description: String,
+    /// The kit, as written.
+    pub kit: WrittenKit,
+}
+
+impl From<&KitConfig> for WrittenKitConfig {
+    fn from(offered: &KitConfig) -> Self {
+        Self {
+            description: offered.description.clone(),
+            kit: WrittenKit::from(&offered.kit),
+        }
+    }
+}
+
+impl WrittenKitConfig {
+    /// The offered kit this spells, on [`WrittenKit::read`]'s terms.
+    ///
+    /// # Errors
+    ///
+    /// Fails as [`WrittenKit::read`] does.
+    pub fn read(self, bridged: Option<ClaudePurse>) -> Result<KitConfig, OpenError> {
+        Ok(KitConfig {
+            description: self.description,
+            kit: self.kit.read(bridged)?,
+        })
+    }
+}
+
 /// A job as it appears on disk: everything in the clear but the warrant.
 ///
 /// The bridges from what the last release wrote live here rather than on
@@ -2922,9 +3415,10 @@ pub struct SealedChannelConfig {
 /// it existed lacks, defaulted per `docs/conventions.md` §4.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SealedJob {
-    /// What it runs on. Written as `kit`, and read as the bare agent name
-    /// too, for the reason [`Job`] gives.
-    pub kit: Kit,
+    /// What it runs on, as written; read charging the purse it names or the
+    /// one the file's older credential became, for the reason [`WrittenKit`]
+    /// gives.
+    pub kit: WrittenKit,
     /// Why the foreman started it.
     pub reason: String,
     /// The instruction the agent begins from.
@@ -2983,7 +3477,7 @@ impl Job {
         nonces: &mut impl FnMut() -> Nonce,
     ) -> Result<SealedJob, SealError> {
         Ok(SealedJob {
-            kit: self.kit.clone(),
+            kit: WrittenKit::from(&self.kit),
             reason: self.reason.clone(),
             kickoff: self.kickoff.clone(),
             created_at: self.created_at,
@@ -3004,15 +3498,17 @@ impl Job {
 }
 
 impl SealedJob {
-    /// Recovers the record, its warrant opened.
+    /// Recovers the record, its warrant opened and its kit read charging the
+    /// purse it names or the one the file's older credential became.
     ///
     /// # Errors
     ///
     /// Fails if the warrant cannot be recovered, which means the key is
-    /// wrong or the file was altered.
-    pub fn open(self, key: &Key) -> Result<Job, OpenError> {
+    /// wrong or the file was altered, or if the kit charges no purse and
+    /// nothing was bridged.
+    pub fn open(self, key: &Key, bridged: Option<ClaudePurse>) -> Result<Job, OpenError> {
         Ok(Job {
-            kit: self.kit,
+            kit: self.kit.read(bridged)?,
             reason: self.reason,
             kickoff: self.kickoff,
             created_at: self.created_at,
@@ -3038,29 +3534,23 @@ pub struct SealedProject {
     /// opened: text that is not one refuses the file — see
     /// `docs/decisions/0079-a-repository-is-an-owner-and-a-name.md`.
     pub repository: String,
-    /// The kit its foreman thinks with.
+    /// The kit its foreman thinks with, as written; read charging the purse
+    /// it names or the one the file's older credential became, for the
+    /// reason [`WrittenKit`] gives.
     ///
-    /// Read under three spellings. The oldest files say `orchestrator_agent`,
-    /// from before `docs/decisions/0030-the-orchestrator-is-a-foreman.md`;
-    /// the ones after say `foreman_agent`; and both hold a bare agent name,
-    /// which reads as that agent's defaults through the same reader a job's
-    /// kit uses and for the same reason — nothing else existed to think with.
     /// A rename of a serialised name is never free, per `docs/conventions.md`
     /// §4, which gained that rule from this exact field failing to open a
-    /// real instance. Written under this name from now on, so a file upgrades
-    /// itself on its first change.
-    #[serde()]
-    pub foreman_kit: Kit,
+    /// real instance under an older spelling.
+    pub foreman_kit: WrittenKit,
     /// The kits its jobs may run on, keyed by plain text.
     ///
     /// Plain text rather than the validated name, for the reason the
     /// variables below are: a file is untrusted input, so a name is checked as
     /// the snapshot is opened rather than trusted because something once
     /// checked it. Defaulted because it was added after snapshots existed,
-    /// and empty is the true answer for a file that carries `job_agents`
-    /// instead — the open path reads one from the other.
+    /// and empty is refused on opening, since a project needs one.
     #[serde(default)]
-    pub kits: BTreeMap<String, KitConfig>,
+    pub kits: BTreeMap<String, WrittenKitConfig>,
     /// The operator's brief for its foreman, in the clear: written to be
     /// read, like a kit's description.
     ///
@@ -3157,7 +3647,16 @@ pub struct Snapshot {
     /// keeps it.
     #[serde(default)]
     pub instance: Option<InstanceId>,
-    /// The configured agents, sealed.
+    /// The purses held, sealed, each saying which it is. Defaulted, because
+    /// a file the last release wrote has none: it held the one credential
+    /// under `agents` below, which opening reads as a purse.
+    #[serde(default)]
+    pub purses: Vec<SealedPurse>,
+    /// The agents' credentials as the last release wrote them: read, and
+    /// never written again. Empty in every file this build writes, and left
+    /// out of it; the one-tag window `docs/conventions.md` §4 sets is what
+    /// retires the field.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub agents: BTreeMap<Agent, SealedAgentConfig>,
     /// The projects, sealed.
     pub projects: BTreeMap<ProjectId, SealedProject>,
@@ -3296,9 +3795,10 @@ impl SealedProject {
     /// # Errors
     ///
     /// Fails if a credential cannot be recovered, if a variable's or a
-    /// kit's name could not be delivered, or if the repository is text that
-    /// is not an address on the platform.
-    pub fn open(self, key: &Key) -> Result<Project, OpenError> {
+    /// kit's name could not be delivered, if a kit charges no purse and
+    /// nothing was bridged, or if the repository is text that is not an
+    /// address on the platform.
+    pub fn open(self, key: &Key, bridged: Option<ClaudePurse>) -> Result<Project, OpenError> {
         let access = self
             .credentials
             .into_iter()
@@ -3354,13 +3854,13 @@ impl SealedProject {
             .into_iter()
             .map(|(name, offered)| {
                 let name = KitName::new(name).map_err(OpenError::KitName)?;
-                Ok((name, offered))
+                Ok((name, offered.read(bridged)?))
             })
             .collect::<Result<BTreeMap<_, _>, OpenError>>()?;
         let jobs = self
             .jobs
             .into_iter()
-            .map(|(job, sealed)| Ok((job, sealed.open(key)?)))
+            .map(|(job, sealed)| Ok((job, sealed.open(key, bridged)?)))
             .collect::<Result<BTreeMap<_, _>, OpenError>>()?;
         // Where the repository's text stops being believed: an address is
         // what everything downstream composes from — see
@@ -3373,7 +3873,7 @@ impl SealedProject {
         Ok(Project {
             name: self.name,
             repository,
-            foreman_kit: self.foreman_kit,
+            foreman_kit: self.foreman_kit.read(bridged)?,
             kits,
             access,
             channels,
@@ -3387,18 +3887,31 @@ impl SealedProject {
     }
 }
 
+/// What the first characters of a credential the last release wrote say
+/// about which purse it was.
+///
+/// That release chose the variable to deliver a credential in by exactly
+/// this test, so reading its file by the same test is the true answer rather
+/// than a guess. Kept here as the reading of that one file and nothing else:
+/// what a credential of each kind looks like is the provider crate's to say
+/// from now on, at the box it is pasted into.
+const OLDER_SUBSCRIPTION_PREFIX: &str = "sk-ant-oat";
+
 impl Snapshot {
     /// Decrypts and validates, yielding state that can be relied on.
     ///
     /// # Errors
     ///
-    /// Fails if any credential cannot be recovered, or if the snapshot is
-    /// internally inconsistent — currently, if the agent it names as the
-    /// foreman's has no configuration. That check is what lets every
-    /// later caller look that agent up without handling an absence.
+    /// Fails if any credential cannot be recovered, if a purse is held
+    /// twice, if a kit charges no purse and the file holds no older
+    /// credential to read one from, or if the snapshot is internally
+    /// inconsistent — a kit charging a purse that is not held, most of all.
+    /// That check is what lets every later caller look a purse up without
+    /// handling an absence.
     pub fn open(self, key: &Key) -> Result<State, OpenError> {
         let Self {
             instance: _,
+            purses,
             agents,
             projects,
             apps,
@@ -3406,17 +3919,33 @@ impl Snapshot {
             password,
         } = self;
 
-        let agents = agents
-            .into_iter()
-            .map(|(agent, config)| {
-                Ok((
-                    agent,
-                    AgentConfig {
-                        auth_token: config.auth_token.open(key)?,
-                    },
-                ))
-            })
-            .collect::<Result<BTreeMap<_, _>, OpenError>>()?;
+        // Where the file's purses stop being believed: each is what its tag
+        // says, and a name that appears twice cannot be.
+        let mut held = Purses::default();
+        for sealed in &purses {
+            if held.holds(sealed.name()) {
+                return Err(OpenError::PurseRepeated(sealed.name()));
+            }
+            held.hold(sealed.open(key)?);
+        }
+        // The one credential the last release wrote under the agent's name
+        // becomes the purse it was delivered as, and every kit that file
+        // wrote is read as charging it. Only where no purse was written: a
+        // file this build wrote lists its purses and names one on every kit.
+        let bridged = if purses.is_empty()
+            && let Some(config) = agents.get(&Agent::Claude)
+        {
+            let credential = config.auth_token.open(key)?;
+            let purse = if credential.expose().starts_with(OLDER_SUBSCRIPTION_PREFIX) {
+                ClaudePurse::Subscription
+            } else {
+                ClaudePurse::Key
+            };
+            held.hold(Purse::new(purse.name(), credential));
+            Some(purse)
+        } else {
+            None
+        };
 
         let apps = opened_apps(apps, key)?;
         let channel_apps = opened_channel_apps(channel_apps, key)?;
@@ -3424,11 +3953,11 @@ impl Snapshot {
 
         let projects = projects
             .into_iter()
-            .map(|(id, project)| Ok((id, project.open(key)?)))
+            .map(|(id, project)| Ok((id, project.open(key, bridged)?)))
             .collect::<Result<BTreeMap<_, _>, OpenError>>()?;
 
         let state = State {
-            agents,
+            purses: held,
             projects,
             apps,
             channel_apps,
@@ -3590,6 +4119,16 @@ impl Role {
 /// holds credentials for its own project and no other — holds by construction
 /// rather than by review.
 ///
+/// **The purse is not here.** A handout is what a container is made with,
+/// fixed for the container's life, and the purse its kit charges is the one
+/// thing an agent's process is handed that a container is not made with: it
+/// travels with every turn, as a [`ChargedPurse`], selected again each time
+/// the agent is run. So this type has nowhere to put one, and a container
+/// holding the purse is not a state to check for — see
+/// `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`. The kit is
+/// here, because an image and a session are chosen by it, and it names the
+/// purse without holding it.
+///
 /// It carries credentials, so like [`Secret`] it redacts when formatted and
 /// deliberately implements no serialisation: a handout is what a process is
 /// about to be handed, never state, and nothing should be able to write one to
@@ -3604,7 +4143,6 @@ pub struct Handout {
     // must have nothing to check out; see
     // `docs/decisions/0050-the-repository-is-checked-out-before-the-first-turn.md`.
     repository: Option<String>,
-    agent_credential: Secret,
     // Which platforms the job reaches, and never a credential for one: since
     // `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`
     // a job fetches its project's credential with the warrant below when a
@@ -3621,9 +4159,9 @@ pub struct Handout {
 }
 
 impl Handout {
-    /// What the agent a project's foreman thinks with is handed.
+    /// What the container a project's foreman thinks in is made with.
     ///
-    /// Its own credential, and no platform credential at all: a foreman judges
+    /// No platform credential at all: a foreman judges
     /// signals rather than acting on them, so it has no repository to reach and
     /// nothing to authenticate against — see
     /// `docs/decisions/0012-agents-run-in-containers.md`.
@@ -3643,26 +4181,12 @@ impl Handout {
     ///
     /// # Errors
     ///
-    /// Fails if the project is not one this instance watches, or if its
-    /// foreman's agent has no configuration — which the invariant in
-    /// `docs/decisions/0021-an-instance-starts-empty.md` says cannot happen,
-    /// since it holds at construction and is checked again on the way in and
-    /// out of a snapshot.
-    ///
-    /// The signature admits it anyway, and deliberately: the alternative is a
-    /// total function substituting an empty credential for a missing one, which
-    /// turns a state that cannot occur into an authentication failure somewhere
-    /// else entirely. `.quality/gate-reference.md` forbids exactly that trade.
+    /// Fails if the project is not one this instance watches.
     pub fn for_foreman(state: &State, project: ProjectId) -> Result<Self, HandoutError> {
         let watching = state
             .projects
             .get(&project)
             .ok_or(HandoutError::UnknownProject(project))?;
-        let agent = watching.foreman_kit.agent();
-        let config = state
-            .agents
-            .get(&agent)
-            .ok_or(HandoutError::UnconfiguredAgent(agent))?;
         Ok(Self {
             kit: watching.foreman_kit.clone(),
             role: Role::Foreman,
@@ -3671,7 +4195,6 @@ impl Handout {
             // could check anything out into one — see
             // `docs/decisions/0036-a-foremans-image-is-not-a-jobs.md`.
             repository: None,
-            agent_credential: config.auth_token.clone(),
             platforms: BTreeSet::new(),
             // A foreman fetches nothing, so it is given nothing to fetch
             // with.
@@ -3688,9 +4211,10 @@ impl Handout {
         })
     }
 
-    /// What a job's agent is handed: its own credential, the job's own
-    /// warrant, and the variables and channel bindings of the one project
-    /// the job belongs to.
+    /// What a job's container is made with: the job's own warrant, and the
+    /// variables and channel bindings of the one project the job belongs to.
+    /// The purse its kit charges is handed to its agent with every turn
+    /// instead, as a [`ChargedPurse`].
     ///
     /// No platform credential, since
     /// `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`:
@@ -3706,22 +4230,15 @@ impl Handout {
     ///
     /// # Errors
     ///
-    /// Fails if the project is not one this instance watches, or if the agent
-    /// has no configuration. Both are refusals rather than empty handouts: a
-    /// process started with nothing to authenticate with fails later, further
-    /// from the cause, and `docs/conventions.md` §3 would rather that be a
-    /// visible job failure than a mystery.
+    /// Fails if the project is not one this instance watches: a refusal
+    /// rather than an empty handout, since a container made with nothing of
+    /// its project's fails later, further from the cause.
     pub fn for_job(
         state: &State,
         kit: Kit,
         project: ProjectId,
         warrant: Secret,
     ) -> Result<Self, HandoutError> {
-        let agent = kit.agent();
-        let config = state
-            .agents
-            .get(&agent)
-            .ok_or(HandoutError::UnconfiguredAgent(agent))?;
         let watched = state
             .projects
             .get(&project)
@@ -3730,7 +4247,6 @@ impl Handout {
             kit,
             role: Role::Job,
             repository: Some(watched.repository.https()),
-            agent_credential: config.auth_token.clone(),
             platforms: watched.access.keys().copied().collect(),
             warrant: Some(warrant),
             variables: watched.variables.clone(),
@@ -3766,12 +4282,6 @@ impl Handout {
     #[must_use]
     pub const fn role(&self) -> Role {
         self.role
-    }
-
-    /// What the agent authenticates with.
-    #[must_use]
-    pub const fn agent_credential(&self) -> &Secret {
-        &self.agent_credential
     }
 
     /// Where the repository this job works on lives, or nothing for a foreman.
@@ -3888,7 +4398,6 @@ impl fmt::Debug for Handout {
             .field("role", &self.role)
             // A URL rather than a secret, and every kickoff embeds it already.
             .field("repository", &self.repository)
-            .field("agent_credential", &"<redacted>")
             .field("platforms", &self.platforms)
             .field("warrant", &self.warrant.as_ref().map(|_| "<redacted>"))
             // Names, never values. A name is not a credential — the operator
@@ -3915,12 +4424,88 @@ fn speaking(state: &State, project: ProjectId) -> BTreeMap<Channel, Speaking> {
         .collect()
 }
 
+/// The purse one kit charges, in hand: the kit, and the credential this
+/// instance holds for the purse the kit names.
+///
+/// What an agent's process is handed to pay with, and the one thing it is
+/// handed that a [`Handout`] has nowhere to put. It travels with every turn
+/// rather than with the container: selected again each time the agent is
+/// run, so that the credential handed over is the one held at that moment —
+/// a replaced one reaches a foreman at its next message and a job when it
+/// resumes — and so that a container never holds one. See
+/// `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`.
+///
+/// Built by [`State::charged_purse`] and by nothing else, which selects by
+/// the kit's own name for its purse. The pairing an adapter delivers by —
+/// this credential, under the variable that kit's agent reads that purse
+/// from — is therefore made in one place, and a credential handed under
+/// another purse's variable is not a state to check for but one that cannot
+/// be built. The failure it rules out is the one
+/// `docs/decisions/0008-one-credential-per-agent.md` exists for: no error,
+/// no log line, and somebody else's purse paying.
+///
+/// It carries a credential, so like [`Secret`] it redacts when formatted and
+/// deliberately implements no serialisation.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ChargedPurse {
+    kit: Kit,
+    credential: Secret,
+}
+
+impl ChargedPurse {
+    /// The kit that charges it: which agent, and which of the purses that
+    /// agent can charge, which is what an adapter chooses the variable by.
+    #[must_use]
+    pub const fn kit(&self) -> &Kit {
+        &self.kit
+    }
+
+    /// The credential itself.
+    #[must_use]
+    pub const fn credential(&self) -> &Secret {
+        &self.credential
+    }
+}
+
+impl fmt::Debug for ChargedPurse {
+    /// Names the purse and never its contents.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ChargedPurse({:?}, <redacted>)", self.kit.purse())
+    }
+}
+
+/// A kit charges a purse this instance does not hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("the purse {0:?} is not held")]
+pub struct NotHeld(pub PurseName);
+
+impl State {
+    /// The purse a kit charges, as this instance holds it now.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the purse is not held. [`State::check`] makes that
+    /// unreachable for a foreman's kit and an offered one, and
+    /// [`State::charged_by`] for an unfinished job's while forgetting goes
+    /// through it; a file edited by hand can still say so. The signature
+    /// admits it, and deliberately: the alternative is a total function
+    /// substituting an empty credential for a missing one, which turns a
+    /// state that should not occur into an authentication failure somewhere
+    /// else entirely. `.quality/gate-reference.md` forbids exactly that
+    /// trade, and the turn that finds out fails saying which purse.
+    pub fn charged_purse(&self, kit: &Kit) -> Result<ChargedPurse, NotHeld> {
+        let name = kit.purse();
+        let held = self.purses.get(name).ok_or(NotHeld(name))?;
+        Ok(ChargedPurse {
+            kit: kit.clone(),
+            credential: held.credential().clone(),
+        })
+    }
+}
+
 /// A handout could not be decided.
 #[derive(Debug, thiserror::Error)]
 pub enum HandoutError {
-    /// The agent has no configuration in this instance.
-    #[error("the agent {0:?} has no configuration in this instance")]
-    UnconfiguredAgent(Agent),
     /// The project is not one this instance watches.
     #[error("no project {0} in this instance")]
     UnknownProject(ProjectId),
@@ -3929,13 +4514,15 @@ pub enum HandoutError {
 #[cfg(test)]
 mod tests {
     use super::{
-        Access, Agent, AgentConfig, Arriving, Attending, BASE64, Binding, Channel, ChannelApp,
-        ChannelConfig, ClaudeEffort, ClaudeModel, Errand, Handout, HandoutError, Inbox,
+        Access, Agent, Arriving, Attending, BASE64, Binding, Channel, ChannelApp, ChannelConfig,
+        Charge, ClaudeEffort, ClaudeModel, ClaudePurse, Errand, Handout, HandoutError, Inbox,
         Inconsistent, Installation, Job, JobId, Key, Kit, KitConfig, KitName, KitNameError,
-        NONCE_LEN, Nonce, OpenError, Outcome, Place, Platform, PlatformApp, Progress, Project,
-        ProjectId, Recipient, RepositoryAddress, RepositoryError, Room, SealedAccess,
-        SealedBinding, SealedChannelApp, SealedJob, SealedPlatformApp, Secret, Snapshot, State,
-        Taken, Thread, Variable, VariableName, VariableNameError, Waiting, Workspace,
+        NONCE_LEN, Nonce, NotHeld, OpenError, Outcome, Place, Platform, PlatformApp, Progress,
+        Project, ProjectId, Provider, Purse, PurseKind, PurseName, Purses, Recipient,
+        RepositoryAddress, RepositoryError, Room, SealedAccess, SealedBinding, SealedChannelApp,
+        SealedJob, SealedPlatformApp, SealedPurse, Secret, Snapshot, State, Taken, Thread,
+        Variable, VariableName, VariableNameError, Waiting, Workspace, WrittenKit,
+        WrittenKitConfig,
     };
     use base64::Engine as _;
     use jiff::Timestamp;
@@ -3978,30 +4565,34 @@ mod tests {
 
     /// The same variable on the other project, holding somebody else's value.
     const ALIEN_VARIABLE_VALUE: &str = "sk-test-belongs-to-somebody-else";
-    /// An instance with an agent configured and nothing else.
+    /// An instance holding one purse, the Anthropic key, and nothing else.
     fn configured() -> State {
+        let mut purses = Purses::default();
+        purses.hold(Purse::AnthropicKey(Secret::new("agent-token".to_owned())));
         State {
             apps: std::collections::BTreeMap::new(),
             channel_apps: std::collections::BTreeMap::new(),
             password: None,
-            agents: BTreeMap::from([(
-                Agent::Claude,
-                AgentConfig {
-                    auth_token: Secret::new("agent-token".to_owned()),
-                },
-            )]),
+            purses,
             ..State::default()
         }
+    }
+
+    /// Claude as it comes, charging the purse the fixture holds.
+    fn a_kit() -> Kit {
+        Kit::defaults(Agent::Claude, PurseName::AnthropicKey).expect("Claude charges a key")
+    }
+
+    /// The kit above, described as Claude describes itself.
+    fn a_kit_config() -> KitConfig {
+        KitConfig::defaults(Agent::Claude, PurseName::AnthropicKey).expect("Claude charges a key")
     }
 
     /// The kits a project's jobs may run on, for a project offering one: its
     /// agent's defaults, under the agent's name — which is exactly what a
     /// project written before kits existed opens as.
     fn default_kits() -> BTreeMap<KitName, KitConfig> {
-        BTreeMap::from([(
-            KitName::new("Claude").expect("a name"),
-            KitConfig::defaults(Agent::Claude),
-        )])
+        BTreeMap::from([(KitName::new("Claude").expect("a name"), a_kit_config())])
     }
 
     fn a_project_with_a_job() -> Project {
@@ -4019,7 +4610,7 @@ mod tests {
         jobs.insert(
             JobId::from_uuid(Uuid::from_u128(9)),
             Job::new(
-                Kit::defaults(Agent::Claude),
+                a_kit(),
                 "an issue was opened".to_owned(),
                 "work on it".to_owned(),
                 Timestamp::UNIX_EPOCH,
@@ -4029,7 +4620,7 @@ mod tests {
         Project {
             name: "example".to_owned(),
             repository: RepositoryAddress::new("example", "repo").expect("an address"),
-            foreman_kit: Kit::defaults(Agent::Claude),
+            foreman_kit: a_kit(),
             kits: default_kits(),
             access,
             channels,
@@ -4100,45 +4691,197 @@ mod tests {
     fn a_fresh_instance_has_nothing_and_is_still_a_state() {
         let empty = State::default();
 
-        assert!(empty.agents.is_empty());
+        assert!(empty.purses.is_empty());
         assert!(empty.projects.is_empty());
     }
 
     #[test]
-    fn a_project_names_the_agent_its_foreman_thinks_with() {
+    fn a_project_charges_a_purse_its_instance_holds() {
         let state = populated();
         let project = state.projects.values().next().expect("one project");
 
-        assert!(state.agents.contains_key(&project.foreman_kit.agent()));
+        assert!(state.purses.holds(project.foreman_kit.purse()));
         assert!(
             project
                 .kits
                 .values()
-                .any(|offered| offered.kit.agent() == Agent::Claude)
+                .all(|offered| state.purses.holds(offered.kit.purse()))
         );
     }
 
-    /// The rule a dashboard has to enforce, and the query it enforces it with.
+    /// The rule a dashboard has to enforce, and the query it enforces it
+    /// with: a foreman, an offered kit and a job that is not over each
+    /// charge the purse, and a job that is over does not.
     #[test]
-    fn an_agent_a_project_names_reports_which_projects_would_break() {
-        let state = populated();
-        let depending: Vec<ProjectId> = state.used_by(Agent::Claude).collect();
+    fn a_purse_reports_what_charges_it_and_would_break() {
+        let mut state = populated();
+        let project = *state.projects.keys().next().expect("a project");
+        let job = state
+            .projects
+            .get(&project)
+            .and_then(|watched| watched.jobs.keys().next().cloned())
+            .expect("the job");
 
-        assert_eq!(depending.len(), 1, "{depending:?}");
-        assert_eq!(configured().used_by(Agent::Claude).count(), 0);
+        let charges: Vec<Charge> = state.charged_by(PurseName::AnthropicKey).collect();
+        assert_eq!(
+            charges,
+            vec![
+                Charge::Foreman(project),
+                Charge::Kit(project, KitName::new("Claude").expect("a name")),
+                Charge::Job(project, job.clone()),
+            ]
+        );
+        assert!(charges.iter().all(|charge| charge.project() == project));
+        assert_eq!(
+            state.charged_by(PurseName::AnthropicSubscription).count(),
+            0,
+            "nothing charges the purse nothing names"
+        );
+        assert_eq!(configured().charged_by(PurseName::AnthropicKey).count(), 0);
+
+        // Over, and so no longer a dependent: forgetting the purse cannot
+        // break a job that will never take another turn.
+        state
+            .projects
+            .get_mut(&project)
+            .and_then(|watched| watched.jobs.get_mut(&job))
+            .expect("the job")
+            .progress = Progress::Retired(Outcome::Done);
+        let charges: Vec<Charge> = state.charged_by(PurseName::AnthropicKey).collect();
+        assert_eq!(charges.len(), 2, "{charges:?}");
+        assert!(!charges.contains(&Charge::Job(project, job)));
     }
 
     /// One definition of valid, asked directly. Everything that persists or
     /// loads a state consults this rather than repeating the rule.
     #[test]
-    fn a_state_that_lost_an_agent_a_project_names_is_not_consistent() {
+    fn a_state_that_lost_a_purse_a_project_charges_is_not_consistent() {
         let mut state = populated();
-        state.agents.clear();
+        state.purses = Purses::default();
 
-        assert!(matches!(
+        assert_eq!(
             state.check(),
-            Err(Inconsistent::UnconfiguredProjectAgent { .. })
-        ));
+            Err(Inconsistent::PurseNotHeld {
+                project: ProjectId::from_uuid(Uuid::from_u128(3)),
+                purse: PurseName::AnthropicKey,
+            })
+        );
+    }
+
+    /// A purse is held under its own name and nowhere else, one of each,
+    /// and holding one again replaces it, which is what rotating means.
+    #[test]
+    fn a_purse_is_held_under_its_own_name_and_one_of_each() {
+        let mut purses = Purses::default();
+        assert!(purses.is_empty());
+
+        let first = Purse::new(PurseName::AnthropicKey, Secret::new("first".to_owned()));
+        assert_eq!(first.name(), PurseName::AnthropicKey);
+        assert_eq!(purses.hold(first), None);
+        assert!(!purses.is_empty(), "one is held");
+        assert!(purses.holds(PurseName::AnthropicKey));
+        assert!(!purses.holds(PurseName::AnthropicSubscription));
+
+        let replaced = purses.hold(Purse::AnthropicKey(Secret::new("second".to_owned())));
+        assert_eq!(
+            replaced.as_ref().map(|purse| purse.credential().expose()),
+            Some("first")
+        );
+        assert_eq!(
+            purses
+                .get(PurseName::AnthropicKey)
+                .map(|purse| purse.credential().expose()),
+            Some("second")
+        );
+        purses.hold(Purse::AnthropicSubscription(Secret::new("sub".to_owned())));
+        assert_eq!(
+            purses.names().collect::<Vec<_>>(),
+            vec![PurseName::AnthropicKey, PurseName::AnthropicSubscription]
+        );
+        assert_eq!(purses.iter().count(), 2);
+
+        assert!(purses.forget(PurseName::AnthropicKey).is_some());
+        assert!(purses.forget(PurseName::AnthropicKey).is_none());
+        assert_eq!(
+            purses.names().collect::<Vec<_>>(),
+            vec![PurseName::AnthropicSubscription]
+        );
+        assert!(purses.forget(PurseName::AnthropicSubscription).is_some());
+        assert!(purses.is_empty(), "and nothing is, once the last has gone");
+    }
+
+    /// A purse names its provider and its kind, and every provider is
+    /// named by at least one purse.
+    #[test]
+    fn a_purse_names_its_provider_and_its_kind() {
+        assert_eq!(PurseName::AnthropicKey.provider(), Provider::Anthropic);
+        assert_eq!(PurseName::AnthropicKey.kind(), PurseKind::Key);
+        assert_eq!(
+            PurseName::AnthropicSubscription.provider(),
+            Provider::Anthropic
+        );
+        assert_eq!(
+            PurseName::AnthropicSubscription.kind(),
+            PurseKind::Subscription
+        );
+        for provider in Provider::ALL {
+            assert!(
+                PurseName::ALL
+                    .iter()
+                    .any(|purse| purse.provider() == *provider),
+                "{provider:?} hands out no purse"
+            );
+        }
+        assert_eq!(Provider::Anthropic.name(), "Anthropic");
+    }
+
+    /// A kit charges a purse its agent can, and the purse is read back from
+    /// the kit rather than stored beside it.
+    #[test]
+    fn a_kit_charges_a_purse_its_agent_can_and_says_which() {
+        for purse in PurseName::ALL {
+            assert!(Agent::Claude.charges(*purse));
+            let kit = Kit::defaults(Agent::Claude, *purse).expect("Claude charges both");
+            assert_eq!(kit.purse(), *purse);
+            assert_eq!(kit.agent(), Agent::Claude);
+        }
+        // Every agent there is charges every purse there is, which is what
+        // makes `Agent::charges` true for every input and its skip honest.
+        // This is the line that fails when an agent lands that cannot charge
+        // some purse: delete the attribute then, and assert the refusal here.
+        for agent in Agent::ALL {
+            assert_eq!(
+                agent.purses().collect::<BTreeSet<_>>(),
+                PurseName::ALL.iter().copied().collect::<BTreeSet<_>>(),
+                "{agent:?}"
+            );
+        }
+        // The subscription first: it is what a new kit charges when both are
+        // held.
+        assert_eq!(
+            Agent::Claude.purses().collect::<Vec<_>>(),
+            vec![PurseName::AnthropicSubscription, PurseName::AnthropicKey]
+        );
+        for purse in ClaudePurse::ALL {
+            assert_eq!(ClaudePurse::of(purse.name()), Some(*purse));
+            assert_eq!(PurseName::from(*purse), purse.name());
+        }
+    }
+
+    /// The credential inside a purse is never formatted, on the terms a
+    /// secret's is not.
+    #[test]
+    fn a_purse_does_not_leak_when_formatted() {
+        let purse = Purse::AnthropicSubscription(Secret::new("sk-ant-oat01-real".to_owned()));
+        let debugged = format!("{purse:?}");
+        let displayed = format!("{purse}");
+
+        assert!(!debugged.contains("real"), "{debugged}");
+        assert!(debugged.contains("AnthropicSubscription"), "{debugged}");
+        assert_eq!(displayed, "<redacted>");
+        let mut purses = Purses::default();
+        purses.hold(purse);
+        assert!(!format!("{purses:?}").contains("real"));
     }
 
     #[test]
@@ -4167,6 +4910,7 @@ mod tests {
         let deep = KitConfig {
             description: "for refactors touching many files; costs several times more".to_owned(),
             kit: Kit::Claude {
+                purse: ClaudePurse::Key,
                 model: ClaudeModel::Opus {
                     effort: ClaudeEffort::XHigh,
                 },
@@ -4177,6 +4921,7 @@ mod tests {
                 .kits
                 .insert(KitName::new("deep").expect("a name"), deep.clone());
             project.foreman_kit = Kit::Claude {
+                purse: ClaudePurse::Key,
                 model: ClaudeModel::Haiku,
             };
         }
@@ -4199,6 +4944,7 @@ mod tests {
         assert_eq!(
             project.foreman_kit,
             Kit::Claude {
+                purse: ClaudePurse::Key,
                 model: ClaudeModel::Haiku
             }
         );
@@ -4211,7 +4957,7 @@ mod tests {
         for project in sealed.projects.values_mut() {
             project
                 .kits
-                .insert("   ".to_owned(), KitConfig::defaults(Agent::Claude));
+                .insert("   ".to_owned(), WrittenKitConfig::from(&a_kit_config()));
         }
 
         assert!(matches!(sealed.open(&key()), Err(OpenError::KitName(_))));
@@ -4241,22 +4987,22 @@ mod tests {
     }
 
     #[test]
-    fn a_jobs_agent_survives_that_agent_being_deconfigured() {
-        // The reason a job stores an agent by value rather than by reference:
-        // removing configuration is ordinary housekeeping, and it must not
+    fn a_jobs_kit_survives_its_purse_being_forgotten() {
+        // The reason a job stores its kit by value rather than by reference:
+        // forgetting a purse is ordinary housekeeping, and it must not
         // rewrite the record of work already done.
         let mut state = configured();
         let project = a_project_with_a_job();
         state
             .projects
             .insert(ProjectId::from_uuid(Uuid::from_u128(3)), project);
-        state.agents.remove(&Agent::Claude);
+        state.purses.forget(PurseName::AnthropicKey);
 
         let still_recorded = state
             .projects
             .values()
             .flat_map(|project| project.jobs.values())
-            .all(|job| job.kit().agent() == Agent::Claude);
+            .all(|job| job.kit().purse() == PurseName::AnthropicKey);
         assert!(still_recorded);
     }
 
@@ -4663,10 +5409,10 @@ mod tests {
         // like a tidy-up.
         let snapshot = sealed();
         let agent_nonce = &snapshot
-            .agents
-            .get(&Agent::Claude)
-            .expect("the agent is configured")
-            .auth_token
+            .purses
+            .first()
+            .expect("the purse is held")
+            .sealed()
             .nonce;
         let project = snapshot
             .projects
@@ -4762,9 +5508,23 @@ mod tests {
 
             let job = serde_json::from_str::<SealedJob>(&older)
                 .unwrap_or_else(|why| panic!("{written} must still parse: {why}"))
-                .open(&key())
+                .open(&key(), Some(ClaudePurse::Subscription))
                 .expect("and opens, holding no warrant to unseal");
             assert_eq!(job.progress, expected);
+            assert_eq!(
+                job.kit().purse(),
+                PurseName::AnthropicSubscription,
+                "a kit written without a purse charges the one the file's credential became"
+            );
+            assert!(
+                matches!(
+                    serde_json::from_str::<SealedJob>(&older)
+                        .expect("parses")
+                        .open(&key(), None),
+                    Err(OpenError::KitWithoutPurse)
+                ),
+                "and with nothing to read a purse from, it is refused"
+            );
             assert!(
                 job.warrant().is_none(),
                 "a job written before warrants existed has none"
@@ -4813,7 +5573,7 @@ mod tests {
             let job = Job {
                 progress: progress.clone(),
                 ..Job::new(
-                    Kit::defaults(Agent::Claude),
+                    a_kit(),
                     "a reason".to_owned(),
                     "some work".to_owned(),
                     Timestamp::UNIX_EPOCH,
@@ -4827,8 +5587,8 @@ mod tests {
             .expect("a job serialises");
             let read = serde_json::from_str::<SealedJob>(&written)
                 .expect("and parses back")
-                .open(&key())
-                .expect("and opens");
+                .open(&key(), None)
+                .expect("and opens, its kit naming its purse");
             assert_eq!(read.progress, progress);
         }
     }
@@ -4859,6 +5619,7 @@ mod tests {
         let job = JobId::from_uuid(Uuid::from_u128(11));
         let mut recorded = Job::new(
             Kit::Claude {
+                purse: ClaudePurse::Subscription,
                 model: ClaudeModel::Opus {
                     effort: ClaudeEffort::XHigh,
                 },
@@ -4891,10 +5652,12 @@ mod tests {
         assert_eq!(
             *survived.kit(),
             Kit::Claude {
+                purse: ClaudePurse::Subscription,
                 model: ClaudeModel::Opus {
                     effort: ClaudeEffort::XHigh,
                 },
-            }
+            },
+            "the purse a job charged is its own, held or not"
         );
         assert_eq!(
             survived.reported.get("model").map(String::as_str),
@@ -4925,7 +5688,28 @@ mod tests {
                 Some(*effort)
             );
         }
-        assert_eq!(Kit::defaults(Agent::Claude).agent(), Agent::Claude);
+        assert_eq!(a_kit().agent(), Agent::Claude);
+        assert_eq!(a_kit().purse(), PurseName::AnthropicKey);
+    }
+
+    /// What is written is the kit with its purse, and what is read is the
+    /// same kit: the file's one reader reads what its one writer writes.
+    #[test]
+    fn a_kit_is_written_with_its_purse_and_read_back_as_itself() {
+        let kit = Kit::Claude {
+            purse: ClaudePurse::Subscription,
+            model: ClaudeModel::Haiku,
+        };
+        let written = serde_json::to_value(WrittenKit::from(&kit)).expect("it serialises");
+        assert_eq!(
+            written,
+            serde_json::json!({ "Claude": { "purse": "Subscription", "model": "Haiku" } })
+        );
+        let read = serde_json::from_value::<WrittenKit>(written)
+            .expect("and parses")
+            .read(None)
+            .expect("naming its purse, it needs no bridge");
+        assert_eq!(read, kit);
     }
 
     /// A snapshot as the last release wrote it still opens, whole.
@@ -4963,16 +5747,29 @@ mod tests {
     /// could run on. The last release read one and never wrote one, so a
     /// file it wrote has kits and nothing else.
     fn written_by_the_last_release() -> String {
+        written_by_the_last_release_holding("agent-token")
+    }
+
+    /// The same file, with the agent's credential as given: what that
+    /// release delivered as a subscription token or as a key, by its first
+    /// characters, is what opening reads it as.
+    fn written_by_the_last_release_holding(agent_token: &str) -> String {
         let sealed = serde_json::to_string(
             &Secret::new("agent-token".to_owned())
                 .seal(&key(), [1; NONCE_LEN])
                 .expect("sealing a well-formed secret"),
         )
         .expect("a sealed secret serialises");
+        let sealed_agent = serde_json::to_string(
+            &Secret::new(agent_token.to_owned())
+                .seal(&key(), [2; NONCE_LEN])
+                .expect("sealing a well-formed secret"),
+        )
+        .expect("a sealed secret serialises");
         format!(
             r#"{{
               "agents": {{
-                "Claude": {{ "auth_token": {sealed} }}
+                "Claude": {{ "auth_token": {sealed_agent} }}
               }},
               "projects": {{
                 "00000000-0000-0000-0000-000000000003": {{
@@ -5074,6 +5871,33 @@ mod tests {
             RepositoryAddress::new("example", "repo").expect("an address"),
             "the text the last release wrote opens as the address it spelled"
         );
+        // The one credential that release held becomes the purse it was
+        // delivered as — a key, since it does not begin as a subscription's
+        // token does — and every kit and job it wrote charges it.
+        assert_eq!(
+            state.purses.names().collect::<Vec<_>>(),
+            vec![PurseName::AnthropicKey]
+        );
+        assert_eq!(
+            state
+                .purses
+                .get(PurseName::AnthropicKey)
+                .map(|purse| purse.credential().expose()),
+            Some("agent-token")
+        );
+        assert_eq!(project.foreman_kit.purse(), PurseName::AnthropicKey);
+        assert!(
+            project
+                .kits
+                .values()
+                .all(|offered| offered.kit.purse() == PurseName::AnthropicKey)
+        );
+        assert!(
+            project
+                .jobs
+                .values()
+                .all(|job| job.kit().purse() == PurseName::AnthropicKey)
+        );
         assert_eq!(
             project
                 .kits
@@ -5127,6 +5951,65 @@ mod tests {
                 owner: None,
                 expires: None
             }) if secret.expose() == "agent-token"
+        ));
+    }
+
+    /// A subscription's token the last release wrote is read as the
+    /// subscription purse, by the same first characters that release chose
+    /// its variable by, and the kits charge that one.
+    #[test]
+    fn a_subscription_token_the_last_release_wrote_becomes_the_subscription_purse() {
+        let parsed: Snapshot =
+            serde_json::from_str(&written_by_the_last_release_holding("sk-ant-oat01-a-token"))
+                .expect("an older file still parses");
+        let state = parsed.open(&key()).expect("and still opens");
+
+        assert_eq!(
+            state.purses.names().collect::<Vec<_>>(),
+            vec![PurseName::AnthropicSubscription]
+        );
+        let project = state
+            .projects
+            .get(&ProjectId::from_uuid(Uuid::from_u128(3)))
+            .expect("the project survived");
+        assert_eq!(
+            project.foreman_kit.purse(),
+            PurseName::AnthropicSubscription
+        );
+        assert!(
+            project
+                .jobs
+                .values()
+                .all(|job| job.kit().purse() == PurseName::AnthropicSubscription)
+        );
+
+        // Written again, the file lists its purse and names one on every kit,
+        // and carries the agents' map no more.
+        let json = serde_json::to_string(
+            &state
+                .seal(&key(), &mut counting_nonces())
+                .expect("sealing cannot fail"),
+        )
+        .expect("a snapshot serialises");
+        assert!(!json.contains("agents"), "{json}");
+        assert!(
+            json.contains("\"purses\":[{\"AnthropicSubscription\""),
+            "{json}"
+        );
+        assert!(json.contains("\"purse\":\"Subscription\""), "{json}");
+    }
+
+    /// A file holding one purse twice was edited by hand, and is refused
+    /// rather than read as whichever came last.
+    #[test]
+    fn a_file_holding_a_purse_twice_is_refused() {
+        let mut snapshot = sealed();
+        let again = snapshot.purses.first().expect("the purse is held").clone();
+        snapshot.purses.push(again);
+
+        assert!(matches!(
+            snapshot.open(&key()),
+            Err(OpenError::PurseRepeated(PurseName::AnthropicKey))
         ));
     }
 
@@ -5715,11 +6598,9 @@ mod tests {
         // plausible-looking wrong answer. That is why it is an AEAD and not
         // just encryption.
         let mut snapshot = sealed();
-        let sealed_token = &mut snapshot
-            .agents
-            .get_mut(&Agent::Claude)
-            .expect("the agent is configured")
-            .auth_token;
+        let (SealedPurse::AnthropicKey(sealed_token)
+        | SealedPurse::AnthropicSubscription(sealed_token)) =
+            snapshot.purses.first_mut().expect("the purse is held");
         let mut raw = BASE64
             .decode(&sealed_token.ciphertext)
             .expect("we wrote valid base64");
@@ -5730,21 +6611,19 @@ mod tests {
     }
 
     #[test]
-    fn a_snapshot_naming_an_agent_it_does_not_configure_is_refused() {
-        // The check that lets every later caller resolve a project's agents
+    fn a_snapshot_charging_a_purse_it_does_not_hold_is_refused() {
+        // The check that lets every later caller resolve a kit's purse
         // without handling an absence. A file is untrusted input — hand-edited,
         // half-written, or written by an older version — and this is where that
         // stops being assumed.
         let mut snapshot = sealed();
-        snapshot.agents.clear();
+        snapshot.purses.clear();
         assert!(matches!(
             snapshot.open(&key()),
-            Err(OpenError::Inconsistent(
-                Inconsistent::UnconfiguredProjectAgent {
-                    agent: Agent::Claude,
-                    ..
-                }
-            ))
+            Err(OpenError::Inconsistent(Inconsistent::PurseNotHeld {
+                purse: PurseName::AnthropicKey,
+                ..
+            }))
         ));
     }
 
@@ -5820,12 +6699,16 @@ mod tests {
     }
 
     #[test]
-    fn a_foreman_is_handed_its_credential_and_no_platform_at_all() {
+    fn a_foreman_is_handed_no_platform_at_all() {
         let (state, mine, _) = two_projects();
         let handout = Handout::for_foreman(&state, mine).expect("a watched project");
 
         assert_eq!(handout.agent(), Agent::Claude);
-        assert_eq!(handout.agent_credential().expose(), "agent-token");
+        assert_eq!(
+            handout.kit().purse(),
+            PurseName::AnthropicKey,
+            "its kit names the purse, which the handout does not hold"
+        );
         assert_eq!(handout.platforms().count(), 0);
         assert!(!handout.reaches(Platform::GitHub));
         assert!(
@@ -5860,10 +6743,9 @@ mod tests {
     #[test]
     fn a_job_is_handed_a_warrant_and_no_platform_credential() {
         let (state, mine, _) = two_projects();
-        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine, warrant())
-            .expect("a watched project");
+        let handout =
+            Handout::for_job(&state, a_kit(), mine, warrant()).expect("a watched project");
 
-        assert_eq!(handout.agent_credential().expose(), "agent-token");
         assert!(handout.reaches(Platform::GitHub));
         assert_eq!(handout.platforms().collect::<Vec<_>>(), [Platform::GitHub]);
         assert_eq!(handout.warrant().map(Secret::expose), Some(WARRANT));
@@ -5891,8 +6773,7 @@ mod tests {
             .map(|project| project.repository.https())
             .expect("a watched project");
 
-        let job = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine, warrant())
-            .expect("a watched project");
+        let job = Handout::for_job(&state, a_kit(), mine, warrant()).expect("a watched project");
         assert_eq!(
             job.repository(),
             Some(expected.as_str()),
@@ -5910,8 +6791,8 @@ mod tests {
     #[test]
     fn a_job_is_handed_the_channel_it_speaks_on() {
         let (state, mine, _) = two_projects();
-        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine, warrant())
-            .expect("a watched project");
+        let handout =
+            Handout::for_job(&state, a_kit(), mine, warrant()).expect("a watched project");
 
         let speaking = handout
             .channel(Channel::Slack)
@@ -5927,11 +6808,10 @@ mod tests {
     fn a_jobs_handout_carries_nothing_belonging_to_another_project() {
         let (state, mine, theirs) = two_projects();
 
-        let ours = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine, warrant())
-            .expect("a watched project");
+        let ours = Handout::for_job(&state, a_kit(), mine, warrant()).expect("a watched project");
         let alien = Handout::for_job(
             &state,
-            Kit::defaults(Agent::Claude),
+            a_kit(),
             theirs,
             Secret::new(ALIEN_WARRANT.to_owned()),
         )
@@ -5975,8 +6855,8 @@ mod tests {
     fn a_job_is_handed_its_projects_variables() {
         let (state, mine, _) = two_projects();
 
-        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine, warrant())
-            .expect("a watched project");
+        let handout =
+            Handout::for_job(&state, a_kit(), mine, warrant()).expect("a watched project");
         let delivered: Vec<(&str, &str)> = handout
             .variables()
             .map(|(name, value)| (name.as_str(), value.expose()))
@@ -6008,8 +6888,8 @@ mod tests {
     fn a_handouts_variable_names_can_be_read_without_their_values() {
         let (state, mine, _) = two_projects();
 
-        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine, warrant())
-            .expect("a watched project");
+        let handout =
+            Handout::for_job(&state, a_kit(), mine, warrant()).expect("a watched project");
         let named: Vec<&str> = handout.variable_names().map(VariableName::as_str).collect();
 
         assert_eq!(named, vec![VARIABLE]);
@@ -6088,8 +6968,8 @@ mod tests {
     fn a_handout_does_not_leak_a_variables_value_when_formatted() {
         let (state, mine, _) = two_projects();
 
-        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine, warrant())
-            .expect("a watched project");
+        let handout =
+            Handout::for_job(&state, a_kit(), mine, warrant()).expect("a watched project");
         let shown = format!("{handout:?}");
 
         assert!(!shown.contains(VARIABLE_VALUE), "{shown}");
@@ -6104,8 +6984,7 @@ mod tests {
     fn a_handout_has_nowhere_to_speak_until_it_is_given_a_place() {
         let (state, mine, _) = two_projects();
 
-        let job = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine, warrant())
-            .expect("a watched project");
+        let job = Handout::for_job(&state, a_kit(), mine, warrant()).expect("a watched project");
         assert!(job.place().is_none());
         assert!(
             Handout::for_foreman(&state, mine)
@@ -6146,8 +7025,7 @@ mod tests {
         let (state, mine, _) = two_projects();
 
         for handout in [
-            Handout::for_job(&state, Kit::defaults(Agent::Claude), mine, warrant())
-                .expect("a watched project"),
+            Handout::for_job(&state, a_kit(), mine, warrant()).expect("a watched project"),
             Handout::for_foreman(&state, mine).expect("a watched project"),
         ] {
             let bound = handout.channel(Channel::Slack).expect("a binding");
@@ -6184,30 +7062,84 @@ mod tests {
         let (state, _, _) = two_projects();
         let stranger = ProjectId::from_uuid(Uuid::from_u128(99));
 
-        let refused = Handout::for_job(&state, Kit::defaults(Agent::Claude), stranger, warrant());
+        let refused = Handout::for_job(&state, a_kit(), stranger, warrant());
 
         assert!(matches!(refused, Err(HandoutError::UnknownProject(id)) if id == stranger));
     }
 
+    /// The purse handed to a turn is the one its kit names, selected by that
+    /// name and by nothing else: with both held, each kit is handed its own
+    /// and never the other's, and a kit charging one that is not held is
+    /// refused rather than handed nothing.
     #[test]
-    fn a_handout_for_an_agent_with_no_configuration_is_refused() {
+    fn a_kits_purse_is_selected_by_the_kits_own_name_for_it() {
+        let (mut state, _, _) = two_projects();
+        state.purses.hold(Purse::AnthropicSubscription(Secret::new(
+            "sk-ant-oat01-the-subscription".to_owned(),
+        )));
+        let subscribed = Kit::defaults(Agent::Claude, PurseName::AnthropicSubscription)
+            .expect("Claude charges a subscription");
+
+        let key = state.charged_purse(&a_kit()).expect("the key is held");
+        assert_eq!(key.credential().expose(), "agent-token");
+        assert_eq!(key.kit(), &a_kit());
+        let subscription = state
+            .charged_purse(&subscribed)
+            .expect("the subscription is held");
+        assert_eq!(
+            subscription.credential().expose(),
+            "sk-ant-oat01-the-subscription"
+        );
+        assert_eq!(subscription.kit(), &subscribed);
+
+        state.purses.forget(PurseName::AnthropicKey);
+        assert_eq!(
+            state.charged_purse(&a_kit()),
+            Err(NotHeld(PurseName::AnthropicKey))
+        );
+        assert!(
+            state.charged_purse(&subscribed).is_ok(),
+            "and the other is still held"
+        );
+    }
+
+    /// A handout is decided whatever purses are held, because it has nowhere
+    /// to put one: what a container is made with is its project's, and the
+    /// purse is its turn's.
+    #[test]
+    fn a_handout_is_decided_without_a_purse_and_holds_none() {
         let (mut state, mine, _) = two_projects();
-        state.agents.clear();
+        state.purses = Purses::default();
 
-        let refused = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine, warrant());
+        let job = Handout::for_job(&state, a_kit(), mine, warrant()).expect("a watched project");
+        let foreman = Handout::for_foreman(&state, mine).expect("a watched project");
 
-        assert!(matches!(
-            refused,
-            Err(HandoutError::UnconfiguredAgent(Agent::Claude))
-        ));
-        assert!(Handout::for_foreman(&state, mine).is_err());
+        assert_eq!(
+            job.kit().purse(),
+            PurseName::AnthropicKey,
+            "named, and not held"
+        );
+        assert_eq!(foreman.kit().purse(), PurseName::AnthropicKey);
+    }
+
+    /// The credential inside a charged purse is never formatted, on the
+    /// terms a secret's is not.
+    #[test]
+    fn a_charged_purse_does_not_leak_when_formatted() {
+        let (state, _, _) = two_projects();
+        let charged = state.charged_purse(&a_kit()).expect("the key is held");
+
+        let shown = format!("{charged:?}");
+
+        assert!(!shown.contains("agent-token"), "{shown}");
+        assert!(shown.contains("AnthropicKey"), "{shown}");
     }
 
     #[test]
     fn a_handout_does_not_leak_a_credential_when_formatted() {
         let (state, mine, _) = two_projects();
-        let handout = Handout::for_job(&state, Kit::defaults(Agent::Claude), mine, warrant())
-            .expect("a watched project");
+        let handout =
+            Handout::for_job(&state, a_kit(), mine, warrant()).expect("a watched project");
 
         let shown = format!("{handout:?}");
 
@@ -6304,7 +7236,7 @@ mod tests {
             (over, Progress::Retired(Outcome::Done)),
         ] {
             let mut job = Job::new(
-                Kit::defaults(Agent::Claude),
+                a_kit(),
                 "a reason".to_owned(),
                 "some work".to_owned(),
                 Timestamp::UNIX_EPOCH,

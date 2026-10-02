@@ -3,18 +3,22 @@
 //!
 //! A request that carries a credential — a project created, or amended
 //! with its access set, or with its repository moved under the access it
-//! holds — is not answered in its own step. Everything in it is asked
-//! about at once, with the credential itself: a token reads the repository
-//! the form chose, an installation mints a token restricted to it, which
-//! the platform refuses where the installation does not cover it, the bot
-//! token asks who it is, the app-level token asks where to connect. Each
-//! is one request the world makes, rendered by the platform's or the
-//! channel's crate and read back by it, and the held request is answered
-//! when the last answer lands: refused with the platform's reason beside
-//! the box it concerns, or answered as it would have been in the first
-//! place, with nothing kept from the check. See
-//! `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`
-//! and `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`.
+//! holds, or a purse pasted on the Agents page — is not answered in its
+//! own step. Everything in it is asked about at once, with the credential
+//! itself: a token reads the repository the form chose, an installation
+//! mints a token restricted to it, which the platform refuses where the
+//! installation does not cover it, the bot token asks who it is, the
+//! app-level token asks where to connect, a purse asks its provider for
+//! its listing. Each is one request the world makes, rendered by the
+//! platform's, the channel's or the provider's crate and read back by it,
+//! and the held request is answered when the last answer lands: refused
+//! with the reason that crate read, beside the box it concerns, or
+//! answered as it would have been in the first place, with nothing kept
+//! from the check. See
+//! `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`,
+//! `docs/decisions/0078-a-repository-is-chosen-from-what-its-access-reaches.md`
+//! and, for a purse,
+//! `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`.
 //!
 //! Held and never kept: a daemon dying mid-check answers nobody, since the
 //! world drops the connection with it, and the next start knows nothing of
@@ -24,12 +28,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use stageman_channel::{ChannelError, Identity};
-use stageman_core::{Access, Channel, ChannelConfig, Platform, RepositoryAddress, Secret};
+use stageman_core::{
+    Access, Channel, ChannelConfig, Platform, PurseName, RepositoryAddress, Secret,
+};
 use stageman_platform::{Owned, PlatformError};
+use stageman_provider::ProviderError;
 use stageman_vocabulary::{Bytes, Effect as Generic, EffectId, Responded};
 use stageman_wire::Refusal;
 
-use crate::requests::{Drafted, Request, Response, binding, drafted};
+use crate::requests::{Drafted, Request, Response, binding, drafted, pasted};
 use crate::views;
 use crate::vocabulary::{AppEffect, RequestId};
 use crate::{Effect, Running};
@@ -100,6 +107,12 @@ pub enum Check {
         /// Which channel.
         channel: Channel,
     },
+    /// A purse pasted on the Agents page, asked of its provider.
+    Purse {
+        /// Which purse, for the answer to be read by and the refusal to
+        /// name. Never the credential, which the held request carries.
+        purse: PurseName,
+    },
 }
 
 /// What one check learned beyond its verdict: nothing, what the platform
@@ -116,8 +129,8 @@ pub enum Learned {
 
 /// One request to check a credential with, whichever crate rendered it.
 ///
-/// The two adapter crates render the same four fields and may not name
-/// each other, so the join is here, where both are named.
+/// The three adapter crates render the same four fields and may not name
+/// each other, so the join is here, where all of them are named.
 struct Asking {
     method: String,
     url: String,
@@ -138,6 +151,17 @@ impl From<stageman_channel::Request> for Asking {
 
 impl From<stageman_platform::Request> for Asking {
     fn from(rendered: stageman_platform::Request) -> Self {
+        Self {
+            method: rendered.method,
+            url: rendered.url,
+            headers: rendered.headers,
+            body: rendered.body,
+        }
+    }
+}
+
+impl From<stageman_provider::Request> for Asking {
+    fn from(rendered: stageman_provider::Request) -> Self {
         Self {
             method: rendered.method,
             url: rendered.url,
@@ -239,8 +263,27 @@ impl Running {
                     stageman_channel::open_socket(channel, &opening).into(),
                 )]);
             }
+            // A purse pasted on the Agents page, asked of its provider by
+            // the provider's listing. Resolved first, which refuses
+            // everything a paste is refused for on its own: nothing is sent
+            // for a paste that would not be kept anyway.
+            Request::HoldPurse { purse, credential } => {
+                let asked = pasted(purse, credential)?;
+                return Ok(vec![(
+                    Check::Purse {
+                        purse: asked.name(),
+                    },
+                    stageman_provider::check(&asked).into(),
+                )]);
+            }
             _ => return Ok(Vec::new()),
         };
+        self.draft_checks(&resolved)
+    }
+
+    /// The checks a project's resolved draft needs: its access against the
+    /// repository, and both credentials of an app of its own.
+    fn draft_checks(&self, resolved: &Drafted) -> Result<Vec<(Check, Asking)>, Refusal> {
         let platform = Platform::GitHub;
         let mut checks = Vec::new();
         // The access is checked against the repository where either is not
@@ -299,7 +342,7 @@ impl Running {
                     .filter_map(|(channel, binding)| Some((*channel, binding.own()?))),
             )?;
         }
-        checks.extend(channel_checks(&resolved));
+        checks.extend(channel_checks(resolved));
         Ok(checks)
     }
 
@@ -502,6 +545,40 @@ fn verdict(check: &Check, responded: &Responded) -> Result<Learned, Refusal> {
             stageman_channel::socket_url(*channel, status, body).map(|_| ())
         })
         .map(|()| Learned::Nothing),
+        Check::Purse { purse } => match responded {
+            Responded::Answered { status, body, .. } => {
+                stageman_provider::checked(*purse, *status, body.as_slice())
+                    .map(|()| Learned::Nothing)
+                    .map_err(|why| purse_refusal(*purse, &why))
+            }
+            // No answer at all, said in the provider crate's own words for
+            // a provider that could not be reached.
+            Responded::Failed(why) => Err(purse_refusal(
+                *purse,
+                &ProviderError::Unreachable {
+                    provider: purse.provider(),
+                    why: why.clone(),
+                },
+            )),
+        },
+    }
+}
+
+/// A purse's refusal: unchecked where the provider said nothing about the
+/// credential — never reached, limiting requests, or failing — and refused
+/// where it answered anything else, each with the provider crate's clause.
+fn purse_refusal(purse: PurseName, why: &ProviderError) -> Refusal {
+    let purse = views::wire_purse(purse).1.to_owned();
+    if why.unreachable() {
+        Refusal::PurseUnchecked {
+            purse,
+            why: why.to_string(),
+        }
+    } else {
+        Refusal::PurseRefused {
+            purse,
+            why: why.to_string(),
+        }
     }
 }
 
@@ -604,7 +681,7 @@ fn spoken(
 #[cfg(test)]
 mod tests {
     use super::{Check, Learned, verdict};
-    use stageman_core::{Channel, Platform, RepositoryAddress};
+    use stageman_core::{Channel, Platform, PurseName, RepositoryAddress};
     use stageman_vocabulary::{Bytes, Responded};
     use stageman_wire::Refusal;
 
@@ -717,6 +794,72 @@ mod tests {
             Err(Refusal::InstallationUnchecked {
                 why: "GitHub could not be reached: dns error".to_owned()
             })
+        );
+    }
+
+    /// A purse's verdict is the provider's clause on the purse, named as its
+    /// row names it: accepted with nothing learned, refused in the
+    /// provider's own sentence for either kind, and unchecked where the
+    /// provider said nothing about the credential or was never reached.
+    #[test]
+    fn a_purses_verdict_is_the_providers_clause_on_the_purse() {
+        let key = Check::Purse {
+            purse: PurseName::AnthropicKey,
+        };
+        let subscription = Check::Purse {
+            purse: PurseName::AnthropicSubscription,
+        };
+        assert_eq!(
+            verdict(&key, &answered(200, r#"{"data":[]}"#)),
+            Ok(Learned::Nothing)
+        );
+        assert_eq!(
+            verdict(
+                &key,
+                &answered(
+                    401,
+                    r#"{"type":"error","error":{"type":"authentication_error","message":"API key is invalid."},"request_id":null}"#
+                )
+            ),
+            Err(Refusal::PurseRefused {
+                purse: "Anthropic key".to_owned(),
+                why: "Anthropic does not accept it: API key is invalid".to_owned()
+            })
+        );
+        assert_eq!(
+            verdict(
+                &subscription,
+                &answered(
+                    401,
+                    r#"{"type":"error","error":{"type":"authentication_error","message":"OAuth access token is invalid."},"request_id":null}"#
+                )
+            ),
+            Err(Refusal::PurseRefused {
+                purse: "Anthropic subscription".to_owned(),
+                why: "Anthropic does not accept it: OAuth access token is invalid".to_owned()
+            })
+        );
+        assert_eq!(
+            verdict(&key, &answered(529, "")),
+            Err(Refusal::PurseUnchecked {
+                purse: "Anthropic key".to_owned(),
+                why: "Anthropic could not be reached: it answered 529".to_owned()
+            })
+        );
+        assert_eq!(
+            verdict(&key, &Responded::Failed("dns error".to_owned())),
+            Err(Refusal::PurseUnchecked {
+                purse: "Anthropic key".to_owned(),
+                why: "Anthropic could not be reached: dns error".to_owned()
+            })
+        );
+        assert_eq!(
+            verdict(&key, &answered(418, "")),
+            Err(Refusal::PurseRefused {
+                purse: "Anthropic key".to_owned(),
+                why: "Anthropic answered 418".to_owned()
+            }),
+            "a status nobody reads is a refusal, as it is for a token"
         );
     }
 

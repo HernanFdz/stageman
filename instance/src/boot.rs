@@ -954,8 +954,22 @@ pub fn unbound(state: &State) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::unbound;
-    use stageman_core::{Agent, Channel, ChannelConfig, Project, ProjectId, Secret, State, Uuid};
+    use stageman_core::{
+        Agent, Channel, ChannelConfig, Project, ProjectId, PurseName, Secret, State, Uuid,
+    };
     use std::collections::BTreeMap;
+
+    /// Claude as it comes, charging the key.
+    fn a_kit() -> stageman_core::Kit {
+        stageman_core::Kit::defaults(Agent::Claude, PurseName::AnthropicKey)
+            .expect("Claude charges a key")
+    }
+
+    /// The kit above, described as Claude describes itself.
+    fn a_kit_config() -> stageman_core::KitConfig {
+        stageman_core::KitConfig::defaults(Agent::Claude, PurseName::AnthropicKey)
+            .expect("Claude charges a key")
+    }
 
     fn watching(name: &str, bound: bool) -> Project {
         let channels = if bound {
@@ -973,10 +987,10 @@ mod tests {
             name: name.to_owned(),
             repository: stageman_core::RepositoryAddress::new("example", "repo")
                 .expect("an address"),
-            foreman_kit: stageman_core::Kit::defaults(Agent::Claude),
+            foreman_kit: a_kit(),
             kits: BTreeMap::from([(
                 stageman_core::KitName::new("Claude").expect("a name"),
-                stageman_core::KitConfig::defaults(Agent::Claude),
+                a_kit_config(),
             )]),
             access: BTreeMap::new(),
             channels,

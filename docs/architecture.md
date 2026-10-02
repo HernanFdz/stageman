@@ -81,6 +81,16 @@ first.
   through the platform's own tools and never through this, per
   `docs/decisions/0009-jobs-hold-their-own-platform-credentials.md`. See
   `docs/decisions/0076-a-credential-is-guided-in-and-checked-before-it-is-kept.md`.
+- **provider** — the contract every provider is asked on by this daemon,
+  and the adapters that implement it: what a purse is checked with, what
+  the answer means, the shape a credential of each kind has, and where
+  each is minted, as pure functions the **instance** renders and reads and
+  the world carries. Beside **platform** for the reason that crate is
+  beside **channel**: `Provider` is the domain's fourth closed set, closed
+  because reaching one needs code. What an agent reads a purse *from* is
+  not here — the variable is the agent's, and stays in **agent** — which is
+  the seam `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`
+  draws.
 - **foreman** — the deciding, for one project. Watches that project's
   channels and judges what each signal deserves. One per project rather than
   one per instance, because watching needs the project's own credentials and a
@@ -184,15 +194,15 @@ first.
   to be read rather than tested, which is the point of the two crates being
   separate.
 
-Dependencies point inward. **core** names nothing. **agent**, **channel**
-and **platform** may name **core**, and never one another. **foreman** and
-**job** may name
-**core** and **agent** — both run agents, for different shapes of work — and
+Dependencies point inward. **core** names nothing. **agent**, **channel**,
+**platform** and **provider** may name **core**, and never one another.
+**foreman** and **job** may name **core** and **agent** — both run agents, for different shapes of work — and
 may never name each other; everything they share is a type in **core**, which
 is what keeps the deciding and the doing from growing into one another.
 **vocabulary** names nothing but serialisation. **instance** may name the
-four, **channel**, **platform**, **wire** and **vocabulary**, for their types
-and their pure functions, and nothing that can perform an effect. **wire** names nothing.
+four, **channel**, **platform**, **provider**, **wire** and **vocabulary**,
+for their types and their pure functions, and nothing that can perform an
+effect. **wire** names nothing.
 **world** names **vocabulary** and the async runtime, and no crate of this
 project's above it. **app** may name all of them; nothing may name **app**.
 
@@ -233,11 +243,11 @@ nobody is a wish.
   a warrant that fetches what its project needs to reach the platforms that
   project uses, one command at a time, what it needs to speak on that
   project's channels, whatever its operator gave that project to reach
-  everything else, and the credential material of the one agent running it
-  — and nothing belonging to any other project, and nothing belonging to any
-  other agent. *Defended by* construction, since everything a job is handed
-  is selected from the project it belongs to and built by the pure function
-  in **core**; by the escape test in `docs/conventions.md` §4; and, for the
+  everything else, and the purse its kit charges — and nothing belonging to
+  any other project, and nothing belonging to any other purse. *Defended by*
+  construction, since everything a job is handed is selected from the
+  project it belongs to, or by its kit's own name for its purse, and built
+  by the pure functions in **core**; by the escape test in `docs/conventions.md` §4; and, for the
   credential that is fetched rather than handed, by the container test the
   same section names, since
   `docs/decisions/0077-a-repository-is-reached-through-an-app-the-instance-owns.md`.

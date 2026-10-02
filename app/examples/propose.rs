@@ -24,8 +24,8 @@ use std::time::Duration;
 
 use stageman::world::{Asking, Performer};
 use stageman_core::{
-    Access, Agent, AgentConfig, JobId, Key, Kit, KitConfig, KitName, NONCE_LEN, Platform, Project,
-    ProjectId, Secret, State, Uuid,
+    Access, Agent, JobId, Key, Kit, KitConfig, KitName, NONCE_LEN, Platform, Project, ProjectId,
+    Purse, Secret, State, Uuid,
 };
 use stageman_instance::{Instance, Request, Response, Seed, Target};
 use stageman_vocabulary::Environment;
@@ -75,19 +75,16 @@ async fn propose() -> Result<(), String> {
         .nth(1)
         .ok_or("give the repository URL as the only argument")?;
 
-    let agent_token = read_secret("anthropic-token")?;
+    let purse = read_purse()?;
     let platform_token = read_secret("github-token")?;
 
-    // An instance that exists only for this run. Nothing configures a project
-    // yet — that is the next step in `docs/open-questions.md` — so this builds
-    // one directly, which is exactly what a dashboard will do later.
+    // An instance that exists only for this run, built directly rather than
+    // through the dashboard, which builds exactly this.
     let mut state = State::default();
-    state.agents.insert(
-        Agent::Claude,
-        AgentConfig {
-            auth_token: agent_token,
-        },
-    );
+    let charging = purse.name();
+    state.purses.hold(purse);
+    let kit = Kit::defaults(Agent::Claude, charging)
+        .map_err(|error| format!("Claude charges both of Anthropic's purses: {error}"))?;
     let project = ProjectId::from_uuid(Uuid::new_v4());
     let mut access = std::collections::BTreeMap::new();
     access.insert(
@@ -105,10 +102,13 @@ async fn propose() -> Result<(), String> {
             repository: stageman_core::RepositoryAddress::parse(&repository).map_err(|error| {
                 format!("the repository has to be an address on GitHub: {error}")
             })?,
-            foreman_kit: Kit::defaults(Agent::Claude),
+            foreman_kit: kit.clone(),
             kits: std::collections::BTreeMap::from([(
                 KitName::new("Claude").map_err(|error| format!("a kit's name: {error}"))?,
-                KitConfig::defaults(Agent::Claude),
+                KitConfig {
+                    description: Agent::Claude.description().to_owned(),
+                    kit,
+                },
             )]),
             access,
             channels: std::collections::BTreeMap::new(),
@@ -236,9 +236,30 @@ fn seed() -> Seed {
     seed
 }
 
+/// The purse the run charges, from whichever of the two gitignored files
+/// holds one. Each is named for the box it would be pasted into on the
+/// Agents page, so the file declares its kind as the box does and nothing
+/// here sniffs it; the subscription's is read first when both exist, as a
+/// form offers it first.
+fn read_purse() -> Result<Purse, String> {
+    if local().join("anthropic-subscription").exists() {
+        let token = read_secret("anthropic-subscription")?;
+        return Ok(Purse::AnthropicSubscription(token));
+    }
+    let key = read_secret("anthropic-key").map_err(|why| {
+        format!("{why}; a subscription's token goes in .local/anthropic-subscription instead")
+    })?;
+    Ok(Purse::AnthropicKey(key))
+}
+
+/// The gitignored directory the credentials are read from.
+fn local() -> PathBuf {
+    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../.local"))
+}
+
 /// A credential, from the gitignored file this project keeps it in.
 fn read_secret(name: &str) -> Result<Secret, String> {
-    let path = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../.local")).join(name);
+    let path = local().join(name);
     let raw = std::fs::read_to_string(&path)
         .map_err(|error| format!("no credential at {}: {error}", path.display()))?;
     let trimmed = raw.trim();

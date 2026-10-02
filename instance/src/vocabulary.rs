@@ -163,7 +163,10 @@ mod tests {
 
         let effects = [AppEffect::Respond {
             id: RequestId(1),
-            response: crate::requests::Response::Agents(Vec::new()),
+            response: crate::requests::Response::Agents(stageman_wire::Agents {
+                providers: Vec::new(),
+                agents: Vec::new(),
+            }),
         }];
         let kinds: Vec<&str> = effects.iter().map(Named::kind).collect();
         assert_eq!(kinds, ["Respond"]);

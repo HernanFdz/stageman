@@ -31,8 +31,8 @@ use super::instance_view::workspace_link;
 use super::live::{Live, Reading, use_reading};
 use super::projects_view::{amend, binds, create, forget, projects, reaches, workspace_arrival};
 use crate::ui::{
-    BESIDE, Button, ButtonVariant, Card, Combobox, ComboboxItem, FIELD, Field, Guide, Icon, Modal,
-    PageHeader, Segmented, Skeleton, TextArea, Tooltip, When,
+    BESIDE, Button, ButtonVariant, Card, Combobox, ComboboxItem, FIELD, Field, Guide, Icon, Mark,
+    Modal, PageHeader, Row, Rows, SecretBox, Segmented, Skeleton, TextArea, Tooltip, When,
 };
 
 pub use stageman_wire::{
@@ -734,16 +734,21 @@ fn refused_before_asking(draft: &Draft, filling: &Filling, held: &[String]) -> b
     !draft.is_complete(filling, held)
 }
 
-/// An agent as it comes: the shape's first model, and its first effort where
-/// that model takes one.
+/// An agent as it comes: the first purse it can charge that is held, the
+/// shape's first model, and its first effort where that model takes one.
 ///
 /// What a new kit starts on, and what a fitted agent moves to when its agent
 /// changes — nothing carries over between agents, because a model is one
-/// agent's and not another's.
+/// agent's and not another's, and so is the set of purses it can charge.
 pub(super) fn seeded(shape: &Shape) -> Fitted {
     let model = shape.models.first();
     Fitted {
         agent: shape.agent.clone(),
+        purse: shape
+            .purses
+            .first()
+            .map(|purse| purse.id.clone())
+            .unwrap_or_default(),
         model: model.map(|model| model.id.clone()).unwrap_or_default(),
         effort: model
             .filter(|model| model.has_effort)
@@ -809,8 +814,19 @@ fn with_model(fitted: &Fitted, shape: &Shape, model: &str) -> Fitted {
     };
     Fitted {
         agent: fitted.agent.clone(),
+        purse: fitted.purse.clone(),
         model: model.to_owned(),
         effort,
+    }
+}
+
+/// A fitted agent moved to another of the purses it can charge. Nothing
+/// else moves: the purse is who pays, and the model and the effort are
+/// what runs.
+fn with_purse(fitted: &Fitted, purse: &str) -> Fitted {
+    Fitted {
+        purse: purse.to_owned(),
+        ..fitted.clone()
     }
 }
 
@@ -1309,29 +1325,30 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
                                 }
                             }
                         },
-                        div { class: "flex flex-col divide-y divide-border",
+                        Rows {
                             for (position, row) in draft().kits.iter().enumerate() {
-                                Kit {
-                                    key: "{position}",
-                                    position,
-                                    row: row.clone(),
-                                    shapes: shapes.clone(),
-                                    available: available.clone(),
-                                    problem: saying(Part::Kit(position)),
-                                    onchange: move |changed: KitDraft| {
-                                        draft.with_mut(|draft| {
-                                            if let Some(row) = draft.kits.get_mut(position) {
-                                                *row = changed;
-                                            }
-                                        });
-                                    },
-                                    onremove: move |()| {
-                                        draft.with_mut(|draft| {
-                                            if position < draft.kits.len() {
-                                                draft.kits.remove(position);
-                                            }
-                                        });
-                                    },
+                                Row { key: "{position}",
+                                    Kit {
+                                        position,
+                                        row: row.clone(),
+                                        shapes: shapes.clone(),
+                                        available: available.clone(),
+                                        problem: saying(Part::Kit(position)),
+                                        onchange: move |changed: KitDraft| {
+                                            draft.with_mut(|draft| {
+                                                if let Some(row) = draft.kits.get_mut(position) {
+                                                    *row = changed;
+                                                }
+                                            });
+                                        },
+                                        onremove: move |()| {
+                                            draft.with_mut(|draft| {
+                                                if position < draft.kits.len() {
+                                                    draft.kits.remove(position);
+                                                }
+                                            });
+                                        },
+                                    }
                                 }
                             }
                         }
@@ -1365,6 +1382,7 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
             // closes itself when the platform brings it back, and the form
             // moves onto the App through the tick.
             Card {
+                mark: rsx! { Mark { agent: "github".to_owned(), size: 16 } },
                 title: "GitHub",
                 note: "How its jobs reach the repository, and which one.",
                 div { class: "flex flex-col gap-4",
@@ -1546,12 +1564,10 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
                                             link: app_form,
                                         }
                                     },
-                                    input {
-                                        r#type: "password",
-                                        class: "{FIELD} font-mono",
+                                    SecretBox {
                                         placeholder: "xoxb-…",
-                                        value: "{own_credential}",
-                                        oninput: move |event| own_credential.set(event.value()),
+                                        value: own_credential(),
+                                        oninput: move |event: FormEvent| own_credential.set(event.value()),
                                     }
                                 }
                                 Field {
@@ -1564,12 +1580,10 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
                                            app another project already speaks through is refused, since Slack \
                                            hands each event to one connection.",
                                     problem: beside_listening,
-                                    input {
-                                        r#type: "password",
-                                        class: "{FIELD} font-mono",
+                                    SecretBox {
                                         placeholder: "xapp-…",
-                                        value: "{own_listening}",
-                                        oninput: move |event| own_listening.set(event.value()),
+                                        value: own_listening(),
+                                        oninput: move |event: FormEvent| own_listening.set(event.value()),
                                     }
                                 }
                             }
@@ -1659,11 +1673,9 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
                                         link: token_form,
                                     }
                                 },
-                                input {
-                                    r#type: "password",
-                                    class: "{FIELD} font-mono",
+                                SecretBox {
                                     placeholder: "github_pat_…",
-                                    value: "{token_text}",
+                                    value: token_text(),
                                     // Focused by script once it exists: the autofocus
                                     // attribute is honoured only until the person has
                                     // focused anything, and the control that opened this
@@ -1676,7 +1688,7 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
                                             let _ = event.set_focus(true).await;
                                         });
                                     },
-                                    oninput: move |event| token_text.set(event.value()),
+                                    oninput: move |event: FormEvent| token_text.set(event.value()),
                                     onkeydown: move |event: KeyboardEvent| {
                                         if event.key() == Key::Enter {
                                             event.prevent_default();
@@ -1696,6 +1708,7 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
             // through the panel — see
             // `docs/decisions/0081-the-instance-owns-a-slack-app-installed-per-workspace.md`.
             Card {
+                mark: rsx! { Mark { agent: "slack".to_owned(), size: 16 } },
                 title: "Slack",
                 note: "How it talks on Slack: through the app this instance owns, on a workspace, or through an app of its own.",
                 Field {
@@ -1873,6 +1886,9 @@ fn Editing(watching: Watching, filling: Filling) -> Element {
                         note: "One NAME=value per line. A comment above a line becomes its note.",
                         problem: unread(),
                         TextArea {
+                            // A file of secrets: readable, so that a paste can
+                            // be checked by eye, and kept from the browser.
+                            holds_secrets: true,
                             class: "min-h-48 font-mono",
                             placeholder: "# the payment provider, in test mode\nSTRIPE_API_KEY=sk_test_not_a_real_key\nexport DATABASE_URL=\"postgres://…\"",
                             value: pasted(),
@@ -1944,8 +1960,9 @@ fn Kit(
     rsx! {
         // A row parted from the next by a hairline rather than a box within
         // the box, so that its remove control stands on the same edge as
-        // every other control in the section — `docs/conventions.md` §3.
-        div { class: "flex flex-col gap-2 py-3 first:pt-0 last:pb-0",
+        // every other control in the section — `docs/conventions.md` §3. The
+        // row's padding is the list's item's, which the caller wraps this in.
+        div { class: "flex flex-col gap-2",
             div { class: "flex items-center gap-2",
                 input {
                     class: FIELD,
@@ -2017,19 +2034,22 @@ fn Variable(
                         move |event| onchange.call(VariableDraft { name: event.value(), ..row.clone() })
                     },
                 }
-                input {
-                    r#type: "password",
-                    class: FIELD,
+                SecretBox {
+                    // The page's own face rather than a credential's: what
+                    // this box says while empty is a sentence, not a shape.
+                    class: "font-sans",
                     // Per row rather than per form, because *this row* is
                     // what decides it: a box says "keep" only where there
                     // is something to keep, which is a name the project
                     // already holds.
                     placeholder: if kept { "leave empty to keep" } else { "its value" },
                     aria_label: "Value of variable {position + 1}",
-                    value: "{row.value}",
+                    value: row.value.clone(),
                     oninput: {
                         let row = row.clone();
-                        move |event| onchange.call(VariableDraft { value: event.value(), ..row.clone() })
+                        move |event: FormEvent| {
+                            onchange.call(VariableDraft { value: event.value(), ..row.clone() });
+                        }
                     },
                 }
                 // What it is for, told to the agent beside the name — see
@@ -2094,6 +2114,20 @@ fn FittedEditor(
                 onchange: move |agent: String| onchange.call(with_agent(&shapes, &agent)),
             }
             if let Some(shape) = shape {
+                // Which purse pays, offered only where there is a choice:
+                // with one purse held that the agent can charge, the kit
+                // charges it and a control would say so to nobody.
+                if shape.purses.len() > 1 {
+                    Segmented {
+                        label: "Pays with",
+                        options: shape.purses.iter().map(|purse| (purse.id.clone(), purse.name.clone())).collect::<Vec<_>>(),
+                        value: fitted.purse.clone(),
+                        onchange: {
+                            let fitted = fitted.clone();
+                            move |purse: String| onchange.call(with_purse(&fitted, &purse))
+                        },
+                    }
+                }
                 Segmented {
                     label: "Model",
                     options: shape.models.iter().map(|model| (model.id.clone(), model.name.clone())).collect::<Vec<_>>(),
@@ -2132,7 +2166,7 @@ mod tests {
         Reachable, Reached, Repository, Said, Segment, Shape, TokenSlot, Watching, WorkspaceSlot,
         beside, host_of, items_of, not_reached_words, placed_own, placeholder,
         refused_before_asking, seeded, sentence, shape_for, slack_sentence, starting, takes_effort,
-        watched, with_agent, with_model,
+        watched, with_agent, with_model, with_purse,
     };
     use stageman_wire::{Choice, ModelChoice};
 
@@ -2797,6 +2831,7 @@ mod tests {
     fn as_it_comes() -> Fitted {
         Fitted {
             agent: "claude".to_owned(),
+            purse: "anthropic-subscription".to_owned(),
             model: "default".to_owned(),
             effort: "default".to_owned(),
         }
@@ -2815,6 +2850,7 @@ mod tests {
         };
         Shape {
             agent: "claude".to_owned(),
+            purses: vec![effort("anthropic-subscription"), effort("anthropic-key")],
             models: vec![
                 model("default", true),
                 model("sonnet", true),
@@ -2823,6 +2859,18 @@ mod tests {
             ],
             efforts: vec![effort("default"), effort("low"), effort("high")],
         }
+    }
+
+    /// Moving between purses changes who pays and nothing else, and a fresh
+    /// kit charges the first purse the shape offers, which the server orders
+    /// as the agent prefers them.
+    #[test]
+    fn moving_between_purses_changes_who_pays_and_nothing_else() {
+        let moved = with_purse(&as_it_comes(), "anthropic-key");
+        assert_eq!(moved.purse, "anthropic-key");
+        assert_eq!(moved.model, "default");
+        assert_eq!(moved.effort, "default");
+        assert_eq!(seeded(&claude()).purse, "anthropic-subscription");
     }
 
     /// Moving between models keeps, clears or seeds the effort as the new
@@ -2941,8 +2989,11 @@ mod tests {
                 id: "claude".to_owned(),
                 name: "Claude".to_owned(),
                 description: "does the work".to_owned(),
-                configured: true,
-                used_by: Vec::new(),
+                ready: true,
+                purses: vec![
+                    "anthropic-subscription".to_owned(),
+                    "anthropic-key".to_owned(),
+                ],
             }],
             shapes: vec![claude()],
             guides: stageman_wire::Guides::default(),

@@ -112,6 +112,24 @@ fn a_job_begun_holds_a_warrant_and_its_container_carries_no_token() {
         !environment.values().any(|value| value == TOKEN),
         "under any name: {environment:?}"
     );
+    assert!(
+        !environment.contains_key("ANTHROPIC_API_KEY")
+            && !environment.contains_key("CLAUDE_CODE_OAUTH_TOKEN"),
+        "nor a purse, which travels with the turn: {environment:?}"
+    );
+    let talks = sim.talks_in(&container);
+    let run = talks.first().expect("its agent was run");
+    assert_eq!(
+        run.given.get("ANTHROPIC_API_KEY").map(String::as_str),
+        Some("agent-token"),
+        "its agent is run with the purse its kit charges: {:?}",
+        run.given
+    );
+    assert_eq!(
+        run.given.get("STAGEMAN_WARRANT"),
+        Some(&warrant),
+        "and still sees what its container was made with"
+    );
 
     let starting = first(
         &sim,

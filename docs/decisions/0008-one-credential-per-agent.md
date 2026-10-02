@@ -1,7 +1,12 @@
 # 0008 — One credential per configured agent
 
 ## Status
-Accepted
+Accepted. Amended by
+`docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`: the credential
+is a purse at a provider rather than an agent's, one per kind per provider,
+named by the kit that charges it and handed to the agent's process on every
+turn rather than to its container once. Every line of the reasoning below
+stands, and *one credential per agent* reads as *one purse per kit*.
 
 ## Context
 

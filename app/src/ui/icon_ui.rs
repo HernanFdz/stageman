@@ -14,9 +14,9 @@
 
 use dioxus::prelude::*;
 use lucide_dioxus::{
-    Activity, ArrowLeft, Bot, Calendar, Check, ChevronRight, CircleCheck, CircleOff, CircleX,
-    ClipboardPaste, ExternalLink, Eye, EyeOff, GitPullRequest, Globe, Hammer, HardHat, Info,
-    LoaderCircle, Lock, Moon, Pencil, Plus, Square, Sun, SunMoon, Trash2, X,
+    Activity, ArrowLeft, Bot, Calendar, CalendarDays, Check, ChevronRight, CircleCheck, CircleOff,
+    CircleX, ClipboardPaste, ExternalLink, Eye, EyeOff, GitPullRequest, Globe, Hammer, HardHat,
+    Info, KeyRound, LoaderCircle, Lock, Moon, Pencil, Plus, Square, Sun, SunMoon, Trash2, X,
 };
 
 /// A concept a screen can point at, and nothing about how it is drawn.
@@ -88,6 +88,12 @@ pub enum Icon {
     /// A repository anybody can read: under a token, one the token may not
     /// have been granted.
     Public,
+    /// A purse that is a key: metered per token, and any agent's — see
+    /// `docs/decisions/0086-a-kit-charges-a-purse-at-a-provider.md`.
+    Key,
+    /// A purse that is a subscription: flat per month, and the vendor's own
+    /// agent's.
+    Subscription,
 }
 
 impl Icon {
@@ -125,6 +131,8 @@ impl Icon {
         Self::Paste,
         Self::Private,
         Self::Public,
+        Self::Key,
+        Self::Subscription,
     ];
 
     /// Drawn at `size` pixels, in the current text colour.
@@ -175,6 +183,10 @@ impl Icon {
             Self::Paste => rsx! { ClipboardPaste { size, class } },
             Self::Private => rsx! { Lock { size, class } },
             Self::Public => rsx! { Globe { size, class } },
+            Self::Key => rsx! { KeyRound { size, class } },
+            // A month of days, because that is what a subscription is paid
+            // by; the bare calendar is already when something was made.
+            Self::Subscription => rsx! { CalendarDays { size, class } },
         }
     }
 }

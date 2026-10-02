@@ -278,7 +278,7 @@
             "id": 10,
             "path": "/sim/instance.json",
             "bytes": {
-              "text": "{\n  \"instance\": \"7053ad2b-c539-4777-ba03-9b258e59ad9d\",\n  \"agents\": {},\n  \"projects\": {},\n  \"apps\": {},\n  \"channel_apps\": {},\n  \"password\": {\n    \"nonce\": \"/w4sdlIYfa35Wje2\",\n    \"ciphertext\": \"CQweedMcQO6nSROmJsDLgLGSMf5iMD/H+FrDXzpZdKDbl8lefQ+jAB15VCOaZTXL2/hdyzEh+FflucG2DdyxcJqRMgp/fG8QLDzVIzgAb7H6e/zQuEsGsbK3kDoDRvsSLrHdLmR1eIs3decRLeYB3n4L+TeFdV0LmEPZpwlltlK8PoUE\"\n  }\n}"
+              "text": "{\n  \"instance\": \"7053ad2b-c539-4777-ba03-9b258e59ad9d\",\n  \"purses\": [],\n  \"projects\": {},\n  \"apps\": {},\n  \"channel_apps\": {},\n  \"password\": {\n    \"nonce\": \"/w4sdlIYfa35Wje2\",\n    \"ciphertext\": \"CQweedMcQO6nSROmJsDLgLGSMf5iMD/H+FrDXzpZdKDbl8lefQ+jAB15VCOaZTXL2/hdyzEh+FflucG2DdyxcJqRMgp/fG8QLDzVIzgAb7H6e/zQuEsGsbK3kDoDRvsSLrHdLmR1eIs3decRLeYB3n4L+TeFdV0LmEPZpwlltlK8PoUE\"\n  }\n}"
             },
             "private": false
           }
@@ -289,7 +289,7 @@
           "op": "add",
           "path": "/kept",
           "value": {
-            "agents": {},
+            "purses": {},
             "projects": {},
             "password": "argon2id$19456$2$1$3301e8d7e754db2cf57b0a4ca73f253c$5edbaf63c6da20442039a5502ec946ec0eabff53160a1014506975a0fef9169c"
           }
